@@ -65,9 +65,54 @@ def _prjsetup_create(project_type, name, path, no_git, no_dvc, bucket):
         Macro.setLocal("project_path", str(result.path))
 
     except ImportError:
-        SFIToolkit.errprintln("Error: mint package not installed.")
-        SFIToolkit.errprintln("Install with: pip install mint")
-        SFIToolkit.exit(198)
+        SFIToolkit.displayln("{text}mint package not found. Attempting automatic installation...{reset}")
+
+        # Try to install mint automatically
+        try:
+            import subprocess
+            import sys
+            import os
+
+            # First try installing from PyPI
+            try:
+                SFIToolkit.displayln("{text}Trying to install mint from PyPI...{reset}")
+                result = subprocess.run([sys.executable, "-m", "pip", "install", "mint"],
+                                      capture_output=True, text=True, timeout=60)
+
+                if result.returncode == 0:
+                    SFIToolkit.displayln("{result}Successfully installed mint from PyPI!{reset}")
+                    # Now try importing again
+                    from mint import create_project
+                else:
+                    raise subprocess.SubprocessError(f"PyPI installation failed: {result.stderr}")
+
+            except (subprocess.SubprocessError, subprocess.TimeoutExpired):
+                # If PyPI installation fails, try local installation
+                # Get the path to the Stata ado directory to find the mint source
+                ado_path = SFIToolkit.getStringLocal("c(sysdir_plus)")
+                mint_path = os.path.join(os.path.dirname(ado_path), "mint")
+
+                if os.path.exists(os.path.join(mint_path, "pyproject.toml")):
+                    SFIToolkit.displayln("{text}Found local mint source. Installing from local directory...{reset}")
+                    result = subprocess.run([sys.executable, "-m", "pip", "install", "-e", mint_path],
+                                          capture_output=True, text=True, timeout=120)
+
+                    if result.returncode == 0:
+                        SFIToolkit.displayln("{result}Successfully installed mint from local source!{reset}")
+                        from mint import create_project
+                    else:
+                        raise subprocess.SubprocessError(f"Local installation failed: {result.stderr}")
+                else:
+                    raise ImportError("Could not find mint package locally or on PyPI")
+
+        except Exception as install_error:
+            SFIToolkit.errprintln("Error: Failed to automatically install mint package.")
+            SFIToolkit.errprintln(f"Installation error: {install_error}")
+            SFIToolkit.errprintln("")
+            SFIToolkit.errprintln("Manual installation options:")
+            SFIToolkit.errprintln("1. From PyPI: python: import subprocess; subprocess.run(['pip', 'install', 'mint'])")
+            SFIToolkit.errprintln("2. From local source: python: import subprocess, os; ado_path = SFIToolkit.getStringLocal('c(sysdir_plus)'); mint_path = os.path.join(os.path.dirname(ado_path), 'mint'); subprocess.run(['pip', 'install', '-e', mint_path])")
+            SFIToolkit.exit(198)
 
     except Exception as e:
         SFIToolkit.errprintln(f"Error creating project: {e}")

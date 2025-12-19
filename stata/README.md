@@ -4,13 +4,35 @@ This directory contains Stata integration files for the mint lab project scaffol
 
 ## Installation
 
-### Option 1: Install via Stata's net install (Recommended)
+### Option 1: Automated Installation (Recommended)
 
-The easiest way to install mint for Stata is using Stata's built-in package manager:
+The easiest way to install mint for Stata is using the automated installer, which handles both the Stata package and Python package installation:
 
 ```stata
-// Install mint from GitHub
+// Automated installation (installs everything)
+mint_installer
+
+// Or force reinstallation
+mint_installer, force
+
+// Verify installation
+help prjsetup
+
+// Test the installation
+prjsetup, type(data) name(test_install)
+```
+
+### Option 2: Manual Installation via net install
+
+If you prefer manual installation, you can use Stata's built-in package manager:
+
+```stata
+// Install Stata package from GitHub
 net install mint, from("https://github.com/your-org/mint/raw/main/stata/")
+
+// Install Python package (choose one method)
+python: import subprocess; subprocess.run(["pip", "install", "mint"])
+python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
 
 // Verify installation
 help prjsetup
@@ -55,9 +77,21 @@ If the above doesn't work, you can install manually:
    python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
    ```
 
-## Troubleshooting
+## Features
 
-### "command prjsetup not found"
+### Automatic Python Package Installation
+
+The `prjsetup` command includes automatic installation of the Python `mint` package. If the Python package is not found when you run a command, `prjsetup` will:
+
+1. First try to install from PyPI: `pip install mint`
+2. If that fails, try to install from the local source directory
+3. Provide clear error messages and manual installation instructions if both methods fail
+
+This means that in most cases, you only need to install the Stata package - the Python package will be installed automatically when needed.
+
+### Troubleshooting
+
+#### "command prjsetup not found"
 - Ensure the `.ado` file is in your Stata ado path
 - Try restarting Stata
 - Check that the file wasn't corrupted during download

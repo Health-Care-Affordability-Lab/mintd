@@ -179,16 +179,28 @@ mint provides seamless integration with Stata 16+ through native Python commands
 
 ### Installation for Stata Users
 
-**Option 1: Via Stata's net install (Recommended)**
+**Option 1: Automated Installation (Recommended)**
 ```stata
-// Install mint from GitHub
-net install mint, from("https://github.com/your-org/mint/raw/main/stata/")
+// Automated installation (installs Stata package + Python package)
+mint_installer
 
 // Verify installation
 help prjsetup
 ```
 
-**Option 2: Manual Installation**
+**Option 2: Via Stata's net install**
+```stata
+// Install Stata package from GitHub
+net install mint, from("https://github.com/your-org/mint/raw/main/stata/")
+
+// Install Python package
+python: import subprocess; subprocess.run(["pip", "install", "mint"])
+
+// Verify installation
+help prjsetup
+```
+
+**Option 3: Manual Installation**
 
 1. **Install mint in Stata's Python environment**:
    ```stata

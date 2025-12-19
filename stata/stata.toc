@@ -10,3 +10,5 @@ d Distribution-Date: 20241219
 d
 f prjsetup.ado
 f prjsetup.sthlp
+f mint_installer.ado
+f mint_installer.sthlp
