@@ -1,0 +1,12 @@
+v 1.0.0
+d mint - Lab Project Scaffolding Tool
+d
+d mint provides Stata users with easy access to create standardized
+d research project repositories with Git and DVC version control.
+d
+d Keywords: research, data, version-control, git, dvc, python
+d Requires: Stata 16+
+d Distribution-Date: 20241219
+d
+f prjsetup.ado
+f prjsetup.sthlp
