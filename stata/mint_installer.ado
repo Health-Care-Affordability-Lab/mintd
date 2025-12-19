@@ -89,10 +89,10 @@ def _mint_install_python(pythonpath, github):
 
         SFIToolkit.displayln("{text}Installing Python package 'mint'...{reset}")
 
-        # Installation logic: PyPI first, then local source if available
+        # Installation logic: Git/local first, then PyPI as fallback
         installed_successfully = False
 
-        # Determine installation path (only needed for local installation)
+        # Determine installation path (prioritize GitHub/local over PyPI)
         mint_path = None
         if github != "":
             # Clone from GitHub
@@ -107,11 +107,11 @@ def _mint_install_python(pythonpath, github):
 
             if clone_result.returncode != 0:
                 SFIToolkit.displayln(f"{{error}}Git clone failed: {clone_result.stderr}{{reset}}")
-                SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
+                SFIToolkit.displayln("{text}Falling back to local source or PyPI...{reset}")
                 mint_path = None
             elif not os.path.exists(os.path.join(mint_path, "pyproject.toml")):
                 SFIToolkit.displayln(f"{{error}}Cloned repository missing pyproject.toml{reset}")
-                SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
+                SFIToolkit.displayln("{text}Falling back to local source or PyPI...{reset}")
                 mint_path = None
             else:
                 SFIToolkit.displayln("{result}✓ Successfully cloned mint from GitHub{reset}")
@@ -119,8 +119,10 @@ def _mint_install_python(pythonpath, github):
             mint_path = pythonpath
             if not os.path.exists(os.path.join(mint_path, "pyproject.toml")):
                 SFIToolkit.displayln(f"{{error}}pyproject.toml not found in specified path: {mint_path}{{reset}}")
-                SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
+                SFIToolkit.displayln("{text}Falling back to PyPI installation...{reset}")
                 mint_path = None
+            else:
+                SFIToolkit.displayln(f"{{text}}Using local mint source at: {mint_path}{{reset}}")
         else:
             # Try to find local mint source based on common locations
             try:
@@ -143,11 +145,10 @@ def _mint_install_python(pythonpath, github):
                     mint_path = potential_mint_path
                     SFIToolkit.displayln(f"{{text}}Found local mint source at: {mint_path}{{reset}}")
                 else:
-                    SFIToolkit.displayln(f"{{text}}Local mint source not found at: {potential_mint_path}{{reset}}")
-                    SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
+                    SFIToolkit.displayln("{text}No local mint source found, will try PyPI...{reset}")
             except Exception as e:
                 SFIToolkit.displayln(f"{{text}}Could not determine Stata paths: {e}{{reset}}")
-                SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
+                SFIToolkit.displayln("{text}Will try PyPI installation...{reset}")
 
         # Check if virtual environment should be used (only if we have local source)
         use_venv = False
@@ -176,25 +177,38 @@ def _mint_install_python(pythonpath, github):
                                        capture_output=True, text=True, timeout=120)
         else:
             # Direct installation without virtual environment
-            # Try PyPI first
-            SFIToolkit.displayln("{text}Trying PyPI installation...{reset}")
-            result = run_pip_command(["install", "mint"],
-                                   capture_output=True, text=True, timeout=60)
-
-            # If PyPI fails and we have local source, try local installation
-            if result.returncode != 0 and mint_path:
-                SFIToolkit.displayln("{text}PyPI installation failed, trying local installation...{reset}")
-                SFIToolkit.displayln(f"{{text}}Installing from local path: {mint_path}{{reset}}")
+            # Try local/GitHub installation first, then PyPI as fallback
+            if mint_path:
+                SFIToolkit.displayln("{text}Installing from local/GitHub source...{reset}")
+                SFIToolkit.displayln(f"{{text}}Installing from: {mint_path}{{reset}}")
                 result = run_pip_command(["install", "-e", mint_path],
                                        capture_output=True, text=True, timeout=120)
-            elif result.returncode != 0 and not mint_path:
-                SFIToolkit.displayln("{error}PyPI installation failed and no local source found.{reset}")
-                SFIToolkit.displayln("{text}To install from the development version:{reset}")
-                SFIToolkit.displayln("{text}1. Clone the repository: git clone https://github.com/Cooper-lab/mint.git{reset}")
-                SFIToolkit.displayln("{text}2. Run: mint_installer, pythonpath(\"/path/to/cloned/mint\"){reset}")
-                SFIToolkit.displayln("{text}{reset}")
-                SFIToolkit.displayln("{text}Or install the stable version from PyPI when available.{reset}")
-                raise RuntimeError("Installation failed: No local source available and PyPI installation failed")
+
+                # If local installation fails, try PyPI as fallback
+                if result.returncode != 0:
+                    SFIToolkit.displayln("{text}Local installation failed, trying PyPI as fallback...{reset}")
+                    result = run_pip_command(["install", "mint"],
+                                           capture_output=True, text=True, timeout=60)
+            else:
+                # No local source, try PyPI directly
+                SFIToolkit.displayln("{text}No local source found, trying PyPI installation...{reset}")
+                result = run_pip_command(["install", "mint"],
+                                       capture_output=True, text=True, timeout=60)
+
+            if result.returncode != 0:
+                if mint_path:
+                    SFIToolkit.displayln("{error}Both local and PyPI installation failed.{reset}")
+                    SFIToolkit.displayln("{text}To install from the development version:{reset}")
+                    SFIToolkit.displayln("{text}1. Clone the repository: git clone https://github.com/Cooper-lab/mint.git{reset}")
+                    SFIToolkit.displayln("{text}2. Run: mint_installer, pythonpath(\"/path/to/cloned/mint\"){reset}")
+                    SFIToolkit.displayln("{text}3. Or install directly: pip install git+https://github.com/Cooper-lab/mint.git{reset}")
+                else:
+                    SFIToolkit.displayln("{error}PyPI installation failed and no local source found.{reset}")
+                    SFIToolkit.displayln("{text}To install from the development version:{reset}")
+                    SFIToolkit.displayln("{text}1. Clone the repository: git clone https://github.com/Cooper-lab/mint.git{reset}")
+                    SFIToolkit.displayln("{text}2. Run: mint_installer, pythonpath(\"/path/to/cloned/mint\"){reset}")
+                    SFIToolkit.displayln("{text}3. Or install directly: pip install git+https://github.com/Cooper-lab/mint.git{reset}")
+                raise RuntimeError("Installation failed: All installation methods failed")
 
         # Test import - handle both virtual environment and direct installation
         try:
@@ -228,11 +242,11 @@ def _mint_install_python(pythonpath, github):
     except Exception as e:
         SFIToolkit.errprintln(f"Error installing Python package: {e}")
         SFIToolkit.errprintln("")
-        SFIToolkit.errprintln("Manual installation:")
-        SFIToolkit.errprintln("python: import subprocess, sys; subprocess.run([sys.executable, '-m', 'pip', 'install', 'mint'])")
-        SFIToolkit.errprintln("or")
-        SFIToolkit.errprintln("python: import subprocess, sys, os; ado_path = SFIToolkit.getStringLocal('c(sysdir_plus)'); mint_path = os.path.dirname(ado_path); subprocess.run([sys.executable, '-m', 'pip', 'install', '-e', mint_path])")
-        SFIToolkit.errprintln("")
+                SFIToolkit.errprintln("Manual installation:")
+                SFIToolkit.errprintln("python: import subprocess, sys; subprocess.run([sys.executable, '-m', 'pip', 'install', 'git+https://github.com/Cooper-lab/mint.git'])")
+                SFIToolkit.errprintln("or")
+                SFIToolkit.errprintln("python: import subprocess, sys, os; ado_path = SFIToolkit.getStringLocal('c(sysdir_plus)'); mint_path = os.path.dirname(ado_path); subprocess.run([sys.executable, '-m', 'pip', 'install', '-e', mint_path])")
+                SFIToolkit.errprintln("")
         SFIToolkit.errprintln("Note: On some systems you may need to use 'pip3' instead of 'pip' in the commands above.")
         raise
 end

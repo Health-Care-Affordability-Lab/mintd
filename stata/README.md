@@ -37,10 +37,10 @@ If you prefer manual installation, you can use Stata's built-in package manager:
 
 ```stata
 // Install Stata package from GitHub
-net install mint, from("https://github.com/your-org/mint/raw/main/stata/")
+net install mint, from("https://github.com/Cooper-lab/mint/raw/main/stata/")
 
 // Install Python package (choose one method)
-python: import subprocess; subprocess.run(["pip", "install", "mint"])
+python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
 python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
 
 // Verify installation
@@ -50,7 +50,7 @@ help mint
 mint, type(data) name(test_install)
 ```
 
-**Note:** Replace `your-org` with the actual GitHub organization/user name where the mint repository is hosted.
+**Note:** The repository is hosted at `Cooper-lab/mint` on GitHub.
 
 ### Option 2: Manual Installation
 
@@ -79,8 +79,8 @@ cp mint.sthlp ~/ado/personal/
 
 3. **Install the mint Python package:**
    ```stata
-   // Install from PyPI (when available)
-   python: import subprocess; subprocess.run(["pip", "install", "mint"])
+   // Install from GitHub (recommended)
+   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
 
    // Or for development/testing
    python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
@@ -134,8 +134,8 @@ The `pythonpath()` option specifies the **local path** to the mint source code o
 
 The `mint` command includes automatic installation of the Python `mint` package. If the Python package is not found when you run a command, `mint` will:
 
-1. First try to install from PyPI: `pip install mint`
-2. If that fails, try to install from the local source directory
+1. First try to install from local source or GitHub
+2. If that fails, try to install from PyPI: `pip install mint`
 3. Provide clear error messages and manual installation instructions if both methods fail
 
 This means that in most cases, you only need to install the Stata package - the Python package will be installed automatically when needed.
@@ -150,7 +150,7 @@ This means that in most cases, you only need to install the Stata package - the 
 ### "mint package not installed"
 - Verify that Python integration is working in Stata: `python: print("Hello")`
 - Check that pip is available in Stata's Python environment
-- Try installing mint manually: `python: import subprocess; subprocess.run(["pip", "install", "mint"])`
+- Try installing mint manually: `python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])`
 
 ### Permission issues
 - On macOS, you may need to create the directory first:

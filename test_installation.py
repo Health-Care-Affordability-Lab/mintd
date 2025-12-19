@@ -68,9 +68,9 @@ def test_package_installation():
         print("\n🎉 Package installation test completed successfully!")
         print("\n📦 The mint package is ready for distribution!")
         print("\nTo install for end users:")
-        print("  pip install mint")
+        print("  pip install git+https://github.com/Cooper-lab/mint.git")
         print("  # or")
-        print("  pip install git+https://github.com/your-org/mint.git")
+        print("  pip install -e /path/to/local/mint")
 
         return True
 

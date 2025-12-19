@@ -14,7 +14,7 @@ setup(
     description="Lab project scaffolding tool",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/your-org/mint",
+    url="https://github.com/Cooper-lab/mint",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     python_requires=">=3.9",

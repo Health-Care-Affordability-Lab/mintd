@@ -48,11 +48,11 @@ dev = [
 mint = "mint.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/your-org/mint"
+Homepage = "https://github.com/Cooper-lab/mint"
 Documentation = "https://mint.readthedocs.io/"
-Repository = "https://github.com/your-org/mint"
-Issues = "https://github.com/your-org/mint/issues"
-Changelog = "https://github.com/your-org/mint/blob/main/CHANGELOG.md"
+Repository = "https://github.com/Cooper-lab/mint"
+Issues = "https://github.com/Cooper-lab/mint/issues"
+Changelog = "https://github.com/Cooper-lab/mint/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
