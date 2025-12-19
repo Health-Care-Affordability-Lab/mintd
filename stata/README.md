@@ -21,6 +21,9 @@ mint_installer, novenv
 // Install from specific local source path
 mint_installer, pythonpath("/path/to/mint/source")
 
+// Install latest development version from GitHub
+mint_installer, github
+
 // Verify installation
 help mint
 
@@ -91,19 +94,41 @@ By default, the automated installer creates a dedicated virtual environment (`.m
 
 ### Finding the Python Path
 
-If you need to specify a custom path to the mint source code using the `pythonpath()` option, you can find it by:
+The `pythonpath()` option specifies the **local path** to the mint source code on your machine (not a GitHub URL). You only need this if automatic detection fails.
+
+**To find the correct path:**
 
 1. **If you cloned the repository:**
    ```bash
-   # The path to the cloned mint repository
-   /path/to/your/cloned/mint/repository
+   # Use the path to your cloned mint repository
+   mint_installer, pythonpath("/Users/username/projects/mint")
    ```
 
-2. **Check for pyproject.toml:**
-   The specified path must contain a `pyproject.toml` file.
+2. **Requirements:**
+   - Must be a local directory path (not a URL)
+   - Must contain a `pyproject.toml` file
+   - The installer will run `pip install -e` from this directory
 
 3. **Automatic detection:**
-   The installer automatically tries to find the mint source relative to your Stata installation. You only need to specify `pythonpath()` if automatic detection fails.
+   The installer automatically tries to find the mint source relative to your Stata installation. You only need `pythonpath()` if automatic detection fails.
+
+4. **Don't have the source locally?**
+   **Option A: Automatic GitHub cloning**
+   ```stata
+   // Automatically clone and install from GitHub
+   mint_installer, github
+   ```
+
+   **Option B: Manual cloning**
+   ```bash
+   # Clone the repository first
+   git clone https://github.com/Cooper-lab/mint.git
+   cd mint
+
+   # Then run the installer with the path
+   # (in Stata)
+   mint_installer, pythonpath("/path/to/cloned/mint")
+   ```
 
 ### Automatic Python Package Installation
 

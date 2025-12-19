@@ -17,7 +17,7 @@
 {title:Syntax}
 
 {p 8 16 2}
-{cmd:mint_installer} [, {opt force} {opt replace} {opt from(url)} {opt pythonpath(path)} {opt novenv} ]
+{cmd:mint_installer} [, {opt force} {opt replace} {opt from(url)} {opt pythonpath(path)} {opt novenv} {opt github} ]
 
 {marker description}{...}
 {title:Description}
@@ -53,17 +53,22 @@ development installations).
 Default is "{browse "https://github.com/Cooper-lab/mint/raw/main/stata/":https://github.com/Cooper-lab/mint/raw/main/stata/}".
 
 {phang}
-{opt pythonpath(path)} specifies the path to the local mint Python package source
-directory. This should be the path to a directory containing {cmd:pyproject.toml}.
-If not specified, the installer will attempt to find it automatically based on the
-Stata installation location. Use this option if automatic detection fails or if
-you want to install from a specific source location.
+{opt pythonpath(path)} specifies the path to the {it:local} mint Python package source
+directory on your machine. This must be a local directory path containing {cmd:pyproject.toml}
+(not a GitHub URL). If not specified, the installer will attempt to find it automatically
+based on the Stata installation location. Use this option if automatic detection fails or if
+you want to install from a specific local source location.
 
 {phang}
 {opt novenv} skips virtual environment creation and installs mint directly into
 Stata's Python environment. By default, the installer creates a virtual environment
 for mint to avoid conflicts with other packages. If virtual environment creation fails,
 the installer will throw an error - use {opt novenv} to install directly instead.
+
+{phang}
+{opt github} automatically clones the mint repository from GitHub into a temporary
+directory and installs from the development version. Use this option to install the
+latest development version without manually cloning the repository.
 
 {marker examples}{...}
 {title:Examples}
@@ -97,6 +102,12 @@ Install from specific source directory:
 
 {p 8 12 2}
 {cmd:. mint_installer, pythonpath("C:\Users\username\projects\mint")}
+
+{phang}
+Install latest development version from GitHub:
+
+{p 8 12 2}
+{cmd:. mint_installer, github}
 
 {marker remarks}{...}
 {title:Remarks}
