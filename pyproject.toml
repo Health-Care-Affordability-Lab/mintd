@@ -62,7 +62,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mint = ["*.ado", "*.sthlp", "*.md", "*.pkg"]
+mint = ["*.ado", "*.sthlp", "*.md", "*.pkg", "*.j2"]
 
 # uv configuration
 [tool.uv]

@@ -5,4 +5,5 @@ recursive-include stata *.ado
 recursive-include stata *.sthlp
 recursive-include stata *.md
 recursive-include stata *.pkg
+recursive-include src *.j2
 recursive-include notes *.md

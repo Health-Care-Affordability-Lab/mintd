@@ -7,6 +7,12 @@ from typing import Dict, List, Tuple, Any
 from datetime import datetime
 
 from jinja2 import Environment, FileSystemLoader, Template
+try:
+    # Python 3.9+
+    from importlib.resources import files
+except ImportError:
+    # Python < 3.9
+    from importlib_resources import files
 
 from ..utils import validate_project_name, format_project_name
 
@@ -18,7 +24,19 @@ class BaseTemplate(ABC):
 
     def __init__(self):
         """Initialize the template."""
-        self.template_dir = Path(__file__).parent.parent / "files"
+        # Try to find templates in the installed package first, fall back to development path
+        try:
+            # Use importlib.resources to get the path to the mint package files
+            mint_files = files('mint')
+            self.template_dir = Path(mint_files / 'files')
+        except (ImportError, AttributeError):
+            # Fall back to development path if importlib.resources fails
+            self.template_dir = Path(__file__).parent.parent / "files"
+
+        # Ensure template directory exists
+        if not self.template_dir.exists():
+            raise RuntimeError(f"Template directory not found: {self.template_dir}")
+
         self.jinja_env = Environment(
             loader=FileSystemLoader(str(self.template_dir)),
             trim_blocks=True,
