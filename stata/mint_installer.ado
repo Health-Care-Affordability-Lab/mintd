@@ -107,11 +107,24 @@ def _mint_install_python(pythonpath):
                 SFIToolkit.displayln("{text}Continuing with PyPI installation only...{reset}")
                 mint_path = None
         else:
-            # Try to find local mint source based on Stata ado path
+            # Try to find local mint source based on common locations
             try:
-                from sfi import Macro
-                ado_path = Macro.get("c(sysdir_plus)")
-                potential_mint_path = os.path.dirname(ado_path)  # Go up one level from PLUS to find mint
+                # Try common locations where mint might be installed
+                alt_paths = [
+                    os.path.join(os.path.expanduser("~"), "mint"),  # ~/mint
+                    os.path.join(os.path.expanduser("~"), "projects", "mint"),  # ~/projects/mint
+                    os.path.join(os.path.expanduser("~"), "git", "mint"),  # ~/git/mint
+                    "/opt/mint",  # System location
+                    "/usr/local/mint",  # Another system location
+                ]
+
+                potential_mint_path = None
+                for path in alt_paths:
+                    if os.path.exists(os.path.join(path, "pyproject.toml")):
+                        potential_mint_path = path
+                        break
+
+                if potential_mint_path:
 
                 if os.path.exists(os.path.join(potential_mint_path, "pyproject.toml")):
                     mint_path = potential_mint_path
