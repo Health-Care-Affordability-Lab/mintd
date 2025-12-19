@@ -1,7 +1,7 @@
 {smcl}
 {* *! version 1.0.0}{...}
 {vieweralsosee "[R] net" "help net"}{...}
-{vieweralsosee "prjsetup" "help prjsetup"}{...}
+{vieweralsosee "mint" "help mint"}{...}
 {viewerjumpto "Syntax" "mint_installer##syntax"}{...}
 {viewerjumpto "Description" "mint_installer##description"}{...}
 {viewerjumpto "Options" "mint_installer##options"}{...}
@@ -28,7 +28,7 @@ including both the Stata commands and the required Python package. This installe
 handles the installation process in two steps:
 
 {p 4 4 2}
-1. Installs the Stata package files ({cmd:prjsetup.ado}, {cmd:prjsetup.sthlp})
+1. Installs the Stata package files ({cmd:mint.ado}, {cmd:mint.sthlp})
 {p_end}
 {p 4 4 2}
 2. Installs the Python {cmd:mint} package in Stata's Python environment
@@ -108,7 +108,7 @@ If the automated installation fails, you can still install the components manual
 {title:Also see}
 
 {psee}
-{manhelp prjsetup R} - Create research projects using mint
+{manhelp mint R} - Create research projects using mint
 {p_end}
 {psee}
 {manhelp net R} - Install and manage Stata packages

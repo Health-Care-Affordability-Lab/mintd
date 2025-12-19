@@ -11,7 +11,7 @@ program define mint_installer
     display as text "=========================================="
 
     * Check if already installed
-    capture which prjsetup
+    capture which mint
     local already_installed = (_rc == 0)
 
     if `already_installed' & "`force'" == "" {
@@ -47,11 +47,11 @@ program define mint_installer
     display as result "✓ Installation complete!"
     display as text ""
     display as text "Usage:"
-    display as text "  prjsetup, type(data) name(myproject)"
-    display as text "  prjsetup, type(project) name(analysis)"
-    display as text "  prjsetup, type(infra) name(package)"
+    display as text "  mint, type(data) name(myproject)"
+    display as text "  mint, type(project) name(analysis)"
+    display as text "  mint, type(infra) name(package)"
     display as text ""
-    display as text "For help: help prjsetup"
+    display as text "For help: help mint"
 
 end
 

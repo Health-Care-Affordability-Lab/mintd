@@ -16,10 +16,10 @@ mint_installer
 mint_installer, force
 
 // Verify installation
-help prjsetup
+help mint
 
 // Test the installation
-prjsetup, type(data) name(test_install)
+mint, type(data) name(test_install)
 ```
 
 ### Option 2: Manual Installation via net install
@@ -35,10 +35,10 @@ python: import subprocess; subprocess.run(["pip", "install", "mint"])
 python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
 
 // Verify installation
-help prjsetup
+help mint
 
 // Test the installation
-prjsetup, type(data) name(test_install)
+mint, type(data) name(test_install)
 ```
 
 **Note:** Replace `your-org` with the actual GitHub organization/user name where the mint repository is hosted.
@@ -48,22 +48,22 @@ prjsetup, type(data) name(test_install)
 If the above doesn't work, you can install manually:
 
 1. **Download the Stata files:**
-   - `prjsetup.ado`
-   - `prjsetup.sthlp`
+   - `mint.ado`
+   - `mint.sthlp`
 
 2. **Install in Stata's personal ado directory:**
    ```bash
-   # macOS
-   cp prjsetup.ado ~/Library/Application\ Support/Stata/ado/personal/
-   cp prjsetup.sthlp ~/Library/Application\ Support/Stata/ado/personal/
+# macOS
+cp mint.ado ~/Library/Application\ Support/Stata/ado/personal/
+cp mint.sthlp ~/Library/Application\ Support/Stata/ado/personal/
 
-   # Windows
-   copy prjsetup.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
-   copy prjsetup.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
+# Windows
+copy mint.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
+copy mint.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
 
-   # Linux
-   cp prjsetup.ado ~/ado/personal/
-   cp prjsetup.sthlp ~/ado/personal/
+# Linux
+cp mint.ado ~/ado/personal/
+cp mint.sthlp ~/ado/personal/
    ```
 
 3. **Restart Stata** after copying the files to ensure they're recognized.
@@ -81,7 +81,7 @@ If the above doesn't work, you can install manually:
 
 ### Automatic Python Package Installation
 
-The `prjsetup` command includes automatic installation of the Python `mint` package. If the Python package is not found when you run a command, `prjsetup` will:
+The `mint` command includes automatic installation of the Python `mint` package. If the Python package is not found when you run a command, `mint` will:
 
 1. First try to install from PyPI: `pip install mint`
 2. If that fails, try to install from the local source directory
@@ -91,7 +91,7 @@ This means that in most cases, you only need to install the Stata package - the 
 
 ### Troubleshooting
 
-#### "command prjsetup not found"
+#### "command mint not found"
 - Ensure the `.ado` file is in your Stata ado path
 - Try restarting Stata
 - Check that the file wasn't corrupted during download
@@ -116,7 +116,7 @@ This means that in most cases, you only need to install the Stata package - the 
 ### Testing the installation
 ```stata
 // Test basic functionality
-prjsetup, type(data) name(test_install)
+mint, type(data) name(test_install)
 
 // Check that project_path macro is set
 display "`project_path'"
@@ -126,24 +126,24 @@ python: import mint; print("mint version:", mint.__version__)
 ```
 
 2. **Install the Stata files:**
-   Copy `prjsetup.ado` and `prjsetup.sthlp` to your Stata personal ado directory.
+   Copy `mint.ado` and `mint.sthlp` to your Stata personal ado directory.
 
    **On macOS:**
    ```bash
-   cp prjsetup.ado ~/Library/Application\ Support/Stata/ado/personal/
-   cp prjsetup.sthlp ~/Library/Application\ Support/Stata/ado/personal/
+   cp mint.ado ~/Library/Application\ Support/Stata/ado/personal/
+   cp mint.sthlp ~/Library/Application\ Support/Stata/ado/personal/
    ```
 
    **On Windows:**
    ```cmd
-   copy prjsetup.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
-   copy prjsetup.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
+   copy mint.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
+   copy mint.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
    ```
 
    **On Linux:**
    ```bash
-   cp prjsetup.ado ~/ado/personal/
-   cp prjsetup.sthlp ~/ado/personal/
+   cp mint.ado ~/ado/personal/
+   cp mint.sthlp ~/ado/personal/
    ```
 
 ## Usage
@@ -152,22 +152,22 @@ Once installed, you can create projects directly from Stata:
 
 ```stata
 // Create a data repository
-prjsetup, type(data) name(medicare_claims)
+mint, type(data) name(medicare_claims)
 
 // Create a research project
-prjsetup, type(project) name(hospital_closures)
+mint, type(project) name(hospital_closures)
 
 // Create in a specific location
-prjsetup, type(data) name(mydata) path(/path/to/projects)
+mint, type(data) name(mydata) path(/path/to/projects)
 
 // Skip git/dvc initialization
-prjsetup, type(infra) name(mypackage) nogit nodvc
+mint, type(infra) name(mypackage) nogit nodvc
 
 // Use custom DVC bucket
-prjsetup, type(data) name(mydata) bucket(my-custom-bucket)
+mint, type(data) name(mydata) bucket(my-custom-bucket)
 
 // Access the created project path
-prjsetup, type(project) name(analysis)
+mint, type(project) name(analysis)
 display "`project_path'"
 ```
 
@@ -182,7 +182,7 @@ display "`project_path'"
 For help within Stata:
 
 ```stata
-help prjsetup
+help mint
 ```
 
 ## Troubleshooting

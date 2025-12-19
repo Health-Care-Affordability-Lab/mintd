@@ -185,7 +185,7 @@ mint provides seamless integration with Stata 16+ through native Python commands
 mint_installer
 
 // Verify installation
-help prjsetup
+help mint
 ```
 
 **Option 2: Via Stata's net install**
@@ -197,7 +197,7 @@ net install mint, from("https://github.com/your-org/mint/raw/main/stata/")
 python: import subprocess; subprocess.run(["pip", "install", "mint"])
 
 // Verify installation
-help prjsetup
+help mint
 ```
 
 **Option 3: Manual Installation**
@@ -208,24 +208,24 @@ help prjsetup
    ```
 
 2. **Install Stata files**:
-   Copy `stata/prjsetup.ado` and `stata/prjsetup.sthlp` to your Stata ado directory.
+   Copy `stata/mint.ado` and `stata/mint.sthlp` to your Stata ado directory.
 
 3. **Usage in Stata**:
    ```stata
    // Create projects directly from Stata
-   prjsetup, type(data) name(medicare_data)
-   prjsetup, type(project) name(analysis) path(/projects)
-   prjsetup, type(infra) name(tools) nogit
+   mint, type(data) name(medicare_data)
+   mint, type(project) name(analysis) path(/projects)
+   mint, type(infra) name(tools) nogit
 
    // Access created project path
-   prjsetup, type(data) name(mydata)
+   mint, type(data) name(mydata)
    display "`project_path'"
    ```
 
 ### Stata Command Reference
 
 ```stata
-prjsetup, type(string) name(string) [path(string) nogit nodvc bucket(string)]
+mint, type(string) name(string) [path(string) nogit nodvc bucket(string)]
 
 Options:
   type(string)     - Project type: data, project, infra

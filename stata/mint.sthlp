@@ -1,22 +1,22 @@
 {smcl}
 {* *! version 1.0.0  19dec2024}{...}
-{vieweralsosee "prjsetup" "mint"}{...}
-{viewerjumpto "Syntax" "prjsetup##syntax"}{...}
-{viewerjumpto "Description" "prjsetup##description"}{...}
-{viewerjumpto "Options" "prjsetup##options"}{...}
-{viewerjumpto "Examples" "prjsetup##examples"}{...}
-{viewerjumpto "Remarks" "prjsetup##remarks"}{...}
+{vieweralsosee "mint" "mint_installer"}{...}
+{viewerjumpto "Syntax" "mint##syntax"}{...}
+{viewerjumpto "Description" "mint##description"}{...}
+{viewerjumpto "Options" "mint##options"}{...}
+{viewerjumpto "Examples" "mint##examples"}{...}
+{viewerjumpto "Remarks" "mint##remarks"}{...}
 {title:Title}
 
 {p2colset 5 18 20 2}{...}
-{p2col :{hi:prjsetup} {hline 2}}Create standardized research project repositories{p_end}
+{p2col :{hi:mint} {hline 2}}Create standardized research project repositories{p_end}
 {p2colreset}{...}
 
 {marker syntax}{...}
 {title:Syntax}
 
 {p 8 16 2}
-{cmd:prjsetup}
+{cmd:mint}
 {cmd:,}
 {cmdab:t:ype}({it:string})
 {cmdab:n:ame}({it:string})
@@ -29,7 +29,7 @@
 {title:Description}
 
 {pstd}
-{cmd:prjsetup} creates standardized project repositories using the mint Python package.
+{cmd:mint} creates standardized project repositories using the mint Python package.
 This command provides Stata users with easy access to create data repositories,
 research projects, and infrastructure packages with proper versioning and structure.
 
@@ -66,19 +66,19 @@ Projects are created with:
 {title:Examples}
 
 {pstd}Create a data repository:{p_end}
-{phang2}{cmd:. prjsetup, type(data) name(medicare_claims)}{p_end}
+{phang2}{cmd:. mint, type(data) name(medicare_claims)}{p_end}
 
 {pstd}Create a research project in a specific location:{p_end}
-{phang2}{cmd:. prjsetup, type(project) name(hospital_closures) path(/path/to/repos)}{p_end}
+{phang2}{cmd:. mint, type(project) name(hospital_closures) path(/path/to/repos)}{p_end}
 
 {pstd}Create an infrastructure package without Git initialization:{p_end}
-{phang2}{cmd:. prjsetup, type(infra) name(price_index) nogit}{p_end}
+{phang2}{cmd:. mint, type(infra) name(price_index) nogit}{p_end}
 
 {pstd}Create a project with custom DVC bucket:{p_end}
-{phang2}{cmd:. prjsetup, type(data) name(mydata) bucket(my-custom-bucket)}{p_end}
+{phang2}{cmd:. mint, type(data) name(mydata) bucket(my-custom-bucket)}{p_end}
 
 {pstd}Use the resulting project path:{p_end}
-{phang2}{cmd:. prjsetup, type(project) name(analysis)}{p_end}
+{phang2}{cmd:. mint, type(project) name(analysis)}{p_end}
 {phang2}{cmd:. display "`project_path'"}{p_end}
 
 {marker remarks}{...}

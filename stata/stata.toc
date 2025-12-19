@@ -8,7 +8,7 @@ d Keywords: research, data, version-control, git, dvc, python
 d Requires: Stata 16+
 d Distribution-Date: 20241219
 d
-f prjsetup.ado
-f prjsetup.sthlp
+f mint.ado
+f mint.sthlp
 f mint_installer.ado
 f mint_installer.sthlp
