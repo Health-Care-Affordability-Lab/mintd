@@ -58,7 +58,7 @@ end
 python:
 def _mint_install_python(pythonpath):
     """Install the mint Python package."""
-    from sfi import SFIToolkit
+    from sfi import SFIToolkit, Macro
     import subprocess
     import sys
     import os
@@ -79,7 +79,7 @@ def _mint_install_python(pythonpath):
 
         # Determine installation path (only needed for local installation)
         mint_path = None
-        if "`github'" != "":
+        if Macro.get("github") != "":
             # Clone from GitHub
             import tempfile
             temp_dir = tempfile.mkdtemp()
