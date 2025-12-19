@@ -91,7 +91,7 @@ def _mint_install_python(pythonpath):
             raise FileNotFoundError(f"Could not find mint source directory. Tried: {mint_path}")
 
         # Check if virtual environment should be used
-        use_venv = "`novenv'" == ""
+        use_venv = False 
 
         if use_venv:
             # Create virtual environment for mint
