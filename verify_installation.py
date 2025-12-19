@@ -81,13 +81,31 @@ def verify_installation():
     # Check CLI command execution
     import subprocess
     try:
+        # For development testing, ensure local src is available
+        env = os.environ.copy()
+        if local_src not in sys.path:
+            # Add local src to Python path for subprocess
+            python_path = local_src
+            if 'PYTHONPATH' in env:
+                env['PYTHONPATH'] = f"{python_path}:{env['PYTHONPATH']}"
+            else:
+                env['PYTHONPATH'] = python_path
+
+        # First try the installed script entry point
         result = subprocess.run([
-            sys.executable, '-m', 'mint.cli', '--version'
-        ], capture_output=True, text=True, timeout=5)
+            'mint', '--version'
+        ], capture_output=True, text=True, timeout=5, env=env)
+
+        if result.returncode != 0:
+            # If that fails, try running via python module (for development)
+            result = subprocess.run([
+                sys.executable, '-c', f'import sys; sys.path.insert(0, "{local_src}"); from mint.cli import main; main(["--version"])'
+            ], capture_output=True, text=True, timeout=5, env=env)
+
         check(
             "CLI command execution",
             result.returncode == 0,
-            f"Output: {result.stdout.strip()}"
+            f"Output: {result.stdout.strip() or result.stderr.strip()}"
         )
     except Exception as e:
         check("CLI command execution", False, str(e))

@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 from .templates import DataTemplate, ProjectTemplate, InfraTemplate
 from .config import get_config
