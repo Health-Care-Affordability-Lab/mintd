@@ -17,7 +17,7 @@
 {title:Syntax}
 
 {p 8 16 2}
-{cmd:mint_installer} [, {opt force} {opt replace} {opt from(url)} {opt pythonpath(path)} ]
+{cmd:mint_installer} [, {opt force} {opt replace} {opt from(url)} {opt pythonpath(path)} {opt novenv} ]
 
 {marker description}{...}
 {title:Description}
@@ -57,6 +57,11 @@ Default is "{browse "https://github.com/Cooper-lab/mint/raw/main/stata/":https:/
 directory. If not specified, the installer will attempt to find it automatically
 based on the Stata installation location.
 
+{phang}
+{opt novenv} skips virtual environment creation and installs mint directly into
+Stata's Python environment. By default, the installer creates a virtual environment
+for mint to avoid conflicts with other packages.
+
 {marker examples}{...}
 {title:Examples}
 
@@ -77,6 +82,12 @@ Install from a custom location with local Python path:
 
 {p 8 12 2}
 {cmd:. mint_installer, from("https://example.com/stata/") pythonpath("/path/to/mint")}
+
+{phang}
+Install directly without virtual environment:
+
+{p 8 12 2}
+{cmd:. mint_installer, novenv}
 
 {marker remarks}{...}
 {title:Remarks}
