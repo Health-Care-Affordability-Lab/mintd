@@ -6,4 +6,6 @@ recursive-include stata *.sthlp
 recursive-include stata *.md
 recursive-include stata *.pkg
 recursive-include src *.j2
+recursive-include src gitignore.txt
+recursive-include src dvcignore.txt
 recursive-include notes *.md
