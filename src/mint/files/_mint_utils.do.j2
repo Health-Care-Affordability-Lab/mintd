@@ -2,6 +2,20 @@
 *
 * This do-file provides common utilities used across all project scripts.
 * DO NOT MODIFY - This file is managed by mint and will be overwritten.
+*
+* NOTE: Scripts are expected to run from the src/ directory.
+* Data paths should use "../data/" to access the data folder.
+
+* =============================================================================
+* GLOBAL PATH DEFINITIONS
+* =============================================================================
+* These paths are relative to src/ where scripts run from
+
+global DATA_DIR "../data"
+global RAW_DIR "../data/raw"
+global INTERMEDIATE_DIR "../data/intermediate"
+global FINAL_DIR "../data/final"
+global LOGS_DIR "../logs"
 
 * =============================================================================
 * SETUP PROJECT DIRECTORY
@@ -9,15 +23,31 @@
 
 capture program drop setup_project_directory
 program define setup_project_directory
-    * Set up working directory and validate we're running from project root
+    * Validate we're running from the src/ directory within a mint project
 
     local current_dir "`c(pwd)'"
-
-    * Look for project root indicators
+    
+    * Check if we're in src/ by looking for project indicators in parent
     local root_indicators "metadata.json .git"
-    local root_found = 0
+    local is_in_src = 0
 
-    * Check if we're already in project root
+    * Check if parent directory has project indicators (we're in src/)
+    foreach indicator of local root_indicators {
+        capture confirm file "../`indicator'"
+        if !_rc {
+            local is_in_src = 1
+            continue, break
+        }
+    }
+
+    if `is_in_src' {
+        display "Running from src/ directory: `current_dir'"
+        display "Project root: `current_dir'/.."
+        exit
+    }
+    
+    * Check if we're in the project root (for backwards compatibility)
+    local root_found = 0
     foreach indicator of local root_indicators {
         capture confirm file "`indicator'"
         if !_rc {
@@ -27,43 +57,23 @@ program define setup_project_directory
     }
 
     if `root_found' {
+        display as text "Note: Running from project root. Consider running from src/"
         display "Project root: `current_dir'"
+        
+        * Update globals for project-root execution (backwards compatibility)
+        global DATA_DIR "data"
+        global RAW_DIR "data/raw"
+        global INTERMEDIATE_DIR "data/intermediate"
+        global FINAL_DIR "data/final"
+        global LOGS_DIR "logs"
         exit
     }
 
-    * Check parent directories
-    local check_dir "`current_dir'"
-    while "`check_dir'" != "" {
-        local parent_dir = subinstr("`check_dir'", "\", "/", .)
-        local last_slash = strrpos("`parent_dir'", "/")
-        if `last_slash' > 0 {
-            local parent_dir = substr("`parent_dir'", 1, `last_slash' - 1)
-        }
-        else {
-            local parent_dir ""
-        }
-
-        if "`parent_dir'" == "`check_dir'" {
-            * At root directory
-            continue, break
-        }
-
-        local check_dir "`parent_dir'"
-
-        foreach indicator of local root_indicators {
-            capture confirm file "`check_dir'/`indicator'"
-            if !_rc {
-                quietly cd "`check_dir'"
-                display "Changed to project root: `check_dir'"
-                exit
-            }
-        }
-    }
-
-    display as error "Not running from project root directory."
-    display as error "Project root should contain metadata.json or .git"
+    * Not in a valid location
+    display as error "Not running from expected directory."
+    display as error "Scripts should be run from src/ directory."
     display as error "Current directory: `current_dir'"
-    display as error "Please cd to the project root and try again."
+    display as error "Please cd to the project's src/ directory and try again."
     error 1
 end
 
@@ -80,13 +90,12 @@ program define ParameterAwareLogger
     local start_time = clock("`c(current_time)'", "hms")
     local start_time_fmt = clock("`c(current_time)'", "hms")
 
-    * Get project root
+    * Validate directory and set up globals
     setup_project_directory
-    local project_root "`c(pwd)'"
 
-    * Create logs directory
-    capture mkdir "logs"
-    local logs_dir "`project_root'/logs"
+    * Create logs directory using global path
+    capture mkdir "$LOGS_DIR"
+    local logs_dir "$LOGS_DIR"
 
     * Parse command line arguments for parameters
     local params ""

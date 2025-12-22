@@ -1,48 +1,48 @@
-"""Data cleaning script for {{ project_name }}."""
+"""Data cleaning script for {{ project_name }}.
+
+NOTE: This script runs from the src/ directory. Data paths use ../data/
+"""
 
 import sys
 from pathlib import Path
 import pandas as pd
 
-# Import mint utilities
-from _mint_utils import setup_project_directory, ParameterAwareLogger
+# Import mint utilities (located in same src/ directory)
+from _mint_utils import (
+    setup_project_directory,
+    ParameterAwareLogger,
+    RAW_DIR,
+    INTERMEDIATE_DIR,
+    FINAL_DIR,
+    get_data_paths
+)
 
-def set_directories():
-    """Set up standard directory structure."""
-    project_root = setup_project_directory()
-
-    dirs = {
-        'raw': project_root / 'data' / 'raw',
-        'intermediate': project_root / 'data' / 'intermediate',
-        'final': project_root / 'data' / 'final'
-    }
-
-    for dir_path in dirs.values():
-        dir_path.mkdir(parents=True, exist_ok=True)
-
-    return dirs
 
 def main():
     """Main cleaning workflow."""
-    # Initialize logging (filename will include any parameters passed)
+    # Initialize logging (validates directory and creates log file)
     logger = ParameterAwareLogger("clean")
     logger.log("Starting data cleaning for {{ project_name }}...")
 
-    dirs = set_directories()
+    # Get data paths and ensure directories exist
+    paths = get_data_paths()
+    for name, path in paths.items():
+        if name != 'logs':  # logs already created by logger
+            path.mkdir(parents=True, exist_ok=True)
 
-    logger.log(f"Raw data directory: {dirs['raw']}")
-    logger.log(f"Intermediate data directory: {dirs['intermediate']}")
-    logger.log(f"Final data directory: {dirs['final']}")
+    logger.log(f"Raw data directory: {RAW_DIR}")
+    logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
+    logger.log(f"Final data directory: {FINAL_DIR}")
 
     # TODO: Implement data cleaning logic
-    # - Load raw data from data/raw/
+    # - Load raw data from RAW_DIR/
     # - Handle missing values, data types, outliers
     # - Standardize formats and encodings
-    # - Save cleaned data to data/intermediate/
+    # - Save cleaned data to INTERMEDIATE_DIR/
 
     # Example:
     # # Load raw data
-    # raw_files = list(dirs['raw'].glob("*.csv"))
+    # raw_files = list(RAW_DIR.glob("*.csv"))
     # for raw_file in raw_files:
     #     df = pd.read_csv(raw_file)
     #
@@ -51,12 +51,13 @@ def main():
     #     df.columns = df.columns.str.lower().str.replace(' ', '_')
     #
     #     # Save cleaned data
-    #     intermediate_file = dirs['intermediate'] / f"clean_{raw_file.name}"
+    #     intermediate_file = INTERMEDIATE_DIR / f"clean_{raw_file.name}"
     #     df.to_csv(intermediate_file, index=False)
     #     logger.log(f"Cleaned {len(df)} rows, saved to {intermediate_file}")
 
     logger.log("Data cleaning completed successfully.")
     logger.close()
+
 
 if __name__ == "__main__":
     main()

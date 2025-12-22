@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .templates import DataTemplate, ProjectTemplate, InfraTemplate
-from .config import get_config
+from .config import get_config, get_stata_executable, get_platform_info
 from .initializers.git import init_git, is_git_repo
 from .initializers.storage import init_dvc, create_bucket, is_dvc_repo
 
@@ -67,6 +67,10 @@ def create_project(
             print(f"Warning: The following files already exist and may be overwritten: {', '.join(conflicting_files)}")
             print("Consider backing up these files before proceeding.")
 
+    # Get platform information for cross-platform support
+    platform_info = get_platform_info()
+    stata_executable = get_stata_executable()
+    
     # Prepare template context
     context = {
         "author": defaults.get("author", ""),
@@ -78,6 +82,10 @@ def create_project(
         "project_type": project_type,
         "language": language,
         "use_current_repo": use_current_repo,
+        # Platform-specific context for cross-platform support
+        "platform_os": platform_info["os"],  # 'windows', 'macos', or 'linux'
+        "command_sep": platform_info["command_separator"],  # '&&' or '&'
+        "stata_executable": stata_executable or "stata",  # Fallback to 'stata'
     }
 
     # Select and create template

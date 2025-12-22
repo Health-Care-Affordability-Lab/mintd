@@ -1,6 +1,7 @@
 #' Data ingestion for {{ project_name }}
 #'
 #' This script handles downloading and initial processing of raw data.
+#' NOTE: This script runs from the src/ directory. Data paths use ../data/
 
 # =============================================================================
 # UPDATING FOR NEW DATA (e.g., annual releases)
@@ -16,27 +17,30 @@
 # and `git log` / `dvc checkout` to access previous versions.
 # =============================================================================
 
-# Import mint utilities
+# Import mint utilities (located in same src/ directory)
 source("_mint_utils.R")
 
 main <- function() {
-  # Initialize logging (filename will include any parameters passed)
+  # Initialize logging (validates directory and creates log file)
   logger <- ParameterAwareLogger("ingest")
   logger$log("Starting data ingestion for {{ project_name }}...")
 
-  # Set up directories (this also validates we're in project root)
-  dirs <- set_directories()
+  # Ensure data directories exist (using global paths from _mint_utils.R)
+  paths <- get_data_paths()
+  lapply(paths, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
 
   logger$log("Directories ready:")
-  logger$log("  Raw data: ", dirs$raw)
-  logger$log("  Intermediate: ", dirs$intermediate)
-  logger$log("  Final data: ", dirs$final)
+  logger$log("  Raw data: ", RAW_DIR)
+  logger$log("  Intermediate: ", INTERMEDIATE_DIR)
+  logger$log("  Final data: ", FINAL_DIR)
 
   # TODO: Implement data ingestion logic
   # - Download data using httr/curl
   # - Extract archives using utils::unzip
   # - Initial validation with readr
-  # - Save to data/raw/
+  # - Save to RAW_DIR/
 
   # Example:
   # library(httr)
@@ -44,7 +48,7 @@ main <- function() {
   #
   # # Download data
   # response <- GET("https://example.com/data.csv")
-  # raw_file <- file.path(dirs$raw, "downloaded_data.csv")
+  # raw_file <- file.path(RAW_DIR, "downloaded_data.csv")
   # writeBin(content(response, "raw"), raw_file)
   #
   # # Quick validation

@@ -92,3 +92,4 @@ def test_template_with_context():
         assert "Test Author" in readme_content
         assert "Test Lab" in readme_content
 
+

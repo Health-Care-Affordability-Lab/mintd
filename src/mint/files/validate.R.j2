@@ -1,24 +1,10 @@
 #' Data validation for {{ project_name }}
 #'
 #' This script runs quality checks and validation on processed data.
+#' NOTE: This script runs from the src/ directory. Data paths use ../data/
 
-# Import mint utilities
+# Import mint utilities (located in same src/ directory)
 source("_mint_utils.R")
-
-# Set up directories
-set_directories <- function() {
-  dirs <- list(
-    raw = file.path("data", "raw"),
-    intermediate = file.path("data", "intermediate"),
-    final = file.path("data", "final")
-  )
-
-  lapply(dirs, function(d) {
-    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
-  })
-
-  return(dirs)
-}
 
 validate_dataset <- function(df, dataset_name, logger) {
   #' Run validation checks on a dataset
@@ -54,35 +40,39 @@ validate_dataset <- function(df, dataset_name, logger) {
       logger$log("    - ", issue)
     }
   } else {
-    logger$log("  ✓ No issues found")
+    logger$log("  [OK] No issues found")
   }
 
   return(length(issues) == 0)
 }
 
 main <- function() {
-  # Initialize logging (filename will include any parameters passed)
+  # Initialize logging (validates directory and creates log file)
   logger <- ParameterAwareLogger("validate")
   logger$log("Starting data validation for {{ project_name }}...")
 
-  dirs <- set_directories()
+  # Ensure data directories exist (using global paths from _mint_utils.R)
+  paths <- get_data_paths()
+  lapply(paths, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
 
   logger$log("Directories ready:")
-  logger$log("  Raw data: ", dirs$raw)
-  logger$log("  Intermediate: ", dirs$intermediate)
-  logger$log("  Final data: ", dirs$final)
+  logger$log("  Raw data: ", RAW_DIR)
+  logger$log("  Intermediate: ", INTERMEDIATE_DIR)
+  logger$log("  Final data: ", FINAL_DIR)
 
   # TODO: Implement comprehensive validation logic
-  # - Load cleaned data from data/intermediate/
+  # - Load cleaned data from INTERMEDIATE_DIR/
   # - Run quality checks (missing values, duplicates, data types)
   # - Business rule validation
   # - Statistical checks
-  # - Save validation reports
+  # - Save validation reports to FINAL_DIR/
 
   # Example validation
   # library(readr)
   #
-  # intermediate_files <- list.files(dirs$intermediate, pattern = "*.csv", full.names = TRUE)
+  # intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "*.csv", full.names = TRUE)
   # all_valid <- TRUE
   #
   # for (intermediate_file in intermediate_files) {
@@ -92,9 +82,9 @@ main <- function() {
   # }
   #
   # if (all_valid) {
-  #   logger$log("✓ All datasets passed validation")
+  #   logger$log("[OK] All datasets passed validation")
   # } else {
-  #   logger$log("✗ Some datasets failed validation - review issues above")
+  #   logger$log("[FAIL] Some datasets failed validation - review issues above")
   # }
 
   logger$log("Data validation completed successfully.")

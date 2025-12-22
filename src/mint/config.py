@@ -133,7 +133,21 @@ def save_config(config: dict) -> None:
 
 
 def _get_default_config() -> dict:
-    """Get default configuration values."""
+    """Get default configuration values.
+    
+    Returns a dictionary with all configuration sections:
+    - storage: S3/cloud storage settings
+    - registry: Data Commons Registry settings
+    - defaults: User and organization defaults
+    - tools: External tool settings (like Stata)
+    - platform: OS detection settings
+    """
+    from .utils import get_platform, detect_stata_executable
+    
+    # Auto-detect platform and Stata
+    current_platform = get_platform()
+    detected_stata = detect_stata_executable()
+    
     return {
         "storage": {
             "provider": "s3",
@@ -150,14 +164,32 @@ def _get_default_config() -> dict:
         "defaults": {
             "author": "",
             "organization": "",
+        },
+        "tools": {
+            "stata": {
+                "executable": "",  # User override - auto-detect if empty
+                "detected_path": detected_stata or "",  # Full path if found
+            }
+        },
+        "platform": {
+            "os": current_platform,  # Auto-detected: windows, macos, linux
         }
     }
 
 
 def init_config() -> None:
-    """Interactive first-time setup - prompts for all required values."""
+    """Interactive first-time setup - prompts for all required values.
+    
+    This function walks the user through configuring:
+    1. Storage settings (S3 endpoint, region, bucket prefix)
+    2. User defaults (name, organization)
+    3. Registry settings (URL, org)
+    4. Tool detection (Stata executable)
+    5. Credentials (AWS keys stored securely)
+    """
     from rich.console import Console
     from rich.prompt import Prompt, Confirm
+    from .utils import get_platform, detect_stata_executable
 
     console = Console()
 
@@ -165,6 +197,10 @@ def init_config() -> None:
     console.print("Let's set up your storage configuration.\n")
 
     config = _get_default_config()
+    
+    # Display detected platform info
+    current_platform = get_platform()
+    console.print(f"[dim]Detected platform: {current_platform}[/dim]\n")
 
     # Storage provider (default to S3)
     provider = Prompt.ask(
@@ -225,6 +261,38 @@ def init_config() -> None:
     )
     config["registry"]["org"] = registry_org
 
+    # Tool Detection (Stata)
+    console.print("\n[bold blue]Tool Detection[/bold blue]")
+    detected_stata = detect_stata_executable()
+    
+    if detected_stata:
+        console.print(f"✅ Stata detected: [green]{detected_stata}[/green]")
+        config["tools"]["stata"]["detected_path"] = detected_stata
+        
+        # Ask if user wants to override
+        use_detected = Confirm.ask(
+            f"Use detected Stata executable?",
+            default=True
+        )
+        
+        if not use_detected:
+            custom_stata = Prompt.ask(
+                "Enter path to Stata executable",
+                default=""
+            )
+            if custom_stata:
+                config["tools"]["stata"]["executable"] = custom_stata
+    else:
+        console.print("[yellow]⚠️  Stata not detected in PATH[/yellow]")
+        console.print("If you have Stata installed, you can specify the path manually.")
+        
+        custom_stata = Prompt.ask(
+            "Enter path to Stata executable (or leave blank to skip)",
+            default=""
+        )
+        if custom_stata:
+            config["tools"]["stata"]["executable"] = custom_stata
+
     # Save configuration
     save_config(config)
     console.print(f"\n✅ Configuration saved to {CONFIG_FILE}")
@@ -280,3 +348,60 @@ def validate_config() -> bool:
         return False
 
     return True
+
+
+def get_stata_executable() -> Optional[str]:
+    """Get the Stata executable from config, with auto-detect fallback.
+    
+    Priority order:
+    1. User-specified override in config (tools.stata.executable)
+    2. Previously detected path (tools.stata.detected_path)
+    3. Fresh auto-detection using detect_stata_executable()
+    
+    Returns:
+        Optional[str]: Path or name of Stata executable, or None if not found
+    """
+    from .utils import detect_stata_executable
+    
+    config = get_config()
+    tools = config.get("tools", {})
+    stata_config = tools.get("stata", {})
+    
+    # 1. Check for user override
+    user_executable = stata_config.get("executable", "")
+    if user_executable:
+        return user_executable
+    
+    # 2. Check for previously detected path
+    detected_path = stata_config.get("detected_path", "")
+    if detected_path:
+        return detected_path
+    
+    # 3. Fall back to fresh auto-detection
+    return detect_stata_executable()
+
+
+def get_platform_info() -> dict:
+    """Get platform information from config or auto-detect.
+    
+    Returns a dictionary with platform-specific information:
+    - os: 'windows', 'macos', or 'linux'
+    - command_separator: '&&' for Unix, '&' for Windows
+    
+    Returns:
+        dict: Platform information dictionary
+    """
+    from .utils import get_platform, get_command_separator
+    
+    config = get_config()
+    platform_config = config.get("platform", {})
+    
+    # Get OS from config or auto-detect
+    os_name = platform_config.get("os", "")
+    if not os_name:
+        os_name = get_platform()
+    
+    return {
+        "os": os_name,
+        "command_separator": get_command_separator(),
+    }

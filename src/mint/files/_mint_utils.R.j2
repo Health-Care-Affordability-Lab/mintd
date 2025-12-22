@@ -2,10 +2,41 @@
 #'
 #' This module provides common utilities used across all project scripts.
 #' DO NOT MODIFY - This file is managed by mint and will be overwritten.
+#'
+#' NOTE: Scripts are expected to run from the src/ directory.
+#' Data paths should use "../data/" or the get_data_paths() function.
 
 library(R6)
 
-#' Set up working directory and validate we're running from project root
+# =============================================================================
+# PATH DEFINITIONS (relative to src/ where scripts run from)
+# =============================================================================
+
+DATA_DIR <- "../data"
+RAW_DIR <- "../data/raw"
+INTERMEDIATE_DIR <- "../data/intermediate"
+FINAL_DIR <- "../data/final"
+LOGS_DIR <- "../logs"
+
+#' Get standard data directory paths
+#'
+#' @return Named list with paths: data, raw, intermediate, final, logs
+#' @export
+get_data_paths <- function() {
+  list(
+    data = DATA_DIR,
+    raw = RAW_DIR,
+    intermediate = INTERMEDIATE_DIR,
+    final = FINAL_DIR,
+    logs = LOGS_DIR
+  )
+}
+
+#' Validate we're running from src/ directory and return project root
+#'
+#' This function checks if we're in the correct directory structure:
+#' - Preferred: Running from src/ (project indicators in parent)
+#' - Fallback: Running from project root (for backwards compatibility)
 #'
 #' @return Character string of project root directory
 #' @export
@@ -15,7 +46,21 @@ setup_project_directory <- function() {
   # Look for project root indicators
   root_indicators <- c("metadata.json", ".git")
 
-  # Check if we're already in project root
+  # Check if we're in src/ (project indicators in parent directory)
+  is_in_src <- FALSE
+  for (indicator in root_indicators) {
+    if (file.exists(file.path("..", indicator))) {
+      is_in_src <- TRUE
+      break
+    }
+  }
+
+  if (is_in_src) {
+    # We're in src/, paths are already correct
+    return(normalizePath(file.path(current_dir, "..")))
+  }
+
+  # Check if we're in project root (backwards compatibility)
   root_found <- FALSE
   for (indicator in root_indicators) {
     if (file.exists(indicator)) {
@@ -25,28 +70,22 @@ setup_project_directory <- function() {
   }
 
   if (root_found) {
+    # Update paths for project-root execution
+    DATA_DIR <<- "data"
+    RAW_DIR <<- "data/raw"
+    INTERMEDIATE_DIR <<- "data/intermediate"
+    FINAL_DIR <<- "data/final"
+    LOGS_DIR <<- "logs"
     return(normalizePath(current_dir))
   }
 
-  # Check parent directories
-  check_dir <- current_dir
-  while (check_dir != dirname(check_dir)) {  # Stop at root
-    for (indicator in root_indicators) {
-      indicator_path <- file.path(check_dir, indicator)
-      if (file.exists(indicator_path)) {
-        setwd(check_dir)
-        return(normalizePath(check_dir))
-      }
-    }
-    check_dir <- dirname(check_dir)
-  }
-
+  # Not in a valid location
   stop(
     paste0(
-      "Not running from project root directory.\n",
-      "Project root should contain metadata.json or .git\n",
+      "Not running from expected directory.\n",
+      "Scripts should be run from src/ directory.\n",
       "Current directory: ", current_dir, "\n",
-      "Please cd to the project root and try again."
+      "Please cd to the project's src/ directory and try again."
     )
   )
 }
@@ -69,8 +108,8 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
       self$start_time <- Sys.time()
       self$project_root <- setup_project_directory()
 
-      # Create logs directory
-      self$logs_dir <- file.path(self$project_root, "logs")
+      # Create logs directory using global LOGS_DIR path
+      self$logs_dir <- LOGS_DIR
       if (!dir.exists(self$logs_dir)) {
         dir.create(self$logs_dir, recursive = TRUE)
       }

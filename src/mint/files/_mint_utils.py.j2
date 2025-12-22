@@ -2,6 +2,9 @@
 
 This module provides common utilities used across all project scripts.
 DO NOT MODIFY - This file is managed by mint and will be overwritten.
+
+NOTE: Scripts are expected to run from the src/ directory.
+Data paths should use "../data/" or the get_data_paths() function.
 """
 
 import os
@@ -14,35 +17,74 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 
-def setup_project_directory():
-    """Set up working directory and validate we're running from project root.
+# =============================================================================
+# PATH DEFINITIONS (relative to src/ where scripts run from)
+# =============================================================================
+
+DATA_DIR = Path("../data")
+RAW_DIR = Path("../data/raw")
+INTERMEDIATE_DIR = Path("../data/intermediate")
+FINAL_DIR = Path("../data/final")
+LOGS_DIR = Path("../logs")
+
+
+def get_data_paths() -> Dict[str, Path]:
+    """Get standard data directory paths.
+    
+    Returns:
+        Dict with keys: 'data', 'raw', 'intermediate', 'final', 'logs'
+    """
+    return {
+        'data': DATA_DIR,
+        'raw': RAW_DIR,
+        'intermediate': INTERMEDIATE_DIR,
+        'final': FINAL_DIR,
+        'logs': LOGS_DIR,
+    }
+
+
+def setup_project_directory() -> Path:
+    """Validate we're running from src/ directory and return project root.
+
+    This function checks if we're in the correct directory structure:
+    - Preferred: Running from src/ (project indicators in parent)
+    - Fallback: Running from project root (for backwards compatibility)
 
     Returns:
         Path: Project root directory
 
     Raises:
-        RuntimeError: If not running from project root
+        RuntimeError: If not running from expected directory
     """
+    global DATA_DIR, RAW_DIR, INTERMEDIATE_DIR, FINAL_DIR, LOGS_DIR
+    
     current_dir = Path.cwd()
 
     # Look for project root indicators
     root_indicators = ['metadata.json', '.git']
 
-    # Check if we're already in project root
+    # Check if we're in src/ (project indicators in parent directory)
+    parent_dir = current_dir.parent
+    if any((parent_dir / indicator).exists() for indicator in root_indicators):
+        # We're in src/, paths are already correct
+        return parent_dir
+
+    # Check if we're in project root (backwards compatibility)
     if any((current_dir / indicator).exists() for indicator in root_indicators):
+        # Update paths for project-root execution
+        DATA_DIR = Path("data")
+        RAW_DIR = Path("data/raw")
+        INTERMEDIATE_DIR = Path("data/intermediate")
+        FINAL_DIR = Path("data/final")
+        LOGS_DIR = Path("logs")
         return current_dir
 
-    # Check if we're in a subdirectory
-    for parent in current_dir.parents:
-        if any((parent / indicator).exists() for indicator in root_indicators):
-            os.chdir(parent)
-            return parent
-
+    # Not in a valid location
     raise RuntimeError(
-        f"Not running from project root directory.\n"
-        f"Project root should contain metadata.json or .git\n"
+        f"Not running from expected directory.\n"
+        f"Scripts should be run from src/ directory.\n"
         f"Current directory: {current_dir}\n"
-        f"Please cd to the project root and try again."
+        f"Please cd to the project's src/ directory and try again."
     )
 
 
@@ -59,9 +101,9 @@ class ParameterAwareLogger:
         self.start_time = datetime.now()
         self.project_root = setup_project_directory()
 
-        # Create logs directory
-        self.logs_dir = self.project_root / 'logs'
-        self.logs_dir.mkdir(exist_ok=True)
+        # Create logs directory using the global LOGS_DIR path
+        self.logs_dir = LOGS_DIR
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Parse command line arguments to get parameters for log filename
         parser = argparse.ArgumentParser(add_help=False)

@@ -154,7 +154,19 @@ class BaseTemplate(ABC):
         create_from_dict(project_path, structure)
 
     def _create_files(self, project_path: Path, name: str, **context) -> None:
-        """Create files from Jinja2 templates."""
+        """Create files from Jinja2 templates.
+        
+        The context passed to templates includes:
+        - project_name: Base project name
+        - full_project_name: Name with prefix (e.g., data_myproject)
+        - created_at: ISO timestamp
+        - author, organization: From config
+        - mint_version, mint_hash: Version info
+        - platform_os: 'windows', 'macos', or 'linux'
+        - command_sep: '&&' for Unix, '&' for Windows
+        - stata_executable: Path or name of Stata executable
+        - language: 'python', 'r', or 'stata'
+        """
         # Prepare common context
         common_context = {
             "project_name": name,
@@ -162,12 +174,17 @@ class BaseTemplate(ABC):
             "created_at": datetime.now().isoformat(),
             "author": context.get("author", ""),
             "organization": context.get("organization", ""),
+            # Platform-specific defaults (will be overridden by context if provided)
+            "platform_os": context.get("platform_os", "linux"),
+            "command_sep": context.get("command_sep", "&&"),
+            "stata_executable": context.get("stata_executable", "stata"),
         }
 
         # Add mint version information
         mint_info = self._get_mint_info()
         common_context.update(mint_info)
 
+        # Update with all context (this allows api.py to override defaults)
         common_context.update(context)
 
         # Create each template file
