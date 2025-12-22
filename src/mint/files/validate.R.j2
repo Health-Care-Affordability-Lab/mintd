@@ -1,0 +1,105 @@
+#' Data validation for {{ project_name }}
+#'
+#' This script runs quality checks and validation on processed data.
+#'
+#' Data flow:
+#' Raw data → data/raw/
+#' Clean data → data/clean/
+#' Intermediate → data/intermediate/
+
+# Set up directories
+set_directories <- function() {
+  dirs <- list(
+    raw = file.path("data", "raw"),
+    clean = file.path("data", "clean"),
+    intermediate = file.path("data", "intermediate")
+  )
+
+  lapply(dirs, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
+
+  return(dirs)
+}
+
+validate_dataset <- function(df, dataset_name) {
+  #' Run validation checks on a dataset
+  issues <- list()
+
+  # Check for missing values
+  missing_cols <- names(df)[sapply(df, function(x) any(is.na(x)))]
+  if (length(missing_cols) > 0) {
+    issues <- c(issues, paste("Missing values in columns:", paste(missing_cols, collapse = ", ")))
+  }
+
+  # Check for duplicate rows
+  duplicates <- sum(duplicated(df))
+  if (duplicates > 0) {
+    issues <- c(issues, paste("Found", duplicates, "duplicate rows"))
+  }
+
+  # Check for numeric columns
+  numeric_cols <- names(df)[sapply(df, is.numeric)]
+  if (length(numeric_cols) == 0) {
+    issues <- c(issues, "No numeric columns found")
+  }
+
+  # Basic statistics
+  message("Validation for ", dataset_name, ":")
+  message("  Rows: ", nrow(df))
+  message("  Columns: ", ncol(df))
+  message("  Numeric columns: ", length(numeric_cols))
+
+  if (length(issues) > 0) {
+    message("  Issues found:")
+    for (issue in issues) {
+      message("    - ", issue)
+    }
+  } else {
+    message("  ✓ No issues found")
+  }
+
+  return(length(issues) == 0)
+}
+
+main <- function() {
+  message("Starting data validation for {{ project_name }}...")
+
+  dirs <- set_directories()
+
+  message("Directories ready:")
+  message("  Raw data: ", dirs$raw)
+  message("  Clean data: ", dirs$clean)
+  message("  Intermediate: ", dirs$intermediate)
+
+  # TODO: Implement comprehensive validation logic
+  # - Load cleaned data from data/clean/
+  # - Run quality checks (missing values, duplicates, data types)
+  # - Business rule validation
+  # - Statistical checks
+  # - Save validation reports
+
+  # Example validation
+  # library(readr)
+  #
+  # clean_files <- list.files(dirs$clean, pattern = "*.csv", full.names = TRUE)
+  # all_valid <- TRUE
+  #
+  # for (clean_file in clean_files) {
+  #   df <- read_csv(clean_file)
+  #   is_valid <- validate_dataset(df, basename(clean_file))
+  #   all_valid <- all_valid && is_valid
+  # }
+  #
+  # if (all_valid) {
+  #   message("✓ All datasets passed validation")
+  # } else {
+  #   message("✗ Some datasets failed validation - review issues above")
+  # }
+
+  message("Data validation completed successfully.")
+}
+
+if (!interactive()) {
+  main()
+}

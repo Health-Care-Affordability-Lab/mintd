@@ -3,28 +3,92 @@
 import os
 import sys
 from pathlib import Path
+import pandas as pd
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+def set_directories():
+    """Set up standard directory structure."""
+    project_root = Path(__file__).parent.parent
+
+    dirs = {
+        'raw': project_root / 'data' / 'raw',
+        'clean': project_root / 'data' / 'clean',
+        'intermediate': project_root / 'data' / 'intermediate'
+    }
+
+    for dir_path in dirs.values():
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    return dirs
+
+def validate_dataset(df, dataset_name):
+    """Run validation checks on a dataset."""
+    issues = []
+
+    # Check for missing values
+    missing_cols = df.columns[df.isnull().any()].tolist()
+    if missing_cols:
+        issues.append(f"Missing values in columns: {missing_cols}")
+
+    # Check for duplicate rows
+    duplicates = df.duplicated().sum()
+    if duplicates > 0:
+        issues.append(f"Found {duplicates} duplicate rows")
+
+    # Check data types
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    if len(numeric_cols) == 0:
+        issues.append("No numeric columns found")
+
+    # Basic statistics
+    print(f"Validation for {dataset_name}:")
+    print(f"  Rows: {len(df)}")
+    print(f"  Columns: {len(df.columns)}")
+    print(f"  Numeric columns: {len(numeric_cols)}")
+
+    if issues:
+        print("  Issues found:")
+        for issue in issues:
+            print(f"    - {issue}")
+    else:
+        print("  ✓ No issues found")
+
+    return len(issues) == 0
+
 def main():
-    """Main validation function."""
+    """Main validation workflow."""
     print("Starting data validation for {{ project_name }}...")
 
-    # Set up directories
-    project_root = Path(__file__).parent.parent
-    intermediate_data_dir = project_root / "data" / "intermediate"
-    final_data_dir = project_root / "data" / "final"
+    dirs = set_directories()
 
-    print(f"Intermediate data directory: {intermediate_data_dir}")
-    print(f"Final data directory: {final_data_dir}")
+    print(f"Raw data directory: {dirs['raw']}")
+    print(f"Clean data directory: {dirs['clean']}")
+    print(f"Intermediate data directory: {dirs['intermediate']}")
 
-    # TODO: Implement data validation logic
-    # - Load intermediate data
-    # - Run quality checks
-    # - Save validated data to data/final/
+    # TODO: Implement comprehensive validation logic
+    # - Load cleaned data from data/clean/
+    # - Run quality checks (missing values, duplicates, data types)
+    # - Business rule validation
+    # - Statistical checks
+    # - Save validation reports
 
-    print("Data validation completed.")
+    # Example validation
+    # clean_files = list(dirs['clean'].glob("*.csv"))
+    # all_valid = True
+    #
+    # for clean_file in clean_files:
+    #     df = pd.read_csv(clean_file)
+    #     is_valid = validate_dataset(df, clean_file.stem)
+    #     all_valid = all_valid and is_valid
+    #
+    # if all_valid:
+    #     print("✓ All datasets passed validation")
+    # else:
+    #     print("✗ Some datasets failed validation - review issues above")
+
+    print("Data validation completed successfully.")
 
 if __name__ == "__main__":
     main()

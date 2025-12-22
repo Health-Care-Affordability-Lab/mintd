@@ -1,0 +1,60 @@
+* Data cleaning for {{ project_name }}
+*
+* This do-file handles data cleaning and preprocessing.
+*
+* Data flow:
+* Raw data → data/raw/
+* Clean data → data/clean/
+* Intermediate → data/intermediate/
+
+// Set up directories
+capture program drop set_directories
+program define set_directories
+    local dirs "raw clean intermediate"
+
+    foreach dir of local dirs {
+        capture mkdir "data/`dir'", public
+    }
+
+    display "Directories ready:"
+    display "  Raw data: data/raw/"
+    display "  Clean data: data/clean/"
+    display "  Intermediate: data/intermediate/"
+end
+
+// Main cleaning program
+capture program drop main
+program define main
+    display "Starting data cleaning for {{ project_name }}..."
+
+    set_directories
+
+    // TODO: Implement data cleaning logic
+    // - Load raw data from data/raw/
+    // - Handle missing values, data types, outliers
+    // - Standardize formats and encodings
+    // - Save cleaned data to data/clean/
+
+    // Example:
+    // // Load raw data
+    // local raw_files : dir "data/raw" files "*.csv"
+    // foreach file of local raw_files {
+    //     import delimited "data/raw/`file'", clear
+    //
+    //     // Basic cleaning
+    //     drop if missing(var1)  // Remove missing values
+    //     rename *, lower        // Lowercase variable names
+    //
+    //     // Save cleaned data
+    //     local clean_file = subinstr("`file'", ".csv", "_clean.csv", .)
+    //     export delimited "data/clean/`clean_file'", replace
+    //     display "Cleaned " c(N) " observations, saved to data/clean/`clean_file'"
+    // }
+
+    display "Data cleaning completed successfully."
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

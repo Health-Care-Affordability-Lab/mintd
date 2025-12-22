@@ -10,7 +10,7 @@ class ProjectTemplate(BaseTemplate):
 
     prefix = "prj__"
 
-    def get_directory_structure(self) -> Dict[str, Any]:
+    def get_directory_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
         """Return directory structure for research projects."""
         return {
             "README.md": None,

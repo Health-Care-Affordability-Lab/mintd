@@ -7,22 +7,52 @@ from pathlib import Path
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+def set_directories():
+    """Set up standard directory structure."""
+    project_root = Path(__file__).parent.parent
+
+    dirs = {
+        'raw': project_root / 'data' / 'raw',
+        'clean': project_root / 'data' / 'clean',
+        'intermediate': project_root / 'data' / 'intermediate'
+    }
+
+    for dir_path in dirs.values():
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    return dirs
+
 def main():
-    """Main ingestion function."""
+    """Main ingestion workflow."""
     print("Starting data ingestion for {{ project_name }}...")
 
-    # Set up directories
-    project_root = Path(__file__).parent.parent
-    raw_data_dir = project_root / "data" / "raw"
+    dirs = set_directories()
 
-    print(f"Raw data directory: {raw_data_dir}")
+    print(f"Raw data directory: {dirs['raw']}")
+    print(f"Clean data directory: {dirs['clean']}")
+    print(f"Intermediate data directory: {dirs['intermediate']}")
 
     # TODO: Implement data ingestion logic
-    # - Download data from sources
-    # - Extract archives if needed
+    # - Download data from APIs/databases
+    # - Extract archives using zipfile/patool
+    # - Initial data validation with pandas
     # - Save to data/raw/
 
-    print("Data ingestion completed.")
+    # Example:
+    # import requests
+    # import pandas as pd
+    #
+    # # Download data
+    # response = requests.get("https://example.com/data.csv")
+    # raw_file = dirs['raw'] / "downloaded_data.csv"
+    # with open(raw_file, 'wb') as f:
+    #     f.write(response.content)
+    #
+    # # Quick validation
+    # df = pd.read_csv(raw_file)
+    # print(f"Downloaded {len(df)} rows with columns: {list(df.columns)}")
+
+    print("Data ingestion completed successfully.")
 
 if __name__ == "__main__":
     main()

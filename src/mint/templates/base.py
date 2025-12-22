@@ -43,8 +43,10 @@ class BaseTemplate(ABC):
             lstrip_blocks=True
         )
 
+        self.language = "python"  # Default language
+
     @abstractmethod
-    def get_directory_structure(self) -> Dict[str, Any]:
+    def get_directory_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
         """Return nested dict representing directory structure to create.
 
         Example:
@@ -78,25 +80,34 @@ class BaseTemplate(ABC):
         Returns:
             Path to created project directory
         """
+        # Set language from context
+        self.language = context.get("language", "python")
+        use_current_repo = context.get("use_current_repo", False)
+
         # Validate project name
         if not validate_project_name(name):
             raise ValueError(f"Invalid project name: {name}")
 
-        # Create full project path
-        full_name = f"{self.prefix}{name}"
-        project_path = Path(path) / full_name
+        if use_current_repo:
+            # Use current directory as project root
+            project_path = Path(path)
+            full_name = f"{self.prefix}{name}"  # Still use full name for metadata, but don't create subdirectory
+        else:
+            # Create full project path (normal behavior)
+            full_name = f"{self.prefix}{name}"
+            project_path = Path(path) / full_name
 
         # Create directory structure
-        self._create_directories(project_path)
+        self._create_directories(project_path, use_current_repo)
 
         # Create template files
         self._create_files(project_path, name, **context)
 
         return project_path
 
-    def _create_directories(self, project_path: Path) -> None:
+    def _create_directories(self, project_path: Path, use_current_repo: bool = False) -> None:
         """Create the directory structure."""
-        structure = self.get_directory_structure()
+        structure = self.get_directory_structure(use_current_repo)
 
         def create_from_dict(base_path: Path, structure_dict: Dict[str, Any]) -> None:
             for name, content in structure_dict.items():

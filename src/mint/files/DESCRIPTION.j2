@@ -1,0 +1,27 @@
+Package: {{ full_project_name }}
+Title: Data Processing for {{ project_name }}
+Version: 0.1.0
+Authors@R: c(
+    person("{{ author or 'Data Team' }}", email = "{{ author or 'data@example.com' }}", role = c("aut", "cre")),
+    person("{{ organization or 'Research Organization' }}", role = "cph")
+)
+Description: Data processing and validation scripts for {{ project_name }}.
+    This package contains scripts for ingesting, cleaning, and validating
+    research data following reproducible research standards.
+License: MIT
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.3
+Imports:
+    dplyr,
+    readr,
+    tidyr,
+    stringr,
+    lubridate,
+    purrr,
+    here
+Suggests:
+    testthat,
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr

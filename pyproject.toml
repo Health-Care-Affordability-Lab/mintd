@@ -1,6 +1,6 @@
 [project]
 name = "mint"
-version = "0.1.0"
+version = "1.0.0"
 description = "Lab project scaffolding tool"
 readme = "README.md"
 license = {text = "MIT"}
@@ -35,6 +35,8 @@ dependencies = [
     "boto3>=1.28",      # S3-compatible storage
     "pyyaml>=6.0",      # YAML configuration files
     "dvc>=3.0",         # Data Version Control
+    "pygithub>=2.0.0",  # GitHub API integration
+    "requests>=2.25.0", # HTTP client for API calls
 ]
 
 [project.optional-dependencies]

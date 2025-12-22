@@ -47,6 +47,34 @@ def get_storage_credentials() -> Tuple[str, str]:
     )
 
 
+def get_registry_url() -> str:
+    """Get registry URL from environment variable or config file.
+
+    Returns:
+        Registry repository URL
+
+    Raises:
+        ValueError: If registry URL is not configured
+    """
+    # Check environment variable first (highest priority)
+    url = os.getenv("MINT_REGISTRY_URL")
+    if url:
+        return url.strip()
+
+    # Fall back to config file
+    config = get_config()
+    registry_config = config.get("registry", {})
+    url = registry_config.get("url")
+
+    if url:
+        return url.strip()
+
+    raise ValueError(
+        "Registry URL not configured. Please set MINT_REGISTRY_URL environment variable "
+        "or configure registry.url in ~/.mint/config.yaml"
+    )
+
+
 def set_storage_credentials(access_key: str, secret_key: str) -> None:
     """Store S3 credentials securely in keychain.
 
@@ -114,6 +142,11 @@ def _get_default_config() -> dict:
             "bucket_prefix": "",
             "versioning": True,
         },
+        "registry": {
+            "url": "https://github.com/cooper-lab/data-commons-registry",
+            "org": "cooper-lab",
+            "default_branch": "main",
+        },
         "defaults": {
             "author": "",
             "organization": "",
@@ -176,6 +209,22 @@ def init_config() -> None:
     )
     config["defaults"]["organization"] = organization
 
+    # Registry settings
+    console.print("\n[bold blue]Registry Configuration[/bold blue]")
+    console.print("For project registration in the Data Commons Registry:")
+
+    registry_url = Prompt.ask(
+        "Registry repository URL",
+        default="https://github.com/cooper-lab/data-commons-registry"
+    )
+    config["registry"]["url"] = registry_url
+
+    registry_org = Prompt.ask(
+        "GitHub organization",
+        default="cooper-lab"
+    )
+    config["registry"]["org"] = registry_org
+
     # Save configuration
     save_config(config)
     console.print(f"\n✅ Configuration saved to {CONFIG_FILE}")
@@ -195,6 +244,14 @@ def init_config() -> None:
             console.print(f"⚠️  Could not store credentials securely: {e}")
             console.print("You can set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables instead.")
 
+    # Registry configuration info
+    console.print("\n[bold blue]Registry Configuration[/bold blue]")
+    console.print(f"Registry URL: {registry_url}")
+    console.print("Registry access uses SSH keys and GitHub CLI (gh). Make sure you have:")
+    console.print("  - SSH key configured for GitHub")
+    console.print("  - GitHub CLI (gh) installed and authenticated")
+    console.print("  - Push access to the registry repository")
+
     console.print("\n🎉 Setup complete! You can now use mint to create projects.")
 
 
@@ -213,6 +270,12 @@ def validate_config() -> bool:
 
     try:
         get_storage_credentials()
+    except ValueError:
+        return False
+
+    # Check registry URL is configured
+    try:
+        get_registry_url()
     except ValueError:
         return False
 

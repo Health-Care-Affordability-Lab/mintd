@@ -1,0 +1,65 @@
+#' Data cleaning for {{ project_name }}
+#'
+#' This script handles data cleaning and preprocessing.
+#'
+#' Data flow:
+#' Raw data → data/raw/
+#' Clean data → data/clean/
+#' Intermediate → data/intermediate/
+
+# Set up directories
+set_directories <- function() {
+  dirs <- list(
+    raw = file.path("data", "raw"),
+    clean = file.path("data", "clean"),
+    intermediate = file.path("data", "intermediate")
+  )
+
+  lapply(dirs, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
+
+  return(dirs)
+}
+
+main <- function() {
+  message("Starting data cleaning for {{ project_name }}...")
+
+  dirs <- set_directories()
+
+  message("Directories ready:")
+  message("  Raw data: ", dirs$raw)
+  message("  Clean data: ", dirs$clean)
+  message("  Intermediate: ", dirs$intermediate)
+
+  # TODO: Implement data cleaning logic
+  # - Load raw data from data/raw/
+  # - Handle missing values, data types, outliers
+  # - Standardize formats and encodings
+  # - Save cleaned data to data/clean/
+
+  # Example:
+  # library(dplyr)
+  # library(readr)
+  #
+  # # Load raw data
+  # raw_files <- list.files(dirs$raw, pattern = "*.csv", full.names = TRUE)
+  # for (raw_file in raw_files) {
+  #   df <- read_csv(raw_file)
+  #
+  #   # Basic cleaning
+  #   df <- df %>% drop_na()  # Remove missing values
+  #   names(df) <- tolower(gsub(" ", "_", names(df)))
+  #
+  #   # Save cleaned data
+  #   clean_file <- file.path(dirs$clean, paste0("clean_", basename(raw_file)))
+  #   write_csv(df, clean_file)
+  #   message("Cleaned ", nrow(df), " rows, saved to ", clean_file)
+  # }
+
+  message("Data cleaning completed successfully.")
+}
+
+if (!interactive()) {
+  main()
+}

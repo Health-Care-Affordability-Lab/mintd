@@ -1,0 +1,59 @@
+#' Data ingestion for {{ project_name }}
+#'
+#' This script handles downloading and initial processing of raw data.
+#'
+#' Data flow:
+#' Raw data → data/raw/
+#' Clean data → data/clean/
+#' Intermediate → data/intermediate/
+
+# Set up directories
+set_directories <- function() {
+  dirs <- list(
+    raw = file.path("data", "raw"),
+    clean = file.path("data", "clean"),
+    intermediate = file.path("data", "intermediate")
+  )
+
+  lapply(dirs, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
+
+  return(dirs)
+}
+
+main <- function() {
+  message("Starting data ingestion for {{ project_name }}...")
+
+  dirs <- set_directories()
+
+  message("Directories ready:")
+  message("  Raw data: ", dirs$raw)
+  message("  Clean data: ", dirs$clean)
+  message("  Intermediate: ", dirs$intermediate)
+
+  # TODO: Implement data ingestion logic
+  # - Download data using httr/curl
+  # - Extract archives using utils::unzip
+  # - Initial validation with readr
+  # - Save to data/raw/
+
+  # Example:
+  # library(httr)
+  # library(readr)
+  #
+  # # Download data
+  # response <- GET("https://example.com/data.csv")
+  # raw_file <- file.path(dirs$raw, "downloaded_data.csv")
+  # writeBin(content(response, "raw"), raw_file)
+  #
+  # # Quick validation
+  # df <- read_csv(raw_file)
+  # message("Downloaded ", nrow(df), " rows with columns: ", paste(names(df), collapse = ", "))
+
+  message("Data ingestion completed successfully.")
+}
+
+if (!interactive()) {
+  main()
+}

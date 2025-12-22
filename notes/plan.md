@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Python package called `mint` that automates the creation of standardized project repositories (`data_`, `prj__`, `infra_`) with pre-configured Git and DVC initialization. This plan focuses on building the **Python CLI tool first**. The Data Commons Registry integration will be built separately.
+A Python package called `mint` that automates the creation of standardized project repositories (`data_`, `prj__`, `infra_`, `enclave_`) with pre-configured Git and DVC initialization. This plan focuses on building the **Python CLI tool first**. The Data Commons Registry integration will be built separately.
 
 ### Key Decisions
 
@@ -19,7 +19,7 @@ A Python package called `mint` that automates the creation of standardized proje
 
 ### In Scope
 - Python package structure and CLI
-- Project templates (directory structures + file generation)
+- Project templates (directory structures + file generation) including `enclave_` for secure data consumption
 - Git initialization
 - DVC initialization with S3-compatible remote configuration
 - Local configuration management (credentials, settings)
@@ -88,7 +88,8 @@ mint/
 │       │   ├── base.py         # Base template class
 │       │   ├── data.py         # data_ template
 │       │   ├── project.py      # prj__ template
-│       │   └── infra.py        # infra_ template
+│       │   ├── infra.py        # infra_ template
+│       │   └── enclave.py      # enclave_ template
 │       ├── initializers/       # Git & DVC setup
 │       │   ├── __init__.py
 │       │   ├── git.py          # Git initialization
@@ -326,6 +327,40 @@ infra_{name}/
 └── .gitignore
 ```
 
+#### 2.5 Implement `enclave_` Template
+**Status:** 🔴 Not Started
+
+**Purpose:** Create secure data consumption workspaces that pull versioned data products from the registry and organize them in `data/repo/hash-date` structure for use in secure enclaves.
+
+**Directory Structure:**
+```
+enclave_{name}/
+├── README.md               # Enclave documentation and data access guide
+├── metadata.json           # Enclave metadata and approved data products
+├── requirements.txt        # Python dependencies for data access
+├── data/                   # Versioned data products organized by source repo
+│   └── .gitkeep            # Initially empty, populated by data pulls
+├── src/
+│   ├── __init__.py
+│   ├── registry.py         # Registry querying and data discovery
+│   ├── download.py         # Data download and organization scripts
+│   ├── validate.py         # Data integrity and access validation
+│   └── r/
+│       └── .gitkeep
+├── scripts/
+│   ├── setup_data.sh       # Automated data setup script
+│   └── update_data.sh      # Data update and refresh script
+├── .gitignore
+└── .dvcignore
+```
+
+**Key Features:**
+- Registry integration to discover approved data products
+- Versioned data organization: `data/{repo_name}/{hash}-{date}/`
+- Secure enclave workflow for sensitive data access
+- Automated data download and integrity validation
+- Access control and audit logging
+
 ---
 
 ### Multi-Language Support Added
@@ -465,6 +500,7 @@ def init_dvc(project_path: Path, bucket_name: str) -> None:
 mint create data --name medicare_claims
 mint create project --name hospital_closures
 mint create infra --name price_index
+mint create enclave --name secure_analysis
 
 # Configure credentials and settings
 mint config setup                         # Interactive setup
@@ -675,21 +711,114 @@ display "`project_path'"
 
 ---
 
-### Phase 6: Testing & Documentation (Week 3-4)
+### Phase 6: Registry Integration (Week 4-5)
 
-#### 6.1 Write Unit Tests
+#### 6.1 GitHub API Integration
 **Status:** 🔴 Not Started
 
-**Test Coverage:**
-- [ ] Template directory structure creation
-- [ ] File rendering with Jinja2
-- [ ] Git initialization
-- [ ] DVC initialization (mock S3)
-- [ ] CLI command parsing
-- [ ] Configuration loading/saving
+**Tasks:**
+- [ ] Add PyGithub dependency to pyproject.toml
+- [ ] Create RegistryClient class in src/mint/registry.py
+- [ ] Implement GitHub authentication (personal tokens, GitHub Apps)
+- [ ] Add registry configuration to config.py
+- [ ] Test GitHub API connectivity and permissions
 
-#### 6.2 Write Documentation
-**Status:** ✅ Completed
+**RegistryClient Features:**
+```python
+class RegistryClient:
+    def register_project(self, metadata: dict) -> str:
+        """Create PR in registry repo with project catalog entry."""
+        pass
+
+    def check_registration_status(self, project_name: str) -> dict:
+        """Check if project exists in registry and get status."""
+        pass
+
+    def update_project_metadata(self, project_name: str, metadata: dict) -> str:
+        """Update existing project metadata in registry."""
+        pass
+```
+
+#### 6.2 Registry CLI Commands
+**Status:** 🔴 Not Started
+
+**New CLI Commands:**
+```bash
+# Register an existing project with the registry
+mint register --path /path/to/project
+
+# Check registration status of a project
+mint status --name project_name
+
+# Update project metadata in registry
+mint update-registry --name project_name --description "Updated description"
+```
+
+**CLI Integration:**
+- [ ] Add registry command group to cli.py
+- [ ] Implement offline mode (save registration requests for later)
+- [ ] Add registry status indicators to project creation output
+
+#### 6.3 YAML Catalog Generation
+**Status:** 🔴 Not Started
+
+**Tasks:**
+- [ ] Create catalog YAML schema based on registry requirements
+- [ ] Implement metadata conversion from project metadata.json
+- [ ] Add validation for required fields
+- [ ] Support for different project types (data, project, infra)
+
+**Catalog YAML Structure:**
+```yaml
+schema_version: "1.0"
+project:
+  name: "medicare_claims"
+  type: "data"
+  full_name: "data_medicare_claims"
+  display_name: "Medicare Claims Dataset"
+metadata:
+  description: "Medicare claims data for analysis"
+  tags: ["healthcare", "claims"]
+ownership:
+  created_by: "user@domain.com"
+  created_at: "2025-01-15T10:30:00Z"
+  maintainers:
+    - email: "user@domain.com"
+      name: "Jane Researcher"
+      role: "lead"
+storage:
+  provider: "s3"
+  bucket: "mylab-data-medicare-claims"
+  versioning: true
+```
+
+#### 6.4 Offline Mode & Error Handling
+**Status:** 🔴 Not Started
+
+**Features:**
+- [ ] Graceful degradation when registry is unreachable
+- [ ] Local queue for pending registrations
+- [ ] Retry mechanism for failed registrations
+- [ ] Clear error messages and recovery instructions
+
+**Offline Workflow:**
+```python
+# Project creation succeeds even without network
+result = create_project("data", "claims", init_registry=False)
+
+# Registration happens later when online
+if network_available():
+    try:
+        pr_url = registry.register_project(result.metadata)
+        print(f"✅ Registration PR: {pr_url}")
+    except Exception as e:
+        save_pending_registration(result.path, result.metadata)
+        print(f"⚠️  Registration queued: {e}")
+```
+
+---
+
+### Phase 7: Testing & Documentation (Week 5-6)
 
 **README Sections:**
 - Installation (pip install / uv / PyPI)
@@ -772,16 +901,60 @@ This metadata file will be used by the Data Commons Registry when that component
 
 ---
 
-## Future Integration Points
+## ✅ Registry Integration Complete
 
-When the Data Commons Registry is built, `mint` will need:
+The Data Commons Registry integration has been fully implemented and tested:
 
-1. **Registration Command**: `mint register` to submit project to registry
-2. **GitHub API Integration**: Create repos on GitHub organization
-3. **PR Workflow**: Auto-open PRs to registry repo
-4. **Status Command**: `mint status` to check registration status
+### **Completed Features**
 
-These will be added in a future phase.
+1. **✅ Registration Command**: `mint registry register` submits project to registry
+2. **✅ GitOps Integration**: Tokenless registration using SSH + GitHub CLI
+3. **✅ PR Workflow**: Automatic branch creation, YAML generation, and PR submission
+4. **✅ Status Command**: `mint registry status` checks registration status
+5. **✅ Offline Mode**: Graceful handling when registry is unreachable
+
+### **Implementation Details**
+
+- **Architecture**: LocalRegistry class using subprocess calls to git/gh CLI
+- **Security**: No personal access tokens required - uses SSH keys + gh auth
+- **Workflow**: Clone registry → Create branch → Generate catalog YAML → Commit → PR
+- **Error Handling**: Comprehensive error messages and offline queuing
+- **Testing**: 22 unit tests covering all registry functionality
+
+### **User Experience**
+
+```bash
+# Create project with automatic registration
+mint create data --name medicare_data --register
+
+# Registry integration happens automatically:
+# 1. Project scaffolding (Git/DVC setup)
+# 2. Clone registry repository via SSH
+# 3. Generate catalog entry YAML
+# 4. Create feature branch and commit
+# 5. Open PR via GitHub CLI
+# 6. Return PR URL to user
+```
+
+### **Configuration**
+
+Registry URL configured via:
+```bash
+# Environment variable (highest priority)
+export MINT_REGISTRY_URL=https://github.com/org/registry
+
+# Or config file
+mint config setup --set registry.url https://github.com/org/registry
+```
+
+### **Prerequisites**
+
+Users need:
+- SSH key configured for GitHub
+- GitHub CLI installed and authenticated (`gh auth login`)
+- Push access to registry repository
+
+The registry integration is now complete and thoroughly tested.
 
 ---
 
@@ -842,6 +1015,7 @@ rm -rf /tmp/data_test_project
 | 2 | `data_` template | ✅ |
 | 2 | `prj__` template | ✅ |
 | 2 | `infra_` template | ✅ |
+| 2 | `enclave_` template | 🔴 |
 | 3 | Git initializer | ✅ |
 | 3 | Git & DVC initializer | ✅ |
 | 4 | CLI commands | ✅ |

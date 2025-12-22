@@ -1,0 +1,107 @@
+* Data validation for {{ project_name }}
+*
+* This do-file runs quality checks and validation on processed data.
+*
+* Data flow:
+* Raw data → data/raw/
+* Clean data → data/clean/
+* Intermediate → data/intermediate/
+
+// Set up directories
+capture program drop set_directories
+program define set_directories
+    local dirs "raw clean intermediate"
+
+    foreach dir of local dirs {
+        capture mkdir "data/`dir'", public
+    }
+
+    display "Directories ready:"
+    display "  Raw data: data/raw/"
+    display "  Clean data: data/clean/"
+    display "  Intermediate: data/intermediate/"
+end
+
+// Validation program
+capture program drop validate_dataset
+program define validate_dataset
+    args dataset_name
+
+    // Check for missing values
+    local missing_vars ""
+    foreach var of varlist _all {
+        count if missing(`var')
+        if r(N) > 0 {
+            local missing_vars "`missing_vars' `var'(`r(N)')"
+        }
+    }
+
+    if "`missing_vars'" != "" {
+        display "  Missing values in: `missing_vars'"
+    }
+
+    // Check for duplicates
+    duplicates report
+    if r(unique_value) < _N {
+        local duplicates = _N - r(unique_value)
+        display "  Found `duplicates' duplicate rows"
+    }
+
+    // Basic statistics
+    display "Validation for `dataset_name':"
+    display "  Rows: " c(N)
+    display "  Columns: " c(k)
+
+    // Count numeric variables
+    local numeric_count 0
+    foreach var of varlist _all {
+        capture confirm numeric variable `var'
+        if !_rc {
+            local ++numeric_count
+        }
+    }
+    display "  Numeric columns: `numeric_count'"
+
+    if "`missing_vars'" == "" & `duplicates' == 0 & `numeric_count' > 0 {
+        display "  ✓ No issues found"
+    }
+end
+
+// Main validation program
+capture program drop main
+program define main
+    display "Starting data validation for {{ project_name }}..."
+
+    set_directories
+
+    // TODO: Implement comprehensive validation logic
+    // - Load cleaned data from data/clean/
+    // - Run quality checks (missing values, duplicates, data types)
+    // - Business rule validation
+    // - Statistical checks
+    // - Save validation reports
+
+    // Example validation
+    // local clean_files : dir "data/clean" files "*.csv"
+    // local all_valid = 1
+    //
+    // foreach file of local clean_files {
+    //     import delimited "data/clean/`file'", clear
+    //     validate_dataset "`file'"
+    //     // Note: Would need to track validation results across files
+    // }
+    //
+    // if `all_valid' {
+    //     display "✓ All datasets passed validation"
+    // }
+    // else {
+    //     display "✗ Some datasets failed validation - review issues above"
+    // }
+
+    display "Data validation completed successfully."
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

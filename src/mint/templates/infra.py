@@ -11,7 +11,7 @@ class InfraTemplate(BaseTemplate):
 
     prefix = "infra_"
 
-    def get_directory_structure(self) -> Dict[str, Any]:
+    def get_directory_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
         """Return directory structure for infrastructure projects."""
         # This will be overridden in create() for dynamic package names
         return {
@@ -54,20 +54,26 @@ class InfraTemplate(BaseTemplate):
         # Add package name to context
         package_name = name.lower().replace("-", "_").replace(" ", "_")
         context["package_name"] = package_name
+        use_current_repo = context.get("use_current_repo", False)
 
-        # Create full project path
-        full_name = f"{self.prefix}{name}"
-        project_path = Path(path) / full_name
+        if use_current_repo:
+            # Use current directory as project root
+            project_path = Path(path)
+            full_name = f"{self.prefix}{name}"  # For metadata, but don't create subdirectory
+        else:
+            # Create full project path (normal behavior)
+            full_name = f"{self.prefix}{name}"
+            project_path = Path(path) / full_name
 
         # Create directory structure with dynamic package name
-        self._create_directories_dynamic(project_path, package_name)
+        self._create_directories_dynamic(project_path, package_name, use_current_repo)
 
         # Create template files
         self._create_files_dynamic(project_path, name, package_name, context)
 
         return project_path
 
-    def _create_directories_dynamic(self, project_path: Path, package_name: str) -> None:
+    def _create_directories_dynamic(self, project_path: Path, package_name: str, use_current_repo: bool = False) -> None:
         """Create directory structure with dynamic package name."""
         structure = {
             "README.md": None,

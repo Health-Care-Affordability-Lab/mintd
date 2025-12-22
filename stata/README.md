@@ -33,24 +33,55 @@ mint, type(data) name(test_install)
 
 ### Option 2: Manual Installation via net install
 
-If you prefer manual installation, you can use Stata's built-in package manager:
+If you prefer manual installation, you can try Stata's built-in package manager (requires public repository):
 
 ```stata
-// Install Stata package from GitHub
+// Install Stata package from GitHub (may fail if repository is private)
 net install mint, from("https://github.com/Cooper-lab/mint/raw/main/stata/")
-
-// Install Python package (choose one method)
-python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
-python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
-
-// Verify installation
-help mint
-
-// Test the installation
-mint, type(data) name(test_install)
 ```
 
-**Note:** The repository is hosted at `Cooper-lab/mint` on GitHub.
+**If net install fails**, download and install manually:
+
+1. **Download the Stata files:**
+   - Go to: https://github.com/Cooper-lab/mint/tree/main/stata
+   - Download: `mint.ado`, `mint.sthlp`, `mint_installer.ado`, `mint_installer.sthlp`
+   - Or clone the repo: `git clone https://github.com/Cooper-lab/mint.git`
+
+2. **Install in Stata's personal ado directory:**
+   ```bash
+   # macOS
+   cp mint.ado ~/Library/Application\ Support/Stata/ado/personal/
+   cp mint.sthlp ~/Library/Application\ Support/Stata/ado/personal/
+   cp mint_installer.ado ~/Library/Application\ Support/Stata/ado/personal/
+   cp mint_installer.sthlp ~/Library/Application\ Support/Stata/ado/personal/
+
+   # Windows
+   copy mint.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
+   copy mint.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
+   copy mint_installer.ado "%USERPROFILE%\Documents\Stata\ado\personal\"
+   copy mint_installer.sthlp "%USERPROFILE%\Documents\Stata\ado\personal\"
+
+   # Linux
+   cp mint.ado ~/ado/personal/
+   cp mint.sthlp ~/ado/personal/
+   cp mint_installer.ado ~/ado/personal/
+   cp mint_installer.sthlp ~/ado/personal/
+   ```
+
+3. **Install the Python package:**
+   ```stata
+   // Install from GitHub
+   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
+
+   // Or from local source
+   python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
+   ```
+
+4. **Verify installation:**
+   ```stata
+   help mint
+   mint, type(data) name(test_install)
+   ```
 
 ### Option 2: Manual Installation
 
@@ -161,9 +192,10 @@ This means that in most cases, you only need to install the Stata package - the 
 - Ensure you have write permissions to the ado directory
 
 ### Network issues with net install
-- If `net install` fails, use manual installation
+- If `net install` fails with "stata.toc not found", the GitHub repository may be private or inaccessible
+- Use manual installation instead (see Option 2 above)
 - Check your internet connection
-- Verify the GitHub URL is correct
+- Verify the GitHub repository is public and accessible: https://github.com/Cooper-lab/mint
 
 ### Testing the installation
 ```stata

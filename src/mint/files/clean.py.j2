@@ -8,24 +8,53 @@ import pandas as pd
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+def set_directories():
+    """Set up standard directory structure."""
+    project_root = Path(__file__).parent.parent
+
+    dirs = {
+        'raw': project_root / 'data' / 'raw',
+        'clean': project_root / 'data' / 'clean',
+        'intermediate': project_root / 'data' / 'intermediate'
+    }
+
+    for dir_path in dirs.values():
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+    return dirs
+
 def main():
-    """Main cleaning function."""
+    """Main cleaning workflow."""
     print("Starting data cleaning for {{ project_name }}...")
 
-    # Set up directories
-    project_root = Path(__file__).parent.parent
-    raw_data_dir = project_root / "data" / "raw"
-    intermediate_data_dir = project_root / "data" / "intermediate"
+    dirs = set_directories()
 
-    print(f"Raw data directory: {raw_data_dir}")
-    print(f"Intermediate data directory: {intermediate_data_dir}")
+    print(f"Raw data directory: {dirs['raw']}")
+    print(f"Clean data directory: {dirs['clean']}")
+    print(f"Intermediate data directory: {dirs['intermediate']}")
 
     # TODO: Implement data cleaning logic
-    # - Load raw data
-    # - Clean and preprocess
-    # - Save to data/intermediate/
+    # - Load raw data from data/raw/
+    # - Handle missing values, data types, outliers
+    # - Standardize formats and encodings
+    # - Save cleaned data to data/clean/
 
-    print("Data cleaning completed.")
+    # Example:
+    # # Load raw data
+    # raw_files = list(dirs['raw'].glob("*.csv"))
+    # for raw_file in raw_files:
+    #     df = pd.read_csv(raw_file)
+    #
+    #     # Basic cleaning
+    #     df = df.dropna()  # Remove missing values
+    #     df.columns = df.columns.str.lower().str.replace(' ', '_')
+    #
+    #     # Save cleaned data
+    #     clean_file = dirs['clean'] / f"clean_{raw_file.name}"
+    #     df.to_csv(clean_file, index=False)
+    #     print(f"Cleaned {len(df)} rows, saved to {clean_file}")
+
+    print("Data cleaning completed successfully.")
 
 if __name__ == "__main__":
     main()
