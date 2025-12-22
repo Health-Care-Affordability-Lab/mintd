@@ -519,16 +519,19 @@ def init_dvc(project_path: Path, bucket_name: str) -> None:
 ### Phase 4: CLI Implementation (Week 2-3)
 
 #### 4.1 Build Main CLI with Click
-**Status:** ✅ Completed
+**Status:** ✅ Completed (with mandatory language selection)
 
 **CLI Commands:**
 
 ```bash
-# Create projects
-mint create data --name medicare_claims
-mint create project --name hospital_closures
-mint create infra --name price_index
-mint create enclave --name secure_analysis
+# Create projects (language now required)
+mint create data --name medicare_claims --lang python
+mint create project --name hospital_closures --lang stata
+mint create infra --name price_index --lang r
+mint create enclave --name secure_analysis --lang python
+
+# Update utility scripts to latest version
+mint update utils                         # Update mint utilities only
 
 # Configure credentials and settings
 mint config setup                         # Interactive setup
@@ -547,6 +550,7 @@ mint --help
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--name` | Project name (required) | - |
+| `--lang` | Programming language (required) | **No default - must specify** |
 | `--path` | Output directory | Current directory |
 | `--no-git` | Skip Git initialization | `False` |
 | `--no-dvc` | Skip DVC initialization | `False` |
@@ -900,11 +904,15 @@ if network_available():
 
 ## Metadata File Schema
 
-Each project generates a `metadata.json` for future registry integration:
+Each project generates a `metadata.json` with comprehensive tracking information:
 
 ```json
 {
   "schema_version": "1.0",
+  "mint": {
+    "version": "1.0.0",
+    "commit_hash": "abc123def456..."
+  },
   "project": {
     "name": "medicare_claims",
     "type": "data",
@@ -923,9 +931,11 @@ Each project generates a `metadata.json` for future registry integration:
 }
 ```
 
+**Mint Tracking:** The `mint` section tracks which version of mint created the project and the exact commit hash for reproducibility.
+
 Values in `storage` are populated from user's `~/.mint/config.yaml` at project creation time.
 
-This metadata file will be used by the Data Commons Registry when that component is built.
+This metadata file serves the Data Commons Registry and enables project lineage tracking.
 
 ---
 
@@ -1033,6 +1043,36 @@ rm -rf /tmp/data_test_project
 
 ---
 
+## Recent Updates (Post-Registry Integration)
+
+### ✅ Language-Specific DVC Commands
+- DVC pipelines now use correct commands for each language
+- Python: `python src/ingest.py`
+- R: `Rscript src/ingest.R`
+- Stata: `stata -b do src/ingest.do`
+
+### ✅ Mandatory Programming Language Selection
+- Language parameter is now required (no defaults)
+- Must specify `--lang python|r|stata` for all project creation
+- Enables proper language-specific scaffolding
+
+### ✅ Mint Utility Scripts
+- Auto-generated `_mint_utils.{py|R|do}` files for each language
+- **Project directory validation**: Ensures scripts run from correct root
+- **Parameter-aware logging**: Creates `logs/script_params.log` files
+- **Schema generation**: Extracts variable metadata and observation counts
+- **Version tracking**: Metadata includes mint version and commit hash
+
+### ✅ Annual Data Updates & Logging
+- Scripts include documentation for updating with new annual data
+- Logging complements DVC versioning with execution audit trails
+- Clear workflow: update script → `dvc repro` → commit → push
+
+### ✅ Utility Script Updates
+- New `mint update utils` command to update mint utilities only
+- Preserves user scripts while updating mint-generated utilities
+- Updates mint version in metadata
+
 ## Checklist Summary
 
 | Phase | Task | Status |
@@ -1040,15 +1080,17 @@ rm -rf /tmp/data_test_project
 | 1 | Package structure & pyproject.toml | ✅ |
 | 1 | Configuration manager | ✅ |
 | 2 | Base template system | ✅ |
-| 2 | `data_` template | ✅ |
+| 2 | `data_` template (Python/R/Stata) | ✅ |
 | 2 | `prj__` template | ✅ |
 | 2 | `infra_` template | ✅ |
 | 2 | `enclave_` template | 🔴 |
 | 3 | Git initializer | ✅ |
-| 3 | Git & DVC initializer | ✅ |
-| 4 | CLI commands | ✅ |
+| 3 | DVC initializer (language-specific) | ✅ |
+| 4 | CLI commands (mandatory language) | ✅ |
 | 5 | Stata wrapper | ✅ |
-| 6 | Unit tests | ✅ |
+| 6 | Registry integration (GitOps) | ✅ |
+| 6 | Mint utilities & logging | ✅ |
+| 6 | Unit tests (47/47 passing) | ✅ |
 | 6 | Documentation | ✅ |
 
 ---

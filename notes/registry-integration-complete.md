@@ -99,15 +99,20 @@ Users need:
 
 ```bash
 # Stata users (primary audience)
-prjsetup, type(data) name(medicare_2024)
+prjsetup, type(data) name(medicare_2024) lang(stata)
 
 # Python CLI users
-mint create data --name medicare_2024 --register
+mint create data --name medicare_2024 --lang python --register
 
 # Output includes PR URL for tracking
 ✅ Created: data_medicare_2024
    Registration PR: https://github.com/org/registry/pull/123
 ```
+
+**New Features:**
+- **Language Selection**: Must specify `--lang python|r|stata` (no defaults)
+- **Mint Utilities**: Auto-generated `_mint_utils.*` files with logging and schema tools
+- **Version Tracking**: Metadata includes mint version and commit hash
 
 ### Registry Management
 
@@ -120,6 +125,9 @@ mint registry register --path /path/to/project
 
 # Process offline registrations
 mint registry sync
+
+# Update mint utilities to latest version
+mint update utils
 ```
 
 ## Security Model
@@ -155,12 +163,16 @@ mint registry sync
 - ✅ **Zero external dependencies** for core functionality
 - ✅ **Comprehensive error handling** with user-friendly messages
 - ✅ **Offline mode support** with automatic retry
+- ✅ **Language-specific DVC commands** and scaffolding
+- ✅ **Auto-generated utility scripts** with logging and schema tools
 
 ### User Experience
 - ✅ **Tokenless operation** - no API key management
 - ✅ **Seamless integration** - registration happens transparently
 - ✅ **Clear feedback** - PR URLs provided for tracking
 - ✅ **Robust error handling** - graceful degradation when offline
+- ✅ **Mandatory language selection** - explicit Python/R/Stata choice
+- ✅ **Parameter-aware logging** - audit trails for script execution
 
 ## Future Maintenance
 

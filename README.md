@@ -1,17 +1,20 @@
 # mint - Lab Project Scaffolding Tool
 
-A comprehensive Python CLI tool that automates the creation of standardized research project repositories with pre-configured version control, data versioning, multi-language support, and **Data Commons Registry integration**. Version 1.0.0 includes full GitOps-based project registration without requiring personal access tokens.
+A comprehensive Python CLI tool that automates the creation of standardized research project repositories with pre-configured version control, data versioning, **mandatory language selection (Python/R/Stata)**, and **Data Commons Registry integration**. Version 1.0.0 includes full GitOps-based project registration without requiring personal access tokens, plus auto-generated utilities for logging, project validation, and schema generation.
 
 ## Features
 
 ### Core Functionality
 - 🚀 **Rapid Project Setup**: Create standardized research projects in seconds
-- 📊 **Multi-Language Support**: Python, R, and Stata integration with language-specific templates
+- 📊 **Multi-Language Support**: Python, R, and Stata with mandatory language selection
 - 🔄 **Version Control**: Automatic Git and DVC initialization with cloud storage
 - ☁️ **Cloud Storage**: S3-compatible storage support (AWS, Wasabi, MinIO)
 - 📁 **Standardized Structure**: Consistent directory layouts for different project types
 - 🔧 **CLI & API**: Command-line interface and Python API
 - 📈 **Stata Integration**: Native Stata commands for seamless workflow
+- 🛠️ **Mint Utilities**: Auto-generated utilities for logging, project validation, and schema generation
+- 📝 **Parameter-Aware Logging**: Automatic logging with parameter-based filenames (e.g., `ingest_2023.log`)
+- 🔖 **Version Tracking**: Metadata includes mint version and commit hash for reproducibility
 
 ### 🎉 Data Commons Registry Integration (v1.0.0)
 - 🏛️ **Automatic Project Registration**: Tokenless GitOps-based cataloging
@@ -49,7 +52,7 @@ pip install -e ".[dev]"
 python verify_installation.py
 ```
 
-**Version 1.0.0** includes complete Data Commons Registry integration with tokenless GitOps-based project registration.
+**Version 1.0.0** includes complete Data Commons Registry integration with tokenless GitOps-based project registration, plus mandatory language selection, parameter-aware logging, and auto-generated utility scripts.
 
 ### Requirements
 
@@ -68,22 +71,22 @@ python verify_installation.py
 ### Basic Usage
 
 ```bash
-# Create a data processing project
-mint create data --name healthcare_analysis
+# Create a data processing project (language required)
+mint create data --name healthcare_analysis --lang python
 
 # Create a research analysis project
-mint create project --name cost_study
+mint create project --name cost_study --lang r
 
 # Create an infrastructure package
-mint create infra --name stat_tools
+mint create infra --name stat_tools --lang python
 ```
 
 ### With Registry Integration
 
 ```bash
 # Create projects with automatic registration to Data Commons Registry
-mint create data --name healthcare_analysis --register
-mint create project --name cost_study --register
+mint create data --name healthcare_analysis --lang python --register
+mint create project --name cost_study --lang stata --register
 
 # Check registration status
 mint registry status healthcare_analysis
@@ -98,7 +101,7 @@ mint registry register --path /path/to/existing/project
 # Create in specific directory with custom settings
 mint create data --name mydata --path /projects --bucket my-custom-bucket
 
-# Create projects with specific programming languages
+# Create projects with specific programming languages (now required)
 mint create data --name healthcare --lang r
 mint create project --name analysis --lang stata
 
@@ -156,63 +159,67 @@ mint create data --name healthcare-data --use-current-repo
 
 For data products and processing pipelines. Supports Python, R, and Stata:
 
-**Python-focused (default):**
+**Python-focused:**
 ```
 data_healthcare/
 ├── README.md                 # Project documentation
-├── metadata.json            # Project metadata
+├── metadata.json            # Project metadata (with mint version)
 ├── requirements.txt         # Python dependencies
+├── logs/                    # Script execution logs
 ├── data/
 │   ├── raw/                 # Raw data (DVC tracked)
-│   ├── clean/               # Cleaned data
-│   └── intermediate/        # Processing intermediates
+│   ├── intermediate/        # Processed data (DVC tracked)
+│   └── final/               # Analysis-ready data (DVC tracked)
 ├── src/
-│   ├── __init__.py
+│   ├── _mint_utils.py       # Mint utilities (auto-generated)
 │   ├── ingest.py           # Data acquisition
 │   ├── clean.py            # Data cleaning
 │   └── validate.py         # Data validation
 ├── .gitignore
 ├── .dvcignore
-└── dvc.yaml                # Pipeline configuration
+└── dvc.yaml                # Pipeline configuration (python commands)
 ```
 
 **R-focused:**
 ```
 data_healthcare/
 ├── README.md                 # Project documentation
-├── metadata.json            # Project metadata
+├── metadata.json            # Project metadata (with mint version)
 ├── DESCRIPTION              # R package description
 ├── renv.lock               # R environment snapshot
+├── logs/                    # Script execution logs
 ├── data/
 │   ├── raw/                 # Raw data (DVC tracked)
-│   ├── clean/               # Cleaned data
-│   └── intermediate/        # Processing intermediates
+│   ├── intermediate/        # Processed data (DVC tracked)
+│   └── final/               # Analysis-ready data (DVC tracked)
 ├── src/
+│   ├── _mint_utils.R        # Mint utilities (auto-generated)
 │   ├── ingest.R            # Data acquisition
 │   ├── clean.R             # Data cleaning
 │   └── validate.R          # Data validation
 ├── .gitignore
 ├── .dvcignore
-└── dvc.yaml                # Pipeline configuration
+└── dvc.yaml                # Pipeline configuration (Rscript commands)
 ```
 
 **Stata-focused:**
 ```
 data_healthcare/
 ├── README.md                 # Project documentation
-├── metadata.json            # Project metadata
-├── requirements.txt         # Python dependencies (for DVC, etc.)
+├── metadata.json            # Project metadata (with mint version)
+├── logs/                    # Script execution logs
 ├── data/
 │   ├── raw/                 # Raw data (DVC tracked)
-│   ├── clean/               # Cleaned data
-│   └── intermediate/        # Processing intermediates
+│   ├── intermediate/        # Processed data (DVC tracked)
+│   └── final/               # Analysis-ready data (DVC tracked)
 ├── src/
+│   ├── _mint_utils.do       # Mint utilities (auto-generated)
 │   ├── ingest.do           # Data acquisition
 │   ├── clean.do            # Data cleaning
 │   └── validate.do         # Data validation
 ├── .gitignore
 ├── .dvcignore
-└── dvc.yaml                # Pipeline configuration
+└── dvc.yaml                # Pipeline configuration (stata -b do commands)
 ```
 
 ### Research Projects (`prj__*`)
@@ -255,6 +262,81 @@ infra_stat_tools/
 └── docs/
 ```
 
+## Mint Utilities
+
+mint automatically generates utility files (`_mint_utils.{py|R|do}`) that provide common functionality for all project scripts:
+
+### Project Directory Validation
+- Ensures scripts run from the correct project root directory
+- Provides clear error messages if executed from wrong location
+- Automatically detects project root via `metadata.json` or `.git`
+
+### Parameter-Aware Logging
+- Creates timestamped log files with parameter-based names
+- Examples: `ingest_2023.log`, `clean_v2.log`, `validate_20241222_143052.log`
+- Logs include: command executed, parameters, start/end times, working directory
+- Complements DVC versioning with execution audit trails
+
+### Schema Generation
+- Extracts variable metadata from data files (CSV, DTA, RDS, etc.)
+- Captures: variable names, types, labels, observation counts
+- Outputs JSON schema for Data Commons Registry integration
+- Useful for data dictionary creation and validation
+
+### Usage in Scripts
+
+**Python:**
+```python
+from _mint_utils import setup_project_directory, ParameterAwareLogger
+
+# Validate project directory and set up logging
+logger = ParameterAwareLogger("ingest")
+logger.log("Starting data ingestion...")
+
+# Your script code here
+logger.log("Processing completed successfully.")
+logger.close()
+```
+
+**R:**
+```r
+source("_mint_utils.R")
+
+# Set up logging
+logger <- ParameterAwareLogger("clean")
+logger$log("Starting data cleaning...")
+
+# Your script code here
+logger$log("Cleaning completed successfully.")
+logger$close()
+```
+
+**Stata:**
+```stata
+do _mint_utils.do
+
+* Initialize logging
+ParameterAwareLogger clean
+log_message "Starting data validation..."
+
+* Your script code here
+log_message "Validation completed successfully."
+close_logger
+```
+
+### Updating Utilities
+
+When mint is updated, you can refresh the utility files without touching your scripts:
+
+```bash
+mint update utils
+```
+
+This command:
+- Regenerates `_mint_utils.*` files with latest features
+- Updates mint version information in `metadata.json`
+- Preserves all your custom scripts and data
+
 ## CLI Reference
 
 ### Main Commands
@@ -274,7 +356,7 @@ mint create infra --name <name> [OPTIONS]
 Options:
   -n, --name TEXT       Project name (required)
   -p, --path PATH       Output directory (default: current)
-  --lang TEXT          Primary programming language (python|r|stata, default: python)
+  --lang TEXT          Primary programming language (python|r|stata, REQUIRED)
   --no-git             Skip Git initialization
   --no-dvc             Skip DVC initialization
   --bucket TEXT        Custom DVC bucket name
@@ -297,6 +379,12 @@ mint config setup --set-credentials # Set storage credentials
 mint registry register --path <path>     # Register existing project
 mint registry status <project_name>      # Check registration status
 mint registry sync                       # Process pending registrations
+```
+
+### Utility Management
+
+```bash
+mint update utils                        # Update mint utilities to latest version
 ```
 
 ## Stata Integration
@@ -514,7 +602,7 @@ export MINT_REGISTRY_URL=https://github.com/your-org/data-commons-registry
 
 ```bash
 # Create project with automatic registration
-mint create data --name medicare_data --register
+mint create data --name medicare_data --lang python --register
 
 # Behind the scenes:
 # 1. Project scaffolding (Git/DVC setup)
@@ -558,10 +646,11 @@ Use mint programmatically in Python:
 ```python
 from mint import create_project
 
-# Create a project
+# Create a project (language is now required)
 result = create_project(
     project_type="data",
     name="my_analysis",
+    language="python",            # Required: "python", "r", or "stata"
     path="/projects",
     init_git=True,
     init_dvc=True,

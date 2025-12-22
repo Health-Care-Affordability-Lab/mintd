@@ -50,7 +50,14 @@ Crucially, `mint` acts as the client-side enforcer for the lab's "Data Commons."
 ## 4. Functional requirements
    - **CLI Scaffolding** (Priority: High)
      - Generate directory trees for `data_` (products), `prj__` (analysis), `infra_` (tooling), and `enclave_` (secure data consumption).
-     - Render templates for `README.md`, `metadata.json`, and `.gitignore`.
+     - Render language-specific templates for `README.md`, `metadata.json`, `.gitignore`, and utility scripts.
+     - **Language Selection**: Require explicit programming language choice (Python/R/Stata) with no defaults.
+   - **Mint Utilities** (Priority: High)
+     - Auto-generate `_mint_utils.{lang}` files with project validation, logging, and schema utilities.
+     - **Project Directory Validation**: Ensure scripts run from correct project root with clear error messages.
+     - **Parameter-Aware Logging**: Create timestamped log files with script parameters (e.g., `ingest_2023.log`).
+     - **Schema Generation**: Extract variable metadata, types, and observation counts for data registry.
+     - **Version Tracking**: Include mint version and commit hash in project metadata.
    - **Enclave Data Access** (Priority: High)
      - Registry integration to discover approved data products for secure enclaves.
      - Automated download and organization of versioned data products in `data/repo/hash-date` structure.
@@ -83,12 +90,12 @@ Crucially, `mint` acts as the client-side enforcer for the lab's "Data Commons."
 
 ### 5.2. Core experience
    - **Create Project**:
-     - User types `prjsetup, type(data) name(medicare_2024)` in Stata.
+     - User types `prjsetup, type(data) name(medicare_2024) lang(stata)` in Stata.
      - System displays a spinner: "Scaffolding folders... Initializing DVC... Registering with Data Commons..."
-     - System creates project structure with Git/DVC setup.
+     - System creates project structure with Git/DVC setup and language-specific utilities.
      - System clones registry, creates catalog entry, and opens PR via git/SSH.
      - System returns: "Success! Project created at ./data_medicare_2024. Registration PR: https://github.com/org/registry/pull/123".
-     - User immediately begins work in the created folder.
+     - User immediately begins work in the created folder with pre-configured logging and utilities.
 
 ### 5.3. Advanced features & edge cases
    - **Offline Mode**: If the Registry is unreachable, the tool scaffolds locally and warns the user to run `mint register` later.
@@ -173,16 +180,18 @@ For sensitive analyses requiring secure enclave access, Sarah can create an encl
    - **ID**: US-001
    - **Description**: As a Data Engineer, I want to create a new data project via the CLI so that the standard directory structure and DVC remotes are configured automatically.
    - **Acceptance criteria**:
-     - Command `mint create data --name {name}` creates the folder structure.
-     - `dvc status` shows the remote is configured to `s3://bucket/{name}`.
-     - A `metadata.json` file is populated with the project name and creator.
+     - Command `mint create data --name {name} --lang python` creates the folder structure.
+     - `dvc status` shows the remote is configured to `s3://bucket/{name}` with language-specific commands.
+     - A `metadata.json` file is populated with the project name, creator, and mint version info.
+     - `_mint_utils.py` is auto-generated with logging and schema utilities.
 
 ### 10.2. Initialize Data Project (Stata)
    - **ID**: US-002
    - **Description**: As a Junior Researcher, I want to set up a new project directly from Stata so that I don't have to use the terminal.
    - **Acceptance criteria**:
-     - Running `prjsetup, type(prj) name(analysis_1)` in Stata creates the project.
+     - Running `prjsetup, type(data) name(analysis_1) lang(stata)` in Stata creates the project.
      - Stata Output window confirms success and prints the path.
+     - `_mint_utils.do` is auto-generated with parameter-aware logging utilities.
      - The underlying Python command handles all errors gracefully and reports them back to Stata.
 
 ### 10.3. Automated Registry Registration
