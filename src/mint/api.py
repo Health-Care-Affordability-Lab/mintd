@@ -72,6 +72,7 @@ def create_project(
     stata_executable = get_stata_executable()
     
     # Prepare template context
+    registry_config = config.get("registry", {})
     context = {
         "author": defaults.get("author", ""),
         "organization": defaults.get("organization", ""),
@@ -86,6 +87,10 @@ def create_project(
         "platform_os": platform_info["os"],  # 'windows', 'macos', or 'linux'
         "command_sep": platform_info["command_separator"],  # '&&' or '&'
         "stata_executable": stata_executable or "stata",  # Fallback to 'stata'
+        # Registry context for metadata generation
+        "registry_org": registry_config.get("org", "cooper-lab"),
+        "admin_team": registry_config.get("admin_team", "infrastructure-admins"),
+        "researcher_team": registry_config.get("researcher_team", "all-researchers"),
     }
 
     # Select and create template

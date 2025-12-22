@@ -160,6 +160,8 @@ def _get_default_config() -> dict:
             "url": "https://github.com/cooper-lab/data-commons-registry",
             "org": "cooper-lab",
             "default_branch": "main",
+            "admin_team": "infrastructure-admins",
+            "researcher_team": "all-researchers",
         },
         "defaults": {
             "author": "",

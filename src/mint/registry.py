@@ -77,7 +77,7 @@ class LocalRegistry:
         ssh_url = f"git@github.com:{self.registry_org}/{self.registry_name}.git"
 
         print(f"📥 Cloning registry: {ssh_url}")
-        self._run_git_command('clone', ssh_url, self.temp_dir.name, cwd=self.temp_dir.parent)
+        self._run_git_command('clone', ssh_url, cwd=self.temp_dir)
 
         self.repo_path = self.temp_dir / self.registry_name
         print(f"✅ Cloned to: {self.repo_path}")
@@ -269,77 +269,20 @@ After merging this PR:
                 shutil.rmtree(self.temp_dir)
 
     def _generate_catalog_entry(self, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
-        """Generate a catalog entry for the project."""
+        """Generate a catalog entry for the project using metadata.json values."""
         project_name = metadata["project"]["name"]
         project_type = metadata["project"]["type"]
+        full_name = metadata["project"]["full_name"]
 
-        # Determine project type and full name
-        if project_type == 'data':
-            full_name = f"data_{project_name}"
-        elif project_type == 'project':
-            full_name = f"prj__{project_name}"
-        elif project_type == 'infra':
-            full_name = f"infra_{project_name}"
+        # Start with the metadata.json as the base catalog entry
+        entry = dict(metadata)
 
-        # Get current user info
-        creator = os.environ.get('GITHUB_ACTOR', os.environ.get('USER', 'unknown-user'))
+        # Update registry-specific fields that may need adjustment
         current_time = datetime.now().isoformat() + 'Z'
+        entry['status']['last_updated'] = current_time
 
-        # Generate catalog entry
-        entry = {
-            'schema_version': '1.0',
-            'project': {
-                'name': project_name,
-                'type': project_type,
-                'full_name': full_name,
-                'display_name': project_name.replace('_', ' ').replace('-', ' ').title()
-            },
-            'metadata': {
-                'description': metadata.get('description', f'{project_type.title()} project: {project_name}'),
-                'tags': metadata.get('tags', []),
-                'language': metadata.get('language', 'unknown')
-            },
-            'ownership': {
-                'created_by': f"{creator}@{self.registry_org}.github.io",
-                'created_at': current_time,
-                'maintainers': [
-                    {
-                        'email': f"{creator}@{self.registry_org}.github.io",
-                        'name': creator.replace('-', ' ').title(),
-                        'role': 'lead'
-                    }
-                ]
-            },
-            'repository': {
-                'github_url': f"https://github.com/{self.registry_org}/{full_name}",
-                'default_branch': 'main',
-                'visibility': 'private'  # Default to private
-            },
-            'access_control': {
-                'teams': [
-                    {
-                        'team': 'infrastructure-admins',
-                        'permission': 'admin'
-                    },
-                    {
-                        'team': 'all-researchers',
-                        'permission': 'read'
-                    }
-                ],
-                'individuals': [],
-                'requirements': [
-                    'Must complete data access training',
-                    'Must sign data use agreement'
-                ]
-            },
-            'status': {
-                'lifecycle': 'active',
-                'last_updated': current_time
-            }
-        }
-
-        # Add storage section for data and project types
-        if project_type in ['data', 'project']:
+        # Add storage section for data and project types if not present
+        if project_type in ['data', 'project'] and 'storage' not in entry:
             entry['storage'] = {
                 'dvc': {
                     'remote_name': 'wasabi',
@@ -348,12 +291,12 @@ After merging this PR:
                     'endpoint': 'https://s3.wasabisys.com',
                     'region': 'us-east-1'
                 },
-                'estimated_size': metadata.get('estimated_size', 'TBD'),
+                'estimated_size': 'TBD',
                 'sensitivity': 'restricted'
             }
 
-        # Add data dependencies for projects
-        if project_type == 'project':
+        # Add data dependencies for projects if not present
+        if project_type == 'project' and 'data_dependencies' not in entry['metadata']:
             entry['metadata']['data_dependencies'] = []
 
         return entry, project_name
@@ -388,16 +331,28 @@ def load_project_metadata(project_path: Path) -> Dict[str, Any]:
     with open(metadata_file, "r") as f:
         metadata = json.load(f)
 
-    # Validate required fields
-    required_fields = ["project", "ownership"]
+    # Validate required fields (matching registry schema)
+    required_fields = ["project", "metadata", "ownership", "access_control", "status"]
     for field in required_fields:
         if field not in metadata:
             raise ValueError(f"Missing required field '{field}' in metadata.json")
 
+    # Validate project section
     project_fields = ["name", "type", "full_name"]
-    for field in project_fields:
-        if field not in metadata["project"]:
-            raise ValueError(f"Missing required project field '{field}' in metadata.json")
+    if "project" in metadata:
+        for field in project_fields:
+            if field not in metadata["project"]:
+                raise ValueError(f"Missing required project field '{field}' in metadata.json")
+
+    # Validate access_control has teams
+    if "access_control" in metadata and "teams" in metadata["access_control"]:
+        teams = metadata["access_control"]["teams"]
+        if not teams:
+            raise ValueError("access_control.teams must contain at least one team")
+        # Check for admin permission
+        has_admin = any(team.get("permission") == "admin" for team in teams)
+        if not has_admin:
+            raise ValueError("At least one team must have 'admin' permission")
 
     return metadata
 

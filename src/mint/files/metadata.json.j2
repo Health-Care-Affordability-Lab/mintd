@@ -8,15 +8,53 @@
     "name": "{{ project_name }}",
     "type": "{{ project_type }}",
     "full_name": "{{ full_project_name }}",
+    "display_name": "{{ project_name | replace('_', ' ') | replace('-', ' ') | title }}",
     "created_at": "{{ created_at }}",
     "created_by": "{{ author }}"
   },
-  "description": "{{ project_name }} project",
-  "tags": [],
+  "metadata": {
+    "description": "{{ project_name | replace('_', ' ') | replace('-', ' ') | title }} project",
+    "tags": [],
+    "language": "{{ language }}"
+  },
+  "ownership": {
+    "created_by": "{{ author }}",
+    "created_at": "{{ created_at }}",
+    "maintainers": [
+      {
+        "email": "{{ author }}",
+        "name": "{{ author | replace('-', ' ') | replace('_', ' ') | title }}",
+        "role": "lead"
+      }
+    ]
+  },
+  "repository": {
+    "github_url": "https://github.com/{{ registry_org }}/{{ full_project_name }}",
+    "default_branch": "main",
+    "visibility": "private"
+  },
   "storage": {
     "provider": "{{ storage_provider | default('s3') }}",
     "bucket": "{{ bucket_name | default('') }}",
     "endpoint": "{{ storage_endpoint | default('') }}",
     "versioning": {{ storage_versioning | default(true) | lower }}
+  },
+  "access_control": {
+    "teams": [
+      {
+        "team": "{{ admin_team }}",
+        "permission": "admin"
+      },
+      {
+        "team": "{{ researcher_team }}",
+        "permission": "read"
+      }
+    ],
+    "individuals": [],
+    "requirements": []
+  },
+  "status": {
+    "lifecycle": "active",
+    "last_updated": "{{ created_at }}"
   }
 }
