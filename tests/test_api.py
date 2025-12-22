@@ -12,6 +12,7 @@ def test_create_project_data():
         result = create_project(
             project_type="data",
             name="test_api",
+            language="python",
             path=temp_dir,
             init_git=False,
             init_dvc=False
@@ -31,6 +32,7 @@ def test_create_project_project():
         result = create_project(
             project_type="project",
             name="test_api",
+            language="python",
             path=temp_dir,
             init_git=False,
             init_dvc=False
@@ -49,6 +51,7 @@ def test_create_project_infra():
         result = create_project(
             project_type="infra",
             name="test_api",
+            language="python",
             path=temp_dir,
             init_git=False,
             init_dvc=False
@@ -68,6 +71,7 @@ def test_create_project_invalid_type():
             create_project(
                 project_type="invalid",
                 name="test",
+                language="python",
                 path=temp_dir,
                 init_git=False,
                 init_dvc=False
@@ -83,6 +87,7 @@ def test_create_project_invalid_name():
         try:
             create_project(
                 project_type="data",
+                language="python",
                 name="test project",  # Invalid name with space
                 path=temp_dir,
                 init_git=False,
@@ -91,3 +96,4 @@ def test_create_project_invalid_name():
             assert False, "Should have raised ValueError"
         except ValueError as e:
             assert "Invalid project name" in str(e)
+

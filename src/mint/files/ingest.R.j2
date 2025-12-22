@@ -1,36 +1,36 @@
 #' Data ingestion for {{ project_name }}
 #'
 #' This script handles downloading and initial processing of raw data.
-#'
-#' Data flow:
-#' Raw data → data/raw/
-#' Clean data → data/clean/
-#' Intermediate → data/intermediate/
 
-# Set up directories
-set_directories <- function() {
-  dirs <- list(
-    raw = file.path("data", "raw"),
-    clean = file.path("data", "clean"),
-    intermediate = file.path("data", "intermediate")
-  )
+# =============================================================================
+# UPDATING FOR NEW DATA (e.g., annual releases)
+# =============================================================================
+# Data versioning is handled by DVC. When new data becomes available:
+#
+# 1. Update this script to point to the new data source
+# 2. Run the pipeline: dvc repro
+# 3. Commit changes: git add . && git commit -m "Update to 2024 data"
+# 4. Push data and code: dvc push && git push
+#
+# DVC tracks all versions - use `dvc diff` to see changes between versions
+# and `git log` / `dvc checkout` to access previous versions.
+# =============================================================================
 
-  lapply(dirs, function(d) {
-    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
-  })
-
-  return(dirs)
-}
+# Import mint utilities
+source("_mint_utils.R")
 
 main <- function() {
-  message("Starting data ingestion for {{ project_name }}...")
+  # Initialize logging (filename will include any parameters passed)
+  logger <- ParameterAwareLogger("ingest")
+  logger$log("Starting data ingestion for {{ project_name }}...")
 
+  # Set up directories (this also validates we're in project root)
   dirs <- set_directories()
 
-  message("Directories ready:")
-  message("  Raw data: ", dirs$raw)
-  message("  Clean data: ", dirs$clean)
-  message("  Intermediate: ", dirs$intermediate)
+  logger$log("Directories ready:")
+  logger$log("  Raw data: ", dirs$raw)
+  logger$log("  Intermediate: ", dirs$intermediate)
+  logger$log("  Final data: ", dirs$final)
 
   # TODO: Implement data ingestion logic
   # - Download data using httr/curl
@@ -49,9 +49,10 @@ main <- function() {
   #
   # # Quick validation
   # df <- read_csv(raw_file)
-  # message("Downloaded ", nrow(df), " rows with columns: ", paste(names(df), collapse = ", "))
+  # logger$log("Downloaded ", nrow(df), " rows with columns: ", paste(names(df), collapse = ", "))
 
-  message("Data ingestion completed successfully.")
+  logger$log("Data ingestion completed successfully.")
+  logger$close()
 }
 
 if (!interactive()) {

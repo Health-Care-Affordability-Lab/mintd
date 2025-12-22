@@ -20,10 +20,10 @@ class DataTemplate(BaseTemplate):
                 "raw": {
                     ".gitkeep": None,
                 },
-                "clean": {
+                "intermediate": {
                     ".gitkeep": None,
                 },
-                "intermediate": {
+                "final": {
                     ".gitkeep": None,
                 },
             },
@@ -37,7 +37,7 @@ class DataTemplate(BaseTemplate):
         if self.language == "python":
             structure["requirements.txt"] = None
             structure["src"] = {
-                "__init__.py": None,
+                "_mint_utils.py": None,
                 "ingest.py": None,
                 "clean.py": None,
                 "validate.py": None,
@@ -46,13 +46,14 @@ class DataTemplate(BaseTemplate):
             structure["DESCRIPTION"] = None
             structure["renv.lock"] = None
             structure["src"] = {
+                "_mint_utils.R": None,
                 "ingest.R": None,
                 "clean.R": None,
                 "validate.R": None,
             }
         elif self.language == "stata":
-            structure["requirements.txt"] = None  # For any Python dependencies
             structure["src"] = {
+                "_mint_utils.do": None,
                 "ingest.do": None,
                 "clean.do": None,
                 "validate.do": None,
@@ -74,7 +75,7 @@ class DataTemplate(BaseTemplate):
         if self.language == "python":
             files.extend([
                 ("requirements.txt", "requirements_data.txt.j2"),
-                ("src/__init__.py", "__init__.py.j2"),
+                ("src/_mint_utils.py", "_mint_utils.py.j2"),
                 ("src/ingest.py", "ingest.py.j2"),
                 ("src/clean.py", "clean.py.j2"),
                 ("src/validate.py", "validate.py.j2"),
@@ -83,13 +84,14 @@ class DataTemplate(BaseTemplate):
             files.extend([
                 ("DESCRIPTION", "DESCRIPTION.j2"),
                 ("renv.lock", "renv.lock.j2"),
+                ("src/_mint_utils.R", "_mint_utils.R.j2"),
                 ("src/ingest.R", "ingest.R.j2"),
                 ("src/clean.R", "clean.R.j2"),
                 ("src/validate.R", "validate.R.j2"),
             ])
         elif self.language == "stata":
             files.extend([
-                ("requirements.txt", "requirements_data.txt.j2"),
+                ("src/_mint_utils.do", "_mint_utils.do.j2"),
                 ("src/ingest.do", "ingest.do.j2"),
                 ("src/clean.do", "clean.do.j2"),
                 ("src/validate.do", "validate.do.j2"),

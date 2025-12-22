@@ -23,7 +23,7 @@ def create():
 @create.command()
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
-@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), default="python", help="Primary programming language")
+@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), required=True, help="Primary programming language")
 @click.option("--no-git", is_flag=True, help="Skip Git initialization")
 @click.option("--no-dvc", is_flag=True, help="Skip DVC initialization")
 @click.option("--bucket", help="Override bucket name for DVC remote")
@@ -59,7 +59,7 @@ def data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: st
 @create.command()
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
-@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), default="python", help="Primary programming language")
+@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), required=True, help="Primary programming language")
 @click.option("--no-git", is_flag=True, help="Skip Git initialization")
 @click.option("--no-dvc", is_flag=True, help="Skip DVC initialization")
 @click.option("--bucket", help="Override bucket name for DVC remote")
@@ -95,7 +95,7 @@ def project(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket:
 @create.command()
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
-@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), default="python", help="Primary programming language")
+@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), required=True, help="Primary programming language")
 @click.option("--no-git", is_flag=True, help="Skip Git initialization")
 @click.option("--no-dvc", is_flag=True, help="Skip DVC initialization")
 @click.option("--bucket", help="Override bucket name for DVC remote")
@@ -125,6 +125,128 @@ def infra(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: s
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
+            raise click.Abort()
+
+
+@main.group()
+def update():
+    """Update project components."""
+
+
+@update.command()
+@click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
+              help="Path to project directory (defaults to current directory)")
+def utils(path):
+    """Update mint utility scripts to the latest version."""
+    project_path = Path(path) if path else Path.cwd()
+
+    with console.status("Updating utility scripts..."):
+        try:
+            from .registry import load_project_metadata
+            from pathlib import Path
+            import json
+
+            # Load existing metadata to get project info
+            metadata_path = project_path / "metadata.json"
+            if not metadata_path.exists():
+                console.print("❌ metadata.json not found. Are you in a mint project directory?", style="red")
+                raise click.Abort()
+
+            with open(metadata_path, 'r') as f:
+                metadata = json.load(f)
+
+            # Extract project info
+            project_name = metadata["project"]["name"]
+            project_type = metadata["project"]["type"]
+            language = metadata.get("language", "python")  # Try to get from metadata, fallback to python
+
+            # Get mint version info for updating metadata
+            from ..templates.base import BaseTemplate
+            template = BaseTemplate()
+            mint_info = template._get_mint_info()
+
+            # Update metadata with new mint version
+            metadata["mint"] = {
+                "version": mint_info["mint_version"],
+                "commit_hash": mint_info["mint_hash"]
+            }
+
+            # Write updated metadata
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+            console.print(f"✅ Updated mint version in metadata.json to {mint_info['mint_version']}")
+
+            # Regenerate utility scripts
+            from .templates import DataTemplate, ProjectTemplate, InfraTemplate
+
+            if project_type == "data":
+                template_class = DataTemplate
+            elif project_type in ["project", "prj"]:
+                template_class = ProjectTemplate
+            elif project_type == "infra":
+                template_class = InfraTemplate
+            else:
+                console.print(f"❌ Unknown project type: {project_type}", style="red")
+                raise click.Abort()
+
+            # Create template instance and set language
+            template = template_class()
+            template.language = language
+
+            # Only regenerate utility files
+            utils_files = []
+            for relative_path, template_name in template.get_template_files():
+                if "_mint_utils" in relative_path:
+                    utils_files.append((relative_path, template_name))
+
+            if not utils_files:
+                console.print(f"⚠️ No utility files found for {language} projects", style="yellow")
+                return
+
+            # Prepare context
+            context = {
+                "author": metadata["project"].get("created_by", ""),
+                "organization": "",  # Could be extracted from metadata if available
+                "storage_provider": metadata["storage"].get("provider", "s3"),
+                "storage_endpoint": metadata["storage"].get("endpoint", ""),
+                "storage_versioning": metadata["storage"].get("versioning", True),
+                "bucket_name": metadata["storage"].get("bucket", ""),
+                "project_type": project_type,
+                "language": language,
+                "use_current_repo": False,  # Assume normal project structure
+            }
+            context.update(mint_info)
+
+            # Regenerate utility files
+            for relative_path, template_name in utils_files:
+                file_path = project_path / relative_path
+
+                try:
+                    jinja_template = template.jinja_env.get_template(template_name)
+                    content = jinja_template.render(
+                        project_name=project_name,
+                        full_project_name=metadata["project"]["full_name"],
+                        created_at=metadata["project"]["created_at"],
+                        **context
+                    )
+
+                    # Ensure parent directory exists
+                    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+
+                    console.print(f"✅ Updated: {relative_path}")
+
+                except Exception as e:
+                    console.print(f"❌ Failed to update {relative_path}: {e}", style="red")
+                    raise click.Abort()
+
+            console.print(f"✅ Successfully updated all utility scripts for {project_name}")
+
+        except Exception as e:
+            console.print(f"❌ Error updating utilities: {e}", style="red")
             raise click.Abort()
 
 

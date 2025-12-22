@@ -1,18 +1,16 @@
 #' Data cleaning for {{ project_name }}
 #'
 #' This script handles data cleaning and preprocessing.
-#'
-#' Data flow:
-#' Raw data → data/raw/
-#' Clean data → data/clean/
-#' Intermediate → data/intermediate/
+
+# Import mint utilities
+source("_mint_utils.R")
 
 # Set up directories
 set_directories <- function() {
   dirs <- list(
     raw = file.path("data", "raw"),
-    clean = file.path("data", "clean"),
-    intermediate = file.path("data", "intermediate")
+    intermediate = file.path("data", "intermediate"),
+    final = file.path("data", "final")
   )
 
   lapply(dirs, function(d) {
@@ -23,20 +21,22 @@ set_directories <- function() {
 }
 
 main <- function() {
-  message("Starting data cleaning for {{ project_name }}...")
+  # Initialize logging (filename will include any parameters passed)
+  logger <- ParameterAwareLogger("clean")
+  logger$log("Starting data cleaning for {{ project_name }}...")
 
   dirs <- set_directories()
 
-  message("Directories ready:")
-  message("  Raw data: ", dirs$raw)
-  message("  Clean data: ", dirs$clean)
-  message("  Intermediate: ", dirs$intermediate)
+  logger$log("Directories ready:")
+  logger$log("  Raw data: ", dirs$raw)
+  logger$log("  Intermediate: ", dirs$intermediate)
+  logger$log("  Final data: ", dirs$final)
 
   # TODO: Implement data cleaning logic
   # - Load raw data from data/raw/
   # - Handle missing values, data types, outliers
   # - Standardize formats and encodings
-  # - Save cleaned data to data/clean/
+  # - Save cleaned data to data/intermediate/
 
   # Example:
   # library(dplyr)
@@ -52,12 +52,13 @@ main <- function() {
   #   names(df) <- tolower(gsub(" ", "_", names(df)))
   #
   #   # Save cleaned data
-  #   clean_file <- file.path(dirs$clean, paste0("clean_", basename(raw_file)))
-  #   write_csv(df, clean_file)
-  #   message("Cleaned ", nrow(df), " rows, saved to ", clean_file)
+  #   intermediate_file <- file.path(dirs$intermediate, paste0("clean_", basename(raw_file)))
+  #   write_csv(df, intermediate_file)
+  #   logger$log("Cleaned ", nrow(df), " rows, saved to ", intermediate_file)
   # }
 
-  message("Data cleaning completed successfully.")
+  logger$log("Data cleaning completed successfully.")
+  logger$close()
 }
 
 if (!interactive()) {

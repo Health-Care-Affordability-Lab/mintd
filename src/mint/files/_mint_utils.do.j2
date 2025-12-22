@@ -1,0 +1,344 @@
+* Mint utility functions for {{ project_name }}
+*
+* This do-file provides common utilities used across all project scripts.
+* DO NOT MODIFY - This file is managed by mint and will be overwritten.
+
+* =============================================================================
+* SETUP PROJECT DIRECTORY
+* =============================================================================
+
+capture program drop setup_project_directory
+program define setup_project_directory
+    * Set up working directory and validate we're running from project root
+
+    local current_dir "`c(pwd)'"
+
+    * Look for project root indicators
+    local root_indicators "metadata.json .git"
+    local root_found = 0
+
+    * Check if we're already in project root
+    foreach indicator of local root_indicators {
+        capture confirm file "`indicator'"
+        if !_rc {
+            local root_found = 1
+            continue, break
+        }
+    }
+
+    if `root_found' {
+        display "Project root: `current_dir'"
+        exit
+    }
+
+    * Check parent directories
+    local check_dir "`current_dir'"
+    while "`check_dir'" != "" {
+        local parent_dir = subinstr("`check_dir'", "\", "/", .)
+        local last_slash = strrpos("`parent_dir'", "/")
+        if `last_slash' > 0 {
+            local parent_dir = substr("`parent_dir'", 1, `last_slash' - 1)
+        }
+        else {
+            local parent_dir ""
+        }
+
+        if "`parent_dir'" == "`check_dir'" {
+            * At root directory
+            continue, break
+        }
+
+        local check_dir "`parent_dir'"
+
+        foreach indicator of local root_indicators {
+            capture confirm file "`check_dir'/`indicator'"
+            if !_rc {
+                quietly cd "`check_dir'"
+                display "Changed to project root: `check_dir'"
+                exit
+            }
+        }
+    }
+
+    display as error "Not running from project root directory."
+    display as error "Project root should contain metadata.json or .git"
+    display as error "Current directory: `current_dir'"
+    display as error "Please cd to the project root and try again."
+    error 1
+end
+
+* =============================================================================
+* PARAMETER-AWARE LOGGER
+* =============================================================================
+
+capture program drop ParameterAwareLogger
+program define ParameterAwareLogger
+    * Initialize parameter-aware logging
+    args script_name
+
+    * Set up timing
+    local start_time = clock("`c(current_time)'", "hms")
+    local start_time_fmt = clock("`c(current_time)'", "hms")
+
+    * Get project root
+    setup_project_directory
+    local project_root "`c(pwd)'"
+
+    * Create logs directory
+    capture mkdir "logs"
+    local logs_dir "`project_root'/logs"
+
+    * Parse command line arguments for parameters
+    local params ""
+    local args_to_parse "`0'"
+
+    * Look for common parameter patterns
+    if strpos("`args_to_parse'", "--year=") > 0 {
+        local year_pos = strpos("`args_to_parse'", "--year=")
+        local year_rest = substr("`args_to_parse'", `year_pos' + 7, .)
+        local year_val = substr("`year_rest'", 1, strpos("`year_rest'", " ") - 1)
+        if "`year_val'" == "" {
+            local year_val = "`year_rest'"
+        }
+        local params "`params'`year_val'_"
+    }
+
+    if strpos("`args_to_parse'", "--version=") > 0 {
+        local ver_pos = strpos("`args_to_parse'", "--version=")
+        local ver_rest = substr("`args_to_parse'", `ver_pos' + 10, .)
+        local ver_val = substr("`ver_rest'", 1, strpos("`ver_rest'", " ") - 1)
+        if "`ver_val'" == "" {
+            local ver_val = "`ver_rest'"
+        }
+        local params "`params'`ver_val'_"
+    }
+
+    * Check for positional arguments (first non-option argument)
+    local first_arg ""
+    local in_arg = 0
+    foreach part of local args_to_parse {
+        if !strpos("`part'", "--") & "`part'" != "`script_name'" {
+            local first_arg "`part'"
+            continue, break
+        }
+    }
+
+    * If first arg looks like a parameter (short, alphanumeric), use it
+    if "`first_arg'" != "" & length("`first_arg'") <= 10 & regexm("`first_arg'", "^[a-zA-Z0-9_]+$") {
+        local params "`params'`first_arg'_"
+    }
+
+    * Clean up trailing underscore
+    local params = subinstr("`params'", "_$", "", .)
+
+    * Create log filename
+    local timestamp = string(date("`c(current_date)'", "dmy"), "%tdCCYYNNDD") + "_" + ///
+                     string(clock("`c(current_time)'", "hms"), "%tcHHMMSS")
+
+    if "`params'" != "" {
+        local log_filename "`script_name'_`params'.log"
+    }
+    else {
+        local log_filename "`script_name'_`timestamp'.log"
+    }
+
+    local log_path "`logs_dir'/`log_filename'"
+
+    * Initialize log file
+    capture log close _mint_log
+    quietly log using "`log_path'", replace name(_mint_log) text
+
+    * Write header
+    display "================================================================================"
+    display "Script: `script_name'"
+    display "Command: `0'"
+    display "Working directory: `c(pwd)'"
+    display "Stata version: `c(version)'"
+    display "Start time: `c(current_date)' `c(current_time)'"
+    display "================================================================================
+end
+
+capture program drop log_message
+program define log_message
+    * Log a message with timestamp
+    args message level
+
+    if "`level'" == "" {
+        local level "INFO"
+    }
+
+    display "[`c(current_time)'] `level': `message'"
+end
+
+capture program drop close_logger
+program define close_logger
+    * Close the logger and write final information
+
+    local end_time = clock("`c(current_time)'", "hms")
+    local start_time = clock("`c(current_time)'", "hms")  // This would need to be passed from init
+
+    display "================================================================================
+    display "End time: `c(current_date)' `c(current_time)'"
+    * Duration calculation would be complex in Stata - skipping for simplicity
+    display "================================================================================
+
+    capture log close _mint_log
+end
+
+* =============================================================================
+* DATA SCHEMA GENERATION
+* =============================================================================
+
+capture program drop generate_data_schema
+program define generate_data_schema
+    * Generate JSON schema from data file
+    args data_path output_path
+
+    * Check if file exists
+    capture confirm file "`data_path'"
+    if _rc {
+        display as error "Data file not found: `data_path'"
+        error 1
+    }
+
+    * Load data based on extension
+    local ext = lower(substr("`data_path'", strrpos("`data_path'", ".") + 1, .))
+
+    if "`ext'" == "csv" {
+        quietly import delimited "`data_path'", clear
+    }
+    else if "`ext'" == "dta" {
+        quietly use "`data_path'", clear
+    }
+    else {
+        display as error "Unsupported file format: `ext'"
+        display as error "Supported formats: csv, dta"
+        error 1
+    }
+
+    * Generate schema information
+    local filename = substr("`data_path'", strrpos("`data_path'", "/") + 1, .)
+    local observations = _N
+    local columns = c(k)
+
+    * Start building JSON schema (Stata doesn't have native JSON, so we'll use a simple format)
+    tempname schema_file
+    tempfile schema_temp
+    file open `schema_file' using "`schema_temp'", write text
+
+    file write `schema_file' "{" _n
+    file write `schema_file' `"  "filename": "`filename'","' _n
+    file write `schema_file' `"  "filepath": "`data_path'","' _n
+    file write `schema_file' `"  "observations": `observations',"'
+    file write `schema_file' `"  "columns": `columns',"'
+    file write `schema_file' `"  "variables": ["' _n
+
+    * Process each variable
+    forvalues i = 1/`columns' {
+        local varname : word `i' of `c(varlist)'
+        local vartype : type `varname'
+
+        * Determine variable type
+        if strpos("`vartype'", "str") == 1 {
+            local var_type "string"
+        }
+        else if strpos("`vartype'", "byte") == 1 | strpos("`vartype'", "int") == 1 | strpos("`vartype'", "long") == 1 {
+            local var_type "integer"
+        }
+        else if strpos("`vartype'", "float") == 1 | strpos("`vartype'", "double") == 1 {
+            local var_type "numeric"
+        }
+        else {
+            local var_type "`vartype'"
+        }
+
+        * Generate label from variable name
+        local label = subinstr("`varname'", "_", " ", .)
+        local label = proper("`label'")
+
+        * Count missing values
+        quietly count if missing(`varname')
+        local missing_count = r(N)
+
+        * Count unique values for strings
+        local unique_values "null"
+        if "`var_type'" == "string" {
+            quietly levelsof `varname', local(levels)
+            local unique_values : word count `levels'
+        }
+
+        * Write variable info
+        file write `schema_file' "    {" _n
+        file write `schema_file' `"      "name": "`varname'","' _n
+        file write `schema_file' `"      "type": "`var_type'","' _n
+        file write `schema_file' `"      "label": "`label'","' _n
+        file write `schema_file' `"      "missing_count": `missing_count''
+
+        if "`var_type'" == "string" & "`unique_values'" != "null" {
+            file write `schema_file' `","' _n `"      "unique_values": `unique_values'' _n
+        }
+        else if "`var_type'" == "integer" | "`var_type'" == "numeric" {
+            * Add numeric statistics
+            quietly summarize `varname'
+            file write `schema_file' "," _n
+            file write `schema_file' `"      "min": `r(min)'' _n
+            file write `schema_file' `"      "max": `r(max)'' _n
+            file write `schema_file' `"      "mean": `r(mean)'' _n
+            file write `schema_file' `"      "sd": `r(sd)'' _n
+        }
+        else {
+            file write `schema_file' _n
+        }
+
+        * Close variable object
+        if `i' < `columns' {
+            file write `schema_file' "    }," _n
+        }
+        else {
+            file write `schema_file' "    }" _n
+        }
+    }
+
+    file write `schema_file' "  ]" _n
+    file write `schema_file' "}" _n
+    file close `schema_file'
+
+    * Save schema if output path provided
+    if "`output_path'" != "" {
+        * Ensure output directory exists
+        local out_dir = substr("`output_path'", 1, strrpos("`output_path'", "/") - 1)
+        capture mkdir "`out_dir'"
+
+        copy "`schema_temp'" "`output_path'", replace
+        display "Schema saved to: `output_path'"
+    }
+    else {
+        * Display schema content
+        type "`schema_temp'"
+    }
+end
+
+* =============================================================================
+* FIND DATA FILES
+* =============================================================================
+
+capture program drop find_data_files
+program define find_data_files
+    * Find data files in a directory
+    args directory
+
+    local extensions "csv dta json xlsx xls rds sav"
+    local found_files ""
+
+    foreach ext of local extensions {
+        local pattern "`directory'/*.`ext'"
+        local files : dir "`directory'" files "*.`ext'", respectcase
+
+        foreach file of local files {
+            local found_files "`found_files' `directory'/`file'"
+        }
+    }
+
+    * Return sorted list
+    display "`found_files'"
+end

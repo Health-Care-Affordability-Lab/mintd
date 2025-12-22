@@ -136,3 +136,4 @@ def test_dvc_command_error_handling(mock_run_dvc):
 
         # Should have tried to run dvc command
         mock_run_dvc.assert_called()
+

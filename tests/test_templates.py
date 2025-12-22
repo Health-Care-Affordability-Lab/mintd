@@ -69,8 +69,10 @@ def test_template_creation():
         assert result_path.exists()
         assert (result_path / "README.md").exists()
         assert (result_path / "metadata.json").exists()
-        assert (result_path / "src" / "__init__.py").exists()
+        assert (result_path / "src" / "_mint_utils.py").exists()
         assert (result_path / "data" / "raw" / ".gitkeep").exists()
+        assert (result_path / "data" / "intermediate" / ".gitkeep").exists()
+        assert (result_path / "data" / "final" / ".gitkeep").exists()
 
 
 def test_template_with_context():
@@ -89,3 +91,4 @@ def test_template_with_context():
         readme_content = (result_path / "README.md").read_text()
         assert "Test Author" in readme_content
         assert "Test Lab" in readme_content
+

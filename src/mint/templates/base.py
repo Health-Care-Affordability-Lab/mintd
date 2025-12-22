@@ -1,6 +1,7 @@
 """Base template system for project scaffolding."""
 
 import os
+import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
@@ -15,6 +16,7 @@ except ImportError:
     from importlib_resources import files
 
 from ..utils import validate_project_name, format_project_name
+from .. import __version__
 
 
 class BaseTemplate(ABC):
@@ -44,6 +46,30 @@ class BaseTemplate(ABC):
         )
 
         self.language = "python"  # Default language
+
+    def _get_mint_info(self) -> Dict[str, str]:
+        """Get mint version and commit hash information."""
+        version = __version__
+
+        # Try to get git commit hash
+        try:
+            result = subprocess.run(
+                ['git', 'rev-parse', 'HEAD'],
+                capture_output=True,
+                text=True,
+                cwd=Path(__file__).parent.parent.parent  # mint package root
+            )
+            if result.returncode == 0:
+                commit_hash = result.stdout.strip()
+            else:
+                commit_hash = "unknown"
+        except (subprocess.SubprocessError, FileNotFoundError):
+            commit_hash = "unknown"
+
+        return {
+            "mint_version": version,
+            "mint_hash": commit_hash
+        }
 
     @abstractmethod
     def get_directory_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
@@ -137,6 +163,11 @@ class BaseTemplate(ABC):
             "author": context.get("author", ""),
             "organization": context.get("organization", ""),
         }
+
+        # Add mint version information
+        mint_info = self._get_mint_info()
+        common_context.update(mint_info)
+
         common_context.update(context)
 
         # Create each template file

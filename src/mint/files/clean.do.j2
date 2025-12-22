@@ -1,39 +1,35 @@
 * Data cleaning for {{ project_name }}
 *
 * This do-file handles data cleaning and preprocessing.
-*
-* Data flow:
-* Raw data → data/raw/
-* Clean data → data/clean/
-* Intermediate → data/intermediate/
 
-// Set up directories
-capture program drop set_directories
-program define set_directories
-    local dirs "raw clean intermediate"
+* Import mint utilities
+do _mint_utils.do
+
+// Main cleaning program
+capture program drop main
+program define main
+    * Initialize logging (filename will include any parameters passed)
+    ParameterAwareLogger clean
+    log_message "Starting data cleaning for {{ project_name }}..."
+
+    * Set up directories (this also validates we're in project root)
+    setup_project_directory
+    local dirs "raw intermediate final"
 
     foreach dir of local dirs {
         capture mkdir "data/`dir'", public
     }
 
-    display "Directories ready:"
-    display "  Raw data: data/raw/"
-    display "  Clean data: data/clean/"
-    display "  Intermediate: data/intermediate/"
-end
-
-// Main cleaning program
-capture program drop main
-program define main
-    display "Starting data cleaning for {{ project_name }}..."
-
-    set_directories
+    log_message "Directories ready:"
+    log_message "  Raw data: data/raw/"
+    log_message "  Intermediate: data/intermediate/"
+    log_message "  Final data: data/final/"
 
     // TODO: Implement data cleaning logic
     // - Load raw data from data/raw/
     // - Handle missing values, data types, outliers
     // - Standardize formats and encodings
-    // - Save cleaned data to data/clean/
+    // - Save cleaned data to data/intermediate/
 
     // Example:
     // // Load raw data
@@ -46,12 +42,13 @@ program define main
     //     rename *, lower        // Lowercase variable names
     //
     //     // Save cleaned data
-    //     local clean_file = subinstr("`file'", ".csv", "_clean.csv", .)
-    //     export delimited "data/clean/`clean_file'", replace
-    //     display "Cleaned " c(N) " observations, saved to data/clean/`clean_file'"
+    //     local intermediate_file = subinstr("`file'", ".csv", "_clean.csv", .)
+    //     export delimited "data/intermediate/`intermediate_file'", replace
+    //     log_message "Cleaned " c(N) " observations, saved to data/intermediate/`intermediate_file'"
     // }
 
-    display "Data cleaning completed successfully."
+    log_message "Data cleaning completed successfully."
+    close_logger
 end
 
 // Run if called directly

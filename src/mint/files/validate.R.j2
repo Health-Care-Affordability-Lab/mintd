@@ -1,18 +1,16 @@
 #' Data validation for {{ project_name }}
 #'
 #' This script runs quality checks and validation on processed data.
-#'
-#' Data flow:
-#' Raw data → data/raw/
-#' Clean data → data/clean/
-#' Intermediate → data/intermediate/
+
+# Import mint utilities
+source("_mint_utils.R")
 
 # Set up directories
 set_directories <- function() {
   dirs <- list(
     raw = file.path("data", "raw"),
-    clean = file.path("data", "clean"),
-    intermediate = file.path("data", "intermediate")
+    intermediate = file.path("data", "intermediate"),
+    final = file.path("data", "final")
   )
 
   lapply(dirs, function(d) {
@@ -22,7 +20,7 @@ set_directories <- function() {
   return(dirs)
 }
 
-validate_dataset <- function(df, dataset_name) {
+validate_dataset <- function(df, dataset_name, logger) {
   #' Run validation checks on a dataset
   issues <- list()
 
@@ -45,35 +43,37 @@ validate_dataset <- function(df, dataset_name) {
   }
 
   # Basic statistics
-  message("Validation for ", dataset_name, ":")
-  message("  Rows: ", nrow(df))
-  message("  Columns: ", ncol(df))
-  message("  Numeric columns: ", length(numeric_cols))
+  logger$log("Validation for ", dataset_name, ":")
+  logger$log("  Rows: ", nrow(df))
+  logger$log("  Columns: ", ncol(df))
+  logger$log("  Numeric columns: ", length(numeric_cols))
 
   if (length(issues) > 0) {
-    message("  Issues found:")
+    logger$log("  Issues found:")
     for (issue in issues) {
-      message("    - ", issue)
+      logger$log("    - ", issue)
     }
   } else {
-    message("  ✓ No issues found")
+    logger$log("  ✓ No issues found")
   }
 
   return(length(issues) == 0)
 }
 
 main <- function() {
-  message("Starting data validation for {{ project_name }}...")
+  # Initialize logging (filename will include any parameters passed)
+  logger <- ParameterAwareLogger("validate")
+  logger$log("Starting data validation for {{ project_name }}...")
 
   dirs <- set_directories()
 
-  message("Directories ready:")
-  message("  Raw data: ", dirs$raw)
-  message("  Clean data: ", dirs$clean)
-  message("  Intermediate: ", dirs$intermediate)
+  logger$log("Directories ready:")
+  logger$log("  Raw data: ", dirs$raw)
+  logger$log("  Intermediate: ", dirs$intermediate)
+  logger$log("  Final data: ", dirs$final)
 
   # TODO: Implement comprehensive validation logic
-  # - Load cleaned data from data/clean/
+  # - Load cleaned data from data/intermediate/
   # - Run quality checks (missing values, duplicates, data types)
   # - Business rule validation
   # - Statistical checks
@@ -82,22 +82,23 @@ main <- function() {
   # Example validation
   # library(readr)
   #
-  # clean_files <- list.files(dirs$clean, pattern = "*.csv", full.names = TRUE)
+  # intermediate_files <- list.files(dirs$intermediate, pattern = "*.csv", full.names = TRUE)
   # all_valid <- TRUE
   #
-  # for (clean_file in clean_files) {
-  #   df <- read_csv(clean_file)
-  #   is_valid <- validate_dataset(df, basename(clean_file))
+  # for (intermediate_file in intermediate_files) {
+  #   df <- read_csv(intermediate_file)
+  #   is_valid <- validate_dataset(df, basename(intermediate_file), logger)
   #   all_valid <- all_valid && is_valid
   # }
   #
   # if (all_valid) {
-  #   message("✓ All datasets passed validation")
+  #   logger$log("✓ All datasets passed validation")
   # } else {
-  #   message("✗ Some datasets failed validation - review issues above")
+  #   logger$log("✗ Some datasets failed validation - review issues above")
   # }
 
-  message("Data validation completed successfully.")
+  logger$log("Data validation completed successfully.")
+  logger$close()
 }
 
 if (!interactive()) {

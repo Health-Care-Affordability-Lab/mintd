@@ -23,8 +23,8 @@ class ProjectResult:
 def create_project(
     project_type: str,
     name: str,
+    language: str,
     path: str = ".",
-    language: str = "python",
     init_git: bool = True,
     init_dvc: bool = True,
     bucket_name: Optional[str] = None,

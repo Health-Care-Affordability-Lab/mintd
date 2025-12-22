@@ -1,23 +1,41 @@
 stages:
   ingest:
+    {% if language == "python" %}
     cmd: python src/ingest.py
+    {% elif language == "r" %}
+    cmd: Rscript src/ingest.R
+    {% elif language == "stata" %}
+    cmd: stata -b do src/ingest.do
+    {% endif %}
     deps:
-      - src/ingest.py
+      - src/ingest{% if language == "python" %}.py{% elif language == "r" %}.R{% elif language == "stata" %}.do{% endif %}
     outs:
       - data/raw/
 
   clean:
+    {% if language == "python" %}
     cmd: python src/clean.py
+    {% elif language == "r" %}
+    cmd: Rscript src/clean.R
+    {% elif language == "stata" %}
+    cmd: stata -b do src/clean.do
+    {% endif %}
     deps:
-      - src/clean.py
+      - src/clean{% if language == "python" %}.py{% elif language == "r" %}.R{% elif language == "stata" %}.do{% endif %}
       - data/raw/
     outs:
       - data/intermediate/
 
   validate:
+    {% if language == "python" %}
     cmd: python src/validate.py
+    {% elif language == "r" %}
+    cmd: Rscript src/validate.R
+    {% elif language == "stata" %}
+    cmd: stata -b do src/validate.do
+    {% endif %}
     deps:
-      - src/validate.py
+      - src/validate{% if language == "python" %}.py{% elif language == "r" %}.R{% elif language == "stata" %}.do{% endif %}
       - data/intermediate/
     outs:
       - data/final/

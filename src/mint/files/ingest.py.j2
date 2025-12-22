@@ -1,20 +1,33 @@
 """Data ingestion script for {{ project_name }}."""
 
-import os
 import sys
 from pathlib import Path
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Import mint utilities
+from _mint_utils import setup_project_directory, ParameterAwareLogger
+
+# =============================================================================
+# UPDATING FOR NEW DATA (e.g., annual releases)
+# =============================================================================
+# Data versioning is handled by DVC. When new data becomes available:
+#
+# 1. Update this script to point to the new data source
+# 2. Run the pipeline: dvc repro
+# 3. Commit changes: git add . && git commit -m "Update to 2024 data"
+# 4. Push data and code: dvc push && git push
+#
+# DVC tracks all versions - use `dvc diff` to see changes between versions
+# and `git log` / `dvc checkout` to access previous versions.
+# =============================================================================
 
 def set_directories():
     """Set up standard directory structure."""
-    project_root = Path(__file__).parent.parent
+    project_root = setup_project_directory()
 
     dirs = {
         'raw': project_root / 'data' / 'raw',
-        'clean': project_root / 'data' / 'clean',
-        'intermediate': project_root / 'data' / 'intermediate'
+        'intermediate': project_root / 'data' / 'intermediate',
+        'final': project_root / 'data' / 'final'
     }
 
     for dir_path in dirs.values():
@@ -24,13 +37,15 @@ def set_directories():
 
 def main():
     """Main ingestion workflow."""
-    print("Starting data ingestion for {{ project_name }}...")
+    # Initialize logging (filename will include any parameters passed)
+    logger = ParameterAwareLogger("ingest")
+    logger.log("Starting data ingestion for {{ project_name }}...")
 
     dirs = set_directories()
 
-    print(f"Raw data directory: {dirs['raw']}")
-    print(f"Clean data directory: {dirs['clean']}")
-    print(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Raw data directory: {dirs['raw']}")
+    logger.log(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Final data directory: {dirs['final']}")
 
     # TODO: Implement data ingestion logic
     # - Download data from APIs/databases
@@ -50,9 +65,10 @@ def main():
     #
     # # Quick validation
     # df = pd.read_csv(raw_file)
-    # print(f"Downloaded {len(df)} rows with columns: {list(df.columns)}")
+    # logger.log(f"Downloaded {len(df)} rows with columns: {list(df.columns)}")
 
-    print("Data ingestion completed successfully.")
+    logger.log("Data ingestion completed successfully.")
+    logger.close()
 
 if __name__ == "__main__":
     main()

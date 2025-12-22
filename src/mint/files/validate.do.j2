@@ -1,11 +1,9 @@
 * Data validation for {{ project_name }}
 *
 * This do-file runs quality checks and validation on processed data.
-*
-* Data flow:
-* Raw data → data/raw/
-* Clean data → data/clean/
-* Intermediate → data/intermediate/
+
+* Import mint utilities
+do _mint_utils.do
 
 // Set up directories
 capture program drop set_directories
@@ -37,20 +35,20 @@ program define validate_dataset
     }
 
     if "`missing_vars'" != "" {
-        display "  Missing values in: `missing_vars'"
+        log_message "  Missing values in: `missing_vars'"
     }
 
     // Check for duplicates
     duplicates report
     if r(unique_value) < _N {
         local duplicates = _N - r(unique_value)
-        display "  Found `duplicates' duplicate rows"
+        log_message "  Found `duplicates' duplicate rows"
     }
 
     // Basic statistics
-    display "Validation for `dataset_name':"
-    display "  Rows: " c(N)
-    display "  Columns: " c(k)
+    log_message "Validation for `dataset_name':"
+    log_message "  Rows: " c(N)
+    log_message "  Columns: " c(k)
 
     // Count numeric variables
     local numeric_count 0
@@ -60,29 +58,42 @@ program define validate_dataset
             local ++numeric_count
         }
     }
-    display "  Numeric columns: `numeric_count'"
+    log_message "  Numeric columns: `numeric_count'"
 
     if "`missing_vars'" == "" & `duplicates' == 0 & `numeric_count' > 0 {
-        display "  ✓ No issues found"
+        log_message "  ✓ No issues found"
     }
 end
 
 // Main validation program
 capture program drop main
 program define main
-    display "Starting data validation for {{ project_name }}..."
+    * Initialize logging (filename will include any parameters passed)
+    ParameterAwareLogger validate
+    log_message "Starting data validation for {{ project_name }}..."
 
-    set_directories
+    * Set up directories (this also validates we're in project root)
+    setup_project_directory
+    local dirs "raw intermediate final"
+
+    foreach dir of local dirs {
+        capture mkdir "data/`dir'", public
+    }
+
+    log_message "Directories ready:"
+    log_message "  Raw data: data/raw/"
+    log_message "  Intermediate: data/intermediate/"
+    log_message "  Final data: data/final/"
 
     // TODO: Implement comprehensive validation logic
-    // - Load cleaned data from data/clean/
+    // - Load cleaned data from data/intermediate/
     // - Run quality checks (missing values, duplicates, data types)
     // - Business rule validation
     // - Statistical checks
     // - Save validation reports
 
     // Example validation
-    // local clean_files : dir "data/clean" files "*.csv"
+    // local intermediate_files : dir "data/intermediate" files "*.csv"
     // local all_valid = 1
     //
     // foreach file of local clean_files {
@@ -98,7 +109,8 @@ program define main
     //     display "✗ Some datasets failed validation - review issues above"
     // }
 
-    display "Data validation completed successfully."
+    log_message "Data validation completed successfully."
+    close_logger
 end
 
 // Run if called directly

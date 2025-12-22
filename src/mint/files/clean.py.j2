@@ -1,21 +1,20 @@
 """Data cleaning script for {{ project_name }}."""
 
-import os
 import sys
 from pathlib import Path
 import pandas as pd
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Import mint utilities
+from _mint_utils import setup_project_directory, ParameterAwareLogger
 
 def set_directories():
     """Set up standard directory structure."""
-    project_root = Path(__file__).parent.parent
+    project_root = setup_project_directory()
 
     dirs = {
         'raw': project_root / 'data' / 'raw',
-        'clean': project_root / 'data' / 'clean',
-        'intermediate': project_root / 'data' / 'intermediate'
+        'intermediate': project_root / 'data' / 'intermediate',
+        'final': project_root / 'data' / 'final'
     }
 
     for dir_path in dirs.values():
@@ -25,19 +24,21 @@ def set_directories():
 
 def main():
     """Main cleaning workflow."""
-    print("Starting data cleaning for {{ project_name }}...")
+    # Initialize logging (filename will include any parameters passed)
+    logger = ParameterAwareLogger("clean")
+    logger.log("Starting data cleaning for {{ project_name }}...")
 
     dirs = set_directories()
 
-    print(f"Raw data directory: {dirs['raw']}")
-    print(f"Clean data directory: {dirs['clean']}")
-    print(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Raw data directory: {dirs['raw']}")
+    logger.log(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Final data directory: {dirs['final']}")
 
     # TODO: Implement data cleaning logic
     # - Load raw data from data/raw/
     # - Handle missing values, data types, outliers
     # - Standardize formats and encodings
-    # - Save cleaned data to data/clean/
+    # - Save cleaned data to data/intermediate/
 
     # Example:
     # # Load raw data
@@ -50,11 +51,12 @@ def main():
     #     df.columns = df.columns.str.lower().str.replace(' ', '_')
     #
     #     # Save cleaned data
-    #     clean_file = dirs['clean'] / f"clean_{raw_file.name}"
-    #     df.to_csv(clean_file, index=False)
-    #     print(f"Cleaned {len(df)} rows, saved to {clean_file}")
+    #     intermediate_file = dirs['intermediate'] / f"clean_{raw_file.name}"
+    #     df.to_csv(intermediate_file, index=False)
+    #     logger.log(f"Cleaned {len(df)} rows, saved to {intermediate_file}")
 
-    print("Data cleaning completed successfully.")
+    logger.log("Data cleaning completed successfully.")
+    logger.close()
 
 if __name__ == "__main__":
     main()

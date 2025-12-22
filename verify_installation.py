@@ -133,3 +133,4 @@ def verify_installation():
 if __name__ == "__main__":
     success = verify_installation()
     exit(0 if success else 1)
+

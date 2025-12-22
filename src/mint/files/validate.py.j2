@@ -1,21 +1,20 @@
 """Data validation script for {{ project_name }}."""
 
-import os
 import sys
 from pathlib import Path
 import pandas as pd
 
-# Add src directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Import mint utilities
+from _mint_utils import setup_project_directory, ParameterAwareLogger
 
 def set_directories():
     """Set up standard directory structure."""
-    project_root = Path(__file__).parent.parent
+    project_root = setup_project_directory()
 
     dirs = {
         'raw': project_root / 'data' / 'raw',
-        'clean': project_root / 'data' / 'clean',
-        'intermediate': project_root / 'data' / 'intermediate'
+        'intermediate': project_root / 'data' / 'intermediate',
+        'final': project_root / 'data' / 'final'
     }
 
     for dir_path in dirs.values():
@@ -23,7 +22,7 @@ def set_directories():
 
     return dirs
 
-def validate_dataset(df, dataset_name):
+def validate_dataset(df, dataset_name, logger):
     """Run validation checks on a dataset."""
     issues = []
 
@@ -43,52 +42,55 @@ def validate_dataset(df, dataset_name):
         issues.append("No numeric columns found")
 
     # Basic statistics
-    print(f"Validation for {dataset_name}:")
-    print(f"  Rows: {len(df)}")
-    print(f"  Columns: {len(df.columns)}")
-    print(f"  Numeric columns: {len(numeric_cols)}")
+    logger.log(f"Validation for {dataset_name}:")
+    logger.log(f"  Rows: {len(df)}")
+    logger.log(f"  Columns: {len(df.columns)}")
+    logger.log(f"  Numeric columns: {len(numeric_cols)}")
 
     if issues:
-        print("  Issues found:")
+        logger.log("  Issues found:")
         for issue in issues:
-            print(f"    - {issue}")
+            logger.log(f"    - {issue}")
     else:
-        print("  ✓ No issues found")
+        logger.log("  ✓ No issues found")
 
     return len(issues) == 0
 
 def main():
     """Main validation workflow."""
-    print("Starting data validation for {{ project_name }}...")
+    # Initialize logging (filename will include any parameters passed)
+    logger = ParameterAwareLogger("validate")
+    logger.log("Starting data validation for {{ project_name }}...")
 
     dirs = set_directories()
 
-    print(f"Raw data directory: {dirs['raw']}")
-    print(f"Clean data directory: {dirs['clean']}")
-    print(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Raw data directory: {dirs['raw']}")
+    logger.log(f"Intermediate data directory: {dirs['intermediate']}")
+    logger.log(f"Final data directory: {dirs['final']}")
 
     # TODO: Implement comprehensive validation logic
-    # - Load cleaned data from data/clean/
+    # - Load cleaned data from data/intermediate/
     # - Run quality checks (missing values, duplicates, data types)
     # - Business rule validation
     # - Statistical checks
     # - Save validation reports
 
     # Example validation
-    # clean_files = list(dirs['clean'].glob("*.csv"))
+    # intermediate_files = list(dirs['intermediate'].glob("*.csv"))
     # all_valid = True
     #
-    # for clean_file in clean_files:
-    #     df = pd.read_csv(clean_file)
-    #     is_valid = validate_dataset(df, clean_file.stem)
+    # for intermediate_file in intermediate_files:
+    #     df = pd.read_csv(intermediate_file)
+    #     is_valid = validate_dataset(df, intermediate_file.stem, logger)
     #     all_valid = all_valid and is_valid
     #
     # if all_valid:
-    #     print("✓ All datasets passed validation")
+    #     logger.log("✓ All datasets passed validation")
     # else:
-    #     print("✗ Some datasets failed validation - review issues above")
+    #     logger.log("✗ Some datasets failed validation - review issues above")
 
-    print("Data validation completed successfully.")
+    logger.log("Data validation completed successfully.")
+    logger.close()
 
 if __name__ == "__main__":
     main()

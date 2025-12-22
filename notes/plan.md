@@ -256,14 +256,14 @@ class BaseTemplate(ABC):
 ```
 
 #### 2.2 Implement `data_` Template
-**Status:** ✅ Completed (with R support)
+**Status:** ✅ Completed (with Python, R, and Stata support)
 
 **Directory Structure:**
 ```
 data_{name}/
 ├── README.md               # Data availability, provenance, requirements
-├── metadata.json           # Project metadata (auto-populated)
-├── requirements.txt        # Python dependencies
+├── metadata.json           # Project metadata (auto-populated with mint version)
+├── requirements.txt        # Python dependencies (Python projects only)
 ├── data/
 │   ├── raw/                # Raw data (DVC tracked)
 │   │   └── .gitkeep
@@ -272,14 +272,27 @@ data_{name}/
 │   └── final/              # Analysis-ready data (DVC tracked)
 │       └── .gitkeep
 ├── src/
-│   ├── __init__.py
-│   ├── ingest.py           # Data acquisition scripts
-│   ├── clean.py            # Data cleaning scripts
-│   └── validate.py         # Data quality checks
+│   ├── _mint_utils.{py|R|do}  # Mint utility scripts (auto-managed)
+│   ├── ingest.{py|R|do}       # Data acquisition scripts
+│   ├── clean.{py|R|do}        # Data cleaning scripts
+│   └── validate.{py|R|do}     # Data quality checks
+├── logs/                   # Script execution logs
+│   └── .gitkeep
 ├── .gitignore
 ├── .dvcignore
-└── dvc.yaml                # DVC pipeline config
+└── dvc.yaml                # DVC pipeline config (language-specific commands)
 ```
+
+**Language-Specific Features:**
+- **Python**: Full script templates with pandas/numpy, logging, and schema utilities
+- **R**: RMarkdown-compatible scripts with tidyverse, logging, and data validation
+- **Stata**: Do-files with parameter-aware logging and data management utilities
+
+**Mint Utilities (_mint_utils.*):**
+- **Project directory validation**: Ensures scripts run from correct project root
+- **Parameter-aware logging**: Creates logs like `ingest_2023.log` based on script parameters
+- **Schema generation**: Extracts variable metadata, types, and observation counts
+- **Version tracking**: Metadata includes mint version and commit hash
 
 #### 2.3 Implement `prj__` Template
 **Status:** ✅ Completed (with R support)
@@ -394,25 +407,40 @@ R support includes:
 # initializers/git.py
 def init_git(project_path: Path) -> None:
     """Initialize git repository and create initial commit."""
-    
+
 def create_gitignore(project_path: Path, project_type: str) -> None:
     """Write .gitignore appropriate for project type."""
 ```
 
 #### 3.2 Implement DVC Initializer
-**Status:** ✅ Completed
+**Status:** ✅ Completed (with language-specific commands)
 
 **Implementation Notes:**
 - Graceful error handling when git/dvc commands are not available
 - S3-compatible bucket creation with versioning support
 - Automatic remote configuration for DVC
 - Support for AWS S3, Wasabi, MinIO, and other S3-compatible services
+- **Language-specific DVC pipeline commands** (Python/Rscript/Stata)
 
 **Tasks:**
 - [ ] Initialize DVC in the project
 - [ ] Create per-project S3-compatible bucket with versioning enabled
 - [ ] Configure DVC remote pointing to the new bucket
 - [ ] Create `.dvcignore`
+- [ ] Generate language-specific dvc.yaml with correct command syntax
+
+**DVC Language Commands:**
+```yaml
+stages:
+  ingest:
+    cmd: python src/ingest.py      # Python
+    # cmd: Rscript src/ingest.R    # R
+    # cmd: stata -b do src/ingest.do  # Stata
+    deps:
+      - src/ingest.{py|R|do}
+    outs:
+      - data/raw/
+```
 
 **Bucket Strategy:**
 - Each project gets its own bucket: `{bucket_prefix}-{project_name}` (from user config)
@@ -429,9 +457,9 @@ def create_bucket(project_name: str) -> str:
     """Create a new S3-compatible bucket with versioning enabled."""
     config = get_config()
     storage = config["storage"]
-    
+
     bucket_name = f"{storage['bucket_prefix']}-{project_name}".lower().replace("_", "-")
-    
+
     client_kwargs = {
         "aws_access_key_id": get_storage_credentials()[0],
         "aws_secret_access_key": get_storage_credentials()[1],
@@ -440,9 +468,9 @@ def create_bucket(project_name: str) -> str:
         client_kwargs["endpoint_url"] = storage["endpoint"]
     if storage["region"]:
         client_kwargs["region_name"] = storage["region"]
-    
+
     s3 = boto3.client("s3", **client_kwargs)
-    
+
     s3.create_bucket(Bucket=bucket_name)
     if storage.get("versioning", True):
         s3.put_bucket_versioning(
@@ -455,7 +483,7 @@ def init_dvc(project_path: Path, bucket_name: str) -> None:
     """Initialize DVC and configure S3 remote."""
     config = get_config()
     storage = config["storage"]
-    
+
     # dvc init
     # dvc remote add -d storage s3://{bucket_name}
     # if endpoint: dvc remote modify storage endpointurl {endpoint}
