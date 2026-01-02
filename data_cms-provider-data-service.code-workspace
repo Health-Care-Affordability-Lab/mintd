@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "../../../git-yale/cooper-lab/data-registry"
+		},
+		{
+			"path": "../../../git-yale/cooper-lab/enclave_test"
 		}
 	],
 	"settings": {}
