@@ -1,0 +1,131 @@
+# {{ full_project_name }}
+
+Data product for {{ project_name }}.
+
+## Overview
+
+This repository contains the data processing pipeline for {{ project_name }} using **{{ language|title }}** as the primary programming language.
+
+## Project Goal
+
+**TODO**: Describe the specific goal and purpose of this data repository. What research question does it address? What data sources are being processed?
+
+## Data Flow
+
+The data processing follows a standard three-stage pipeline:
+
+- **Raw Data** → `data/raw/`: Original, unmodified data as acquired from sources
+- **Clean Data** → `data/clean/`: Processed and cleaned data ready for analysis
+- **Intermediate Data** → `data/intermediate/`: Temporary files and intermediate processing results
+
+## Requirements
+
+{% if language == "python" %}
+Install Python dependencies:
+```bash
+pip install -r requirements.txt
+```
+{% elif language == "r" %}
+Install R dependencies:
+```r
+# Install renv for reproducible environments
+install.packages("renv")
+renv::restore()  # Install dependencies from renv.lock
+```
+{% elif language == "stata" %}
+This project requires Stata for data processing. Any Python dependencies for auxiliary scripts:
+```bash
+pip install -r requirements.txt
+```
+{% endif %}
+
+## Pipeline Scripts
+
+{% if language == "python" %}
+1. **Ingest**: `src/ingest.py` - Raw data acquisition and initial processing
+2. **Clean**: `src/clean.py` - Data cleaning and preprocessing
+3. **Validate**: `src/validate.py` - Data quality checks and validation
+{% elif language == "r" %}
+1. **Ingest**: `src/ingest.R` - Raw data acquisition and initial processing
+2. **Clean**: `src/clean.R` - Data cleaning and preprocessing
+3. **Validate**: `src/validate.R` - Data quality checks and validation
+{% elif language == "stata" %}
+1. **Ingest**: `src/ingest.do` - Raw data acquisition and initial processing
+2. **Clean**: `src/clean.do` - Data cleaning and preprocessing
+3. **Validate**: `src/validate.do` - Data quality checks and validation
+{% endif %}
+
+## Usage
+
+{% if language == "python" %}
+Run the complete pipeline:
+```bash
+# Ingest raw data
+python src/ingest.py
+
+# Clean data
+python src/clean.py
+
+# Validate results
+python src/validate.py
+```
+{% elif language == "r" %}
+Run the complete pipeline:
+```r
+# Ingest raw data
+source("src/ingest.R")
+
+# Clean data
+source("src/clean.R")
+
+# Validate results
+source("src/validate.R")
+```
+
+Or from command line:
+```bash
+Rscript src/ingest.R
+Rscript src/clean.R
+Rscript src/validate.R
+```
+{% elif language == "stata" %}
+Run the complete pipeline in Stata:
+```stata
+// Ingest raw data
+do src/ingest.do
+
+// Clean data
+do src/clean.do
+
+// Validate results
+do src/validate.do
+```
+{% endif %}
+
+## Extending the Pipeline
+
+For more complex data ingestion scenarios, consider:
+
+- **Multiple Data Sources**: Modify the ingest script to handle multiple APIs/databases
+- **Incremental Updates**: Add logic to check for new data since last run
+- **Data Versioning**: Use DVC to track changes in raw data files
+- **Parallel Processing**: Split large datasets across multiple workers
+- **Error Handling**: Add robust error handling and logging
+- **Configuration Files**: Move hardcoded paths and parameters to config files
+
+## Data Validation
+
+The validation script performs checks for:
+- Missing values and data completeness
+- Duplicate records
+- Data type consistency
+- Basic statistical distributions
+- Business rule compliance
+
+**TODO**: Add specific validation rules relevant to your data domain.
+
+## Data Provenance
+
+Created: {{ created_at }}
+{% if author %}Author: {{ author }}{% endif %}
+{% if organization %}Organization: {{ organization }}{% endif %}

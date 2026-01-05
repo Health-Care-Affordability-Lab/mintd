@@ -1,0 +1,103 @@
+* Data validation for {{ project_name }}
+*
+* This do-file runs quality checks and validation on processed data.
+* NOTE: This script runs from the src/ directory. Data paths use ../data/
+
+* Import mint utilities (located in same src/ directory)
+do _mint_utils.do
+
+// Validation program
+capture program drop validate_dataset
+program define validate_dataset
+    args dataset_name
+
+    // Check for missing values
+    local missing_vars ""
+    foreach var of varlist _all {
+        count if missing(`var')
+        if r(N) > 0 {
+            local missing_vars "`missing_vars' `var'(`r(N)')"
+        }
+    }
+
+    if "`missing_vars'" != "" {
+        log_message "  Missing values in: `missing_vars'"
+    }
+
+    // Check for duplicates
+    duplicates report
+    if r(unique_value) < _N {
+        local duplicates = _N - r(unique_value)
+        log_message "  Found `duplicates' duplicate rows"
+    }
+
+    // Basic statistics
+    log_message "Validation for `dataset_name':"
+    log_message "  Rows: `c(N)'"
+    log_message "  Columns: `c(k)'"
+
+    // Count numeric variables
+    local numeric_count 0
+    foreach var of varlist _all {
+        capture confirm numeric variable `var'
+        if !_rc {
+            local ++numeric_count
+        }
+    }
+    log_message "  Numeric columns: `numeric_count'"
+
+    if "`missing_vars'" == "" & `duplicates' == 0 & `numeric_count' > 0 {
+        log_message "  [OK] No issues found"
+    }
+end
+
+// Main validation program
+capture program drop main
+program define main
+    * Initialize logging (filename will include any parameters passed)
+    ParameterAwareLogger validate
+    log_message "Starting data validation for {{ project_name }}..."
+
+    * Ensure data directories exist (using global paths from _mint_utils.do)
+    capture mkdir "$DATA_DIR"
+    capture mkdir "$RAW_DIR"
+    capture mkdir "$INTERMEDIATE_DIR"
+    capture mkdir "$FINAL_DIR"
+
+    log_message "Directories ready:"
+    log_message "  Raw data: $RAW_DIR"
+    log_message "  Intermediate: $INTERMEDIATE_DIR"
+    log_message "  Final data: $FINAL_DIR"
+
+    // TODO: Implement comprehensive validation logic
+    // - Load cleaned data from $INTERMEDIATE_DIR/
+    // - Run quality checks (missing values, duplicates, data types)
+    // - Business rule validation
+    // - Statistical checks
+    // - Save validation reports to $FINAL_DIR/
+
+    // Example validation
+    // local intermediate_files : dir "$INTERMEDIATE_DIR" files "*.csv"
+    // local all_valid = 1
+    //
+    // foreach file of local intermediate_files {
+    //     import delimited "$INTERMEDIATE_DIR/`file'", clear
+    //     validate_dataset "`file'"
+    //     // Note: Would need to track validation results across files
+    // }
+    //
+    // if `all_valid' {
+    //     display "[OK] All datasets passed validation"
+    // }
+    // else {
+    //     display "[FAIL] Some datasets failed validation - review issues above"
+    // }
+
+    log_message "Data validation completed successfully."
+    close_logger
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

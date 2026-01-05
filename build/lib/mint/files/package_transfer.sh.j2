@@ -1,0 +1,67 @@
+#!/bin/bash
+# Transfer packaging script for {{ full_project_name }}
+#
+# Creates secure transfer archives with SHA256 checksums.
+# Run this after pulling data with pull_data.sh.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Change to project root directory
+cd "$PROJECT_ROOT"
+
+# Add current directory to Python path for module imports
+export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
+
+echo "📦 Packaging data for transfer to {{ full_project_name }}"
+echo "Working directory: $PWD"
+echo
+
+# Check if Python is available
+if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+    echo "❌ Python not found. Please install Python 3.9+."
+    exit 1
+fi
+
+# Use python3 if available, otherwise python
+PYTHON_CMD="python3"
+if ! command -v python3 &> /dev/null; then
+    PYTHON_CMD="python"
+fi
+
+# Check if required packages are installed
+$PYTHON_CMD -c "import yaml, hashlib, tarfile" 2>/dev/null || {
+    echo "❌ Required packages not installed. Please run:"
+    echo "   pip install pyyaml"
+    exit 1
+}
+
+# Check for downloaded data
+if [ ! -f "enclave_manifest.yaml" ]; then
+    echo "❌ Enclave manifest not found. Run this from the enclave project root."
+    exit 1
+fi
+
+# Check if there's downloaded data to package
+if ! $PYTHON_CMD -c "
+import yaml
+with open('enclave_manifest.yaml') as f:
+    manifest = yaml.safe_load(f)
+downloaded = manifest.get('downloaded', [])
+if not downloaded:
+    print('❌ No downloaded data found. Run pull_data.sh first.')
+    exit(1)
+"; then
+    exit 1
+fi
+
+# Run the packaging script (located in src/ directory)
+echo "Creating transfer package..."
+$PYTHON_CMD -m src.package "$@"
+
+echo
+echo "✅ Transfer package created."
+echo "Transfer files are in the 'transfers/' directory."
+echo "Copy these files to the secure enclave via USB or secure transfer."

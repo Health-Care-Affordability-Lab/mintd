@@ -1,0 +1,276 @@
+"""Registry interaction for {{ full_project_name }}.
+
+Handles querying approved data products from the Data Commons Registry.
+"""
+
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+import yaml
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+ENCLAVE_MANIFEST = Path(__file__).parent.parent / "enclave_manifest.yaml"
+REGISTRY_CACHE_DIR = Path(__file__).parent.parent / ".registry_cache"
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def load_manifest() -> Dict:
+    """Load the enclave manifest file."""
+    if not ENCLAVE_MANIFEST.exists():
+        raise FileNotFoundError(f"Manifest not found: {ENCLAVE_MANIFEST}")
+
+    with open(ENCLAVE_MANIFEST, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def save_manifest(manifest: Dict) -> None:
+    """Save the enclave manifest file."""
+    with open(ENCLAVE_MANIFEST, 'w') as f:
+        yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+
+def get_registry_url() -> str:
+    """Get the configured registry URL from manifest."""
+    manifest = load_manifest()
+    registry_url = manifest.get('registry_url', '')
+
+    if not registry_url:
+        raise ValueError("No registry URL configured. Run 'mint create enclave --registry-url <url>' to set it.")
+
+    return registry_url
+
+
+def get_registry_cache_path() -> Path:
+    """Get the local registry cache directory."""
+    return REGISTRY_CACHE_DIR
+
+
+def convert_to_ssh_url(https_url: str) -> str:
+    """Convert HTTPS GitHub URL to SSH URL for authentication with SSH keys."""
+    if https_url.startswith('https://github.com/'):
+        # Extract org/repo from https://github.com/org/repo
+        path = https_url[len('https://github.com/'):]
+        # Remove .git suffix if present
+        if path.endswith('.git'):
+            path = path[:-4]
+        return f'git@github.com:{path}.git'
+    return https_url
+
+
+def clone_or_update_registry() -> Path:
+    """Clone or update the registry cache."""
+    registry_url = get_registry_url()
+    cache_path = get_registry_cache_path()
+
+    if cache_path.exists():
+        # Update existing cache
+        try:
+            import git
+            repo = git.Repo(cache_path)
+            repo.remotes.origin.pull()
+        except Exception as e:
+            print(f"Warning: Failed to update registry cache: {e}")
+    else:
+        # Clone new registry
+        try:
+            import git
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            ssh_url = convert_to_ssh_url(registry_url)
+            git.Repo.clone_from(ssh_url, cache_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to clone registry from {registry_url}: {e}")
+
+    return cache_path
+
+
+# =============================================================================
+# REGISTRY FUNCTIONS
+# =============================================================================
+
+def get_approved_products() -> List[Dict]:
+    """Get list of approved data products for this enclave."""
+    manifest = load_manifest()
+    return manifest.get('approved_products', [])
+
+
+def add_approved_product(repo_name: str, registry_entry: Optional[str] = None, stage: str = "final") -> None:
+    """Add a data product to the approved list."""
+    manifest = load_manifest()
+
+    # Check if already approved
+    approved = manifest.setdefault('approved_products', [])
+    existing = any(item['repo'] == repo_name for item in approved)
+
+    if existing:
+        print(f"Repository '{repo_name}' is already approved in this enclave.")
+        return
+
+    # Add to approved list
+    product = {
+        'repo': repo_name,
+        'registry_entry': registry_entry or f"catalog/data/{repo_name}.yaml",
+        'stage': stage
+    }
+    approved.append(product)
+
+    save_manifest(manifest)
+    print(f"✅ Added '{repo_name}' to approved products.")
+
+
+def remove_approved_product(repo_name: str) -> None:
+    """Remove a data product from the approved list."""
+    manifest = load_manifest()
+
+    approved = manifest.get('approved_products', [])
+    original_count = len(approved)
+    approved[:] = [item for item in approved if item['repo'] != repo_name]
+
+    if len(approved) < original_count:
+        save_manifest(manifest)
+        print(f"✅ Removed '{repo_name}' from approved products.")
+    else:
+        print(f"Repository '{repo_name}' was not found in approved products.")
+
+
+def query_registry_for_product(repo_name: str) -> Optional[Dict]:
+    """Query the registry for information about a specific data product."""
+    try:
+        cache_path = clone_or_update_registry()
+        catalog_path = cache_path / "catalog" / "data" / f"{repo_name}.yaml"
+
+        if not catalog_path.exists():
+            return None
+
+        with open(catalog_path, 'r') as f:
+            catalog_entry = yaml.safe_load(f)
+
+        return {
+            'repo': repo_name,
+            'exists': True,
+            'registry_entry': f"catalog/data/{repo_name}.yaml",
+            'description': catalog_entry.get('metadata', {}).get('description', f"Data product: {repo_name}"),
+            'latest_commit': "unknown",  # Would need git integration
+            'dvc_hash': "unknown",       # Would need DVC integration
+            'catalog_data': catalog_entry,
+        }
+    except Exception as e:
+        print(f"Warning: Failed to query registry for {repo_name}: {e}")
+        return None
+
+
+def list_available_products() -> List[Dict]:
+    """List all data products available in the registry."""
+    try:
+        cache_path = clone_or_update_registry()
+        catalog_data_path = cache_path / "catalog" / "data"
+
+        if not catalog_data_path.exists():
+            return []
+
+        products = []
+        for yaml_file in catalog_data_path.glob("*.yaml"):
+            try:
+                with open(yaml_file, 'r') as f:
+                    catalog_entry = yaml.safe_load(f)
+
+                repo_name = yaml_file.stem  # Remove .yaml extension
+                metadata = catalog_entry.get('metadata', {})
+
+                products.append({
+                    'repo': f"data_{repo_name}",
+                    'description': metadata.get('description', f"Data product: {repo_name}"),
+                    'type': 'data',
+                    'sensitivity': catalog_entry.get('storage', {}).get('sensitivity', 'unknown'),
+                    'tags': metadata.get('tags', []),
+                })
+            except Exception as e:
+                print(f"Warning: Failed to read catalog entry {yaml_file}: {e}")
+
+        return products
+
+    except Exception as e:
+        print(f"Warning: Failed to list registry products: {e}")
+        return []
+
+
+# =============================================================================
+# CLI INTERFACE
+# =============================================================================
+
+def main():
+    """Command-line interface for registry operations."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Registry operations for enclave")
+    parser.add_argument("--list-available", action="store_true",
+                       help="List all products available in registry")
+    parser.add_argument("--add", metavar="REPO",
+                       help="Add a product to approved list")
+    parser.add_argument("--remove", metavar="REPO",
+                       help="Remove a product from approved list")
+    parser.add_argument("--query", metavar="REPO",
+                       help="Query registry for product information")
+
+    args = parser.parse_args()
+
+    try:
+        if args.list_available:
+            products = list_available_products()
+            if not products:
+                print("No products found in registry.")
+                return
+
+            print("Available Data Products:")
+            print("-" * 40)
+            for product in products:
+                print(f"  {product['repo']}")
+                print(f"    {product['description']}")
+                print(f"    Type: {product['type']} | Sensitivity: {product['sensitivity']}")
+                print()
+
+        elif args.add:
+            add_approved_product(args.add)
+
+        elif args.remove:
+            remove_approved_product(args.remove)
+
+        elif args.query:
+            info = query_registry_for_product(args.query)
+            if info:
+                print(f"Registry Information for '{args.query}':")
+                print("-" * 40)
+                for key, value in info.items():
+                    print(f"  {key}: {value}")
+            else:
+                print(f"Product '{args.query}' not found in registry.")
+
+        else:
+            # Show approved products
+            approved = get_approved_products()
+            if not approved:
+                print("No approved products configured.")
+                print("Run 'mint enclave add <repo-name>' to add products.")
+                return
+
+            print("Approved Products for this Enclave:")
+            print("-" * 40)
+            for product in approved:
+                print(f"  {product['repo']}")
+                print(f"    Registry: {product['registry_entry']}")
+                print(f"    Stage: {product['stage']}")
+                print()
+
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

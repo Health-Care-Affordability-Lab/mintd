@@ -1,0 +1,64 @@
+#' Data ingestion for {{ project_name }}
+#'
+#' This script handles downloading and initial processing of raw data.
+#' NOTE: This script runs from the src/ directory. Data paths use ../data/
+
+# =============================================================================
+# UPDATING FOR NEW DATA (e.g., annual releases)
+# =============================================================================
+# Data versioning is handled by DVC. When new data becomes available:
+#
+# 1. Update this script to point to the new data source
+# 2. Run the pipeline: dvc repro
+# 3. Commit changes: git add . && git commit -m "Update to 2024 data"
+# 4. Push data and code: dvc push && git push
+#
+# DVC tracks all versions - use `dvc diff` to see changes between versions
+# and `git log` / `dvc checkout` to access previous versions.
+# =============================================================================
+
+# Import mint utilities (located in same src/ directory)
+source("_mint_utils.R")
+
+main <- function() {
+  # Initialize logging (validates directory and creates log file)
+  logger <- ParameterAwareLogger("ingest")
+  logger$log("Starting data ingestion for {{ project_name }}...")
+
+  # Ensure data directories exist (using global paths from _mint_utils.R)
+  paths <- get_data_paths()
+  lapply(paths, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
+
+  logger$log("Directories ready:")
+  logger$log("  Raw data: ", RAW_DIR)
+  logger$log("  Intermediate: ", INTERMEDIATE_DIR)
+  logger$log("  Final data: ", FINAL_DIR)
+
+  # TODO: Implement data ingestion logic
+  # - Download data using httr/curl
+  # - Extract archives using utils::unzip
+  # - Initial validation with readr
+  # - Save to RAW_DIR/
+
+  # Example:
+  # library(httr)
+  # library(readr)
+  #
+  # # Download data
+  # response <- GET("https://example.com/data.csv")
+  # raw_file <- file.path(RAW_DIR, "downloaded_data.csv")
+  # writeBin(content(response, "raw"), raw_file)
+  #
+  # # Quick validation
+  # df <- read_csv(raw_file)
+  # logger$log("Downloaded ", nrow(df), " rows with columns: ", paste(names(df), collapse = ", "))
+
+  logger$log("Data ingestion completed successfully.")
+  logger$close()
+}
+
+if (!interactive()) {
+  main()
+}

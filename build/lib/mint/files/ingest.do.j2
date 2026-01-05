@@ -1,0 +1,63 @@
+* Data ingestion for {{ project_name }}
+*
+* This do-file handles downloading and initial processing of raw data.
+* NOTE: This script runs from the src/ directory. Data paths use ../data/
+
+* =============================================================================
+* UPDATING FOR NEW DATA (e.g., annual releases)
+* =============================================================================
+* Data versioning is handled by DVC. When new data becomes available:
+*
+* 1. Update this script to point to the new data source
+* 2. Run the pipeline: dvc repro
+* 3. Commit changes: git add . && git commit -m "Update to 2024 data"
+* 4. Push data and code: dvc push && git push
+*
+* DVC tracks all versions - use `dvc diff` to see changes between versions
+* and `git log` / `dvc checkout` to access previous versions.
+* =============================================================================
+
+* Import mint utilities (located in same src/ directory)
+do _mint_utils.do
+
+// Main ingestion program
+capture program drop main
+program define main
+    * Initialize logging (filename will include any parameters passed)
+    ParameterAwareLogger ingest
+    log_message "Starting data ingestion for {{ project_name }}..."
+
+    * Ensure data directories exist (using global paths from _mint_utils.do)
+    capture mkdir "$DATA_DIR"
+    capture mkdir "$RAW_DIR"
+    capture mkdir "$INTERMEDIATE_DIR"
+    capture mkdir "$FINAL_DIR"
+
+    log_message "Directories ready:"
+    log_message "  Raw data: $RAW_DIR"
+    log_message "  Intermediate: $INTERMEDIATE_DIR"
+    log_message "  Final data: $FINAL_DIR"
+
+    // TODO: Implement data ingestion logic
+    // - Download data using copy/copyfiles
+    // - Extract archives using unzip
+    // - Initial validation using insheet/import
+    // - Save to $RAW_DIR/
+
+    // Example:
+    // // Download data
+    // copy "https://example.com/data.csv" "$RAW_DIR/downloaded_data.csv", replace
+    //
+    // // Quick validation
+    // import delimited "$RAW_DIR/downloaded_data.csv", clear
+    // describe
+    // log_message "Downloaded `c(N)' observations"
+
+    log_message "Data ingestion completed successfully."
+    close_logger
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

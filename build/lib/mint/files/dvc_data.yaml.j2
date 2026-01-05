@@ -1,0 +1,73 @@
+# DVC Pipeline Configuration for {{ project_name }}
+# 
+# This file defines the data pipeline stages. Commands are run from the src/ 
+# directory to keep script paths simple and consistent.
+#
+# Platform: {{ platform_os }}
+# Command separator: {{ command_sep }}
+{% if language == "stata" %}
+# Stata executable: {{ stata_executable }}
+{% endif %}
+
+stages:
+  ingest:
+{% if language == "python" %}
+    cmd: cd src {{ command_sep }} python ingest.py
+{% elif language == "r" %}
+    cmd: cd src {{ command_sep }} Rscript ingest.R
+{% elif language == "stata" %}
+    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do ingest.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - src/ingest.py
+{% elif language == "r" %}
+      - src/ingest.R
+{% elif language == "stata" %}
+      - src/ingest.do
+      - src/_mint_utils.do
+{% endif %}
+    outs:
+      - data/raw/
+
+  clean:
+{% if language == "python" %}
+    cmd: cd src {{ command_sep }} python clean.py
+{% elif language == "r" %}
+    cmd: cd src {{ command_sep }} Rscript clean.R
+{% elif language == "stata" %}
+    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do clean.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - src/clean.py
+{% elif language == "r" %}
+      - src/clean.R
+{% elif language == "stata" %}
+      - src/clean.do
+      - src/_mint_utils.do
+{% endif %}
+      - data/raw/
+    outs:
+      - data/intermediate/
+
+  validate:
+{% if language == "python" %}
+    cmd: cd src {{ command_sep }} python validate.py
+{% elif language == "r" %}
+    cmd: cd src {{ command_sep }} Rscript validate.R
+{% elif language == "stata" %}
+    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do validate.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - src/validate.py
+{% elif language == "r" %}
+      - src/validate.R
+{% elif language == "stata" %}
+      - src/validate.do
+      - src/_mint_utils.do
+{% endif %}
+      - data/intermediate/
+    outs:
+      - data/final/

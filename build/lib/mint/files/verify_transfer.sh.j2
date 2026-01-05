@@ -1,0 +1,114 @@
+#!/bin/bash
+# Transfer verification script for {{ full_project_name }}
+#
+# Verifies transfer integrity and updates enclave manifest.
+# Run this after unpacking transfer with unpack_transfer.sh.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Change to project root directory
+cd "$PROJECT_ROOT"
+
+# Add current directory to Python path for module imports
+export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
+
+echo "🔍 Verifying transfer for {{ full_project_name }}"
+echo "Working directory: $PWD"
+echo
+
+# Check arguments
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <unpack-directory>"
+    echo
+    echo "Example: $0 transfer_temp_20250115_143022"
+    exit 1
+fi
+
+UNPACK_DIR="$1"
+
+# Check if directory exists
+if [ ! -d "$UNPACK_DIR" ]; then
+    echo "❌ Unpack directory not found: $UNPACK_DIR"
+    exit 1
+fi
+
+# Check if Python is available
+if ! command -v python3 &> /dev/null && ! command -v python &> /dev/null; then
+    echo "❌ Python not found. Please install Python 3.9+."
+    exit 1
+fi
+
+# Use python3 if available, otherwise python
+PYTHON_CMD="python3"
+if ! command -v python3 &> /dev/null; then
+    PYTHON_CMD="python"
+fi
+
+# Check if required packages are installed
+$PYTHON_CMD -c "import yaml, hashlib" 2>/dev/null || {
+    echo "❌ Required packages not installed. Please run:"
+    echo "   pip install pyyaml"
+    exit 1
+}
+
+# Run verification (verify.py is in src/ directory)
+echo "Verifying transfer integrity..."
+if $PYTHON_CMD -m src.verify "$UNPACK_DIR"; then
+    echo
+    echo "✅ Transfer verification successful!"
+
+    # Move data to final location
+    echo "Moving verified data to enclave..."
+
+    # Read transfer manifest to know what repos are included
+    TRANSFER_MANIFEST="$UNPACK_DIR/_transfer_manifest.yaml"
+    if [ -f "$TRANSFER_MANIFEST" ]; then
+        # Extract data for each repo
+        $PYTHON_CMD -c "
+import yaml
+import shutil
+from pathlib import Path
+
+with open('$TRANSFER_MANIFEST') as f:
+    manifest = yaml.safe_load(f)
+
+unpack_dir = Path('$UNPACK_DIR')
+data_dir = Path('data')
+
+for content in manifest.get('contents', []):
+    repo_name = content['repo']
+    dvc_hash = content['dvc_hash']
+    transfer_date = manifest['transfer_date'][:10]  # YYYY-MM-DD
+
+    # Source and destination paths
+    src_path = unpack_dir / repo_name
+    dst_path = data_dir / repo_name / f'{dvc_hash[:7]}-{transfer_date}'
+
+    if src_path.exists():
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        if dst_path.exists():
+            shutil.rmtree(dst_path)
+        shutil.move(str(src_path), str(dst_path))
+        print(f'Moved {repo_name} to {dst_path}')
+"
+
+        echo "✅ Data moved to enclave."
+    fi
+
+    # Clean up unpack directory
+    echo "Cleaning up temporary files..."
+    rm -rf "$UNPACK_DIR"
+
+    echo
+    echo "🎉 Transfer complete! Data is now available in the enclave."
+    echo "Run 'python src/verify.py --status' to see enclave status."
+
+else
+    echo
+    echo "❌ Transfer verification FAILED!"
+    echo "The transfer may be corrupted. Please try again."
+    exit 1
+fi

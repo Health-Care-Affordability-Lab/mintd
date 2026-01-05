@@ -1,0 +1,104 @@
+# {{ full_project_name }}
+
+Secure data consumption workspace for air-gapped enclave environments.
+
+## Overview
+
+This enclave workspace manages versioned data transfers from the Data Commons Registry to secure, air-gapped environments. Data is pulled on a networked machine, packaged for physical transfer, and verified upon receipt in the enclave.
+
+## Key Features
+
+- **Registry Integration**: Discover and pull approved data products from the Data Commons Registry
+- **Version Management**: Keep all versions for reproducibility, with duplicate warnings
+- **Bulk Operations**: Pull latest versions of all approved data products with single command
+- **Data Integrity**: SHA256 checksum validation for secure transfers
+- **Audit Trail**: Complete manifest of transferred data versions
+
+## Workflow
+
+### 1. Add Data Products to Enclave
+
+Add approved data products to the enclave manifest:
+
+```bash
+# Add a specific data product
+mint enclave add data_cms-provider-data-service
+
+# Or edit enclave_manifest.yaml directly to add:
+approved_products:
+  - repo: "data_cms-provider-data-service"
+    registry_entry: "catalog/data/data_cms-provider-data-service.yaml"
+    stage: "final"
+```
+
+### 2. Pull Data (Networked Machine)
+
+Pull latest versions of data products:
+
+```bash
+# Pull all approved products
+mint enclave pull --all
+
+# Pull specific product (warns if already exists)
+mint enclave pull data_cms-provider-data-service
+```
+
+### 3. Package for Transfer (Networked Machine)
+
+Create transfer archive with checksums:
+
+```bash
+mint enclave package
+# Creates transfers/transfer-YYYY-MM-DD.tar.gz
+```
+
+### 4. Physical Transfer
+
+Copy the transfer archive to the enclave via USB, secure file transfer, etc.
+
+### 5. Unpack and Verify (Enclave)
+
+```bash
+# On enclave machine
+./scripts/unpack_transfer.sh transfer-YYYY-MM-DD.tar.gz
+./scripts/verify_transfer.sh
+```
+
+## Data Organization
+
+```
+data/
+└── {repo_name}/
+    └── {dvc_hash}-{transfer_date}/
+        ├── _checksums.sha256
+        └── final/
+            └── *.dta, *.csv, etc.
+```
+
+## Manifest Structure
+
+The `enclave_manifest.yaml` tracks all data operations:
+
+- **approved_products**: Data products this enclave can access
+- **downloaded**: Versions pulled to networked repo
+- **transferred**: Versions verified on enclave
+
+## Security Notes
+
+- Data transfers require physical media (no network on enclave)
+- All transfers are verified with SHA256 checksums
+- Complete audit trail maintained in manifest
+- Registry approval required before data can be accessed
+
+## Requirements
+
+- Python 3.9+
+- Network access (for pulling data)
+- Physical transfer capability (USB, secure file transfer)
+
+## Getting Help
+
+```bash
+mint enclave --help          # Show enclave commands
+mint enclave list           # Show approved products
+```

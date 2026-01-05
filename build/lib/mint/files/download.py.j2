@@ -1,0 +1,326 @@
+"""Data download and management for {{ full_project_name }}.
+
+Handles pulling approved data products from registry sources via DVC.
+Supports duplicate checking and bulk operations.
+"""
+
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+import yaml
+import hashlib
+import git
+import dvc.api
+import dvc.repo
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+ENCLAVE_MANIFEST = Path(__file__).parent.parent / "enclave_manifest.yaml"
+DATA_DIR = Path(__file__).parent.parent / "data"
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def load_manifest() -> Dict:
+    """Load the enclave manifest file."""
+    if not ENCLAVE_MANIFEST.exists():
+        raise FileNotFoundError(f"Manifest not found: {ENCLAVE_MANIFEST}")
+
+    with open(ENCLAVE_MANIFEST, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def save_manifest(manifest: Dict) -> None:
+    """Save the enclave manifest file."""
+    with open(ENCLAVE_MANIFEST, 'w') as f:
+        yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+
+def get_repo_info(repo_name: str) -> Dict:
+    """Get repository information from registry."""
+    # Import registry functions
+    from .registry import query_registry_for_product
+
+    registry_info = query_registry_for_product(repo_name)
+
+    if not registry_info or not registry_info.get('exists'):
+        raise FileNotFoundError(f"Registry entry not found for: {repo_name}")
+
+    catalog_data = registry_info.get('catalog_data', {})
+
+    # Extract repository and storage information
+    repository = catalog_data.get('repository', {})
+    storage = catalog_data.get('storage', {})
+
+    return {
+        'repo_url': repository.get('github_url', ''),
+        'dvc_remote': storage.get('dvc', {}).get('remote_name', ''),
+        'data_stage': 'final',  # Default to final stage
+    }
+
+
+def convert_to_ssh_url(https_url: str) -> str:
+    """Convert HTTPS GitHub URL to SSH URL for authentication with SSH keys."""
+    if https_url.startswith('https://github.com/'):
+        # Extract org/repo from https://github.com/org/repo
+        path = https_url[len('https://github.com/'):]
+        # Remove .git suffix if present
+        if path.endswith('.git'):
+            path = path[:-4]
+        return f'git@github.com:{path}.git'
+    return https_url
+
+
+def clone_or_update_repo(repo_name: str, repo_url: str) -> Path:
+    """Clone or update a data repository."""
+    repo_dir = DATA_DIR / f".{repo_name}_staging"
+
+    # Convert HTTPS URL to SSH URL for authentication
+    ssh_url = convert_to_ssh_url(repo_url)
+
+    if repo_dir.exists():
+        # Update existing repo
+        repo = git.Repo(repo_dir)
+        repo.remotes.origin.pull()
+    else:
+        # Clone new repo
+        repo = git.Repo.clone_from(ssh_url, repo_dir)
+
+    return repo_dir
+
+
+def get_dvc_hash(repo_dir: Path, stage: str) -> Tuple[str, str]:
+    """Get DVC hash and commit for a stage."""
+    repo = dvc.repo.Repo(repo_dir)
+
+    # Get the output files for this stage
+    pipeline = repo.get_pipeline()
+    stage_obj = pipeline.get_stage(stage, "")
+
+    if not stage_obj:
+        raise ValueError(f"Stage '{stage}' not found in pipeline")
+
+    # Get hash of stage outputs
+    output_hashes = []
+    for output in stage_obj.outs:
+        if hasattr(output, 'checksum'):
+            output_hashes.append(output.checksum)
+
+    if not output_hashes:
+        raise ValueError(f"No output checksums found for stage '{stage}'")
+
+    # Combine hashes for deterministic stage hash
+    combined = "".join(sorted(output_hashes))
+    stage_hash = hashlib.sha256(combined.encode()).hexdigest()[:7]
+
+    # Get current commit
+    git_repo = git.Repo(repo_dir)
+    commit_hash = git_repo.head.commit.hexsha[:7]
+
+    return stage_hash, commit_hash
+
+
+def pull_dvc_data(repo_dir: Path, stage: str) -> None:
+    """Pull DVC data for a specific stage."""
+    cmd = ["dvc", "pull", f"{stage}.dvc"]
+    result = subprocess.run(cmd, cwd=repo_dir, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"DVC pull failed: {result.stderr}")
+
+
+def check_duplicate_version(repo_name: str, dvc_hash: str, manifest: Dict) -> bool:
+    """Check if a version has already been transferred to the enclave."""
+    transferred = manifest.get('transferred', [])
+    for item in transferred:
+        if (item['repo'] == repo_name and item['dvc_hash'] == dvc_hash):
+            return True
+    return False
+
+
+def add_to_downloaded(repo_name: str, dvc_hash: str, git_commit: str, manifest: Dict) -> None:
+    """Add a version to the downloaded section of manifest."""
+    downloaded = manifest.setdefault('downloaded', [])
+
+    # Remove any existing entry for this repo
+    downloaded[:] = [d for d in downloaded if d['repo'] != repo_name]
+
+    # Add new entry
+    downloaded.append({
+        'repo': repo_name,
+        'dvc_hash': dvc_hash,
+        'git_commit': git_commit,
+        'downloaded_at': datetime.now().isoformat(),
+    })
+
+
+# =============================================================================
+# MAIN FUNCTIONS
+# =============================================================================
+
+def pull_single_repo(repo_name: str, verbose: bool = True) -> None:
+    """Pull latest version of a single repository."""
+    manifest = load_manifest()
+
+    # Check if repo is approved
+    approved = manifest.get('approved_products', [])
+    repo_config = None
+    for item in approved:
+        if item['repo'] == repo_name:
+            repo_config = item
+            break
+
+    if not repo_config:
+        raise ValueError(f"Repository '{repo_name}' not in approved_products list")
+
+    if verbose:
+        print(f"Pulling latest version of {repo_name}...")
+
+    try:
+        # Get repo information from registry
+        repo_info = get_repo_info(repo_name)
+        repo_url = repo_info['repo_url']
+        data_stage = repo_config.get('stage', repo_info.get('data_stage', 'final'))
+
+        # Clone/update repository
+        repo_dir = clone_or_update_repo(repo_name, repo_url)
+
+        # Get current DVC hash
+        dvc_hash, git_commit = get_dvc_hash(repo_dir, data_stage)
+
+        # Check for duplicates
+        if check_duplicate_version(repo_name, dvc_hash, manifest):
+            print(f"⚠ Warning: Version {dvc_hash[:7]} of {repo_name} already exists in the enclave")
+            print(f"  No new data to pull.")
+            return
+
+        # Pull DVC data
+        pull_dvc_data(repo_dir, data_stage)
+
+        # Update manifest
+        add_to_downloaded(repo_name, dvc_hash, git_commit, manifest)
+        save_manifest(manifest)
+
+        if verbose:
+            print(f"✅ Downloaded {repo_name} version {dvc_hash[:7]} (commit: {git_commit[:7]})")
+
+    except Exception as e:
+        print(f"❌ Failed to pull {repo_name}: {e}")
+        raise
+
+
+def pull_all_repos(verbose: bool = True) -> None:
+    """Pull latest versions of all approved repositories."""
+    manifest = load_manifest()
+    approved = manifest.get('approved_products', [])
+
+    if not approved:
+        print("No approved products found in manifest.")
+        return
+
+    if verbose:
+        print(f"Checking {len(approved)} approved data products...")
+
+    updated = 0
+    current = 0
+
+    for repo_config in approved:
+        repo_name = repo_config['repo']
+
+        try:
+            # Get current version info
+            repo_info = get_repo_info(repo_name)
+            repo_dir = clone_or_update_repo(repo_name, repo_info['repo_url'])
+            data_stage = repo_config.get('stage', repo_info.get('data_stage', 'final'))
+            dvc_hash, git_commit = get_dvc_hash(repo_dir, data_stage)
+
+            # Check current enclave status
+            current_transferred = None
+            for item in manifest.get('transferred', []):
+                if item['repo'] == repo_name:
+                    current_transferred = item['dvc_hash']
+                    break
+
+            if current_transferred == dvc_hash:
+                if verbose:
+                    print(f"  {repo_name}:")
+                    print(f"    Current: {current_transferred[:7]} (same)")
+                    print("    → Already up to date ✓")
+                current += 1
+                continue
+
+            # Check if already downloaded
+            downloaded = manifest.get('downloaded', [])
+            already_downloaded = any(d['repo'] == repo_name and d['dvc_hash'] == dvc_hash
+                                   for d in downloaded)
+
+            if already_downloaded:
+                if verbose:
+                    print(f"  {repo_name}:")
+                    print(f"    Current: {current_transferred[:7] if current_transferred else 'none'}")
+                    print(f"    Latest:  {dvc_hash[:7]} (already downloaded)")
+                continue
+
+            # Pull new version
+            if verbose:
+                print(f"  {repo_name}:")
+                print(f"    Current: {current_transferred[:7] if current_transferred else 'none'}")
+                print(f"    Latest:  {dvc_hash[:7]}")
+                print("    → Pulling new version...")
+
+            # Pull DVC data
+            pull_dvc_data(repo_dir, data_stage)
+
+            # Update manifest
+            add_to_downloaded(repo_name, dvc_hash, git_commit, manifest)
+            updated += 1
+
+        except Exception as e:
+            print(f"❌ Failed to check {repo_name}: {e}")
+
+    save_manifest(manifest)
+
+    if verbose:
+        print(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"Summary: {updated} updated, {current} already current")
+        if updated > 0:
+            print("Ready to package for transfer.")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+
+# =============================================================================
+# CLI INTERFACE
+# =============================================================================
+
+def main():
+    """Command-line interface for download operations."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Download data products for enclave")
+    parser.add_argument("repo", nargs="?", help="Repository name to pull")
+    parser.add_argument("--all", action="store_true", help="Pull all approved repositories")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet output")
+
+    args = parser.parse_args()
+
+    try:
+        if args.all:
+            pull_all_repos(verbose=not args.quiet)
+        elif args.repo:
+            pull_single_repo(args.repo, verbose=not args.quiet)
+        else:
+            parser.print_help()
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

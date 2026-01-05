@@ -1,0 +1,309 @@
+#' Mint utility functions for {{ project_name }}.
+#'
+#' This module provides common utilities used across all project scripts.
+#' DO NOT MODIFY - This file is managed by mint and will be overwritten.
+#'
+#' NOTE: Scripts are expected to run from the src/ directory.
+#' Data paths should use "../data/" or the get_data_paths() function.
+
+library(R6)
+
+# =============================================================================
+# PATH DEFINITIONS (relative to src/ where scripts run from)
+# =============================================================================
+
+DATA_DIR <- "../data"
+RAW_DIR <- "../data/raw"
+INTERMEDIATE_DIR <- "../data/intermediate"
+FINAL_DIR <- "../data/final"
+LOGS_DIR <- "../logs"
+
+#' Get standard data directory paths
+#'
+#' @return Named list with paths: data, raw, intermediate, final, logs
+#' @export
+get_data_paths <- function() {
+  list(
+    data = DATA_DIR,
+    raw = RAW_DIR,
+    intermediate = INTERMEDIATE_DIR,
+    final = FINAL_DIR,
+    logs = LOGS_DIR
+  )
+}
+
+#' Validate we're running from src/ directory and return project root
+#'
+#' This function checks if we're in the correct directory structure:
+#' - Preferred: Running from src/ (project indicators in parent)
+#' - Fallback: Running from project root (for backwards compatibility)
+#'
+#' @return Character string of project root directory
+#' @export
+setup_project_directory <- function() {
+  current_dir <- getwd()
+
+  # Look for project root indicators
+  root_indicators <- c("metadata.json", ".git")
+
+  # Check if we're in src/ (project indicators in parent directory)
+  is_in_src <- FALSE
+  for (indicator in root_indicators) {
+    if (file.exists(file.path("..", indicator))) {
+      is_in_src <- TRUE
+      break
+    }
+  }
+
+  if (is_in_src) {
+    # We're in src/, paths are already correct
+    return(normalizePath(file.path(current_dir, "..")))
+  }
+
+  # Check if we're in project root (backwards compatibility)
+  root_found <- FALSE
+  for (indicator in root_indicators) {
+    if (file.exists(indicator)) {
+      root_found <- TRUE
+      break
+    }
+  }
+
+  if (root_found) {
+    # Update paths for project-root execution
+    DATA_DIR <<- "data"
+    RAW_DIR <<- "data/raw"
+    INTERMEDIATE_DIR <<- "data/intermediate"
+    FINAL_DIR <<- "data/final"
+    LOGS_DIR <<- "logs"
+    return(normalizePath(current_dir))
+  }
+
+  # Not in a valid location
+  stop(
+    paste0(
+      "Not running from expected directory.\n",
+      "Scripts should be run from src/ directory.\n",
+      "Current directory: ", current_dir, "\n",
+      "Please cd to the project's src/ directory and try again."
+    )
+  )
+}
+
+#' Parameter-aware logger class
+ParameterAwareLogger <- R6Class("ParameterAwareLogger",
+  public = list(
+    script_name = NULL,
+    start_time = NULL,
+    project_root = NULL,
+    logs_dir = NULL,
+    params_suffix = NULL,
+    log_path = NULL,
+    log_conn = NULL,
+
+    #' Initialize logger
+    #' @param script_name Name of the script
+    initialize = function(script_name) {
+      self$script_name <- script_name
+      self$start_time <- Sys.time()
+      self$project_root <- setup_project_directory()
+
+      # Create logs directory using global LOGS_DIR path
+      self$logs_dir <- LOGS_DIR
+      if (!dir.exists(self$logs_dir)) {
+        dir.create(self$logs_dir, recursive = TRUE)
+      }
+
+      # Parse command line arguments for parameters
+      args <- commandArgs(trailingOnly = TRUE)
+
+      params <- character(0)
+
+      # Look for common parameter patterns
+      for (arg in args) {
+        if (grepl("^--year=", arg)) {
+          params <- c(params, sub("^--year=", "", arg))
+        } else if (grepl("^--version=", arg)) {
+          params <- c(params, sub("^--version=", "", arg))
+        } else if (grepl("^--param=", arg)) {
+          params <- c(params, sub("^--param=", "", arg))
+        } else if (grepl("^-y", arg) && length(args) > which(args == arg)) {
+          params <- c(params, args[which(args == arg) + 1])
+        } else if (!startsWith(arg, "-") && nchar(arg) <= 10) {
+          # Positional argument that might be a parameter (like year)
+          params <- c(params, arg)
+        }
+      }
+
+      self$params_suffix <- if (length(params) > 0) paste(params, collapse = "_") else NULL
+
+      # Create log filename
+      if (!is.null(self$params_suffix)) {
+        log_filename <- paste0(self$script_name, "_", self$params_suffix, ".log")
+      } else {
+        timestamp <- format(self$start_time, "%Y%m%d_%H%M%S")
+        log_filename <- paste0(self$script_name, "_", timestamp, ".log")
+      }
+
+      self$log_path <- file.path(self$logs_dir, log_filename)
+
+      # Initialize log file
+      self$log_conn <- file(self$log_path, open = "wt")
+
+      # Write header
+      header <- paste0(
+        paste(rep("=", 80), collapse = ""), "\n",
+        "Script: ", self$script_name, "\n",
+        "Command: ", paste(commandArgs(), collapse = " "), "\n",
+        "Working directory: ", getwd(), "\n",
+        "R version: ", R.version.string, "\n",
+        "Start time: ", format(self$start_time, "%Y-%m-%d %H:%M:%S"), "\n",
+        paste(rep("=", 80), collapse = ""), "\n"
+      )
+
+      cat(header, file = self$log_conn)
+    },
+
+    #' Log a message
+    #' @param message Message to log
+    #' @param level Log level (info, warning, error)
+    log = function(message, level = "info") {
+      timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+      log_line <- paste0("[", timestamp, "] ", toupper(level), ": ", message, "\n")
+
+      cat(log_line, file = self$log_conn)
+      cat(log_line)  # Also print to console
+    },
+
+    #' Close the logger
+    close = function() {
+      end_time <- Sys.time()
+      duration <- difftime(end_time, self$start_time, units = "secs")
+
+      footer <- paste0(
+        paste(rep("=", 80), collapse = ""), "\n",
+        "End time: ", format(end_time, "%Y-%m-%d %H:%M:%S"), "\n",
+        "Duration: ", round(as.numeric(duration), 2), " seconds\n",
+        paste(rep("=", 80), collapse = ""), "\n"
+      )
+
+      cat(footer, file = self$log_conn)
+      close(self$log_conn)
+    }
+  )
+)
+
+#' Generate data schema from file
+#'
+#' @param data_path Path to data file
+#' @param output_path Optional path to save schema JSON
+#' @return List containing schema information
+#' @export
+generate_data_schema <- function(data_path, output_path = NULL) {
+  tryCatch({
+    # Read data based on file extension
+    ext <- tolower(tools::file_ext(data_path))
+
+    if (ext == "csv") {
+      df <- read.csv(data_path, stringsAsFactors = FALSE)
+    } else if (ext == "json") {
+      df <- jsonlite::fromJSON(data_path)
+      if (!is.data.frame(df)) {
+        stop("JSON file does not contain a data frame")
+      }
+    } else if (ext %in% c("xlsx", "xls")) {
+      df <- readxl::read_excel(data_path)
+    } else if (ext == "rds") {
+      df <- readRDS(data_path)
+    } else if (ext == "dta") {
+      df <- haven::read_dta(data_path)
+    } else {
+      stop("Unsupported file format: ", ext)
+    }
+
+    # Generate schema
+    schema <- list(
+      filename = basename(data_path),
+      filepath = normalizePath(data_path),
+      observations = nrow(df),
+      columns = ncol(df),
+      variables = list()
+    )
+
+    for (col_name in colnames(df)) {
+      col_data <- df[[col_name]]
+
+      # Basic type detection
+      if (is.integer(col_data)) {
+        var_type <- "integer"
+      } else if (is.numeric(col_data)) {
+        var_type <- "numeric"
+      } else if (is.character(col_data)) {
+        var_type <- "string"
+      } else if (is.logical(col_data)) {
+        var_type <- "boolean"
+      } else if (inherits(col_data, "Date")) {
+        var_type <- "date"
+      } else if (inherits(col_data, "POSIXct")) {
+        var_type <- "datetime"
+      } else {
+        var_type <- typeof(col_data)
+      }
+
+      # Generate basic label from column name
+      label <- tools::toTitleCase(gsub("[._-]", " ", col_name))
+
+      variable_info <- list(
+        name = col_name,
+        type = var_type,
+        label = label,
+        missing_count = sum(is.na(col_data)),
+        unique_values = if (is.character(col_data)) length(unique(col_data)) else NULL
+      )
+
+      # Add numeric statistics for numeric columns
+      if (var_type %in% c("integer", "numeric")) {
+        variable_info <- c(variable_info, list(
+          min = if (all(is.na(col_data))) NULL else min(col_data, na.rm = TRUE),
+          max = if (all(is.na(col_data))) NULL else max(col_data, na.rm = TRUE),
+          mean = if (all(is.na(col_data))) NULL else mean(col_data, na.rm = TRUE),
+          sd = if (all(is.na(col_data))) NULL else sd(col_data, na.rm = TRUE)
+        ))
+      }
+
+      schema$variables <- c(schema$variables, list(variable_info))
+    }
+
+    # Save schema if output path provided
+    if (!is.null(output_path)) {
+      dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+      jsonlite::write_json(schema, output_path, pretty = TRUE, auto_unbox = TRUE)
+    }
+
+    return(schema)
+
+  }, error = function(e) {
+    stop("Failed to generate schema for ", data_path, ": ", e$message)
+  })
+}
+
+#' Find data files in a directory
+#'
+#' @param directory Directory to search
+#' @param extensions File extensions to look for
+#' @return Character vector of data file paths
+#' @export
+find_data_files <- function(directory, extensions = NULL) {
+  if (is.null(extensions)) {
+    extensions <- c("csv", "json", "xlsx", "xls", "dta", "rds", "sav")
+  }
+
+  files <- character(0)
+  for (ext in extensions) {
+    pattern <- paste0("*.", ext)
+    found <- list.files(directory, pattern = pattern, recursive = TRUE, full.names = TRUE)
+    files <- c(files, found)
+  }
+
+  return(sort(files))
+}

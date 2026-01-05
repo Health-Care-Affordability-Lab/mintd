@@ -1,0 +1,328 @@
+"""Data verification for {{ full_project_name }}.
+
+Validates transfer integrity using SHA256 checksums and updates manifest.
+"""
+
+import sys
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+import yaml
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+ENCLAVE_MANIFEST = Path(__file__).parent.parent / "enclave_manifest.yaml"
+DATA_DIR = Path(__file__).parent.parent / "data"
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def load_manifest() -> Dict:
+    """Load the enclave manifest file."""
+    if not ENCLAVE_MANIFEST.exists():
+        raise FileNotFoundError(f"Manifest not found: {ENCLAVE_MANIFEST}")
+
+    with open(ENCLAVE_MANIFEST, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def save_manifest(manifest: Dict) -> None:
+    """Save the enclave manifest file."""
+    with open(ENCLAVE_MANIFEST, 'w') as f:
+        yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+
+def calculate_file_hash(filepath: Path) -> str:
+    """Calculate SHA256 hash of a file."""
+    hash_sha256 = hashlib.sha256()
+
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_sha256.update(chunk)
+
+    return hash_sha256.hexdigest()
+
+
+def load_checksums(checksums_file: Path) -> Dict[str, str]:
+    """Load checksums from a .sha256 file."""
+    checksums = {}
+
+    if not checksums_file.exists():
+        raise FileNotFoundError(f"Checksums file not found: {checksums_file}")
+
+    with open(checksums_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            # Format: "hash  filepath"
+            parts = line.split('  ', 1)
+            if len(parts) == 2:
+                hash_value, filepath = parts
+                checksums[filepath.strip()] = hash_value.strip()
+
+    return checksums
+
+
+def verify_file(filepath: Path, expected_hash: str) -> str:
+    """Verify a single file against its expected hash.
+
+    Returns:
+        "verified": File exists and hash matches
+        "missing": File does not exist
+        "failed": File exists but hash does not match
+    """
+    if not filepath.exists():
+        print(f"❌ Missing file: {filepath}")
+        return "missing"
+
+    actual_hash = calculate_file_hash(filepath)
+
+    if actual_hash != expected_hash:
+        print(f"❌ Hash mismatch: {filepath}")
+        print(f"    Expected: {expected_hash}")
+        print(f"    Actual:   {actual_hash}")
+        return "failed"
+
+    return "verified"
+
+
+def verify_directory(base_path: Path, checksums: Dict[str, str]) -> Tuple[int, int, int]:
+    """Verify all files in a directory against checksums.
+
+    Returns: (verified_count, failed_count, missing_count)
+    """
+    verified = 0
+    failed = 0
+    missing = 0
+
+    for filepath_str, expected_hash in checksums.items():
+        filepath = base_path / filepath_str
+
+        result = verify_file(filepath, expected_hash)
+        if result == "verified":
+            verified += 1
+        elif result == "missing":
+            missing += 1
+        else:  # "failed" - hash mismatch
+            failed += 1
+
+    # Check for extra files (not in checksums)
+    for filepath in base_path.rglob("*"):
+        if filepath.is_file():
+            relative_path = filepath.relative_to(base_path)
+            if str(relative_path) not in checksums:
+                print(f"⚠ Extra file found: {relative_path}")
+
+    return verified, failed, missing
+
+
+def find_transfer_data(transfer_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """Find checksums and manifest files in transfer directory."""
+    checksums_file = None
+    manifest_file = None
+
+    for file_path in transfer_dir.glob("*"):
+        if file_path.name == "_checksums.sha256":
+            checksums_file = file_path
+        elif file_path.name == "_transfer_manifest.yaml":
+            manifest_file = file_path
+
+    return checksums_file, manifest_file
+
+
+def load_transfer_manifest(manifest_file: Path) -> Dict:
+    """Load transfer manifest."""
+    with open(manifest_file, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def update_transferred_manifest(transfer_manifest: Dict, manifest: Dict) -> None:
+    """Update the main manifest with transferred information."""
+    transferred = manifest.setdefault('transferred', [])
+    transfer_date = datetime.now().strftime("%Y-%m-%d")
+    transfer_id = transfer_manifest.get('transfer_id', f"transfer-{transfer_date}")
+
+    # Add new transferred entries
+    for content in transfer_manifest.get('contents', []):
+        # Check if already exists (avoid duplicates)
+        existing = any(
+            t['repo'] == content['repo'] and t['dvc_hash'] == content['dvc_hash']
+            for t in transferred
+        )
+
+        if not existing:
+            transferred.append({
+                'repo': content['repo'],
+                'dvc_hash': content['dvc_hash'],
+                'transfer_date': transfer_date,
+                'transfer_id': transfer_id,
+                'path': f"data/{content['repo']}/{content['dvc_hash']}-{transfer_date}/",
+                'verified': True,
+                'verified_at': datetime.now().isoformat(),
+            })
+
+
+# =============================================================================
+# MAIN FUNCTIONS
+# =============================================================================
+
+def verify_transfer(transfer_dir: Path, verbose: bool = True) -> bool:
+    """Verify a transfer package that has been unpacked."""
+    if not transfer_dir.exists():
+        raise FileNotFoundError(f"Transfer directory not found: {transfer_dir}")
+
+    if verbose:
+        print(f"Verifying transfer in: {transfer_dir}")
+
+    # Find checksums and manifest files
+    checksums_file, manifest_file = find_transfer_data(transfer_dir)
+
+    if not checksums_file:
+        raise FileNotFoundError("Checksums file (_checksums.sha256) not found in transfer")
+
+    if not manifest_file:
+        raise FileNotFoundError("Transfer manifest (_transfer_manifest.yaml) not found in transfer")
+
+    # Load checksums and manifest
+    checksums = load_checksums(checksums_file)
+    transfer_manifest = load_transfer_manifest(manifest_file)
+
+    if verbose:
+        print(f"Transfer ID: {transfer_manifest.get('transfer_id', 'unknown')}")
+        print(f"Contents: {len(transfer_manifest.get('contents', []))} data products")
+        print(f"Files to verify: {len(checksums)}")
+        print()
+
+    # Verify all files
+    verified, failed, missing = verify_directory(transfer_dir, checksums)
+
+    if verbose:
+        print()
+        print("Verification Results:")
+        print(f"  ✅ Verified: {verified} files")
+        if failed > 0:
+            print(f"  ❌ Failed: {failed} files")
+        if missing > 0:
+            print(f"  ⚠ Missing: {missing} files")
+
+    if failed > 0 or missing > 0:
+        print("\n❌ Transfer verification FAILED!")
+        return False
+
+    # Verification successful - update main manifest
+    if verbose:
+        print("\n✅ Transfer verification PASSED!")
+
+    main_manifest = load_manifest()
+    update_transferred_manifest(transfer_manifest, main_manifest)
+    save_manifest(main_manifest)
+
+    if verbose:
+        print("Updated enclave manifest with transfer information.")
+
+    return True
+
+
+def list_transferred_data() -> List[Dict]:
+    """List all data that has been transferred and verified."""
+    manifest = load_manifest()
+    transferred = manifest.get('transferred', [])
+
+    return sorted(transferred, key=lambda x: x.get('verified_at', ''), reverse=True)
+
+
+def check_data_availability(repo_name: Optional[str] = None) -> Dict[str, List[Dict]]:
+    """Check what data is available in the enclave."""
+    manifest = load_manifest()
+
+    result = {
+        'approved': manifest.get('approved_products', []),
+        'downloaded': manifest.get('downloaded', []),
+        'packaged': manifest.get('packaged', []),
+        'transferred': manifest.get('transferred', []),
+    }
+
+    if repo_name:
+        # Filter by repo name
+        for key in result:
+            result[key] = [item for item in result[key] if item.get('repo') == repo_name]
+
+    return result
+
+
+# =============================================================================
+# CLI INTERFACE
+# =============================================================================
+
+def main():
+    """Command-line interface for verification operations."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Verify data transfers for enclave")
+    parser.add_argument("transfer_dir", nargs="?", help="Directory containing unpacked transfer")
+    parser.add_argument("--list", action="store_true", help="List transferred data")
+    parser.add_argument("--status", nargs="?", const="", metavar="REPO",
+                       help="Show data availability status (optionally for specific repo)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet output")
+
+    args = parser.parse_args()
+
+    try:
+        if args.list:
+            transferred = list_transferred_data()
+            if not transferred:
+                print("No transferred data found.")
+                return
+
+            print("Transferred Data:")
+            print("-" * 50)
+            for item in transferred:
+                repo = item['repo']
+                version = item['dvc_hash'][:7]
+                date = item.get('transfer_date', 'unknown')
+                verified = "✅" if item.get('verified', False) else "❌"
+                print(f"  {repo}: {version} ({date}) {verified}")
+
+        elif args.status is not None:
+            status = check_data_availability(args.status if args.status else None)
+
+            repo_filter = f" for {args.status}" if args.status else ""
+
+            print(f"Data Status{repo_filter}:")
+            print("-" * 30)
+
+            for category, items in status.items():
+                print(f"{category.title()}: {len(items)}")
+                if not args.quiet and items:
+                    for item in items[:3]:  # Show first 3
+                        if 'dvc_hash' in item:
+                            print(f"  - {item['repo']}: {item['dvc_hash'][:7]}")
+                        elif 'repo' in item:
+                            print(f"  - {item['repo']}")
+                    if len(items) > 3:
+                        print(f"  ... and {len(items) - 3} more")
+                print()
+
+        elif args.transfer_dir:
+            transfer_path = Path(args.transfer_dir)
+            success = verify_transfer(transfer_path, verbose=not args.quiet)
+            sys.exit(0 if success else 1)
+
+        else:
+            parser.print_help()
+
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,56 @@
+* Data cleaning for {{ project_name }}
+*
+* This do-file handles data cleaning and preprocessing.
+* NOTE: This script runs from the src/ directory. Data paths use ../data/
+
+* Import mint utilities (located in same src/ directory)
+do _mint_utils.do
+
+// Main cleaning program
+capture program drop main
+program define main
+    * Initialize logging (filename will include any parameters passed)
+    ParameterAwareLogger clean
+    log_message "Starting data cleaning for {{ project_name }}..."
+
+    * Ensure data directories exist (using global paths from _mint_utils.do)
+    capture mkdir "$DATA_DIR"
+    capture mkdir "$RAW_DIR"
+    capture mkdir "$INTERMEDIATE_DIR"
+    capture mkdir "$FINAL_DIR"
+
+    log_message "Directories ready:"
+    log_message "  Raw data: $RAW_DIR"
+    log_message "  Intermediate: $INTERMEDIATE_DIR"
+    log_message "  Final data: $FINAL_DIR"
+
+    // TODO: Implement data cleaning logic
+    // - Load raw data from $RAW_DIR/
+    // - Handle missing values, data types, outliers
+    // - Standardize formats and encodings
+    // - Save cleaned data to $INTERMEDIATE_DIR/
+
+    // Example:
+    // // Load raw data
+    // local raw_files : dir "$RAW_DIR" files "*.csv"
+    // foreach file of local raw_files {
+    //     import delimited "$RAW_DIR/`file'", clear
+    //
+    //     // Basic cleaning
+    //     drop if missing(var1)  // Remove missing values
+    //     rename *, lower        // Lowercase variable names
+    //
+    //     // Save cleaned data
+    //     local intermediate_file = subinstr("`file'", ".csv", "_clean.csv", .)
+    //     export delimited "$INTERMEDIATE_DIR/`intermediate_file'", replace
+    //     log_message "Cleaned `c(N)' observations, saved to $INTERMEDIATE_DIR/`intermediate_file'"
+    // }
+
+    log_message "Data cleaning completed successfully."
+    close_logger
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

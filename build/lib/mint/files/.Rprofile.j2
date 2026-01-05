@@ -1,0 +1,9 @@
+# R profile for {{ project_name }}
+
+# Set CRAN mirror
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+
+# Load common packages if available
+if (interactive()) {
+  message("Welcome to {{ project_name }} R environment")
+}

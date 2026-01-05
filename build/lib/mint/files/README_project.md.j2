@@ -1,0 +1,52 @@
+# {{ full_project_name }}
+
+Research project: {{ project_name }}.
+
+## Overview
+
+This repository contains the analysis code and outputs for {{ project_name }}.
+
+## Project Structure
+
+- `data/`: Project-specific data files
+- `src/analysis/`: Python analysis scripts
+- `src/stata/`: Stata do-files
+- `src/r/`: R analysis scripts
+- `output/figures/`: Generated figures
+- `output/tables/`: Generated tables
+- `docs/`: Documentation
+- `.Rprofile`: R environment configuration
+
+## Requirements
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Analysis
+
+Run analysis scripts from the appropriate directories:
+
+- **Python**: `src/analysis/` directory
+- **R**: `src/r/` directory
+- **Stata**: `src/stata/` directory
+
+For R projects, initialize renv with:
+```r
+install.packages("renv")
+renv::init()
+```
+
+## Outputs
+
+- Figures are saved to `output/figures/`
+- Tables are saved to `output/tables/`
+
+## Data
+
+Project data is stored in the `data/` directory and tracked with DVC.
+
+Created: {{ created_at }}
+{% if author %}Author: {{ author }}{% endif %}
+{% if organization %}Organization: {{ organization }}{% endif %}

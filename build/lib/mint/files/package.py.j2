@@ -1,0 +1,305 @@
+"""Data packaging for transfer to {{ full_project_name }}.
+
+Creates secure transfer archives with SHA256 checksums for data integrity.
+"""
+
+import sys
+import hashlib
+import tarfile
+import tempfile
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Tuple
+import yaml
+import json
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+ENCLAVE_MANIFEST = Path(__file__).parent.parent / "enclave_manifest.yaml"
+DATA_DIR = Path(__file__).parent.parent / "data"
+TRANSFERS_DIR = Path(__file__).parent.parent / "transfers"
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def load_manifest() -> Dict:
+    """Load the enclave manifest file."""
+    if not ENCLAVE_MANIFEST.exists():
+        raise FileNotFoundError(f"Manifest not found: {ENCLAVE_MANIFEST}")
+
+    with open(ENCLAVE_MANIFEST, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def save_manifest(manifest: Dict) -> None:
+    """Save the enclave manifest file."""
+    with open(ENCLAVE_MANIFEST, 'w') as f:
+        yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
+
+
+def calculate_file_hash(filepath: Path) -> str:
+    """Calculate SHA256 hash of a file."""
+    hash_sha256 = hashlib.sha256()
+
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_sha256.update(chunk)
+
+    return hash_sha256.hexdigest()
+
+
+def calculate_directory_hashes(data_dir: Path) -> Dict[str, str]:
+    """Calculate hashes for all files in a directory recursively."""
+    hashes = {}
+
+    for filepath in sorted(data_dir.rglob("*")):
+        if filepath.is_file():
+            # Store relative path from data directory
+            relative_path = filepath.relative_to(data_dir.parent)
+            hashes[str(relative_path)] = calculate_file_hash(filepath)
+
+    return hashes
+
+
+def create_transfer_archive(transfer_name: str, source_data: Dict[str, Path]) -> Path:
+    """Create a tar.gz archive with data and checksums."""
+    TRANSFERS_DIR.mkdir(exist_ok=True)
+
+    archive_path = TRANSFERS_DIR / f"{transfer_name}.tar.gz"
+    checksums_path = TRANSFERS_DIR / f"{transfer_name}_checksums.sha256"
+
+    # Calculate checksums for all data
+    all_hashes = {}
+    for repo_name, data_path in source_data.items():
+        if data_path.exists():
+            repo_hashes = calculate_directory_hashes(data_path)
+            all_hashes.update(repo_hashes)
+
+    # Write checksums file
+    with open(checksums_path, 'w') as f:
+        for filepath, hash_value in sorted(all_hashes.items()):
+            f.write(f"{hash_value}  {filepath}\n")
+
+    # Create tar archive
+    with tarfile.open(archive_path, "w:gz") as tar:
+        # Add data directories
+        for repo_name, data_path in source_data.items():
+            if data_path.exists():
+                # Add the entire directory tree
+                tar.add(data_path, arcname=repo_name)
+
+        # Add checksums file
+        tar.add(checksums_path, arcname="_checksums.sha256")
+
+        # Add manifest subset
+        manifest_subset = create_transfer_manifest(source_data)
+        manifest_path = TRANSFERS_DIR / f"{transfer_name}_manifest.yaml"
+        with open(manifest_path, 'w') as f:
+            yaml.dump(manifest_subset, f, default_flow_style=False, sort_keys=False)
+        tar.add(manifest_path, arcname="_transfer_manifest.yaml")
+
+    # Clean up temporary files
+    checksums_path.unlink(missing_ok=True)
+    manifest_path.unlink(missing_ok=True)
+
+    return archive_path
+
+
+def create_transfer_manifest(source_data: Dict[str, Path]) -> Dict:
+    """Create a manifest subset for this transfer."""
+    full_manifest = load_manifest()
+
+    transfer_manifest = {
+        'schema_version': full_manifest.get('schema_version', '1.0'),
+        'enclave_name': full_manifest.get('enclave_name', ''),
+        'transfer_date': datetime.now().isoformat(),
+        'transfer_id': f"transfer-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}",
+        'contents': []
+    }
+
+    for repo_name, data_path in source_data.items():
+        # Find downloaded entry for this repo
+        downloaded = full_manifest.get('downloaded', [])
+        repo_entry = None
+        for entry in downloaded:
+            if entry['repo'] == repo_name:
+                repo_entry = entry
+                break
+
+        if repo_entry:
+            transfer_manifest['contents'].append({
+                'repo': repo_name,
+                'dvc_hash': repo_entry['dvc_hash'],
+                'git_commit': repo_entry['git_commit'],
+                'downloaded_at': repo_entry['downloaded_at'],
+            })
+
+    return transfer_manifest
+
+
+def get_downloaded_data() -> Dict[str, Path]:
+    """Get mapping of repo names to their downloaded data paths."""
+    manifest = load_manifest()
+    downloaded = manifest.get('downloaded', [])
+
+    source_data = {}
+    for entry in downloaded:
+        repo_name = entry['repo']
+        dvc_hash = entry['dvc_hash']
+        downloaded_at = entry['downloaded_at']
+
+        # Find the actual data directory
+        # This assumes data is in .repo_staging/final/ after DVC pull
+        staging_dir = DATA_DIR / f".{repo_name}_staging" / "final"
+        if staging_dir.exists():
+            source_data[repo_name] = staging_dir
+
+    return source_data
+
+
+def update_packaged_manifest(transfer_id: str, transfer_manifest: Dict, manifest: Dict) -> None:
+    """Update the main manifest with packaged information."""
+    packaged = manifest.setdefault('packaged', [])
+
+    # Remove any existing entries for these repos
+    repo_names = {item['repo'] for item in transfer_manifest['contents']}
+    packaged[:] = [p for p in packaged if p['repo'] not in repo_names]
+
+    # Add new packaged entries
+    for content in transfer_manifest['contents']:
+        packaged.append({
+            'repo': content['repo'],
+            'dvc_hash': content['dvc_hash'],
+            'transfer_id': transfer_id,
+            'packaged_at': transfer_manifest['transfer_date'],
+        })
+
+
+# =============================================================================
+# MAIN FUNCTIONS
+# =============================================================================
+
+def package_transfer(transfer_name: Optional[str] = None, verbose: bool = True) -> Path:
+    """Package downloaded data for transfer to enclave."""
+    manifest = load_manifest()
+
+    # Check for downloaded data
+    downloaded = manifest.get('downloaded', [])
+    if not downloaded:
+        raise ValueError("No downloaded data found. Run download.py first.")
+
+    # Get source data paths
+    source_data = get_downloaded_data()
+    if not source_data:
+        raise ValueError("No data directories found for downloaded entries.")
+
+    # Generate transfer name if not provided
+    if transfer_name is None:
+        timestamp = datetime.now().strftime("%Y-%m-%d")
+        transfer_name = f"transfer-{timestamp}"
+
+    if verbose:
+        print(f"Creating transfer package: {transfer_name}")
+        print(f"Packaging {len(source_data)} data products...")
+
+    # Create transfer manifest
+    transfer_manifest = create_transfer_manifest(source_data)
+
+    # Create archive
+    archive_path = create_transfer_archive(transfer_name, source_data)
+
+    # Update main manifest
+    update_packaged_manifest(transfer_manifest['transfer_id'], transfer_manifest, manifest)
+    save_manifest(manifest)
+
+    if verbose:
+        total_size = sum(p.stat().st_size for p in archive_path.parent.glob(f"{transfer_name}*") if p.is_file())
+        print(f"✅ Created transfer package: {archive_path.name}")
+        print(f"   Size: {total_size / (1024*1024):.1f} MB")
+        print(f"   Contents: {len(source_data)} data products")
+        print(f"   Transfer ID: {transfer_manifest['transfer_id']}")
+
+    return archive_path
+
+
+def list_available_packages() -> List[Dict]:
+    """List available transfer packages."""
+    if not TRANSFERS_DIR.exists():
+        return []
+
+    packages = []
+    for archive_path in TRANSFERS_DIR.glob("transfer-*.tar.gz"):
+        transfer_name = archive_path.stem  # Remove .tar.gz
+
+        # Try to read transfer manifest if it exists
+        manifest_path = TRANSFERS_DIR / f"{transfer_name}_manifest.yaml"
+        transfer_info = {
+            'name': transfer_name,
+            'path': archive_path,
+            'size': archive_path.stat().st_size,
+            'created': datetime.fromtimestamp(archive_path.stat().st_mtime).isoformat(),
+        }
+
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, 'r') as f:
+                    manifest = yaml.safe_load(f)
+                transfer_info.update({
+                    'transfer_id': manifest.get('transfer_id', ''),
+                    'contents': len(manifest.get('contents', [])),
+                })
+            except Exception:
+                pass
+
+        packages.append(transfer_info)
+
+    return sorted(packages, key=lambda x: x['created'], reverse=True)
+
+
+# =============================================================================
+# CLI INTERFACE
+# =============================================================================
+
+def main():
+    """Command-line interface for packaging operations."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Package data for enclave transfer")
+    parser.add_argument("--name", help="Transfer package name (default: transfer-YYYY-MM-DD)")
+    parser.add_argument("--list", action="store_true", help="List available transfer packages")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Quiet output")
+
+    args = parser.parse_args()
+
+    try:
+        if args.list:
+            packages = list_available_packages()
+            if not packages:
+                print("No transfer packages found.")
+                return
+
+            print("Available transfer packages:")
+            print("-" * 50)
+            for pkg in packages:
+                size_mb = pkg['size'] / (1024 * 1024)
+                contents = pkg.get('contents', 'unknown')
+                created = pkg['created'][:10]  # Just date
+                print(f"  {pkg['name']}")
+                print(f"    Created: {created} | Size: {size_mb:.1f} MB | Contents: {contents} items")
+                print()
+        else:
+            archive_path = package_transfer(args.name, verbose=not args.quiet)
+            print(f"\nTransfer package ready: {archive_path}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
