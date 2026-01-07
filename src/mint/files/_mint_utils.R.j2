@@ -307,3 +307,97 @@ find_data_files <- function(directory, extensions = NULL) {
 
   return(sort(files))
 }
+
+# =============================================================================
+# FILE MANIFEST UTILITIES (Python-backed)
+# =============================================================================
+
+#' Create/update manifest for a directory
+#'
+#' @param directory Directory to scan
+#' @param pattern File pattern to match (default: "*")
+#' @export
+manifest_create <- function(directory, pattern = "*") {
+  tryCatch({
+    mint_manifest <- reticulate::import("mint.manifest")
+    
+    # Run from project root (parent of code/)
+    project_root <- dirname(getwd())
+    
+    # Python expects paths relative to current working directory or absolute
+    # Since we are in code/ and mint.manifest usually works with project root,
+    # let's be careful. simpler to just pass absolute paths or let python handle it.
+    
+    # Actually, the Stata implementation changes dir to project_root.
+    # Let's do the same for consistency if possible, or just pass absolute path.
+    # But mint.manifest.create_manifest has a base_directory arg.
+    
+    # Let's replicate Stata approach of changing directory for the python call context if possible,
+    # but reticulate runs in the same process. Changing R's dir changes Python's dir.
+    
+    current_wd <- getwd()
+    setwd(project_root)
+    on.exit(setwd(current_wd))
+    
+    mint_manifest$create_manifest(directory = directory, pattern = pattern)
+    
+  }, error = function(e) {
+    stop("Failed to create manifest: ", e$message)
+  })
+}
+
+#' Check if a file has changed since last manifest
+#'
+#' @param filepath Path to file to check
+#' @return TRUE if changed, FALSE otherwise
+#' @export
+manifest_file_changed <- function(filepath) {
+  tryCatch({
+    mint_manifest <- reticulate::import("mint.manifest")
+    
+    project_root <- dirname(getwd())
+    current_wd <- getwd()
+    setwd(project_root)
+    on.exit(setwd(current_wd))
+    
+    tryCatch({
+      manifest <- mint_manifest$load_manifest("manifest.json")
+      return(mint_manifest$has_file_changed(filepath, manifest))
+    }, error = function(e) {
+      # No manifest or error loading it -> consider changed
+      return(TRUE)
+    })
+    
+  }, error = function(e) {
+    return(TRUE) 
+  })
+}
+
+#' Get list of files that have changed in a directory
+#'
+#' @param directory Directory to scan
+#' @param pattern File pattern to match (default: "*")
+#' @return Character vector of changed files
+#' @export
+manifest_get_changed_files <- function(directory, pattern = "*") {
+  tryCatch({
+    mint_manifest <- reticulate::import("mint.manifest")
+    
+    project_root <- dirname(getwd())
+    current_wd <- getwd()
+    setwd(project_root)
+    on.exit(setwd(current_wd))
+    
+    tryCatch({
+      manifest <- mint_manifest$load_manifest("manifest.json")
+      changed_files <- mint_manifest$get_files_to_update(directory, manifest, pattern)
+      return(as.character(changed_files))
+    }, error = function(e) {
+      message("No manifest found or error loading it.")
+      return(character(0))
+    })
+    
+  }, error = function(e) {
+    stop("Failed to check changed files: ", e$message)
+  })
+}

@@ -51,9 +51,9 @@ def main():
     #     df.columns = df.columns.str.lower().str.replace(' ', '_')
     #
     #     # Save cleaned data
-    #     intermediate_file = INTERMEDIATE_DIR / f"clean_{raw_file.name}"
-    #     df.to_csv(intermediate_file, index=False)
-    #     logger.log(f"Cleaned {len(df)} rows, saved to {intermediate_file}")
+    #     final_file = FINAL_DIR / f"clean_{raw_file.name}"
+    #     df.to_csv(final_file, index=False)
+    #     logger.log(f"Cleaned {len(df)} rows, saved to {final_file}")
 
     logger.log("Data cleaning completed successfully.")
     logger.close()

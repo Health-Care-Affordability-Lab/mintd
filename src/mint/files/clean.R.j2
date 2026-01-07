@@ -42,9 +42,9 @@ main <- function() {
   #   names(df) <- tolower(gsub(" ", "_", names(df)))
   #
   #   # Save cleaned data
-  #   intermediate_file <- file.path(INTERMEDIATE_DIR, paste0("clean_", basename(raw_file)))
-  #   write_csv(df, intermediate_file)
-  #   logger$log("Cleaned ", nrow(df), " rows, saved to ", intermediate_file)
+  #   final_file <- file.path(FINAL_DIR, paste0("clean_", basename(raw_file)))
+  #   write_csv(df, final_file)
+  #   logger$log("Cleaned ", nrow(df), " rows, saved to ", final_file)
   # }
 
   logger$log("Data cleaning completed successfully.")

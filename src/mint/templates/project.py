@@ -17,10 +17,21 @@ class ProjectTemplate(BaseTemplate):
             "README.md": None,
             "metadata.json": None,
             "data": {
-                ".gitkeep": None,
+                "raw": {
+                    ".gitkeep": None,
+                },
+                "intermediate": {
+                    ".gitkeep": None,
+                },
+                "final": {
+                    ".gitkeep": None,
+                },
             },
             self.source_dir: {
                 ".gitkeep": None, # Base code directory
+            },
+            "notebooks": {
+                ".gitkeep": None,
             },
             "results": {
                 "figures": {
@@ -34,6 +45,12 @@ class ProjectTemplate(BaseTemplate):
                 },
             },
             "docs": {
+                ".gitkeep": None,
+            },
+            "references": {
+                ".gitkeep": None,
+            },
+            "tests": {
                 ".gitkeep": None,
             },
             ".gitignore": None,

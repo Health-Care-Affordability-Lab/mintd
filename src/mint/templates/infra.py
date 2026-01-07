@@ -20,12 +20,23 @@ class InfraTemplate(BaseTemplate):
             "README.md": None,
             "metadata.json": None,
             "data": {
-                ".gitkeep": None,
+                "raw": {
+                    ".gitkeep": None,
+                },
+                "intermediate": {
+                    ".gitkeep": None,
+                },
+                "final": {
+                    ".gitkeep": None,
+                },
             },
             "docs": {
                 ".gitkeep": None,
             },
             self.source_dir: {
+                ".gitkeep": None,
+            },
+            "tests": {
                 ".gitkeep": None,
             },
             ".gitignore": None,

@@ -41,9 +41,9 @@ program define main
     //     rename *, lower        // Lowercase variable names
     //
     //     // Save cleaned data
-    //     local intermediate_file = subinstr("`file'", ".csv", "_clean.csv", .)
-    //     export delimited "$INTERMEDIATE_DIR/`intermediate_file'", replace
-    //     log_message "Cleaned `c(N)' observations, saved to $INTERMEDIATE_DIR/`intermediate_file'"
+    //     local final_file = subinstr("`file'", ".csv", "_clean.csv", .)
+    //     export delimited "$FINAL_DIR/`final_file'", replace
+    //     log_message "Cleaned `c(N)' observations, saved to $FINAL_DIR/`final_file'"
     // }
 
     log_message "Data cleaning completed successfully."

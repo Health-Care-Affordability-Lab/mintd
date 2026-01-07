@@ -16,6 +16,8 @@ def test_data_template():
     assert "code" in structure
     assert "data" in structure
     assert structure["data"]["raw"] == {".gitkeep": None}
+    assert structure["data"]["intermediate"] == {".gitkeep": None}
+    assert structure["data"]["final"] == {".gitkeep": None}
 
     # Test template files
     template_files = template.get_template_files()
@@ -35,6 +37,10 @@ def test_project_template():
     # unless we mock a strategy. 
     # But let's check basic structure.
     assert "data" in structure
+    assert "notebooks" in structure
+    assert "references" in structure
+    assert "tests" in structure
+    assert structure["data"]["raw"] == {".gitkeep": None}
 
     # Test template files
     template_files = template.get_template_files()
@@ -51,7 +57,9 @@ def test_infra_template():
     # Test directory structure
     structure = template.get_directory_structure()
     assert "code" in structure
-    # assert "tests" in structure # Requires strategy
+    assert "tests" in structure
+    assert "data" in structure
+    assert structure["data"]["final"] == {".gitkeep": None}
 
     # Test template files
     template_files = template.get_template_files()
