@@ -353,7 +353,8 @@ def verify_transfer(transfer_path: Path, enclave_path: Optional[Path] = None) ->
 
     for content in transfer_manifest.get('contents', []):
         repo_name = content['repo']
-        version_folder = content.get('version_folder', f"{content['dvc_hash'][:7]}-{transfer_manifest['transfer_date'][:10]}")
+        transfer_date = transfer_manifest.get('transfer_date', datetime.now().isoformat())[:10]
+        version_folder = content.get('version_folder', f"{content['dvc_hash'][:7]}-{transfer_date}")
         dvc_hash = content['dvc_hash']
         
         # Target path: data/repo/hash-date (flatter structure)
