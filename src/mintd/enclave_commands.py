@@ -274,20 +274,22 @@ def package_transfer(enclave_path: Path, name: Optional[str] = None) -> Path:
                 local_path = enclave_path / local_path_str
                 if local_path.exists():
                     dvc_hash = item['dvc_hash']
-                    
                     # Warn if already transferred
                     transferred = manifest.get('transferred', [])
                     already_id = next((t.get('transfer_id') for t in transferred if t['repo'] == repo_name and t['dvc_hash'] == dvc_hash), None)
                     if already_id:
                         print(f"  ⚠ Alert: {repo_name} ({dvc_hash[:7]}) was already transferred via {already_id}")
 
-                    tar.add(local_path, arcname=repo_name)
+                    # Preserve repo/hash-date hierarchy
+                    version_folder = local_path.name
+                    tar.add(local_path, arcname=f"{repo_name}/{version_folder}")
                     transfer_manifest['contents'].append({
                         'repo': repo_name,
+                        'version_folder': version_folder,
                         'dvc_hash': item['dvc_hash'],
                         'git_commit': item['git_commit']
                     })
-                    print(f"  + {repo_name} ({item['dvc_hash'][:7]})")
+                    print(f"  + {repo_name}/{version_folder} ({item['dvc_hash'][:7]})")
         
         # Add manifest
         manifest_bytes = yaml.dump(transfer_manifest, default_flow_style=False, sort_keys=False).encode('utf-8')
@@ -351,19 +353,23 @@ def verify_transfer(transfer_path: Path, enclave_path: Optional[Path] = None) ->
 
     for content in transfer_manifest.get('contents', []):
         repo_name = content['repo']
+        version_folder = content.get('version_folder', f"{content['dvc_hash'][:7]}-{transfer_manifest['transfer_date'][:10]}")
         dvc_hash = content['dvc_hash']
-        transfer_date = transfer_manifest['transfer_date'][:10]
         
-        # Target path: data/downloads/repo/hash-date
-        dest_path = enclave_path / "data" / "downloads" / repo_name / f"{dvc_hash[:7]}-{transfer_date}"
-        src_path = transfer_dir / repo_name
+        # Target path: data/repo/hash-date (flatter structure)
+        dest_path = enclave_path / "data" / repo_name / version_folder
+        src_path = transfer_dir / repo_name / version_folder
         
+        if not src_path.exists():
+            # Fallback for old packages
+            src_path = transfer_dir / repo_name
+            
         if src_path.exists():
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             if dest_path.exists():
                 shutil.rmtree(dest_path)
             shutil.move(str(src_path), str(dest_path))
-            print(f"✅ Moved {repo_name} to {dest_path.relative_to(enclave_path)}")
+            print(f"✅ Moved {repo_name}/{version_folder} to {dest_path.relative_to(enclave_path)}")
             
             # Update enclave manifest
             transferred = enclave_manifest.setdefault('transferred', [])
@@ -409,11 +415,10 @@ def clean_enclave(enclave_path: Path, keep_recent: int = 1, staging_only: bool =
     if staging_only:
         return
 
-    # 2. Prune old downloads
-    downloads_base = enclave_path / "data" / "downloads"
-    if not downloads_base.exists():
-        return
-
+    # 2. Prune old downloads/transfers
+    # Check both data/ and data/downloads/ (legacy)
+    search_dirs = [enclave_path / "data", enclave_path / "data" / "downloads"]
+    
     manifest_path = enclave_path / "enclave_manifest.yaml"
     if not manifest_path.exists():
         return
@@ -423,31 +428,35 @@ def clean_enclave(enclave_path: Path, keep_recent: int = 1, staging_only: bool =
 
     print(f"🧹 Pruning old versions (keeping {keep_recent} recent)...")
     
-    # Process each repo
-    for repo_dir in downloads_base.iterdir():
-        if not repo_dir.is_dir():
+    for downloads_base in search_dirs:
+        if not downloads_base.exists():
             continue
             
-        # Get all versions for this repo, sorted by date (if possible) or mtime
-        versions = sorted(
-            [v for v in repo_dir.iterdir() if v.is_dir()],
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
-        )
-        
-        if len(versions) > keep_recent:
-            to_delete = versions[keep_recent:]
-            for v in to_delete:
-                print(f"  - Removing old version: {repo_dir.name}/{v.name}")
-                shutil.rmtree(v)
-                
-                # Update manifest lists (downloaded or transferred)
-                for section in ['downloaded', 'transferred']:
-                    if section in manifest:
-                        manifest[section] = [
-                            item for item in manifest[section]
-                            if not (item['repo'] == repo_dir.name and item.get('local_path', '').endswith(v.name))
-                        ]
+        # Process each repo in this directory
+        for repo_dir in downloads_base.iterdir():
+            if not repo_dir.is_dir() or repo_dir.name == "staging":
+                continue
+            
+            # Get all versions for this repo, sorted by date (if possible) or mtime
+            versions = sorted(
+                [v for v in repo_dir.iterdir() if v.is_dir()],
+                key=lambda x: x.stat().st_mtime,
+                reverse=True
+            )
+            
+            if len(versions) > keep_recent:
+                to_delete = versions[keep_recent:]
+                for v in to_delete:
+                    print(f"  - Removing old version: {repo_dir.name}/{v.name}")
+                    shutil.rmtree(v)
+                    
+                    # Update manifest lists (downloaded or transferred)
+                    for section in ['downloaded', 'transferred']:
+                        if section in manifest:
+                            manifest[section] = [
+                                item for item in manifest[section]
+                                if not (item['repo'] == repo_dir.name and item.get('local_path', '').endswith(v.name))
+                            ]
 
     with open(manifest_path, 'w') as f:
         yaml.dump(manifest, f, default_flow_style=False, sort_keys=False)
