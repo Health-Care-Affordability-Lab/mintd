@@ -1054,14 +1054,15 @@ def pull(repo_name, pull_all, path):
 @click.option("--name", "-n", help="Transfer package name")
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to enclave directory (defaults to current directory)")
-def package(name, path):
+@click.option("--force", "--fforce", is_flag=True, help="Force packaging even if files were already transferred.")
+def package(name, path, force):
     """Package downloaded data for transfer to enclave."""
     from .enclave_commands import package_transfer
 
     enclave_path = Path(path) if path else Path.cwd()
     
     try:
-        package_transfer(enclave_path, name=name)
+        package_transfer(enclave_path, name=name, force=force)
     except Exception as e:
         console.print(f"❌ Packaging failed: {e}", style="red")
         raise click.Abort()

@@ -238,7 +238,7 @@ def pull_enclave_data(enclave_path: Path, repo_name: Optional[str] = None, pull_
     
     print("✅ Data pull complete.")
 
-def package_transfer(enclave_path: Path, name: Optional[str] = None) -> Path:
+def package_transfer(enclave_path: Path, name: Optional[str] = None, force: bool = False) -> Path:
     """Package downloaded data for transfer to enclave."""
     manifest_path = enclave_path / "enclave_manifest.yaml"
     with open(manifest_path, 'r') as f:
@@ -248,6 +248,23 @@ def package_transfer(enclave_path: Path, name: Optional[str] = None) -> Path:
     if not downloaded:
         raise ValueError("No downloaded data to package.")
         
+    # Filter out already transferred items if not forcing
+    transferred = manifest.get('transferred', [])
+    if not force:
+        new_items = []
+        for item in downloaded:
+            already_transferred = next((t for t in transferred if t['repo'] == item['repo'] and t['dvc_hash'] == item['dvc_hash']), None)
+            if not already_transferred:
+                new_items.append(item)
+        
+        if not new_items:
+            raise ValueError("All downloaded data products have already been transferred. Use --force to package anyway.")
+        
+        # If we have some new items, we only package those
+        if len(new_items) < len(downloaded):
+            print(f"💡 Note: Skipping {len(downloaded) - len(new_items)} already transferred products.")
+            downloaded = new_items
+
     if not name:
         name = f"transfer-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}"
         
@@ -274,12 +291,7 @@ def package_transfer(enclave_path: Path, name: Optional[str] = None) -> Path:
                 local_path = enclave_path / local_path_str
                 if local_path.exists():
                     dvc_hash = item['dvc_hash']
-                    # Warn if already transferred
-                    transferred = manifest.get('transferred', [])
-                    already_id = next((t.get('transfer_id') for t in transferred if t['repo'] == repo_name and t['dvc_hash'] == dvc_hash), None)
-                    if already_id:
-                        print(f"  ⚠ Alert: {repo_name} ({dvc_hash[:7]}) was already transferred via {already_id}")
-
+                    
                     # Preserve repo/hash-date hierarchy
                     version_folder = local_path.name
                     tar.add(local_path, arcname=f"{repo_name}/{version_folder}")
