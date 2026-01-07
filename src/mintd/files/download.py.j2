@@ -191,6 +191,39 @@ def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "
                 capture_output=True, text=True, cwd=repo_dir
             )
             print(f"  Configured DVC remote '{expected_remote}' -> {dvc_remote_url}")
+            
+            # Copy endpoint configuration from global DVC config if needed
+            # This is required for S3-compatible services like Wasabi
+            result = subprocess.run(
+                ["dvc", "config", "--global", f"remote.{repo_name}.endpointurl"],
+                capture_output=True, text=True
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                endpoint_url = result.stdout.strip()
+                subprocess.run(
+                    ["dvc", "remote", "modify", expected_remote, "endpointurl", endpoint_url],
+                    capture_output=True, text=True, cwd=repo_dir
+                )
+                print(f"  Configured endpoint: {endpoint_url}")
+            else:
+                # Try to get from mintd config
+                try:
+                    from pathlib import Path
+                    import yaml
+                    mintd_config = Path.home() / ".mintd" / "config.yaml"
+                    if mintd_config.exists():
+                        with open(mintd_config, 'r') as f:
+                            config = yaml.safe_load(f)
+                        endpoint = config.get('storage', {}).get('endpoint', '')
+                        if endpoint:
+                            subprocess.run(
+                                ["dvc", "remote", "modify", expected_remote, "endpointurl", endpoint],
+                                capture_output=True, text=True, cwd=repo_dir
+                            )
+                            print(f"  Configured endpoint from mintd config: {endpoint}")
+                except Exception:
+                    pass
+            
             return
         except Exception as e:
             print(f"  Warning: Could not configure DVC remote from registry URL: {e}")
