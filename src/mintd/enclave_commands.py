@@ -316,14 +316,23 @@ def unpack_transfer(transfer_file: Path, dest_dir: Optional[Path] = None) -> Pat
     print(f"✅ Unpacked to: {dest_dir}")
     return dest_dir
 
-def verify_transfer(transfer_dir: Path, enclave_path: Optional[Path] = None) -> bool:
-    """Verify an unpacked transfer and move data to final location."""
+def verify_transfer(transfer_path: Path, enclave_path: Optional[Path] = None) -> bool:
+    """Verify a transfer (file or unpacked directory) and move data to final location."""
     if not enclave_path:
         enclave_path = Path.cwd()
         
+    temp_dir = None
+    if transfer_path.is_file() and transfer_path.name.endswith(".tar.gz"):
+        temp_dir = unpack_transfer(transfer_path)
+        transfer_dir = temp_dir
+    else:
+        transfer_dir = transfer_path
+        
     manifest_file = transfer_dir / "_transfer_manifest.yaml"
     if not manifest_file.exists():
-        raise FileNotFoundError("Transfer manifest not found in unpacked directory.")
+        if temp_dir:
+            shutil.rmtree(temp_dir)
+        raise FileNotFoundError(f"Transfer manifest not found in {transfer_dir}")
 
     with open(manifest_file, 'r') as f:
         transfer_manifest = yaml.safe_load(f)
@@ -382,8 +391,9 @@ def verify_transfer(transfer_dir: Path, enclave_path: Optional[Path] = None) -> 
         
     print("🎉 Transfer successfully verified and data integrated.")
     
-    # Cleanup tmp dir
-    shutil.rmtree(transfer_dir)
+    # Cleanup tmp dir if we created one
+    if temp_dir and temp_dir.exists():
+        shutil.rmtree(temp_dir)
     return True
 
 def clean_enclave(enclave_path: Path, keep_recent: int = 1, staging_only: bool = False) -> None:

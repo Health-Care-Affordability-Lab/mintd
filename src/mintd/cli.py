@@ -1081,14 +1081,15 @@ def unpack(transfer_file, dest):
 
 
 @enclave.command()
-@click.argument("transfer_dir", type=click.Path(exists=True, path_type=Path))
+@click.argument("transfer_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to enclave directory (defaults to current directory)")
-def verify(transfer_dir):
-    """Verify an unpacked transfer's integrity and move data to enclave."""
+def verify(transfer_path, path):
+    """Verify a transfer (archive or unpacked directory) and update enclave manifest."""
     from .enclave_commands import verify_transfer
+    enclave_path = Path(path) if path else Path.cwd()
     try:
-        success = verify_transfer(transfer_dir)
+        success = verify_transfer(transfer_path, enclave_path=enclave_path)
         if not success:
             raise click.Abort()
     except Exception as e:
