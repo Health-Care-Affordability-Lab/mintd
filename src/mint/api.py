@@ -33,6 +33,10 @@ def create_project(
     registry_url: Optional[str] = None,
     admin_team: Optional[str] = None,
     researcher_team: Optional[str] = None,
+    classification: Optional[str] = None,
+    team: Optional[str] = None,
+    contract_info: Optional[str] = None,
+    contract_slug: Optional[str] = None,
 ) -> ProjectResult:
     """Main API function called by both CLI and Stata.
 
@@ -45,8 +49,13 @@ def create_project(
         init_dvc: Whether to initialize DVC
         bucket_name: Override bucket name for DVC
         register_project: Whether to register project with Data Commons Registry
+        register_project: Whether to register project with Data Commons Registry
         use_current_repo: Whether to use current directory as project root (when in existing git repo)
         registry_url: Data Commons Registry GitHub URL (required for enclaves)
+        classification: Data classification (public, private, contract)
+        team: Owning team (GitHub slug)
+        contract_info: Description or link to contract
+        contract_slug: Short name for contract (used in S3 prefix)
 
     Returns:
         ProjectResult with creation details
@@ -99,6 +108,32 @@ def create_project(
         "admin_team": admin_team or registry_config.get("admin_team", "infrastructure-admins"),
         "researcher_team": researcher_team or registry_config.get("researcher_team", "all-researchers"),
     }
+    
+    # Governance and Storage Prefix Logic
+    # Default values
+    classification = classification or "private"
+    target_team = team or context["admin_team"]
+    
+    # Calculate storage prefix
+    if classification == "public":
+        storage_prefix = f"public/{name}/"
+    elif classification == "contract":
+        if not contract_slug:
+            # Fallback if slug missing (should be handled by CLI)
+            contract_slug = "unknown-contract"
+        storage_prefix = f"contract/{contract_slug}/{name}/"
+    else:
+        # Private/Lab
+        storage_prefix = f"lab/{target_team}/{name}/"
+
+    context.update({
+        "classification": classification,
+        "team": target_team,
+        "contract_info": contract_info or "",
+        "storage_prefix": storage_prefix,
+        # Map classification to DVC sensitivity (for backward compatibility/ACLs)
+        "storage_sensitivity": "public" if classification == "public" else "restricted",
+    })
 
     # Select and create template
     if project_type == "data":

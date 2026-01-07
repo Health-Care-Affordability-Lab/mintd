@@ -12,21 +12,30 @@
     "created_at": "{{ created_at }}",
     "created_by": "{{ author }}"
   },
-  "metadata": {
-    "description": "{{ project_name | replace('_', ' ') | replace('-', ' ') | title }} project",
-    "tags": [],
-    "language": "{{ language }}"
-  },
   "ownership": {
-    "created_by": "{{ author }}",
-    "created_at": "{{ created_at }}",
+    "team": "{{ team }}",
     "maintainers": [
-      {
-        "email": "{{ author }}",
-        "name": "{{ author | replace('-', ' ') | replace('_', ' ') | title }}",
-        "role": "lead"
-      }
+      "{{ author }}"
     ]
+  },
+  "governance": {
+    "classification": "{{ classification }}",
+    "contract_info": "{{ contract_info | default('') }}"
+  },
+  "storage": {
+    "provider": "{{ storage_provider | default('s3') }}",
+    "bucket": "{{ bucket_name | default('') }}",
+    "prefix": "{{ storage_prefix }}",
+    "endpoint": "{{ storage_endpoint | default('') }}",
+    "versioning": {{ storage_versioning | default(true) | lower }}
+  },
+  "schema": {
+    "version": "1.0.0",
+    "location": "schemas/v1/schema.json"
+  },
+  "lifecycle": {
+    "retention_policy": "permanent",
+    "archival_status": "active"
   },
   "repository": {
     "github_url": "https://github.com/{{ registry_org }}/{{ full_project_name }}",
@@ -36,30 +45,5 @@
       "url": "{{ mirror_url | default('') }}",
       "purpose": "{{ mirror_purpose | default('external_collaboration') }}"
     }
-  },
-  "storage": {
-    "provider": "{{ storage_provider | default('s3') }}",
-    "bucket": "{{ bucket_name | default('') }}",
-    "endpoint": "{{ storage_endpoint | default('') }}",
-    "versioning": {{ storage_versioning | default(true) | lower }},
-    "sensitivity": "{{ storage_sensitivity | default('restricted') }}"
-  },
-  "access_control": {
-    "teams": [
-      {
-        "team": "{{ admin_team }}",
-        "permission": "admin"
-      },
-      {
-        "team": "{{ researcher_team }}",
-        "permission": "read"
-      }
-    ],
-    "individuals": [],
-    "requirements": []
-  },
-  "status": {
-    "lifecycle": "active",
-    "last_updated": "{{ created_at }}"
   }
 }

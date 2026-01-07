@@ -1,73 +1,69 @@
-# DVC Pipeline Configuration for {{ project_name }}
-# 
-# This file defines the data pipeline stages. Commands are run from the src/ 
-# directory to keep script paths simple and consistent.
-#
-# Platform: {{ platform_os }}
-# Command separator: {{ command_sep }}
-{% if language == "stata" %}
-# Stata executable: {{ stata_executable }}
-{% endif %}
+vars:
+  - dvc_vars.yaml
 
 stages:
   ingest:
+    wdir: src
 {% if language == "python" %}
-    cmd: cd src {{ command_sep }} python ingest.py
+    cmd: ${python_cmd} ingest.py
 {% elif language == "r" %}
-    cmd: cd src {{ command_sep }} Rscript ingest.R
+    cmd: ${r_cmd} ingest.R
 {% elif language == "stata" %}
-    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do ingest.do
+    cmd: ${stata_cmd} -b do ingest.do
 {% endif %}
     deps:
 {% if language == "python" %}
-      - src/ingest.py
+      - ingest.py
 {% elif language == "r" %}
-      - src/ingest.R
+      - ingest.R
 {% elif language == "stata" %}
-      - src/ingest.do
-      - src/_mint_utils.do
+      - ingest.do
+      - _mint_utils.do
 {% endif %}
     outs:
-      - data/raw/
+      - ../data/raw/
 
   clean:
+    wdir: src
 {% if language == "python" %}
-    cmd: cd src {{ command_sep }} python clean.py
+    cmd: ${python_cmd} clean.py
 {% elif language == "r" %}
-    cmd: cd src {{ command_sep }} Rscript clean.R
+    cmd: ${r_cmd} clean.R
 {% elif language == "stata" %}
-    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do clean.do
+    cmd: ${stata_cmd} -b do clean.do
 {% endif %}
     deps:
 {% if language == "python" %}
-      - src/clean.py
+      - clean.py
 {% elif language == "r" %}
-      - src/clean.R
+      - clean.R
 {% elif language == "stata" %}
-      - src/clean.do
-      - src/_mint_utils.do
+      - clean.do
+      - _mint_utils.do
 {% endif %}
-      - data/raw/
+      - ../data/raw/
     outs:
-      - data/intermediate/
+      - ../data/intermediate/
 
   validate:
+    wdir: src
 {% if language == "python" %}
-    cmd: cd src {{ command_sep }} python validate.py
+    cmd: ${python_cmd} validate.py
 {% elif language == "r" %}
-    cmd: cd src {{ command_sep }} Rscript validate.R
+    cmd: ${r_cmd} validate.R
 {% elif language == "stata" %}
-    cmd: cd src {{ command_sep }} {{ stata_executable }} -b do validate.do
+    cmd: ${stata_cmd} -b do validate.do
 {% endif %}
     deps:
 {% if language == "python" %}
-      - src/validate.py
+      - validate.py
 {% elif language == "r" %}
-      - src/validate.R
+      - validate.R
 {% elif language == "stata" %}
-      - src/validate.do
-      - src/_mint_utils.do
+      - validate.do
+      - _mint_utils.do
 {% endif %}
-      - data/intermediate/
+      - ../data/intermediate/
     outs:
-      - data/final/
+      - ../data/final/
+      - ../data/schema_validation_log.txt

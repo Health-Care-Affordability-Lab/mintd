@@ -280,6 +280,93 @@ After merging this PR:
             if self.temp_dir and self.temp_dir.exists():
                 shutil.rmtree(self.temp_dir)
 
+    def query_data_product(self, product_name: str) -> Dict[str, Any]:
+        """Query registry for data product information.
+
+        Args:
+            product_name: Name of the data product (e.g., "data_cms-provider-data-service")
+
+        Returns:
+            Dictionary with product catalog entry
+
+        Raises:
+            FileNotFoundError: If product not found
+            RuntimeError: If registry access fails
+        """
+        try:
+            # Clone registry to get current catalog
+            self._clone_registry()
+
+            # Look for the product in the catalog
+            catalog_dir = self.repo_path / 'catalog' / 'data'
+            catalog_file = catalog_dir / f"{product_name}.yaml"
+
+            if not catalog_file.exists():
+                # Try to find similar products for suggestions
+                available_products = []
+                if catalog_dir.exists():
+                    for yaml_file in catalog_dir.glob("*.yaml"):
+                        available_products.append(yaml_file.stem)
+
+                error_msg = f"Data product '{product_name}' not found in registry"
+                if available_products:
+                    error_msg += f". Available products: {', '.join(available_products[:5])}"
+                    if len(available_products) > 5:
+                        error_msg += f" (and {len(available_products) - 5} more)"
+
+                raise FileNotFoundError(error_msg)
+
+            # Read and parse the catalog entry
+            with open(catalog_file, 'r') as f:
+                catalog_data = yaml.safe_load(f)
+
+            return catalog_data
+
+        finally:
+            # Cleanup
+            if self.temp_dir and self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+
+    def list_data_products(self) -> List[Dict[str, Any]]:
+        """List all available data products in the registry.
+
+        Returns:
+            List of data product summaries
+        """
+        try:
+            # Clone registry to get current catalog
+            self._clone_registry()
+
+            products = []
+            catalog_dir = self.repo_path / 'catalog' / 'data'
+
+            if catalog_dir.exists():
+                for yaml_file in catalog_dir.glob("*.yaml"):
+                    try:
+                        with open(yaml_file, 'r') as f:
+                            catalog_data = yaml.safe_load(f)
+
+                        product_info = {
+                            "name": yaml_file.stem,
+                            "type": catalog_data.get("project", {}).get("type", "data"),
+                            "full_name": catalog_data.get("project", {}).get("full_name", ""),
+                            "description": catalog_data.get("metadata", {}).get("description", ""),
+                            "created_at": catalog_data.get("project", {}).get("created_at", ""),
+                            "created_by": catalog_data.get("ownership", {}).get("created_by", "")
+                        }
+                        products.append(product_info)
+
+                    except Exception as e:
+                        # Skip malformed catalog entries but continue
+                        continue
+
+            return products
+
+        finally:
+            # Cleanup
+            if self.temp_dir and self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+
     def _generate_catalog_entry(self, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Generate a catalog entry for the project using metadata.json values."""
         project_name = metadata["project"]["name"]

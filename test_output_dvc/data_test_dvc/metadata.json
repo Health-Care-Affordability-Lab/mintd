@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "mint": {
+    "version": "0.1.0",
+    "commit_hash": "e88a759b52bcf88a4d89f86b5820690ee7e04211"
+  },
+  "project": {
+    "name": "test_dvc",
+    "type": "data",
+    "full_name": "data_test_dvc",
+    "display_name": "Test Dvc",
+    "created_at": "2026-01-06T21:43:26.160987",
+    "created_by": "Maurice Dalton"
+  },
+  "ownership": {
+    "team": "infrastructure-admins",
+    "maintainers": [
+      "Maurice Dalton"
+    ]
+  },
+  "governance": {
+    "classification": "private",
+    "contract_info": ""
+  },
+  "storage": {
+    "provider": "s3",
+    "bucket": "",
+    "prefix": "lab/infrastructure-admins/test_dvc/",
+    "endpoint": "https://s3.wasabisys.com",
+    "versioning": true
+  },
+  "schema": {
+    "version": "1.0.0",
+    "location": "schemas/v1/schema.json"
+  },
+  "lifecycle": {
+    "retention_policy": "permanent",
+    "archival_status": "active"
+  },
+  "repository": {
+    "github_url": "https://github.com/cooper-lab-yale/data_test_dvc",
+    "default_branch": "main",
+    "visibility": "private",
+    "mirror": {
+      "url": "",
+      "purpose": "external_collaboration"
+    }
+  }
+}

@@ -32,9 +32,43 @@ def create():
 @click.option("--use-current-repo", is_flag=True, help="Use current directory as project root (when in existing git repo)")
 @click.option("--admin-team", help="Override default admin team")
 @click.option("--researcher-team", help="Override default researcher team")
-def data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: str, register: bool, use_current_repo: bool, admin_team: str, researcher_team: str):
+@click.option("--public", is_flag=True, help="Mark as public data")
+@click.option("--contract", help="Mark as contract data (provide contract slug)")
+@click.option("--private", is_flag=True, help="Mark as private/lab data (default)")
+@click.option("--contract-info", help="Description or link to contract")
+@click.option("--team", help="Owning team slug")
+def data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: str, register: bool, use_current_repo: bool, admin_team: str, researcher_team: str, public: bool, contract: str, private: bool, contract_info: str, team: str):
     """Create a data product repository (data_{name})."""
     from .api import create_project
+
+    # Interactive Prompts for Governance
+    classification = "private"
+    contract_slug = None
+    
+    # Determine classification (if not silenced by flags)
+    if public:
+        classification = "public"
+    elif contract:
+        classification = "contract"
+        contract_slug = contract
+    elif private:
+        classification = "private"
+    else:
+        # No flag provided, prompt user
+        console.print()
+        console.print("[bold]Governance Configuration[/bold]")
+        classification = click.prompt(
+            "Data Classification",
+            type=click.Choice(["public", "private", "contract"]),
+            default="private"
+        )
+        
+        if classification == "contract":
+            contract_slug = click.prompt("Contract Slug (short-name for URL)")
+
+    # Get Contract Info if needed
+    if classification == "contract" and not contract_info:
+        contract_info = click.prompt("Contract Info (URL or description)", default="")
 
     with console.status("Scaffolding project..."):
         try:
@@ -50,6 +84,10 @@ def data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: st
                 use_current_repo=use_current_repo,
                 admin_team=admin_team,
                 researcher_team=researcher_team,
+                classification=classification,
+                team=team,
+                contract_slug=contract_slug,
+                contract_info=contract_info,
             )
             console.print(f"✅ Created: {result.full_name}", style="green")
             console.print(f"   Location: {result.path}", style="dim")
@@ -713,6 +751,108 @@ def setup(set_value, set_credentials):
     else:
         # Interactive setup
         init_config()
+
+
+@main.group()
+def data():
+    """Manage data products and dependencies."""
+    pass
+
+
+@data.command()
+@click.argument("product_name")
+@click.option("--destination", "-d", help="Local destination directory")
+@click.option("--stage", help="Pipeline stage to pull (e.g., final, clean)")
+@click.option("--path", help="Specific path to pull from the product")
+def pull(product_name, destination, stage, path):
+    """Pull/download data from a registered data product."""
+    from pathlib import Path
+    from .data_import import pull_data_product
+
+    try:
+        if stage and path:
+            console.print("❌ Cannot specify both --stage and --path", style="red")
+            raise click.Abort()
+
+        success = pull_data_product(
+            product_name=product_name,
+            destination=destination,
+            stage=stage,
+            path=path
+        )
+
+        if not success:
+            raise click.Abort()
+
+    except Exception as e:
+        console.print(f"❌ Error: {e}", style="red")
+        raise click.Abort()
+
+
+@data.command()
+@click.argument("product_name")
+@click.option("--stage", help="Pipeline stage to import (e.g., final, clean)")
+@click.option("--source-path", help="Specific path to import from the product")
+@click.option("--dest", help="Local destination path")
+@click.option("--rev", help="Specific git revision to import from")
+@click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path),
+              help="Path to project directory (defaults to current directory)")
+def import_(product_name, stage, source_path, dest, rev, project_path):
+    """Import data product as DVC dependency into current project."""
+    from pathlib import Path
+    from .data_import import import_data_product, update_project_metadata, query_data_product
+
+    project_path = Path(project_path) if project_path else Path.cwd()
+
+    try:
+        if stage and source_path:
+            console.print("❌ Cannot specify both --stage and --source-path", style="red")
+            raise click.Abort()
+
+        # Import the data
+        result = import_data_product(
+            product_name=product_name,
+            project_path=project_path,
+            stage=stage,
+            path=source_path,
+            dest=dest,
+            repo_rev=rev
+        )
+
+        if result.success:
+            # Update metadata with dependency info
+            try:
+                product_info = query_data_product(product_name)
+                update_project_metadata(project_path, result, product_info)
+                console.print("✅ Metadata updated with dependency information", style="green")
+            except Exception as e:
+                console.print(f"⚠️ Import succeeded but metadata update failed: {e}", style="yellow")
+                console.print("You may need to manually update metadata.json", style="yellow")
+        else:
+            console.print(f"❌ Import failed: {result.error_message}", style="red")
+            raise click.Abort()
+
+    except Exception as e:
+        console.print(f"❌ Error: {e}", style="red")
+        raise click.Abort()
+
+
+@data.command()
+@click.option("--imported", "-i", is_flag=True, help="Show imported dependencies instead of available products")
+@click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
+              help="Path to project directory (defaults to current directory)")
+def list(imported, project_path):
+    """List available data products or imported dependencies."""
+    from pathlib import Path
+    from .data_import import list_data_products
+
+    project_path = Path(project_path) if project_path else Path.cwd()
+
+    try:
+        list_data_products(show_imported=imported, project_path=project_path)
+    except Exception as e:
+        console.print(f"❌ Error: {e}", style="red")
+        raise click.Abort()
 
 
 @main.group()

@@ -1,0 +1,30 @@
+vars:
+  - dvc_vars.yaml
+
+stages:
+  ingest:
+    wdir: src
+    cmd: ${python_cmd} ingest.py
+    deps:
+      - ingest.py
+    outs:
+      - ../data/raw/
+
+  clean:
+    wdir: src
+    cmd: ${python_cmd} clean.py
+    deps:
+      - clean.py
+      - ../data/raw/
+    outs:
+      - ../data/intermediate/
+
+  validate:
+    wdir: src
+    cmd: ${python_cmd} validate.py
+    deps:
+      - validate.py
+      - ../data/intermediate/
+    outs:
+      - ../data/final/
+      - ../data/schema_validation_log.txt

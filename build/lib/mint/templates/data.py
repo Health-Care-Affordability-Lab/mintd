@@ -27,6 +27,11 @@ class DataTemplate(BaseTemplate):
                     ".gitkeep": None,
                 },
             },
+            "schemas": {
+                "v1": {
+                    "schema.json": None,
+                },
+            },
             "src": {},
             ".gitignore": None,
             ".dvcignore": None,
@@ -66,6 +71,7 @@ class DataTemplate(BaseTemplate):
         files = [
             ("README.md", "README_data.md.j2"),
             ("metadata.json", "metadata.json.j2"),
+            ("schemas/v1/schema.json", "schema.json.j2"),
             (".gitignore", "gitignore.txt"),
             (".dvcignore", "dvcignore.txt"),
             ("dvc.yaml", "dvc_data.yaml.j2"),

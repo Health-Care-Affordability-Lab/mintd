@@ -11,6 +11,7 @@ src/mint/__init__.py
 src/mint/api.py
 src/mint/cli.py
 src/mint/config.py
+src/mint/data_import.py
 src/mint/manifest.py
 src/mint/registry.py
 src/mint/utils.py
@@ -36,6 +37,7 @@ src/mint/files/clean.do.j2
 src/mint/files/clean.py.j2
 src/mint/files/download.py.j2
 src/mint/files/dvc_data.yaml.j2
+src/mint/files/dvc_vars.yaml.j2
 src/mint/files/dvcignore.txt
 src/mint/files/enclave_manifest.yaml.j2
 src/mint/files/gitignore.txt
@@ -52,6 +54,7 @@ src/mint/files/renv.lock.j2
 src/mint/files/requirements_data.txt.j2
 src/mint/files/requirements_enclave.txt.j2
 src/mint/files/requirements_project.txt.j2
+src/mint/files/schema.json.j2
 src/mint/files/unpack_transfer.sh.j2
 src/mint/files/validate.R.j2
 src/mint/files/validate.do.j2
@@ -76,6 +79,7 @@ stata/mint_installer.sthlp
 tests/test_api.py
 tests/test_cli.py
 tests/test_config.py
+tests/test_data_import.py
 tests/test_initializers.py
 tests/test_registry.py
 tests/test_templates.py
