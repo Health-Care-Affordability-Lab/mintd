@@ -44,6 +44,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Installation: installation.md
+  - Windows Setup: windows-setup.md
   - Quick Start: quick-start.md
   - Project Types: project-types.md
   - Features:

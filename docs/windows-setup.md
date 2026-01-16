@@ -56,17 +56,21 @@ You can run `mintd` directly in PowerShell. This is fully supported, though you 
 
 ### 2. Install Mintd
 
-Open PowerShell and run:
+You can install `mintd` directly from GitHub using pip (simplest), or for development, you can use `uv`.
 
+**Option A: Simple Install (Recommended for Users)**
 ```powershell
-# Install uv (Recommended)
+pip install git+https://github.com/Cooper-lab/mint.git
+```
+
+**Option B: Developer Install (for contributing code)**
+```powershell
+# Install uv
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Clone repository
+# Clone and sync
 git clone <repository-url>
 cd mintd
-
-# Install dependencies
 uv sync --dev
 ```
 
