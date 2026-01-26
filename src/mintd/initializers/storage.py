@@ -3,12 +3,9 @@
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Optional
 
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
 
-from ..config import get_config, get_storage_credentials
+from ..config import get_config
 
 # Mapping from sensitivity levels to ACL folder names
 SENSITIVITY_TO_ACL = {

@@ -4,22 +4,19 @@ Handles pulling data from registered data products and importing DVC dependencie
 into project/infra repositories with robust error handling and rollback support.
 """
 
-import os
 import json
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Callable
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, asdict
 
-import yaml
 import git
 from rich.console import Console
 
 from .registry import get_registry_client, load_project_metadata
-from .config import get_config
 
 console = Console()
 
@@ -222,7 +219,7 @@ def run_dvc_import(
         cmd.extend(["--rev", repo_rev])
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             cwd=project_path,
             capture_output=True,
@@ -454,7 +451,7 @@ def pull_data_product(
         # Clone repository
         temp_dir = Path(tempfile.mkdtemp())
         try:
-            repo = git.Repo.clone_from(ssh_url, temp_dir)
+            git.Repo.clone_from(ssh_url, temp_dir)
 
             # Determine what to copy
             if stage:

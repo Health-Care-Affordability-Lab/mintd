@@ -318,7 +318,7 @@ def _register_project(project_path: Path) -> Optional[str]:
 
         return pr_url
 
-    except Exception as e:
+    except Exception:
         # Registration is not critical - don't fail project creation
         # Save registration request for later retry
         try:

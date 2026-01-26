@@ -5,15 +5,13 @@ and verifying transfers. It is used by the mintd CLI and can be called by
 generated enclave scripts.
 """
 
-import os
 import shutil
 import yaml
 import git
-import hashlib
 import tarfile
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional
 
 from .registry import query_registry_for_product
 from .config import get_config
@@ -290,8 +288,6 @@ def package_transfer(enclave_path: Path, name: Optional[str] = None, force: bool
             if local_path_str:
                 local_path = enclave_path / local_path_str
                 if local_path.exists():
-                    dvc_hash = item['dvc_hash']
-                    
                     # Preserve repo/hash-date hierarchy
                     version_folder = local_path.name
                     tar.add(local_path, arcname=f"{repo_name}/{version_folder}")

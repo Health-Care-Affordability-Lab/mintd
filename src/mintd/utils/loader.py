@@ -5,7 +5,7 @@ import sys
 import importlib.util
 import inspect
 from pathlib import Path
-from typing import Dict, Type, List
+from typing import Dict, Type
 
 from ..templates.base import BaseTemplate
 

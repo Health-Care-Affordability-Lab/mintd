@@ -1,6 +1,5 @@
 """Registry integration for mintd - Tokenless GitOps operations using git + gh CLI."""
 
-import os
 import json
 import yaml
 import tempfile
@@ -356,7 +355,7 @@ After merging this PR:
                         }
                         products.append(product_info)
 
-                    except Exception as e:
+                    except Exception:
                         # Skip malformed catalog entries but continue
                         continue
 

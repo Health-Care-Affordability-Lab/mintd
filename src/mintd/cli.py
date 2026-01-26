@@ -419,7 +419,7 @@ def storage(path, yes):
     """Update DVC storage configuration to use new bucket naming (opt-in)."""
     import json
     from .config import get_config
-    from .initializers.storage import init_dvc, is_dvc_repo
+    from .initializers.storage import is_dvc_repo
 
     project_path = Path(path) if path else Path.cwd()
 
@@ -534,7 +534,6 @@ def utils(path):
 
     with console.status("Updating utility scripts..."):
         try:
-            from .registry import load_project_metadata
             import json
 
             # Load existing metadata to get project info
@@ -785,7 +784,7 @@ def update(project_name, description, add_tag, remove_tag):
 @registry.command()
 def sync():
     """Process pending registrations that were saved for offline mode."""
-    from .registry import get_pending_registrations, RegistryClient, clear_pending_registration
+    from .registry import get_pending_registrations, clear_pending_registration
 
     pending = get_pending_registrations()
 
@@ -873,7 +872,6 @@ def data():
 @click.option("--path", help="Specific path to pull from the product")
 def pull(product_name, destination, stage, path):
     """Pull/download data from a registered data product."""
-    from pathlib import Path
     from .data_import import pull_data_product
 
     try:
@@ -980,7 +978,6 @@ def add(repo_name, path, no_pull):
     attempt to pull/download the data. Use --no-pull to add without downloading."""
     from pathlib import Path
     import yaml
-    import subprocess
 
     enclave_path = Path(path) if path else Path.cwd()
     manifest_path = enclave_path / "enclave_manifest.yaml"
@@ -1332,7 +1329,7 @@ def register_custom_commands():
             # Register the command
             create_command_func(cmd_name)
                         
-    except Exception as e:
+    except Exception:
         # Don't crash CLI if custom template loading fails
         pass
 

@@ -3,9 +3,7 @@
 import subprocess
 import shutil
 from pathlib import Path
-from typing import Optional
 
-from ..utils import format_project_name
 
 
 def _is_command_available(command: str) -> bool:
