@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from mintd.initializers.git import init_git, is_git_repo
 from mintd.initializers.storage import init_dvc, is_dvc_repo

@@ -1,7 +1,6 @@
 """Tests for template functionality."""
 
 import tempfile
-from pathlib import Path
 
 from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate
 

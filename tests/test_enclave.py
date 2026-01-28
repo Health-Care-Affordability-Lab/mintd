@@ -4,7 +4,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import yaml
 import tempfile
-import shutil
 
 from mintd.templates.enclave import EnclaveTemplate
 

@@ -1,6 +1,5 @@
 """Tests for CLI functionality."""
 
-import pytest
 from click.testing import CliRunner
 from mintd.cli import main
 

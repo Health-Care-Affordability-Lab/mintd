@@ -1,19 +1,15 @@
 """Tests for configuration management."""
 
 import tempfile
-import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 from mintd.config import (
     get_config,
     save_config,
     _get_default_config,
-    validate_config,
-    CONFIG_DIR,
-    CONFIG_FILE
+    validate_config
 )
 
 

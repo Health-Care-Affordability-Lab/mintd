@@ -21,7 +21,7 @@ def create():
     pass
 
 
-@create.command()
+@create.command(name="data")
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
 @click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), required=True, help="Primary programming language")
@@ -37,7 +37,7 @@ def create():
 @click.option("--private", is_flag=True, help="Mark as private/lab data (default)")
 @click.option("--contract-info", help="Description or link to contract")
 @click.option("--team", help="Owning team slug")
-def data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: str, register: bool, use_current_repo: bool, admin_team: str, researcher_team: str, public: bool, contract: str, private: bool, contract_info: str, team: str):
+def create_data(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: str, register: bool, use_current_repo: bool, admin_team: str, researcher_team: str, public: bool, contract: str, private: bool, contract_info: str, team: str):
     """Create a data product repository (data_{name})."""
     from .api import create_project
 
@@ -179,12 +179,12 @@ def infra(name: str, path: str, lang: str, no_git: bool, no_dvc: bool, bucket: s
             raise click.Abort()
 
 
-@create.command()
+@create.command(name="enclave")
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
 @click.option("--registry-url", required=False, help="Data Commons Registry GitHub URL (e.g., https://github.com/org/data-registry). Uses config default if not provided.")
 @click.option("--no-git", is_flag=True, help="Skip Git initialization")
-def enclave(name: str, path: str, registry_url: str, no_git: bool):
+def create_enclave(name: str, path: str, registry_url: str, no_git: bool):
     """Create a secure data enclave workspace (enclave_{name})."""
     from .config import CONFIG_FILE, get_config, save_config
     import re
@@ -460,7 +460,7 @@ def storage(path, yes):
     from .initializers.storage import SENSITIVITY_TO_ACL
     acl_path = SENSITIVITY_TO_ACL.get(sensitivity, "lab")
 
-    console.print(f"📋 Current configuration will be updated:")
+    console.print("📋 Current configuration will be updated:")
     console.print(f"   - Project: {full_name}")
     console.print(f"   - Remote name: {remote_name}")
     console.print(f"   - Sensitivity: {sensitivity} → ACL: {acl_path}")
@@ -516,7 +516,7 @@ def storage(path, yes):
 
     console.print("✅ Updated DVC storage configuration")
     console.print(f"   - Remote '{remote_name}' now points to: s3://{new_bucket_name}/{acl_path}/{project_name}/")
-    console.print(f"   - Cloud versioning is enabled (version_aware: true)")
+    console.print("   - Cloud versioning is enabled (version_aware: true)")
 
     console.print("\n📝 Next steps for data migration:")
     console.print(f"   1. Create the bucket '{new_bucket_name}' if it doesn't exist")
@@ -736,9 +736,9 @@ def register(path):
                     pass
 
 
-@registry.command()
+@registry.command(name="status")
 @click.argument("project_name")
-def status(project_name):
+def registry_status(project_name):
     """Check registration status of a project."""
     with console.status(f"Checking registration status for '{project_name}'..."):
         try:
@@ -774,7 +774,7 @@ def status(project_name):
 @click.option("--description", help="Update project description")
 @click.option("--add-tag", multiple=True, help="Add a tag to the project")
 @click.option("--remove-tag", multiple=True, help="Remove a tag from the project")
-def update(project_name, description, add_tag, remove_tag):
+def update(project_name, description, _add_tag, _remove_tag):
     """Update project metadata in the registry."""
     console.print("❌ Update functionality is not yet implemented.")
     console.print("   This feature will be added in a future version.")
@@ -865,12 +865,12 @@ def data():
     pass
 
 
-@data.command()
+@data.command(name="pull")
 @click.argument("product_name")
 @click.option("--destination", "-d", help="Local destination directory")
 @click.option("--stage", help="Pipeline stage to pull (e.g., final, clean)")
 @click.option("--path", help="Specific path to pull from the product")
-def pull(product_name, destination, stage, path):
+def data_pull(product_name, destination, stage, path):
     """Pull/download data from a registered data product."""
     from .data_import import pull_data_product
 
@@ -942,11 +942,11 @@ def import_(product_name, stage, source_path, dest, rev, project_path):
         raise click.Abort()
 
 
-@data.command()
+@data.command(name="list")
 @click.option("--imported", "-i", is_flag=True, help="Show imported dependencies instead of available products")
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to project directory (defaults to current directory)")
-def list(imported, project_path):
+def data_list(imported, project_path):
     """List available data products or imported dependencies."""
     from pathlib import Path
     from .data_import import list_data_products
@@ -1029,12 +1029,12 @@ def add(repo_name, path, no_pull):
         console.print("Edit enclave_manifest.yaml to customize registry entry and stage if needed.")
 
 
-@enclave.command()
+@enclave.command(name="pull")
 @click.argument("repo_name", required=False)
 @click.option("--all", "-a", "pull_all", is_flag=True, help="Pull latest for all approved products")
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to enclave directory (defaults to current directory)")
-def pull(repo_name, pull_all, path):
+def enclave_pull(repo_name, pull_all, path):
     """Pull data products from registry (networked machine only)."""
     from .enclave_commands import pull_enclave_data
 
@@ -1095,11 +1095,11 @@ def verify(transfer_path, path):
         raise click.Abort()
 
 
-@enclave.command()
+@enclave.command(name="list")
 @click.argument("repo_name", required=False)
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to enclave directory (defaults to current directory)")
-def list(repo_name, path):
+def enclave_list(repo_name, path):
     """List approved and transferred data products."""
     from pathlib import Path
     import yaml
@@ -1221,13 +1221,13 @@ def check(filepath: Path, manifest: Path):
         raise click.Abort()
 
 
-@manifest.command()
+@manifest.command(name="status")
 @click.option("--directory", "-d", required=True, type=click.Path(exists=True, path_type=Path),
               help="Directory to scan for files")
 @click.option("--pattern", "-p", default="*", help="File pattern to match (default: *)")
 @click.option("--manifest", "-m", type=click.Path(exists=True, path_type=Path),
               help="Path to manifest file (default: manifest.json in current directory)")
-def status(directory: Path, pattern: str, manifest: Path):
+def manifest_status(directory: Path, pattern: str, manifest: Path):
     """Show status of files in a directory compared to manifest."""
     from .manifest import load_manifest, get_files_to_update, get_unchanged_files
 

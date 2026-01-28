@@ -283,7 +283,7 @@ def init_config() -> None:
             console.print(f"✅ Authenticated as: [green]{auth_info}[/green]")
             config["tools"]["github_cli"] = {"installed": True, "authenticated": True, "user": auth_info}
         else:
-            console.print(f"[yellow]⚠️  GitHub CLI is not authenticated[/yellow]")
+            console.print("[yellow]⚠️  GitHub CLI is not authenticated[/yellow]")
             console.print(f"   Status: {auth_info}\n")
 
             run_auth = Confirm.ask("Would you like to authenticate now?", default=True)
@@ -346,7 +346,7 @@ def init_config() -> None:
         
         # Ask if user wants to override
         use_detected = Confirm.ask(
-            f"Use detected Stata executable?",
+            "Use detected Stata executable?",
             default=True
         )
         

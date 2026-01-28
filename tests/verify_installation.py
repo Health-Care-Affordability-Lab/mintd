@@ -44,36 +44,36 @@ def verify_installation():
 
     try:
         import mintd
-        version = getattr(mint, '__version__', 'unknown')
-        check("mint package import", True, f"Version: {version} (local source)")
+        version = getattr(mintd, '__version__', 'unknown')
+        check("mintd package import", True, f"Version: {version} (local source)")
     except ImportError:
         check("mint package import", False, "Package not found in local source")
 
     # Check CLI
     try:
-        from mintd.cli import main
+        from mintd.cli import main  # noqa: F401
         check("CLI module import", True)
     except ImportError:
         check("CLI module import", False)
 
     # Check API
     try:
-        from mintd.api import create_project
+        from mintd.api import create_project  # noqa: F401
         check("API module import", True)
     except ImportError:
         check("API module import", False)
 
     # Check templates
     try:
-        from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate
+        from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate  # noqa: F401
         check("Template modules import", True)
     except ImportError:
         check("Template modules import", False)
 
     # Check initializers
     try:
-        from mintd.initializers.git import init_git
-        from mintd.initializers.storage import init_dvc
+        from mintd.initializers.git import init_git  # noqa: F401
+        from mintd.initializers.storage import init_dvc  # noqa: F401
         check("Initializer modules import", True)
     except ImportError:
         check("Initializer modules import", False)

@@ -1,7 +1,6 @@
 """Tests for API functionality."""
 
 import tempfile
-from pathlib import Path
 
 from mintd.api import create_project
 
