@@ -260,3 +260,11 @@ For sensitive analyses requiring secure enclave access, Sarah can create an encl
      - Scripts run from `src/` directory with consistent relative paths (`../data/`).
      - Configuration stores detected Stata path for future use.
      - Manual override allows specifying custom Stata executable path.
+
+### 10.10. Updating mintd scripts
+   - **ID**: US-010
+   - **Description**: As a user, I want to update mintd scripts so that I can use the latest features and bug fixes.
+   - **Acceptance criteria**:
+     - Running `mint update` updates the mintd scripts.
+     - The update process preserves existing project configurations.
+     - The update process updates the mintd scripts in place.

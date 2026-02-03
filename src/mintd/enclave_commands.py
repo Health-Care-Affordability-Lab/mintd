@@ -6,15 +6,18 @@ generated enclave scripts.
 """
 
 import shutil
-import yaml
-import git
 import tarfile
-from pathlib import Path
 from datetime import datetime
-from typing import Dict, Tuple, Optional
+from pathlib import Path
+from typing import Dict, Optional, Tuple
 
-from .registry import query_registry_for_product
+import git
+import yaml
+
 from .config import get_config
+from .exceptions import DVCError
+from .registry import query_registry_for_product
+from .shell import dvc_command
 
 def get_repo_info(repo_name: str) -> Dict:
     """Get repository information from registry."""
@@ -48,46 +51,37 @@ def convert_to_ssh_url(https_url: str) -> str:
 
 def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "") -> None:
     """Configure DVC remote in cloned repo."""
-    import subprocess
-    
     # First, check what remote name the repo expects
     repo_config = repo_dir / ".dvc" / "config"
     expected_remote = "storage"  # Default
-    
+
     if repo_config.exists():
         with open(repo_config, 'r') as f:
             for line in f:
                 if "remote =" in line:
                     expected_remote = line.split("=")[1].strip()
                     break
-    
+
+    dvc = dvc_command(cwd=repo_dir)
+
     # If we have an explicit URL from registry, use it directly
     if dvc_remote_url:
         try:
-            subprocess.run(
-                ["dvc", "remote", "add", "-f", expected_remote, dvc_remote_url],
-                capture_output=True, text=True, cwd=repo_dir
-            )
-            
+            dvc.run("remote", "add", "-f", expected_remote, dvc_remote_url)
+
             # Copy endpoint configuration from mintd config if needed
             config = get_config()
             endpoint = config.get('storage', {}).get('endpoint', '')
             if endpoint:
-                subprocess.run(
-                    ["dvc", "remote", "modify", expected_remote, "endpointurl", endpoint],
-                    capture_output=True, text=True, cwd=repo_dir
-                )
+                dvc.run("remote", "modify", expected_remote, "endpointurl", endpoint)
             return
-        except Exception:
+        except DVCError:
             pass
-    
+
     # Fallback: search global DVC config (simplified for now)
     try:
-        subprocess.run(
-            ["dvc", "remote", "add", "-f", expected_remote, f"s3://cooper-globus/lab/{repo_name}/"],
-            capture_output=True, text=True, cwd=repo_dir
-        )
-    except Exception:
+        dvc.run("remote", "add", "-f", expected_remote, f"s3://cooper-globus/lab/{repo_name}/")
+    except DVCError:
         pass
 
 def pull_dvc_data(repo_dir: Path, repo_name: str, stage: str, dvc_remote_url: str = "") -> None:

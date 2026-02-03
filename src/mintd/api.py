@@ -20,6 +20,160 @@ class ProjectResult:
     registration_url: Optional[str] = None
 
 
+class ProjectBuilder:
+    """Fluent builder for project creation.
+
+    This class provides a cleaner API for creating projects compared to the
+    many-parameter create_project() function. It groups related options together.
+
+    Example:
+        result = (ProjectBuilder("data", "my-project", "python")
+            .at_path("/path/to/create")
+            .with_git(enabled=True)
+            .with_dvc(bucket="my-bucket")
+            .with_governance(classification="private", team="my-team")
+            .build())
+    """
+
+    def __init__(self, project_type: str, name: str, language: str):
+        """Initialize the builder with required parameters.
+
+        Args:
+            project_type: Type of project ("data", "project", "infra", "enclave")
+            name: Project name (without prefix)
+            language: Primary programming language ("python", "r", "stata")
+        """
+        self._project_type = project_type
+        self._name = name
+        self._language = language
+        self._path = "."
+        self._init_git = True
+        self._init_dvc = True
+        self._bucket_name: Optional[str] = None
+        self._register_project = False
+        self._use_current_repo = False
+        self._registry_url: Optional[str] = None
+        self._admin_team: Optional[str] = None
+        self._researcher_team: Optional[str] = None
+        self._classification: Optional[str] = None
+        self._team: Optional[str] = None
+        self._contract_info: Optional[str] = None
+        self._contract_slug: Optional[str] = None
+
+    def at_path(self, path: str) -> "ProjectBuilder":
+        """Set the path where the project will be created.
+
+        Args:
+            path: Directory to create project in
+
+        Returns:
+            Self for method chaining
+        """
+        self._path = path
+        return self
+
+    def with_git(self, enabled: bool = True, use_current_repo: bool = False) -> "ProjectBuilder":
+        """Configure Git initialization.
+
+        Args:
+            enabled: Whether to initialize Git
+            use_current_repo: Use current directory as project root (when in existing git repo)
+
+        Returns:
+            Self for method chaining
+        """
+        self._init_git = enabled
+        self._use_current_repo = use_current_repo
+        return self
+
+    def with_dvc(self, enabled: bool = True, bucket: Optional[str] = None) -> "ProjectBuilder":
+        """Configure DVC initialization.
+
+        Args:
+            enabled: Whether to initialize DVC
+            bucket: Override bucket name for DVC remote
+
+        Returns:
+            Self for method chaining
+        """
+        self._init_dvc = enabled
+        self._bucket_name = bucket
+        return self
+
+    def with_governance(
+        self,
+        classification: str = "private",
+        team: Optional[str] = None,
+        contract_slug: Optional[str] = None,
+        contract_info: Optional[str] = None,
+    ) -> "ProjectBuilder":
+        """Configure data governance settings.
+
+        Args:
+            classification: Data classification ("public", "private", "contract")
+            team: Owning team (GitHub slug)
+            contract_slug: Short name for contract (used in S3 prefix)
+            contract_info: Description or link to contract
+
+        Returns:
+            Self for method chaining
+        """
+        self._classification = classification
+        self._team = team
+        self._contract_slug = contract_slug
+        self._contract_info = contract_info
+        return self
+
+    def with_registry(
+        self,
+        register: bool = False,
+        url: Optional[str] = None,
+        admin_team: Optional[str] = None,
+        researcher_team: Optional[str] = None,
+    ) -> "ProjectBuilder":
+        """Configure registry settings.
+
+        Args:
+            register: Whether to register project with Data Commons Registry
+            url: Data Commons Registry GitHub URL (required for enclaves)
+            admin_team: Override default admin team
+            researcher_team: Override default researcher team
+
+        Returns:
+            Self for method chaining
+        """
+        self._register_project = register
+        self._registry_url = url
+        self._admin_team = admin_team
+        self._researcher_team = researcher_team
+        return self
+
+    def build(self) -> "ProjectResult":
+        """Create the project with the configured settings.
+
+        Returns:
+            ProjectResult with creation details
+        """
+        return create_project(
+            project_type=self._project_type,
+            name=self._name,
+            language=self._language,
+            path=self._path,
+            init_git=self._init_git,
+            init_dvc=self._init_dvc,
+            bucket_name=self._bucket_name,
+            register_project=self._register_project,
+            use_current_repo=self._use_current_repo,
+            registry_url=self._registry_url,
+            admin_team=self._admin_team,
+            researcher_team=self._researcher_team,
+            classification=self._classification,
+            team=self._team,
+            contract_info=self._contract_info,
+            contract_slug=self._contract_slug,
+        )
+
+
 def create_project(
     project_type: str,
     name: str,
@@ -206,12 +360,13 @@ def _init_git(project_path: Path, use_current_repo: bool = False) -> None:
         # Just commit any new files that were added
         if is_git_repo(project_path):
             try:
-                from .initializers.git import _run_git_command
+                from .shell import git_command
+                git = git_command(cwd=project_path)
                 # Add all files (including new ones)
-                _run_git_command(project_path, ["add", "."])
+                git.run("add", ".")
                 # Try to commit, but don't fail if there are no changes
                 try:
-                    _run_git_command(project_path, ["commit", "-m", "Add mint project scaffolding"])
+                    git.run("commit", "-m", "Add mint project scaffolding")
                 except Exception:
                     # No changes to commit, that's fine
                     pass

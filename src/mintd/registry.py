@@ -1,14 +1,17 @@
 """Registry integration for mintd - Tokenless GitOps operations using git + gh CLI."""
 
 import json
-import yaml
-import tempfile
 import shutil
-import subprocess
+import tempfile
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Any, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
+
+import yaml
+
+from .exceptions import GHCLIError, GitError, RegistryError, ShellCommandError
+from .shell import gh_command, git_command
 
 
 class LocalRegistry:
@@ -34,53 +37,13 @@ class LocalRegistry:
             return path_parts[0], path_parts[1]
         raise ValueError(f"Invalid registry URL: {url}")
 
-    def _run_git_command(self, *args, cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
-        """Run a git command and return the result."""
-        cmd = ['git'] + list(args)
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd or self.repo_path,
-                capture_output=True,
-                text=True,
-                check=check
-            )
-            return result
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Git command failed: {' '.join(cmd)}")
-            print(f"stdout: {e.stdout}")
-            print(f"stderr: {e.stderr}")
-            raise
+    def _git(self, cwd: Optional[Path] = None):
+        """Get a git command instance for the given directory."""
+        return git_command(cwd=cwd or self.repo_path)
 
-    def _run_gh_command(self, *args, cwd: Optional[Path] = None, check: bool = True) -> subprocess.CompletedProcess:
-        """Run a gh CLI command and return the result."""
-        cmd = ['gh'] + list(args)
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=cwd or self.repo_path,
-                capture_output=True,
-                text=True,
-                check=check
-            )
-            return result
-        except FileNotFoundError:
-            print("❌ GitHub CLI (gh) not found!")
-            print("\n💡 GitHub CLI is required for project registration.")
-            print("   Run 'mintd config setup' for installation instructions.")
-            raise RuntimeError("GitHub CLI (gh) is not installed. Run 'mintd config setup' for help.")
-        except subprocess.CalledProcessError as e:
-            print(f"❌ GitHub CLI command failed: {' '.join(cmd)}")
-            print(f"stdout: {e.stdout}")
-            print(f"stderr: {e.stderr}")
-
-            # Provide helpful guidance for common errors
-            if "gh auth login" in e.stderr or "GH_TOKEN" in e.stderr:
-                print("\n💡 [bold]GitHub CLI is not authenticated.[/bold]")
-                print("   Run: gh auth login")
-                print("   Or run: mintd config setup")
-
-            raise
+    def _gh(self, cwd: Optional[Path] = None):
+        """Get a gh command instance for the given directory."""
+        return gh_command(cwd=cwd or self.repo_path)
 
     def _clone_registry(self) -> Path:
         """Clone the registry repository using SSH."""
@@ -88,7 +51,7 @@ class LocalRegistry:
         ssh_url = f"git@github.com:{self.registry_org}/{self.registry_name}.git"
 
         print(f"📥 Cloning registry: {ssh_url}")
-        self._run_git_command('clone', ssh_url, cwd=self.temp_dir)
+        self._git(cwd=self.temp_dir).run("clone", ssh_url)
 
         self.repo_path = self.temp_dir / self.registry_name
         print(f"✅ Cloned to: {self.repo_path}")
@@ -97,17 +60,18 @@ class LocalRegistry:
     def _create_branch(self, branch_name: str) -> None:
         """Create and checkout a new branch."""
         print(f"🌿 Creating branch: {branch_name}")
+        git = self._git()
 
         # Check if branch already exists
         try:
-            self._run_git_command('checkout', '-b', branch_name)
-        except subprocess.CalledProcessError:
+            git.run("checkout", "-b", branch_name)
+        except GitError:
             # Branch might exist, try to checkout existing
             try:
-                self._run_git_command('checkout', branch_name)
+                git.run("checkout", branch_name)
                 print(f"📋 Switched to existing branch: {branch_name}")
-            except subprocess.CalledProcessError:
-                raise RuntimeError(f"Could not create or checkout branch: {branch_name}")
+            except GitError:
+                raise RegistryError(f"Could not create or checkout branch: {branch_name}")
 
     def _write_catalog_entry(self, catalog_entry: Dict[str, Any], project_name: str) -> Path:
         """Write catalog entry to the appropriate file."""
@@ -128,14 +92,16 @@ class LocalRegistry:
 
     def _commit_and_push(self, branch_name: str, commit_message: str) -> None:
         """Commit changes and push the branch."""
+        git = self._git()
+
         # Add all changes
-        self._run_git_command('add', '.')
+        git.run("add", ".")
 
         # Commit
-        self._run_git_command('commit', '-m', commit_message)
+        git.run("commit", "-m", commit_message)
 
         # Push branch
-        self._run_git_command('push', '-u', 'origin', branch_name)
+        git.run("push", "-u", "origin", branch_name)
 
         print(f"✅ Pushed branch: {branch_name}")
 
@@ -143,23 +109,21 @@ class LocalRegistry:
         """Create a pull request using GitHub CLI."""
         try:
             # Use GitHub CLI to create PR
-            result = self._run_gh_command(
-                'pr', 'create',
-                '--title', title,
-                '--body', body,
-                '--head', branch_name,
-                '--base', 'main'
+            result = self._gh().run(
+                "pr", "create",
+                "--title", title,
+                "--body", body,
+                "--head", branch_name,
+                "--base", "main"
             )
 
             pr_url = result.stdout.strip()
             print(f"✅ Created PR: {pr_url}")
             return pr_url
 
-        except subprocess.CalledProcessError as e:
+        except GHCLIError as e:
             print(f"❌ Failed to create PR: {e}")
-            print(f"stdout: {e.stdout}")
-            print(f"stderr: {e.stderr}")
-            raise
+            raise RegistryError(f"Failed to create pull request: {e.message}")
 
     def register_project(self, metadata: Dict[str, Any]) -> str:
         """
@@ -257,7 +221,7 @@ After merging this PR:
 
             # Check for open PRs using gh CLI
             try:
-                result = self._run_gh_command('pr', 'list', '--state', 'open', '--json', 'title,url,headRefName')
+                result = self._gh().run("pr", "list", "--state", "open", "--json", "title,url,headRefName")
                 prs = json.loads(result.stdout)
 
                 for pr in prs:
@@ -268,7 +232,7 @@ After merging this PR:
                             "pr_title": pr.get('title'),
                             "status": "pending_review"
                         }
-            except subprocess.CalledProcessError:
+            except ShellCommandError:
                 # gh CLI not available or no PRs found
                 pass
 

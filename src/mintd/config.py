@@ -1,15 +1,228 @@
 """Configuration management for mintd."""
 
-import os
 import json
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import keyring
     KEYRING_AVAILABLE = True
 except ImportError:
     KEYRING_AVAILABLE = False
+
+
+# Configuration Schema Dataclasses
+@dataclass
+class StorageConfig:
+    """Storage configuration schema.
+
+    Defines S3-compatible cloud storage settings for DVC remotes.
+    """
+    provider: str = "s3"
+    bucket_prefix: str = ""
+    endpoint: str = ""
+    region: str = ""
+    versioning: bool = True
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "StorageConfig":
+        """Create from dictionary, ignoring unknown keys."""
+        return cls(
+            provider=data.get("provider", "s3"),
+            bucket_prefix=data.get("bucket_prefix", ""),
+            endpoint=data.get("endpoint", ""),
+            region=data.get("region", ""),
+            versioning=data.get("versioning", True),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "provider": self.provider,
+            "bucket_prefix": self.bucket_prefix,
+            "endpoint": self.endpoint,
+            "region": self.region,
+            "versioning": self.versioning,
+        }
+
+    def validate(self) -> None:
+        """Validate configuration values.
+
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        if self.provider not in ["s3", "gcs", "azure", "ssh"]:
+            raise ValueError(f"Invalid storage provider: {self.provider}")
+
+
+@dataclass
+class RegistryConfig:
+    """Registry configuration schema.
+
+    Defines Data Commons Registry connection settings.
+    """
+    url: str = ""
+    org: str = ""
+    default_branch: str = "main"
+    admin_team: str = "infrastructure-admins"
+    researcher_team: str = "all-researchers"
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RegistryConfig":
+        """Create from dictionary, ignoring unknown keys."""
+        return cls(
+            url=data.get("url", ""),
+            org=data.get("org", ""),
+            default_branch=data.get("default_branch", "main"),
+            admin_team=data.get("admin_team", "infrastructure-admins"),
+            researcher_team=data.get("researcher_team", "all-researchers"),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "url": self.url,
+            "org": self.org,
+            "default_branch": self.default_branch,
+            "admin_team": self.admin_team,
+            "researcher_team": self.researcher_team,
+        }
+
+    def validate(self) -> None:
+        """Validate configuration values.
+
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        if self.url and not self.url.startswith(("http://", "https://")):
+            raise ValueError(f"Invalid registry URL: {self.url}")
+
+
+@dataclass
+class DefaultsConfig:
+    """Defaults configuration schema.
+
+    User and organization default values for project creation.
+    """
+    author: str = ""
+    organization: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DefaultsConfig":
+        """Create from dictionary, ignoring unknown keys."""
+        return cls(
+            author=data.get("author", ""),
+            organization=data.get("organization", ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {"author": self.author, "organization": self.organization}
+
+
+@dataclass
+class ToolsConfig:
+    """Tools configuration schema.
+
+    External tool settings (like Stata executable paths).
+    """
+    stata_executable: str = ""
+    stata_auto_detected: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ToolsConfig":
+        """Create from dictionary, handling nested structure."""
+        stata = data.get("stata", {})
+        return cls(
+            stata_executable=stata.get("executable", ""),
+            stata_auto_detected=stata.get("auto_detected", ""),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "stata": {
+                "executable": self.stata_executable,
+                "auto_detected": self.stata_auto_detected,
+            }
+        }
+
+
+@dataclass
+class PlatformConfig:
+    """Platform configuration schema.
+
+    OS detection and platform-specific settings.
+    """
+    os: str = ""
+    auto_detected: bool = True
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
+        """Create from dictionary, ignoring unknown keys."""
+        return cls(
+            os=data.get("os", ""),
+            auto_detected=data.get("auto_detected", True),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {"os": self.os, "auto_detected": self.auto_detected}
+
+
+@dataclass
+class MintdConfig:
+    """Complete mintd configuration schema.
+
+    Groups all configuration sections together with validation.
+    """
+    storage: StorageConfig = field(default_factory=StorageConfig)
+    registry: RegistryConfig = field(default_factory=RegistryConfig)
+    defaults: DefaultsConfig = field(default_factory=DefaultsConfig)
+    tools: ToolsConfig = field(default_factory=ToolsConfig)
+    platform: PlatformConfig = field(default_factory=PlatformConfig)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "MintdConfig":
+        """Create from dictionary configuration."""
+        return cls(
+            storage=StorageConfig.from_dict(data.get("storage", {})),
+            registry=RegistryConfig.from_dict(data.get("registry", {})),
+            defaults=DefaultsConfig.from_dict(data.get("defaults", {})),
+            tools=ToolsConfig.from_dict(data.get("tools", {})),
+            platform=PlatformConfig.from_dict(data.get("platform", {})),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for saving."""
+        return {
+            "storage": self.storage.to_dict(),
+            "registry": self.registry.to_dict(),
+            "defaults": self.defaults.to_dict(),
+            "tools": self.tools.to_dict(),
+            "platform": self.platform.to_dict(),
+        }
+
+    def validate(self) -> None:
+        """Validate all configuration sections.
+
+        Raises:
+            ValueError: If any configuration is invalid
+        """
+        self.storage.validate()
+        self.registry.validate()
+
+
+def get_typed_config() -> MintdConfig:
+    """Load configuration as typed dataclass.
+
+    Returns:
+        MintdConfig instance with validated configuration
+    """
+    raw_config = get_config()
+    return MintdConfig.from_dict(raw_config)
 
 
 # Configuration file location

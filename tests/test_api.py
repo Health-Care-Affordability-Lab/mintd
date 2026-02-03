@@ -233,16 +233,17 @@ class TestInitGit:
         mock_init_git.assert_called_once()
 
     @patch("mintd.api.is_git_repo")
-    @patch("mintd.initializers.git._run_git_command")
-    def test_init_git_use_current_repo(self, mock_git_cmd, mock_is_git_repo):
+    @patch("mintd.shell.ShellCommand.run")
+    def test_init_git_use_current_repo(self, mock_shell_run, mock_is_git_repo):
         """Test using git in existing repo."""
         mock_is_git_repo.return_value = True
+        mock_shell_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             _init_git(Path(temp_dir), use_current_repo=True)
 
-        # Should attempt to add and commit
-        assert mock_git_cmd.call_count >= 1
+        # Should attempt to add and commit via ShellCommand
+        assert mock_shell_run.call_count >= 1
 
 
 class TestInitDvc:
