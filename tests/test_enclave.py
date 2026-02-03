@@ -25,7 +25,7 @@ def test_enclave_creation(temp_workspace):
     assert project_path.exists()
     assert (project_path / "enclave_manifest.yaml").exists()
     assert (project_path / "src" / "download.py").exists()
-    assert (project_path / "src" / "package.py").exists()
+    assert (project_path / "src" / "transfer.py").exists()  # Combined transfer operations
     assert (project_path / "scripts" / "pull_data.sh").exists()
     
     # Check executables

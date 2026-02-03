@@ -262,10 +262,12 @@ class TestLocalRegistryIntegration:
 class TestRegistryClientFactory:
     """Test registry client factory functions."""
 
-    @patch("mintd.config.get_registry_url")
-    def test_get_registry_client(self, mock_get_url):
+    @patch("mintd.config.get_config")
+    def test_get_registry_client(self, mock_get_config):
         """Test getting registry client instance."""
-        mock_get_url.return_value = "https://github.com/test-org/test-repo"
+        mock_get_config.return_value = {
+            "registry": {"url": "https://github.com/test-org/test-repo"}
+        }
 
         client = get_registry_client()
 
