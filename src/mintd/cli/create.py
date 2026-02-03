@@ -88,9 +88,38 @@ def create_data(name, path, lang, no_git, no_dvc, bucket, register, use_current_
 @click.option("--use-current-repo", is_flag=True, help="Use current directory as project root")
 @click.option("--admin-team", help="Override default admin team")
 @click.option("--researcher-team", help="Override default researcher team")
-def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team):
+@click.option("--public", is_flag=True, help="Mark as public data")
+@click.option("--contract", help="Mark as contract data (provide contract slug)")
+@click.option("--private", is_flag=True, help="Mark as private/lab data (default)")
+@click.option("--contract-info", help="Description or link to contract")
+@click.option("--team", help="Owning team slug")
+def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team, public, contract, private, contract_info, team):
     """Create a project repository (prj__{name})."""
     from ..api import create_project
+
+    classification = "private"
+    contract_slug = None
+
+    if public:
+        classification = "public"
+    elif contract:
+        classification = "contract"
+        contract_slug = contract
+    elif private:
+        classification = "private"
+    else:
+        console.print()
+        console.print("[bold]Governance Configuration[/bold]")
+        classification = click.prompt(
+            "Data Classification",
+            type=click.Choice(["public", "private", "contract"]),
+            default="private"
+        )
+        if classification == "contract":
+            contract_slug = click.prompt("Contract Slug (short-name for URL)")
+
+    if classification == "contract" and not contract_info:
+        contract_info = click.prompt("Contract Info (URL or description)", default="")
 
     with console.status("Scaffolding project..."):
         try:
@@ -99,6 +128,8 @@ def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo
                 init_git=not no_git, init_dvc=not no_dvc, bucket_name=bucket,
                 register_project=register, use_current_repo=use_current_repo,
                 admin_team=admin_team, researcher_team=researcher_team,
+                classification=classification, team=team,
+                contract_slug=contract_slug, contract_info=contract_info,
             )
             console.print(f"✅ Created: {result.full_name}", style="green")
             console.print(f"   Location: {result.path}", style="dim")
@@ -120,9 +151,38 @@ def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo
 @click.option("--use-current-repo", is_flag=True, help="Use current directory as project root")
 @click.option("--admin-team", help="Override default admin team")
 @click.option("--researcher-team", help="Override default researcher team")
-def infra(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team):
+@click.option("--public", is_flag=True, help="Mark as public data")
+@click.option("--contract", help="Mark as contract data (provide contract slug)")
+@click.option("--private", is_flag=True, help="Mark as private/lab data (default)")
+@click.option("--contract-info", help="Description or link to contract")
+@click.option("--team", help="Owning team slug")
+def infra(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team, public, contract, private, contract_info, team):
     """Create an infrastructure repository (infra_{name})."""
     from ..api import create_project
+
+    classification = "private"
+    contract_slug = None
+
+    if public:
+        classification = "public"
+    elif contract:
+        classification = "contract"
+        contract_slug = contract
+    elif private:
+        classification = "private"
+    else:
+        console.print()
+        console.print("[bold]Governance Configuration[/bold]")
+        classification = click.prompt(
+            "Data Classification",
+            type=click.Choice(["public", "private", "contract"]),
+            default="private"
+        )
+        if classification == "contract":
+            contract_slug = click.prompt("Contract Slug (short-name for URL)")
+
+    if classification == "contract" and not contract_info:
+        contract_info = click.prompt("Contract Info (URL or description)", default="")
 
     with console.status("Scaffolding project..."):
         try:
@@ -131,6 +191,8 @@ def infra(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, 
                 init_git=not no_git, init_dvc=not no_dvc, bucket_name=bucket,
                 register_project=register, use_current_repo=use_current_repo,
                 admin_team=admin_team, researcher_team=researcher_team,
+                classification=classification, team=team,
+                contract_slug=contract_slug, contract_info=contract_info,
             )
             console.print(f"✅ Created: {result.full_name}", style="green")
             console.print(f"   Location: {result.path}", style="dim")
