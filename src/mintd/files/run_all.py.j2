@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+"""Master run script for {{ project_name }}.
+
+This script runs all analysis code in the correct order.
+Per AEA Data Editor guidelines for reproducible research:
+https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+
+Usage:
+    python run_all.py
+
+Requirements:
+    - Python {{ language_version | default('3.9+') }}
+    - Dependencies listed in requirements.txt
+"""
+
+import sys
+import subprocess
+from pathlib import Path
+from datetime import datetime
+
+# Project root directory
+PROJECT_ROOT = Path(__file__).parent
+CODE_DIR = PROJECT_ROOT / "code"
+
+
+def run_script(script_path: Path, description: str) -> bool:
+    """Run a Python script and return success status.
+
+    Args:
+        script_path: Path to the script to run
+        description: Human-readable description of the script
+
+    Returns:
+        True if script ran successfully, False otherwise
+    """
+    print(f"\n{'='*60}")
+    print(f"Running: {description}")
+    print(f"Script: {script_path}")
+    print(f"Time: {datetime.now().isoformat()}")
+    print("="*60)
+
+    if not script_path.exists():
+        print(f"WARNING: Script not found: {script_path}")
+        return True  # Skip missing scripts
+
+    result = subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=PROJECT_ROOT,
+    )
+
+    if result.returncode != 0:
+        print(f"ERROR: Script failed with return code {result.returncode}")
+        return False
+
+    print(f"SUCCESS: {description} completed")
+    return True
+
+
+def main():
+    """Run all analysis scripts in order."""
+    print("="*60)
+    print("{{ full_project_name }}")
+    print("Master Run Script")
+    print(f"Started: {datetime.now().isoformat()}")
+    print("="*60)
+
+    scripts = [
+        # Data preparation
+        # (CODE_DIR / "01_data_prep" / "prepare_data.py", "Data preparation"),
+
+        # Analysis
+        # (CODE_DIR / "02_analysis" / "main_analysis.py", "Main analysis"),
+
+        # Tables
+        # (CODE_DIR / "03_tables" / "generate_tables.py", "Generate tables"),
+
+        # Figures
+        # (CODE_DIR / "04_figures" / "generate_figures.py", "Generate figures"),
+    ]
+
+    # Run each script
+    for script_path, description in scripts:
+        if not run_script(script_path, description):
+            print(f"\nERROR: Pipeline failed at: {description}")
+            sys.exit(1)
+
+    print("\n" + "="*60)
+    print("All scripts completed successfully!")
+    print(f"Finished: {datetime.now().isoformat()}")
+    print("="*60)
+
+
+if __name__ == "__main__":
+    main()

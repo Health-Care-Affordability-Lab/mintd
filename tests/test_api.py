@@ -53,7 +53,14 @@ def test_create_project_project():
         assert result.full_name == "prj_test_api"
         assert result.project_type == "project"
         assert result.path.exists()
-        assert (result.path / "code" / "analysis" / "__init__.py").exists()
+        # AEA-compliant structure with config at code/ level
+        assert (result.path / "code" / "02_analysis" / "__init__.py").exists()
+        assert (result.path / "code" / "config.py").exists()
+        assert (result.path / "code" / "_mintd_utils.py").exists()
+        assert (result.path / "run_all.py").exists()
+        assert (result.path / "citations.md").exists()
+        assert (result.path / "data" / "analysis").exists()
+        assert (result.path / "results" / "estimates").exists()
 
 
 def test_create_project_infra():

@@ -13,7 +13,11 @@ class DataTemplate(BaseTemplate):
     template_type = "data"
 
     def define_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
-        """Return directory structure for data projects."""
+        """Return directory structure for data projects.
+
+        Follows AEA Data Editor guidelines for reproducible research packages.
+        See: https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+        """
         # Base structure
         structure = {
             "README.md": None,
@@ -22,10 +26,7 @@ class DataTemplate(BaseTemplate):
                 "raw": {
                     ".gitkeep": None,
                 },
-                "intermediate": {
-                    ".gitkeep": None,
-                },
-                "final": {
+                "analysis": {
                     ".gitkeep": None,
                 },
             },
@@ -34,7 +35,7 @@ class DataTemplate(BaseTemplate):
                     "schema.json": None,
                 },
             },
-            self.source_dir: {}, # Renamed from src
+            self.source_dir: {},  # Renamed from src
             ".gitignore": None,
             ".dvcignore": None,
             "dvc_vars.yaml": None,

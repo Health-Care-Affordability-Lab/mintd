@@ -1,71 +1,152 @@
 # {{ full_project_name }}
 
-Research project: {{ project_name }}.
+Research project: {{ project_name }}
 
 ## Overview
 
 This repository contains the analysis code and outputs for {{ project_name }}.
 
-## Project Structure
+**TODO**: Add a brief description of your research question and findings.
 
-- `data/`: Project-specific data files (raw, intermediate, final)
-- `code/`: Analysis scripts ({{ language | default('Python') }})
-- `results/figures/`: Generated figures
-- `results/tables/`: Generated tables
-- `notebooks/`: Jupyter/R notebooks for exploration
-- `docs/`: Documentation
-- `references/`: Reference materials and literature
-- `tests/`: Test files
-- `logs/`: Execution logs
+## Data Availability and Provenance Statements
 
-## Requirements
+### Statement about Rights
+
+- [ ] I certify that the author(s) of the manuscript have legitimate access to and permission to use the data used in this manuscript.
+
+### License for Data
+
+The data are licensed under a [Creative Commons Attribution 4.0 International License (CC-BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+
+**TODO**: Update this section with the appropriate license for your data.
+
+### Data Sources
+
+| Data Source | Location | Provided | Citation |
+|-------------|----------|----------|----------|
+| [Source 1] | [URL or description] | Yes/No | See `citations.md` |
+| [Source 2] | [URL or description] | Yes/No | See `citations.md` |
+
+**TODO**: Document all data sources used in this project.
+
+## Dataset List
+
+| File | Description | Source |
+|------|-------------|--------|
+| `data/raw/` | Original source data | [Source] |
+| `data/analysis/` | Processed data for analysis | Generated |
+
+**TODO**: List all datasets with descriptions.
+
+## Computational Requirements
+
+### Software Requirements
 
 {% if language == 'r' %}
+- R {{ language_version | default('4.0+') }}
+- See `renv.lock` for package dependencies
+
 Install R dependencies with renv:
 ```r
 install.packages("renv")
 renv::restore()
 ```
 {% elif language == 'stata' %}
+- Stata {{ language_version | default('17+') }} (MP/SE/IC)
+
 No additional package manager required. Ensure Stata is installed and configured.
+User-written commands are documented in `citations.md`.
 {% else %}
+- Python {{ language_version | default('3.9+') }}
+- See `requirements.txt` for package dependencies
+
 Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 {% endif %}
 
-## Analysis
+### Controlled Randomness
 
-Run analysis scripts from the `code/` directory:
+- Random seed: Set in `code/config.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}`
+- All stochastic operations use this seed for reproducibility
+
+### Memory, Runtime, and Storage Requirements
+
+**TODO**: Document the computational requirements:
+
+- Approximate runtime: [X hours/minutes on machine type]
+- Memory requirements: [X GB RAM]
+- Storage requirements: [X GB disk space]
+
+## Description of Programs/Code
+
+### License for Code
+
+The code is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+
+**TODO**: Update with your preferred license.
+
+### Program Structure
+
+```
+code/
+├── config.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}         # Configuration (paths, random seed)
+├── _mintd_utils.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}   # Utility functions
+├── 01_data_prep/   # Data cleaning and preparation
+├── 02_analysis/    # Main analysis scripts
+├── 03_tables/      # Table generation
+└── 04_figures/     # Figure generation
+```
 
 {% if language == 'r' %}
+Run the master script to execute all programs:
 ```r
-source("code/analysis.R")
+source("run_all.R")
 ```
 {% elif language == 'stata' %}
+Run the master script to execute all programs:
 ```stata
-do code/analysis.do
+do run_all.do
 ```
 {% else %}
+Run the master script to execute all programs:
 ```bash
-python code/analysis/main.py
+python run_all.py
 ```
 {% endif %}
+
+## Instructions to Replicators
+
+1. **Install dependencies** (see Software Requirements above)
+2. **Configure paths**: Edit `code/config.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}` to set your base path
+3. **Obtain data**: Place raw data files in `data/raw/` as documented in Dataset List
+4. **Run analysis**: Execute `run_all.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}` OR run scripts in numbered order
+
+## List of Tables and Programs
+
+| Table/Figure | Program | Output File |
+|--------------|---------|-------------|
+| Table 1 | `code/03_tables/table1.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}` | `results/tables/table1.tex` |
+| Figure 1 | `code/04_figures/figure1.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}` | `results/figures/figure1.pdf` |
+
+**TODO**: Update with your actual tables and figures.
 
 ## Outputs
 
 - Figures are saved to `results/figures/`
 - Tables are saved to `results/tables/`
+- Model estimates are saved to `results/estimates/`
 - Presentations are saved to `results/presentations/`
 
-## Data
+## References
 
-Project data is stored in the `data/` directory and tracked with DVC.
+See `citations.md` for data citations and references.
+
+---
 
 Created: {{ created_at }}
 {% if author %}Author: {{ author }}{% endif %}
 {% if organization %}Organization: {{ organization }}{% endif %}
 
----
 This project was created by and is managed by [mintd](https://github.com/cooper-lab/mint).

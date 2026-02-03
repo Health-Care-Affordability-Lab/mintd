@@ -10,13 +10,32 @@ This repository contains the data processing pipeline for {{ project_name }} usi
 
 **TODO**: Describe the specific goal and purpose of this data repository. What research question does it address? What data sources are being processed?
 
+## Data Availability and Provenance Statements
+
+### Statement about Rights
+
+- [ ] I certify that the author(s) of the manuscript have legitimate access to and permission to use the data used in this manuscript.
+
+### License for Data
+
+The data are licensed under a [Creative Commons Attribution 4.0 International License (CC-BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+
+**TODO**: Update this section with the appropriate license for your data.
+
+### Data Sources
+
+| Data Source | Location | Provided | Citation |
+|-------------|----------|----------|----------|
+| [Source 1] | [URL or description] | Yes/No | See `citations.md` |
+
+**TODO**: Document all data sources used in this project.
+
 ## Data Flow
 
-The data processing follows a standard three-stage pipeline:
+The data processing follows a standard two-stage pipeline:
 
 - **Raw Data** → `data/raw/`: Original, unmodified data as acquired from sources
-- **Clean Data** → `data/clean/`: Processed and cleaned data ready for analysis
-- **Intermediate Data** → `data/intermediate/`: Temporary files and intermediate processing results
+- **Analysis Data** → `data/analysis/`: Processed and cleaned data ready for analysis
 
 ## Requirements
 
@@ -39,66 +58,80 @@ pip install -r requirements.txt
 ```
 {% endif %}
 
+## Computational Requirements
+
+### Controlled Randomness
+
+- Random seed: Set in `code/config.{{ 'R' if language == 'r' else ('do' if language == 'stata' else 'py') }}` (if applicable)
+
+### Memory, Runtime, and Storage Requirements
+
+**TODO**: Document the computational requirements:
+
+- Approximate runtime: [X hours/minutes]
+- Memory requirements: [X GB RAM]
+- Storage requirements: [X GB disk space]
+
 ## Pipeline Scripts
 
 {% if language == "python" %}
-1. **Ingest**: `src/ingest.py` - Raw data acquisition and initial processing
-2. **Clean**: `src/clean.py` - Data cleaning and preprocessing
-3. **Validate**: `src/validate.py` - Data quality checks and validation
+1. **Ingest**: `code/ingest.py` - Raw data acquisition and initial processing
+2. **Clean**: `code/clean.py` - Data cleaning and preprocessing
+3. **Validate**: `code/validate.py` - Data quality checks and validation
 {% elif language == "r" %}
-1. **Ingest**: `src/ingest.R` - Raw data acquisition and initial processing
-2. **Clean**: `src/clean.R` - Data cleaning and preprocessing
-3. **Validate**: `src/validate.R` - Data quality checks and validation
+1. **Ingest**: `code/ingest.R` - Raw data acquisition and initial processing
+2. **Clean**: `code/clean.R` - Data cleaning and preprocessing
+3. **Validate**: `code/validate.R` - Data quality checks and validation
 {% elif language == "stata" %}
-1. **Ingest**: `src/ingest.do` - Raw data acquisition and initial processing
-2. **Clean**: `src/clean.do` - Data cleaning and preprocessing
-3. **Validate**: `src/validate.do` - Data quality checks and validation
+1. **Ingest**: `code/ingest.do` - Raw data acquisition and initial processing
+2. **Clean**: `code/clean.do` - Data cleaning and preprocessing
+3. **Validate**: `code/validate.do` - Data quality checks and validation
 {% endif %}
 
-## Usage
+## Instructions to Replicators
 
 {% if language == "python" %}
 Run the complete pipeline:
 ```bash
 # Ingest raw data
-python src/ingest.py
+python code/ingest.py
 
 # Clean data
-python src/clean.py
+python code/clean.py
 
 # Validate results
-python src/validate.py
+python code/validate.py
 ```
 {% elif language == "r" %}
 Run the complete pipeline:
 ```r
 # Ingest raw data
-source("src/ingest.R")
+source("code/ingest.R")
 
 # Clean data
-source("src/clean.R")
+source("code/clean.R")
 
 # Validate results
-source("src/validate.R")
+source("code/validate.R")
 ```
 
 Or from command line:
 ```bash
-Rscript src/ingest.R
-Rscript src/clean.R
-Rscript src/validate.R
+Rscript code/ingest.R
+Rscript code/clean.R
+Rscript code/validate.R
 ```
 {% elif language == "stata" %}
 Run the complete pipeline in Stata:
 ```stata
 // Ingest raw data
-do src/ingest.do
+do code/ingest.do
 
 // Clean data
-do src/clean.do
+do code/clean.do
 
 // Validate results
-do src/validate.do
+do code/validate.do
 ```
 {% endif %}
 
@@ -123,6 +156,10 @@ The validation script performs checks for:
 - Business rule compliance
 
 **TODO**: Add specific validation rules relevant to your data domain.
+
+## References
+
+See `citations.md` for data citations and references.
 
 ## Data Provenance
 

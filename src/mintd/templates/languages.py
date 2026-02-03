@@ -58,18 +58,25 @@ class PythonStrategy(LanguageStrategy):
         return {"requirements.txt": None}
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                "analysis": {
+                "_mintd_utils.py": None,
+                "config.py": None,
+                "02_analysis": {
                     "__init__.py": None,
-                }
-            }
+                },
+            },
+            "run_all.py": None,
         }
 
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
             ("requirements.txt", "requirements_project.txt.j2"),
-            (f"{source_dir}/analysis/__init__.py", "__init__.py.j2"),
+            (f"{source_dir}/_mintd_utils.py", "_mintd_utils.py.j2"),
+            (f"{source_dir}/config.py", "config.py.j2"),
+            (f"{source_dir}/02_analysis/__init__.py", "__init__.py.j2"),
+            ("run_all.py", "run_all.py.j2"),
         ]
 
     def get_data_structure(self, source_dir: str = "code") -> Dict[str, Any]:
@@ -126,19 +133,26 @@ class RStrategy(LanguageStrategy):
         }
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
-        # Standardize R to use code/ folder logic?
-        # Legacy used src/r/analysis.R. Let's modernize to code/analysis.R
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                "analysis.R": None
-            }
+                "_mintd_utils.R": None,
+                "config.R": None,
+                "02_analysis": {
+                    "analysis.R": None,
+                },
+            },
+            "run_all.R": None,
         }
 
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
             ("DESCRIPTION", "DESCRIPTION.j2"),
             ("renv.lock", "renv.lock.j2"),
-            (f"{source_dir}/analysis.R", "analysis.R.j2"),
+            (f"{source_dir}/_mintd_utils.R", "_mintd_utils.R.j2"),
+            (f"{source_dir}/config.R", "config.R.j2"),
+            (f"{source_dir}/02_analysis/analysis.R", "analysis.R.j2"),
+            ("run_all.R", "run_all.R.j2"),
             (".Rprofile", ".Rprofile.j2"),
         ]
 
@@ -189,19 +203,29 @@ class StataStrategy(LanguageStrategy):
 
     name = "stata"
     file_extension = "do"
-    
+
     def get_system_requirements(self) -> Dict[str, Any]:
         return {}
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                ".gitkeep": None
-            }
+                "_mintd_utils.do": None,
+                "config.do": None,
+                "02_analysis": {
+                    ".gitkeep": None,
+                },
+            },
+            "run_all.do": None,
         }
-        
+
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return []
+        return [
+            (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
+            (f"{source_dir}/config.do", "config.do.j2"),
+            ("run_all.do", "run_all.do.j2"),
+        ]
 
     def get_data_structure(self, source_dir: str = "code") -> Dict[str, Any]:
         return {

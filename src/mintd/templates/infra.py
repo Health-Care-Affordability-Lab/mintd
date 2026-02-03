@@ -15,7 +15,11 @@ class InfraTemplate(BaseTemplate):
     package_name: str = "package_name"
 
     def define_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
-        """Return base directory structure for infrastructure projects."""
+        """Return base directory structure for infrastructure projects.
+
+        Follows AEA Data Editor guidelines for reproducible research packages.
+        See: https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+        """
         return {
             "README.md": None,
             "metadata.json": None,
@@ -23,10 +27,7 @@ class InfraTemplate(BaseTemplate):
                 "raw": {
                     ".gitkeep": None,
                 },
-                "intermediate": {
-                    ".gitkeep": None,
-                },
-                "final": {
+                "analysis": {
                     ".gitkeep": None,
                 },
             },

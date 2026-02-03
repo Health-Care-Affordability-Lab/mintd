@@ -13,9 +13,7 @@
 
 global DATA_DIR "../data"
 global RAW_DIR "../data/raw"
-global INTERMEDIATE_DIR "../data/intermediate"
-global FINAL_DIR "../data/final"
-global LOGS_DIR "../logs"
+global ANALYSIS_DIR "../data/analysis"
 
 * =============================================================================
 * SETUP PROJECT DIRECTORY
@@ -26,7 +24,7 @@ program define setup_project_directory
     * Validate we're running from the code/ directory within a mint project
 
     local current_dir "`c(pwd)'"
-    
+
     * Check if we're in code/ by looking for project indicators in parent
     local root_indicators "metadata.json .git"
     local is_in_src = 0
@@ -45,7 +43,7 @@ program define setup_project_directory
         display "Project root: `current_dir'/.."
         exit
     }
-    
+
     * Check if we're in the project root (for backwards compatibility)
     local root_found = 0
     foreach indicator of local root_indicators {
@@ -59,13 +57,11 @@ program define setup_project_directory
     if `root_found' {
         display as text "Note: Running from project root. Consider running from code/"
         display "Project root: `current_dir'"
-        
+
         * Update globals for project-root execution (backwards compatibility)
         global DATA_DIR "data"
         global RAW_DIR "data/raw"
-        global INTERMEDIATE_DIR "data/intermediate"
-        global FINAL_DIR "data/final"
-        global LOGS_DIR "logs"
+        global ANALYSIS_DIR "data/analysis"
         exit
     }
 
@@ -75,123 +71,6 @@ program define setup_project_directory
     display as error "Current directory: `current_dir'"
     display as error "Please cd to the project's code/ directory and try again."
     error 1
-end
-
-* =============================================================================
-* PARAMETER-AWARE LOGGER
-* =============================================================================
-
-capture program drop ParameterAwareLogger
-program define ParameterAwareLogger
-    * Initialize parameter-aware logging
-    args script_name
-
-    * Set up timing
-    local start_time = clock("`c(current_time)'", "hms")
-    local start_time_fmt = clock("`c(current_time)'", "hms")
-
-    * Validate directory and set up globals
-    setup_project_directory
-
-    * Create logs directory using global path
-    capture mkdir "$LOGS_DIR"
-    local logs_dir "$LOGS_DIR"
-
-    * Parse command line arguments for parameters
-    local params ""
-    local args_to_parse "`0'"
-
-    * Look for common parameter patterns
-    if strpos("`args_to_parse'", "--year=") > 0 {
-        local year_pos = strpos("`args_to_parse'", "--year=")
-        local year_rest = substr("`args_to_parse'", `year_pos' + 7, .)
-        local year_val = substr("`year_rest'", 1, strpos("`year_rest'", " ") - 1)
-        if "`year_val'" == "" {
-            local year_val = "`year_rest'"
-        }
-        local params "`params'`year_val'_"
-    }
-
-    if strpos("`args_to_parse'", "--version=") > 0 {
-        local ver_pos = strpos("`args_to_parse'", "--version=")
-        local ver_rest = substr("`args_to_parse'", `ver_pos' + 10, .)
-        local ver_val = substr("`ver_rest'", 1, strpos("`ver_rest'", " ") - 1)
-        if "`ver_val'" == "" {
-            local ver_val = "`ver_rest'"
-        }
-        local params "`params'`ver_val'_"
-    }
-
-    * Check for positional arguments (first non-option argument)
-    local first_arg ""
-    local in_arg = 0
-    foreach part of local args_to_parse {
-        if !strpos("`part'", "--") & "`part'" != "`script_name'" {
-            local first_arg "`part'"
-            continue, break
-        }
-    }
-
-    * If first arg looks like a parameter (short, alphanumeric), use it
-    if "`first_arg'" != "" & length("`first_arg'") <= 10 & regexm("`first_arg'", "^[a-zA-Z0-9_]+$") {
-        local params "`params'`first_arg'_"
-    }
-
-    * Clean up trailing underscore
-    local params = subinstr("`params'", "_$", "", .)
-
-    * Create log filename
-    local timestamp = string(date("`c(current_date)'", "dmy"), "%tdCCYYNNDD") + "_" + ///
-                     string(clock("`c(current_time)'", "hms"), "%tcHHMMSS")
-
-    if "`params'" != "" {
-        local log_filename "`script_name'_`params'.log"
-    }
-    else {
-        local log_filename "`script_name'_`timestamp'.log"
-    }
-
-    local log_path "`logs_dir'/`log_filename'"
-
-    * Initialize log file
-    capture log close _mint_log
-    quietly log using "`log_path'", replace name(_mint_log) text
-
-    * Write header
-    display "================================================================================"
-    display "Script: `script_name'"
-    display "Command: `0'"
-    display "Working directory: `c(pwd)'"
-    display "Stata version: `c(version)'"
-    display "Start time: `c(current_date)' `c(current_time)'"
-    display "================================================================================
-end
-
-capture program drop log_message
-program define log_message
-    * Log a message with timestamp
-    args message level
-
-    if "`level'" == "" {
-        local level "INFO"
-    }
-
-    display "[`c(current_time)'] `level': `message'"
-end
-
-capture program drop close_logger
-program define close_logger
-    * Close the logger and write final information
-
-    local end_time = clock("`c(current_time)'", "hms")
-    local start_time = clock("`c(current_time)'", "hms")  // This would need to be passed from init
-
-    display "================================================================================
-    display "End time: `c(current_date)' `c(current_time)'"
-    * Duration calculation would be complex in Stata - skipping for simplicity
-    display "================================================================================
-
-    capture log close _mint_log
 end
 
 * =============================================================================
@@ -230,7 +109,7 @@ program define generate_data_schema
     local observations = _N
     local columns = c(k)
 
-    * Start building JSON schema (Stata doesn't have native JSON, so we'll use a simple format)
+    * Start building JSON schema
     tempname schema_file
     tempfile schema_temp
     file open `schema_file' using "`schema_temp'", write text
@@ -350,76 +229,4 @@ program define find_data_files
 
     * Return sorted list
     display "`found_files'"
-end
-
-* =============================================================================
-* FILE MANIFEST UTILITIES (Python-backed)
-* =============================================================================
-
-capture program drop manifest_create
-program define manifest_create
-    * Create/update manifest for a directory
-    * Usage: manifest_create "data/raw" "*.csv"
-    args directory pattern
-
-python:
-from mintd.manifest import create_manifest
-import os
-# Convert Stata paths to Python paths
-python_directory = "`directory'".replace("\\", "/")
-python_pattern = "`pattern'" if "`pattern'" != "" else "*"
-# Run from project root (parent of src/)
-project_root = os.path.dirname(os.getcwd())
-os.chdir(project_root)
-result = create_manifest(python_directory, python_pattern)
-end
-end
-
-capture program drop manifest_file_changed
-program define manifest_file_changed, rclass
-    * Check if a file has changed since last manifest
-    * Returns r(changed) = 1 if changed, 0 if unchanged
-    * Usage: manifest_file_changed "data/raw/file.csv"
-    args filepath
-
-python:
-from sfi import Scalar
-from mintd.manifest import load_manifest, has_file_changed
-import os
-# Run from project root (parent of src/)
-project_root = os.path.dirname(os.getcwd())
-os.chdir(project_root)
-try:
-    manifest = load_manifest("manifest.json")
-    changed = 1 if has_file_changed("`filepath'", manifest) else 0
-except FileNotFoundError:
-    changed = 1  # No manifest = consider changed
-except Exception as e:
-    changed = 1  # Error loading manifest = consider changed
-Scalar.setValue("r(changed)", changed)
-end
-end
-
-capture program drop manifest_get_changed_files
-program define manifest_get_changed_files
-    * Get list of files that have changed in a directory
-    * Usage: manifest_get_changed_files "data/raw" "*.csv"
-    args directory pattern
-
-python:
-from mintd.manifest import load_manifest, get_files_to_update
-import os
-# Run from project root (parent of src/)
-project_root = os.path.dirname(os.getcwd())
-os.chdir(project_root)
-try:
-    manifest = load_manifest("manifest.json")
-    changed_files = get_files_to_update("`directory'", manifest, "`pattern'")
-    # Print space-separated list
-    print(" ".join(changed_files))
-except FileNotFoundError:
-    print("No manifest found")
-except Exception as e:
-    print(f"Error: {e}")
-end
 end
