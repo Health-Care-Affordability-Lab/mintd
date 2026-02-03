@@ -165,32 +165,23 @@ class RStrategy(LanguageStrategy):
         ]
 
     def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        # R Libraries (Packages)
+        # R package structure using code/ directory for consistency with other mintd projects
+        # Note: Standard R packages use R/ directory, but we use code/ for mintd consistency.
+        # Users can configure .Rbuildignore or symlink if needed for CRAN submission.
         return {
             "DESCRIPTION": None,
             "NAMESPACE": None,
             source_dir: {
-                # R source files usually go in R/ directory in standard packages
-                # But we are using 'code' as our source root.
-                # Standard R packages expect 'R/' directory.
-                # We might need to map 'code' -> 'R' for R packages OR configure R to use 'code'
-                # But R is strict.
-                # However, for Mint consistency we want 'code'.
-                # Let's assume for now we use 'code' and user might symlink or we stick to 'code' as the 'src' equivalent.
-                # Wait, standard R package MUST have 'R' directory.
-                # If we enforce 'code' directory, it's not a standard R package structure.
-                # For Infra (Library), satisfying the Language Standard is probably more important than Mint standard?
-                # But the User said: "should be similar to the prj_ where we have code, data, docs... Note that this maybe a stata, R or python library"
-                # If we use 'code', we can add .Rbuildignore or config?
-                # Actually, forcing 'code' instead of 'R' might break R tooling.
-                # But let's follow instruction: "refactor this, it should be similar to the prj_".
-                f"{package_name}.R": None, # Simple single file lib? No, package.
+                f"{package_name}.R": None,
             }
         }
 
     def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        # Placeholder for R infra support
-        return []
+        return [
+            ("DESCRIPTION", "DESCRIPTION_infra.j2"),
+            ("NAMESPACE", "NAMESPACE.j2"),
+            (f"{source_dir}/{package_name}.R", "package.R.j2"),
+        ]
 
 
 class StataStrategy(LanguageStrategy):
@@ -233,9 +224,13 @@ class StataStrategy(LanguageStrategy):
     def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
         return {
             source_dir: {
-                f"{package_name}.ado": None
+                f"{package_name}.ado": None,
+                f"{package_name}.sthlp": None,
             }
         }
 
     def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return []
+        return [
+            (f"{source_dir}/{package_name}.ado", "package.ado.j2"),
+            (f"{source_dir}/{package_name}.sthlp", "package.sthlp.j2"),
+        ]

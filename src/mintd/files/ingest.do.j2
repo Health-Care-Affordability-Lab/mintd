@@ -1,7 +1,7 @@
 * Data ingestion for {{ project_name }}
 *
 * This do-file handles downloading and initial processing of raw data.
-* NOTE: This script runs from the src/ directory. Data paths use ../data/
+* NOTE: This script runs from the code/ directory. Data paths use ../data/
 
 * =============================================================================
 * UPDATING FOR NEW DATA (e.g., annual releases)
@@ -17,8 +17,25 @@
 * and `git log` / `dvc checkout` to access previous versions.
 * =============================================================================
 
-* Import mint utilities (located in same src/ directory)
+* Import mint utilities (located in same code/ directory)
 do _mintd_utils.do
+
+* List files in raw directory
+capture program drop list_raw_files
+program define list_raw_files
+    local raw_files : dir "$RAW_DIR" files "*"
+    local file_count : word count `raw_files'
+
+    if `file_count' > 0 {
+        log_message "Found `file_count' files in RAW_DIR:"
+        foreach file of local raw_files {
+            log_message "  - `file'"
+        }
+    }
+    else {
+        log_message "No files found in RAW_DIR. Add raw data files to get started."
+    }
+end
 
 // Main ingestion program
 capture program drop main
@@ -38,20 +55,24 @@ program define main
     log_message "  Intermediate: $INTERMEDIATE_DIR"
     log_message "  Final data: $FINAL_DIR"
 
-    // TODO: Implement data ingestion logic
-    // - Download data using copy/copyfiles
-    // - Extract archives using unzip
-    // - Initial validation using insheet/import
-    // - Save to $RAW_DIR/
+    * List existing raw files
+    list_raw_files
 
-    // Example:
-    // // Download data
-    // copy "https://example.com/data.csv" "$RAW_DIR/downloaded_data.csv", replace
-    //
-    // // Quick validation
-    // import delimited "$RAW_DIR/downloaded_data.csv", clear
-    // describe
-    // log_message "Downloaded `c(N)' observations"
+    * ==========================================================================
+    * CUSTOMIZE: Add your data ingestion logic below
+    * ==========================================================================
+    * Examples of common ingestion patterns:
+    *
+    * 1. Copy from URL:
+    *    copy "https://example.com/data.csv" "$RAW_DIR/data.csv", replace
+    *
+    * 2. Copy from local source:
+    *    copy "/path/to/source/data.csv" "$RAW_DIR/data.csv", replace
+    *
+    * 3. Import and save as .dta:
+    *    import delimited "$RAW_DIR/data.csv", clear
+    *    save "$RAW_DIR/data.dta", replace
+    * ==========================================================================
 
     log_message "Data ingestion completed successfully."
     close_logger

@@ -53,6 +53,9 @@ class ProjectTemplate(BaseTemplate):
             "tests": {
                 ".gitkeep": None,
             },
+            "logs": {
+                ".gitkeep": None,
+            },
             ".gitignore": None,
             ".dvcignore": None,
         }

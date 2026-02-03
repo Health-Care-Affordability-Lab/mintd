@@ -8,6 +8,7 @@ notes/produc-spec.md
 notes/registry-integration-complete.md
 notes/todo.md
 src/mintd/__init__.py
+src/mintd/__main__.py
 src/mintd/api.py
 src/mintd/cli.py
 src/mintd/config.py

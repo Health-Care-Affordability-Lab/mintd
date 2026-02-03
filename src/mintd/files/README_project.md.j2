@@ -8,40 +8,56 @@ This repository contains the analysis code and outputs for {{ project_name }}.
 
 ## Project Structure
 
-- `data/`: Project-specific data files
-- `src/analysis/`: Python analysis scripts
-- `src/stata/`: Stata do-files
-- `src/r/`: R analysis scripts
-- `output/figures/`: Generated figures
-- `output/tables/`: Generated tables
+- `data/`: Project-specific data files (raw, intermediate, final)
+- `code/`: Analysis scripts ({{ language | default('Python') }})
+- `results/figures/`: Generated figures
+- `results/tables/`: Generated tables
+- `notebooks/`: Jupyter/R notebooks for exploration
 - `docs/`: Documentation
-- `.Rprofile`: R environment configuration
+- `references/`: Reference materials and literature
+- `tests/`: Test files
+- `logs/`: Execution logs
 
 ## Requirements
 
-Install dependencies:
+{% if language == 'r' %}
+Install R dependencies with renv:
+```r
+install.packages("renv")
+renv::restore()
+```
+{% elif language == 'stata' %}
+No additional package manager required. Ensure Stata is installed and configured.
+{% else %}
+Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
+{% endif %}
 
 ## Analysis
 
-Run analysis scripts from the appropriate directories:
+Run analysis scripts from the `code/` directory:
 
-- **Python**: `src/analysis/` directory
-- **R**: `src/r/` directory
-- **Stata**: `src/stata/` directory
-
-For R projects, initialize renv with:
+{% if language == 'r' %}
 ```r
-install.packages("renv")
-renv::init()
+source("code/analysis.R")
 ```
+{% elif language == 'stata' %}
+```stata
+do code/analysis.do
+```
+{% else %}
+```bash
+python code/analysis/main.py
+```
+{% endif %}
 
 ## Outputs
 
-- Figures are saved to `output/figures/`
-- Tables are saved to `output/tables/`
+- Figures are saved to `results/figures/`
+- Tables are saved to `results/tables/`
+- Presentations are saved to `results/presentations/`
 
 ## Data
 

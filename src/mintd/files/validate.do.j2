@@ -1,35 +1,17 @@
 * Data validation for {{ project_name }}
 *
 * This do-file runs quality checks and validation on processed data.
-* NOTE: This script runs from the src/ directory. Data paths use ../data/
+* NOTE: This script runs from the code/ directory. Data paths use ../data/
 
-* Import mint utilities (located in same src/ directory)
+* Import mint utilities (located in same code/ directory)
 do _mintd_utils.do
 
 // Validation program
 capture program drop validate_dataset
-program define validate_dataset
+program define validate_dataset, rclass
     args dataset_name
 
-    // Check for missing values
-    local missing_vars ""
-    foreach var of varlist _all {
-        count if missing(`var')
-        if r(N) > 0 {
-            local missing_vars "`missing_vars' `var'(`r(N)')"
-        }
-    }
-
-    if "`missing_vars'" != "" {
-        log_message "  Missing values in: `missing_vars'"
-    }
-
-    // Check for duplicates
-    duplicates report
-    if r(unique_value) < _N {
-        local duplicates = _N - r(unique_value)
-        log_message "  Found `duplicates' duplicate rows"
-    }
+    local issues_found = 0
 
     // Basic statistics
     log_message "Validation for `dataset_name':"
@@ -37,7 +19,7 @@ program define validate_dataset
     log_message "  Columns: `c(k)'"
 
     // Count numeric variables
-    local numeric_count 0
+    local numeric_count = 0
     foreach var of varlist _all {
         capture confirm numeric variable `var'
         if !_rc {
@@ -46,9 +28,39 @@ program define validate_dataset
     }
     log_message "  Numeric columns: `numeric_count'"
 
-    if "`missing_vars'" == "" & `duplicates' == 0 & `numeric_count' > 0 {
+    // Check for missing values
+    local missing_vars ""
+    foreach var of varlist _all {
+        quietly count if missing(`var')
+        if r(N) > 0 {
+            local missing_vars "`missing_vars' `var'(`r(N)')"
+            local issues_found = 1
+        }
+    }
+
+    if "`missing_vars'" != "" {
+        log_message "  Issues found:"
+        log_message "    - Missing values in:`missing_vars'"
+    }
+
+    // Check for duplicates
+    quietly duplicates report
+    local duplicates = _N - r(unique_value)
+    if `duplicates' > 0 {
+        if `issues_found' == 0 {
+            log_message "  Issues found:"
+        }
+        log_message "    - Found `duplicates' duplicate rows"
+        local issues_found = 1
+    }
+
+    if `issues_found' == 0 {
         log_message "  [OK] No issues found"
     }
+
+    return scalar passed = (`issues_found' == 0)
+    return scalar rows = `c(N)'
+    return scalar cols = `c(k)'
 end
 
 // Main validation program
@@ -69,29 +81,56 @@ program define main
     log_message "  Intermediate: $INTERMEDIATE_DIR"
     log_message "  Final data: $FINAL_DIR"
 
-    // TODO: Implement comprehensive validation logic
-    // - Load cleaned data from $INTERMEDIATE_DIR/
-    // - Run quality checks (missing values, duplicates, data types)
-    // - Business rule validation
-    // - Statistical checks
-    // - Save validation reports to $FINAL_DIR/
+    * Validate all .dta files in INTERMEDIATE_DIR
+    local intermediate_files : dir "$INTERMEDIATE_DIR" files "*.dta"
+    local file_count : word count `intermediate_files'
 
-    // Example validation
-    // local intermediate_files : dir "$INTERMEDIATE_DIR" files "*.csv"
-    // local all_valid = 1
-    //
-    // foreach file of local intermediate_files {
-    //     import delimited "$INTERMEDIATE_DIR/`file'", clear
-    //     validate_dataset "`file'"
-    //     // Note: Would need to track validation results across files
-    // }
-    //
-    // if `all_valid' {
-    //     display "[OK] All datasets passed validation"
-    // }
-    // else {
-    //     display "[FAIL] Some datasets failed validation - review issues above"
-    // }
+    local all_valid = 1
+    local total_rows = 0
+    local total_files = 0
+
+    if `file_count' == 0 {
+        log_message "No .dta files found in INTERMEDIATE_DIR. Run clean.do first."
+    }
+    else {
+        log_message "Found `file_count' .dta files to validate"
+
+        foreach file of local intermediate_files {
+            use "$INTERMEDIATE_DIR/`file'", clear
+            validate_dataset "`file'"
+
+            if r(passed) == 0 {
+                local all_valid = 0
+            }
+            local total_rows = `total_rows' + r(rows)
+            local ++total_files
+        }
+
+        * Summary
+        if `all_valid' {
+            log_message "[OK] All datasets passed validation"
+        }
+        else {
+            log_message "[WARN] Some datasets have issues - review above"
+        }
+    }
+
+    * Create validation report (simple text format for Stata)
+    tempname report_handle
+    file open `report_handle' using "$FINAL_DIR/validation_report.txt", write replace
+
+    if `all_valid' {
+        file write `report_handle' "Status: PASSED" _n
+    }
+    else {
+        file write `report_handle' "Status: ISSUES_FOUND" _n
+    }
+    file write `report_handle' "Timestamp: `c(current_date)' `c(current_time)'" _n
+    file write `report_handle' "Files validated: `total_files'" _n
+    file write `report_handle' "Total rows: `total_rows'" _n
+
+    file close `report_handle'
+    log_message "Validation report saved to: $FINAL_DIR/validation_report.txt"
 
     log_message "Data validation completed successfully."
     close_logger

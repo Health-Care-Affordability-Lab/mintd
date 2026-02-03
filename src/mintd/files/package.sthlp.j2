@@ -1,0 +1,84 @@
+{smcl}
+{* *! version 1.0.0  {{ created_at or 'Unknown' }}}{...}
+{vieweralsosee "[R] summarize" "help summarize"}{...}
+{vieweralsosee "[R] tabulate" "help tabulate"}{...}
+{viewerjumpto "Syntax" "{{ package_name }}##syntax"}{...}
+{viewerjumpto "Description" "{{ package_name }}##description"}{...}
+{viewerjumpto "Options" "{{ package_name }}##options"}{...}
+{viewerjumpto "Examples" "{{ package_name }}##examples"}{...}
+{viewerjumpto "Author" "{{ package_name }}##author"}{...}
+{title:Title}
+
+{phang}
+{bf:{{ package_name }}} {hline 2} {{ project_name }} Infrastructure Package
+
+
+{marker syntax}{...}
+{title:Syntax}
+
+{p 8 17 2}
+{cmdab:{{ package_name }}}
+{varlist}
+{ifin}
+[{cmd:,} {it:options}]
+
+{synoptset 20 tabbed}{...}
+{synopthdr}
+{synoptline}
+{syntab:Main}
+{synopt:{opt opt:ion1(string)}}specify option 1{p_end}
+{synopt:{opt opt:ion2(#)}}specify numeric option (default: 0){p_end}
+{synopt:{opt v:erbose}}display detailed output{p_end}
+{synoptline}
+{p2colreset}{...}
+
+
+{marker description}{...}
+{title:Description}
+
+{pstd}
+{cmd:{{ package_name }}} provides utility functions for {{ project_name }}.
+This is an infrastructure package that can be customized for your specific needs.
+
+
+{marker options}{...}
+{title:Options}
+
+{dlgtab:Main}
+
+{phang}
+{opt option1(string)} specifies a string option. Default is empty.
+
+{phang}
+{opt option2(#)} specifies a numeric option. Default is 0.
+
+{phang}
+{opt verbose} requests detailed output during execution.
+
+
+{marker examples}{...}
+{title:Examples}
+
+{pstd}Basic usage:{p_end}
+{phang2}{cmd:. sysuse auto}{p_end}
+{phang2}{cmd:. {{ package_name }} price mpg}{p_end}
+
+{pstd}With options:{p_end}
+{phang2}{cmd:. {{ package_name }} price mpg, verbose}{p_end}
+{phang2}{cmd:. {{ package_name }} price mpg if foreign==1, option2(5)}{p_end}
+
+
+{marker author}{...}
+{title:Author}
+
+{pstd}
+{{ author or 'Developer' }}{break}
+{{ organization or 'Organization' }}{break}
+
+
+{marker alsosee}{...}
+{title:Also see}
+
+{psee}
+Online: {helpb summarize}, {helpb tabulate}
+{p_end}

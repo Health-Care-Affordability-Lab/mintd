@@ -1,7 +1,7 @@
 #' Data ingestion for {{ project_name }}
 #'
 #' This script handles downloading and initial processing of raw data.
-#' NOTE: This script runs from the src/ directory. Data paths use ../data/
+#' NOTE: This script runs from the code/ directory. Data paths use ../data/
 
 # =============================================================================
 # UPDATING FOR NEW DATA (e.g., annual releases)
@@ -17,8 +17,25 @@
 # and `git log` / `dvc checkout` to access previous versions.
 # =============================================================================
 
-# Import mint utilities (located in same src/ directory)
+# Import mint utilities (located in same code/ directory)
 source("_mintd_utils.R")
+
+#' List and log all files in the raw data directory
+list_raw_files <- function(logger) {
+  raw_files <- list.files(RAW_DIR, full.names = TRUE)
+
+  if (length(raw_files) > 0) {
+    logger$log("Found ", length(raw_files), " files in RAW_DIR:")
+    for (f in raw_files) {
+      size_kb <- file.info(f)$size / 1024
+      logger$log("  - ", basename(f), " (", round(size_kb, 1), " KB)")
+    }
+  } else {
+    logger$log("No files found in RAW_DIR. Add raw data files to get started.")
+  }
+
+  return(raw_files)
+}
 
 main <- function() {
   # Initialize logging (validates directory and creates log file)
@@ -36,24 +53,28 @@ main <- function() {
   logger$log("  Intermediate: ", INTERMEDIATE_DIR)
   logger$log("  Final data: ", FINAL_DIR)
 
-  # TODO: Implement data ingestion logic
-  # - Download data using httr/curl
-  # - Extract archives using utils::unzip
-  # - Initial validation with readr
-  # - Save to RAW_DIR/
+  # List existing raw files
+  raw_files <- list_raw_files(logger)
 
-  # Example:
-  # library(httr)
-  # library(readr)
+  # ==========================================================================
+  # CUSTOMIZE: Add your data ingestion logic below
+  # ==========================================================================
+  # Examples of common ingestion patterns:
   #
-  # # Download data
-  # response <- GET("https://example.com/data.csv")
-  # raw_file <- file.path(RAW_DIR, "downloaded_data.csv")
-  # writeBin(content(response, "raw"), raw_file)
+  # 1. Download from URL:
+  #    library(httr)
+  #    response <- GET("https://example.com/data.csv")
+  #    writeBin(content(response, "raw"), file.path(RAW_DIR, "data.csv"))
   #
-  # # Quick validation
-  # df <- read_csv(raw_file)
-  # logger$log("Downloaded ", nrow(df), " rows with columns: ", paste(names(df), collapse = ", "))
+  # 2. Copy from local source:
+  #    file.copy("/path/to/source/data.csv", file.path(RAW_DIR, "data.csv"))
+  #
+  # 3. Read from database:
+  #    library(DBI)
+  #    con <- dbConnect(...)
+  #    df <- dbGetQuery(con, "SELECT * FROM table")
+  #    readr::write_csv(df, file.path(RAW_DIR, "data.csv"))
+  # ==========================================================================
 
   logger$log("Data ingestion completed successfully.")
   logger$close()

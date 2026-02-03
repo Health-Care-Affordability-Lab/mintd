@@ -1,0 +1,28 @@
+Package: {{ package_name }}
+Title: {{ project_name }} Infrastructure Package
+Version: 0.1.0
+Authors@R: c(
+    person("{{ author or 'Developer' }}", email = "{{ author_email or 'dev@example.com' }}", role = c("aut", "cre")),
+    person("{{ organization or 'Organization' }}", role = "cph")
+)
+Description: Infrastructure utilities and functions for {{ project_name }}.
+    This package provides reusable components for data processing,
+    analysis workflows, and project automation.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.3
+Imports:
+    dplyr,
+    readr,
+    tidyr,
+    stringr,
+    purrr,
+    here,
+    jsonlite
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+Config/testthat/edition: 3
+VignetteBuilder: knitr

@@ -1,0 +1,47 @@
+*! {{ package_name }} - {{ project_name }} Infrastructure Package
+*! Version 1.0.0
+*! Author: {{ author or 'Developer' }}
+*! {{ organization or 'Organization' }}
+
+program define {{ package_name }}
+    version 16.0
+
+    syntax varlist(min=1) [if] [in] [, ///
+        OPTion1(string) ///
+        OPTion2(real 0) ///
+        Verbose ///
+    ]
+
+    * Mark sample
+    marksample touse
+
+    * Display header if verbose
+    if "`verbose'" != "" {
+        display as text "{{ package_name }} - {{ project_name }}"
+        display as text "Processing `varlist'"
+    }
+
+    * ==========================================================================
+    * CUSTOMIZE: Add your program logic below
+    * ==========================================================================
+
+    * Example: summarize variables
+    summarize `varlist' if `touse'
+
+    * Example: store results
+    return scalar N = r(N)
+    return scalar mean = r(mean)
+
+    * ==========================================================================
+
+    if "`verbose'" != "" {
+        display as text "Processing complete."
+    }
+end
+
+* Version history
+program define {{ package_name }}_version
+    display as text "{{ package_name }} version 1.0.0"
+    display as text "Created: {{ created_at or 'Unknown' }}"
+    display as text "Author: {{ author or 'Developer' }}"
+end

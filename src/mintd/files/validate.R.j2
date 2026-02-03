@@ -1,49 +1,74 @@
 #' Data validation for {{ project_name }}
 #'
 #' This script runs quality checks and validation on processed data.
-#' NOTE: This script runs from the src/ directory. Data paths use ../data/
+#' NOTE: This script runs from the code/ directory. Data paths use ../data/
 
-# Import mint utilities (located in same src/ directory)
+# Import mint utilities (located in same code/ directory)
 source("_mintd_utils.R")
 
+# Load required packages
+library(readr)
+library(jsonlite)
+
+#' Run validation checks on a dataset
+#'
+#' @param df Data frame to validate
+#' @param dataset_name Name of the dataset for logging
+#' @param logger Logger instance
+#' @return List with validation results
 validate_dataset <- function(df, dataset_name, logger) {
-  #' Run validation checks on a dataset
-  issues <- list()
+  results <- list(
+    dataset = dataset_name,
+    rows = nrow(df),
+    columns = ncol(df),
+    issues = list(),
+    passed = TRUE
+  )
 
   # Check for missing values
   missing_cols <- names(df)[sapply(df, function(x) any(is.na(x)))]
   if (length(missing_cols) > 0) {
-    issues <- c(issues, paste("Missing values in columns:", paste(missing_cols, collapse = ", ")))
+    missing_counts <- sapply(missing_cols, function(col) sum(is.na(df[[col]])))
+    results$issues <- c(results$issues, list(list(
+      type = "missing_values",
+      columns = as.list(missing_counts)
+    )))
   }
 
   # Check for duplicate rows
   duplicates <- sum(duplicated(df))
   if (duplicates > 0) {
-    issues <- c(issues, paste("Found", duplicates, "duplicate rows"))
+    results$issues <- c(results$issues, list(list(
+      type = "duplicate_rows",
+      count = duplicates
+    )))
   }
 
-  # Check for numeric columns
+  # Count numeric columns
   numeric_cols <- names(df)[sapply(df, is.numeric)]
-  if (length(numeric_cols) == 0) {
-    issues <- c(issues, "No numeric columns found")
-  }
+  results$numeric_columns <- length(numeric_cols)
 
-  # Basic statistics
+  # Log validation results
   logger$log("Validation for ", dataset_name, ":")
-  logger$log("  Rows: ", nrow(df))
-  logger$log("  Columns: ", ncol(df))
-  logger$log("  Numeric columns: ", length(numeric_cols))
+  logger$log("  Rows: ", results$rows)
+  logger$log("  Columns: ", results$columns)
+  logger$log("  Numeric columns: ", results$numeric_columns)
 
-  if (length(issues) > 0) {
+  if (length(results$issues) > 0) {
+    results$passed <- FALSE
     logger$log("  Issues found:")
-    for (issue in issues) {
-      logger$log("    - ", issue)
+    for (issue in results$issues) {
+      if (issue$type == "missing_values") {
+        logger$log("    - Missing values in: ", paste(names(issue$columns), collapse = ", "))
+      } else if (issue$type == "duplicate_rows") {
+        logger$log("    - Found ", issue$count, " duplicate rows")
+      }
     }
   } else {
     logger$log("  [OK] No issues found")
   }
 
-  return(length(issues) == 0)
+  return(results)
 }
 
 main <- function() {
@@ -62,30 +87,44 @@ main <- function() {
   logger$log("  Intermediate: ", INTERMEDIATE_DIR)
   logger$log("  Final data: ", FINAL_DIR)
 
-  # TODO: Implement comprehensive validation logic
-  # - Load cleaned data from INTERMEDIATE_DIR/
-  # - Run quality checks (missing values, duplicates, data types)
-  # - Business rule validation
-  # - Statistical checks
-  # - Save validation reports to FINAL_DIR/
+  # Validate all CSV files in INTERMEDIATE_DIR
+  intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "\\.csv$", full.names = TRUE)
 
-  # Example validation
-  # library(readr)
-  #
-  # intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "*.csv", full.names = TRUE)
-  # all_valid <- TRUE
-  #
-  # for (intermediate_file in intermediate_files) {
-  #   df <- read_csv(intermediate_file)
-  #   is_valid <- validate_dataset(df, basename(intermediate_file), logger)
-  #   all_valid <- all_valid && is_valid
-  # }
-  #
-  # if (all_valid) {
-  #   logger$log("[OK] All datasets passed validation")
-  # } else {
-  #   logger$log("[FAIL] Some datasets failed validation - review issues above")
-  # }
+  if (length(intermediate_files) == 0) {
+    logger$log("No CSV files found in INTERMEDIATE_DIR. Run clean.R first.")
+    validation_report <- list(status = "no_files", datasets = list())
+  } else {
+    logger$log("Found ", length(intermediate_files), " CSV files to validate")
+
+    all_results <- list()
+    all_valid <- TRUE
+
+    for (data_file in intermediate_files) {
+      df <- read_csv(data_file, show_col_types = FALSE)
+      results <- validate_dataset(df, basename(data_file), logger)
+      all_results <- c(all_results, list(results))
+      all_valid <- all_valid && results$passed
+    }
+
+    # Summary
+    if (all_valid) {
+      logger$log("[OK] All datasets passed validation")
+    } else {
+      logger$log("[WARN] Some datasets have issues - review above")
+    }
+
+    # Create validation report
+    validation_report <- list(
+      status = ifelse(all_valid, "passed", "issues_found"),
+      timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+      datasets = all_results
+    )
+  }
+
+  # Save validation report to FINAL_DIR
+  report_file <- file.path(FINAL_DIR, "validation_report.json")
+  write_json(validation_report, report_file, pretty = TRUE, auto_unbox = TRUE)
+  logger$log("Validation report saved to: ", report_file)
 
   logger$log("Data validation completed successfully.")
   logger$close()
