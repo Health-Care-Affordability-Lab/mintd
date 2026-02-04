@@ -26,7 +26,10 @@ class DataTemplate(BaseTemplate):
                 "raw": {
                     ".gitkeep": None,
                 },
-                "analysis": {
+                "intermediate": {
+                    ".gitkeep": None,
+                },
+                "final": {
                     ".gitkeep": None,
                 },
             },

@@ -14,7 +14,8 @@ data_hospital_project/
 ├── requirements.txt          # Python dependencies
 ├── data/
 │   ├── raw/                  # Original source data (DVC tracked)
-│   └── analysis/             # Processed data (DVC tracked)
+│   ├── intermediate/         # Temporary processing results (DVC tracked)
+│   └── final/                # Final processed data (DVC tracked)
 ├── schemas/
 │   └── v1/
 │       └── schema.json       # Data schema
@@ -38,7 +39,8 @@ data_hospital_project/
 ├── renv.lock                 # R environment snapshot
 ├── data/
 │   ├── raw/
-│   └── analysis/
+│   ├── intermediate/
+│   └── final/
 ├── schemas/
 │   └── v1/
 │       └── schema.json
@@ -60,7 +62,8 @@ data_hospital_project/
 ├── metadata.json
 ├── data/
 │   ├── raw/
-│   └── analysis/
+│   ├── intermediate/
+│   └── final/
 ├── schemas/
 │   └── v1/
 │       └── schema.json
