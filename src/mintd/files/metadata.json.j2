@@ -12,11 +12,31 @@
     "created_at": "{{ created_at }}",
     "created_by": "{{ author }}"
   },
+  "metadata": {
+    "version": "1.0.0",
+    "mint_version": "{{ mint_version }}"
+  },
   "ownership": {
     "team": "{{ team }}",
     "maintainers": [
       "{{ author }}"
     ]
+  },
+  "access_control": {
+    "teams": [
+      {
+        "name": "{{ admin_team }}",
+        "permission": "admin"
+      },
+      {
+        "name": "{{ researcher_team }}",
+        "permission": "read"
+      }
+    ]
+  },
+  "status": {
+    "state": "active",
+    "last_updated": "{{ created_at }}"
   },
   "governance": {
     "classification": "{{ classification }}",
