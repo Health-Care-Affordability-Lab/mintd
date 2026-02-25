@@ -1,13 +1,13 @@
 """Data cleaning script for {{ project_name }}.
 
-NOTE: This script runs from the src/ directory. Data paths use ../data/
+NOTE: This script runs from the code/ directory. Data paths use ../data/
 """
 
 import sys
 from pathlib import Path
 import pandas as pd
 
-# Import mint utilities (located in same src/ directory)
+# Import mint utilities (located in same code/ directory)
 from _mintd_utils import (
     setup_project_directory,
     ParameterAwareLogger,
@@ -16,6 +16,49 @@ from _mintd_utils import (
     FINAL_DIR,
     get_data_paths
 )
+
+
+def clean_dataset(df, logger):
+    """Apply standard cleaning operations to a DataFrame.
+
+    Operations:
+    - Remove completely empty rows
+    - Strip whitespace from string columns
+    - Standardize column names (lowercase, underscores)
+
+    Args:
+        df: pandas DataFrame to clean
+        logger: Logger instance for logging
+
+    Returns:
+        Cleaned DataFrame
+    """
+    initial_rows = len(df)
+
+    # Remove completely empty rows
+    df = df.dropna(how='all')
+    empty_removed = initial_rows - len(df)
+    if empty_removed > 0:
+        logger.log(f"  Removed {empty_removed} empty rows")
+
+    # Strip whitespace from string columns
+    string_cols = df.select_dtypes(include=['object']).columns
+    for col in string_cols:
+        df[col] = df[col].astype(str).str.strip()
+        # Convert 'nan' strings back to NaN
+        df[col] = df[col].replace('nan', pd.NA)
+    if len(string_cols) > 0:
+        logger.log(f"  Stripped whitespace from {len(string_cols)} string columns")
+
+    # Standardize column names
+    original_cols = list(df.columns)
+    df.columns = df.columns.str.lower().str.replace(' ', '_').str.replace('-', '_')
+    renamed = sum(1 for a, b in zip(original_cols, df.columns) if a != b)
+    if renamed > 0:
+        logger.log(f"  Standardized {renamed} column names")
+
+    logger.log(f"  Final row count: {len(df)}")
+    return df
 
 
 def main():
@@ -34,26 +77,28 @@ def main():
     logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
     logger.log(f"Final data directory: {FINAL_DIR}")
 
-    # TODO: Implement data cleaning logic
-    # - Load raw data from RAW_DIR/
-    # - Handle missing values, data types, outliers
-    # - Standardize formats and encodings
-    # - Save cleaned data to INTERMEDIATE_DIR/
+    # Process all CSV files in RAW_DIR
+    raw_files = list(RAW_DIR.glob("*.csv"))
 
-    # Example:
-    # # Load raw data
-    # raw_files = list(RAW_DIR.glob("*.csv"))
-    # for raw_file in raw_files:
-    #     df = pd.read_csv(raw_file)
-    #
-    #     # Basic cleaning
-    #     df = df.dropna()  # Remove missing values
-    #     df.columns = df.columns.str.lower().str.replace(' ', '_')
-    #
-    #     # Save cleaned data
-    #     final_file = FINAL_DIR / f"clean_{raw_file.name}"
-    #     df.to_csv(final_file, index=False)
-    #     logger.log(f"Cleaned {len(df)} rows, saved to {final_file}")
+    if not raw_files:
+        logger.log("No CSV files found in RAW_DIR. Run ingest.py first.")
+    else:
+        logger.log(f"Found {len(raw_files)} CSV files to clean")
+
+        for raw_file in raw_files:
+            logger.log(f"Processing: {raw_file.name}")
+
+            # Load raw data
+            df = pd.read_csv(raw_file)
+            logger.log(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
+
+            # Apply cleaning
+            df = clean_dataset(df, logger)
+
+            # Save to intermediate directory
+            output_file = INTERMEDIATE_DIR / f"clean_{raw_file.name}"
+            df.to_csv(output_file, index=False)
+            logger.log(f"  Saved to: {output_file.name}")
 
     logger.log("Data cleaning completed successfully.")
     logger.close()

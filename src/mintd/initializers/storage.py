@@ -1,14 +1,10 @@
 """DVC and storage initialization for S3-compatible buckets."""
 
-import subprocess
-import shutil
 from pathlib import Path
-from typing import Optional
 
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
-
-from ..config import get_config, get_storage_credentials
+from ..config import get_config
+from ..exceptions import DVCError
+from ..shell import dvc_command
 
 # Mapping from sensitivity levels to ACL folder names
 SENSITIVITY_TO_ACL = {
@@ -16,18 +12,6 @@ SENSITIVITY_TO_ACL = {
     "restricted": "lab",
     "confidential": "restricted"
 }
-
-
-def _is_command_available(command: str) -> bool:
-    """Check if a command is available on the system.
-
-    Args:
-        command: Command name to check
-
-    Returns:
-        True if command is available
-    """
-    return shutil.which(command) is not None
 
 
 def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restricted", project_name: str = "", full_project_name: str = "") -> dict:
@@ -63,30 +47,26 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
     dvc_info = {"remote_name": remote_name, "remote_url": remote_url}
 
     try:
+        dvc = dvc_command(cwd=project_path)
+
         # Initialize DVC
-        _run_dvc_command(project_path, ["init"])
+        dvc.run("init")
 
         # Add as global remote so it's available across all projects
-        _run_dvc_command(project_path, ["remote", "add", "--global", "-d", remote_name, remote_url])
+        dvc.run("remote", "add", "--global", "-d", remote_name, remote_url)
 
         # Configure remote settings (globally)
         if storage.get("endpoint"):
-            _run_dvc_command(project_path, [
-                "remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"]
-            ])
+            dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
 
         if storage.get("region"):
-            _run_dvc_command(project_path, [
-                "remote", "modify", "--global", remote_name, "region", storage["region"]
-            ])
+            dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
 
         # Enable cloud versioning support
         if storage.get("versioning", True):
-            _run_dvc_command(project_path, [
-                "remote", "modify", "--global", remote_name, "version_aware", "true"
-            ])
+            dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
 
-    except Exception as e:
+    except DVCError as e:
         # For any DVC-related error, just warn and continue
         # This allows the project creation to succeed even without DVC
         print(f"Warning: Failed to initialize DVC: {e}")
@@ -130,31 +110,3 @@ def is_dvc_repo(project_path: Path) -> bool:
     return dvc_dir.is_dir()
 
 
-def _run_dvc_command(project_path: Path, args: list[str]) -> str:
-    """Run a DVC command in the project directory.
-
-    Args:
-        project_path: Path to the project directory
-        args: DVC command arguments
-
-    Returns:
-        Command output
-
-    Raises:
-        subprocess.CalledProcessError: If the command fails
-        FileNotFoundError: If dvc is not available
-    """
-    try:
-        result = subprocess.run(
-            ["dvc"] + args,
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
-    except FileNotFoundError:
-        raise FileNotFoundError("dvc command not found")
-    except subprocess.CalledProcessError:
-        # Re-raise for caller to handle
-        raise

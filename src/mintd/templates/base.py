@@ -1,6 +1,5 @@
 """Base template system for project scaffolding."""
 
-import os
 import subprocess
 from abc import ABC, abstractmethod
 from datetime import datetime

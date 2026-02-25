@@ -1,13 +1,15 @@
 """Data validation script for {{ project_name }}.
 
-NOTE: This script runs from the src/ directory. Data paths use ../data/
+NOTE: This script runs from the code/ directory. Data paths use ../data/
 """
 
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
 import pandas as pd
 
-# Import mint utilities (located in same src/ directory)
+# Import mint utilities (located in same code/ directory)
 from _mintd_utils import (
     setup_project_directory,
     ParameterAwareLogger,
@@ -19,38 +21,63 @@ from _mintd_utils import (
 
 
 def validate_dataset(df, dataset_name, logger):
-    """Run validation checks on a dataset."""
-    issues = []
+    """Run validation checks on a dataset.
+
+    Args:
+        df: pandas DataFrame to validate
+        dataset_name: Name of the dataset for logging
+        logger: Logger instance
+
+    Returns:
+        dict with validation results
+    """
+    results = {
+        'dataset': dataset_name,
+        'rows': len(df),
+        'columns': len(df.columns),
+        'issues': [],
+        'passed': True
+    }
 
     # Check for missing values
     missing_cols = df.columns[df.isnull().any()].tolist()
     if missing_cols:
-        issues.append(f"Missing values in columns: {missing_cols}")
+        missing_counts = {col: int(df[col].isnull().sum()) for col in missing_cols}
+        results['issues'].append({
+            'type': 'missing_values',
+            'columns': missing_counts
+        })
 
     # Check for duplicate rows
     duplicates = df.duplicated().sum()
     if duplicates > 0:
-        issues.append(f"Found {duplicates} duplicate rows")
+        results['issues'].append({
+            'type': 'duplicate_rows',
+            'count': int(duplicates)
+        })
 
     # Check data types
-    numeric_cols = df.select_dtypes(include=['number']).columns
-    if len(numeric_cols) == 0:
-        issues.append("No numeric columns found")
+    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+    results['numeric_columns'] = len(numeric_cols)
 
-    # Basic statistics
+    # Log validation results
     logger.log(f"Validation for {dataset_name}:")
-    logger.log(f"  Rows: {len(df)}")
-    logger.log(f"  Columns: {len(df.columns)}")
-    logger.log(f"  Numeric columns: {len(numeric_cols)}")
+    logger.log(f"  Rows: {results['rows']}")
+    logger.log(f"  Columns: {results['columns']}")
+    logger.log(f"  Numeric columns: {results['numeric_columns']}")
 
-    if issues:
+    if results['issues']:
+        results['passed'] = False
         logger.log("  Issues found:")
-        for issue in issues:
-            logger.log(f"    - {issue}")
+        for issue in results['issues']:
+            if issue['type'] == 'missing_values':
+                logger.log(f"    - Missing values in: {list(issue['columns'].keys())}")
+            elif issue['type'] == 'duplicate_rows':
+                logger.log(f"    - Found {issue['count']} duplicate rows")
     else:
         logger.log("  [OK] No issues found")
 
-    return len(issues) == 0
+    return results
 
 
 def main():
@@ -69,26 +96,42 @@ def main():
     logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
     logger.log(f"Final data directory: {FINAL_DIR}")
 
-    # TODO: Implement comprehensive validation logic
-    # - Load cleaned data from INTERMEDIATE_DIR/
-    # - Run quality checks (missing values, duplicates, data types)
-    # - Business rule validation
-    # - Statistical checks
-    # - Save validation reports to FINAL_DIR/
+    # Validate all CSV files in INTERMEDIATE_DIR
+    intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
 
-    # Example validation
-    # intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
-    # all_valid = True
-    #
-    # for intermediate_file in intermediate_files:
-    #     df = pd.read_csv(intermediate_file)
-    #     is_valid = validate_dataset(df, intermediate_file.stem, logger)
-    #     all_valid = all_valid and is_valid
-    #
-    # if all_valid:
-    #     logger.log("[OK] All datasets passed validation")
-    # else:
-    #     logger.log("[FAIL] Some datasets failed validation - review issues above")
+    if not intermediate_files:
+        logger.log("No CSV files found in INTERMEDIATE_DIR. Run clean.py first.")
+        validation_report = {'status': 'no_files', 'datasets': []}
+    else:
+        logger.log(f"Found {len(intermediate_files)} CSV files to validate")
+
+        all_results = []
+        all_valid = True
+
+        for data_file in intermediate_files:
+            df = pd.read_csv(data_file)
+            results = validate_dataset(df, data_file.stem, logger)
+            all_results.append(results)
+            all_valid = all_valid and results['passed']
+
+        # Summary
+        if all_valid:
+            logger.log("[OK] All datasets passed validation")
+        else:
+            logger.log("[WARN] Some datasets have issues - review above")
+
+        # Create validation report
+        validation_report = {
+            'status': 'passed' if all_valid else 'issues_found',
+            'timestamp': datetime.now().isoformat(),
+            'datasets': all_results
+        }
+
+    # Save validation report to FINAL_DIR
+    report_file = FINAL_DIR / "validation_report.json"
+    with open(report_file, 'w') as f:
+        json.dump(validation_report, f, indent=2)
+    logger.log(f"Validation report saved to: {report_file}")
 
     logger.log("Data validation completed successfully.")
     logger.close()

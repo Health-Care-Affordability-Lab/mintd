@@ -8,10 +8,10 @@ from pathlib import Path
 
 # Import mint utilities (located in same code/ directory)
 from _mintd_utils import (
-    setup_project_directory, 
+    setup_project_directory,
     ParameterAwareLogger,
-    RAW_DIR, 
-    INTERMEDIATE_DIR, 
+    RAW_DIR,
+    INTERMEDIATE_DIR,
     FINAL_DIR,
     get_data_paths
 )
@@ -31,6 +31,19 @@ from _mintd_utils import (
 # =============================================================================
 
 
+def list_raw_files(logger):
+    """List and log all files in the raw data directory."""
+    raw_files = list(RAW_DIR.glob("*"))
+    if raw_files:
+        logger.log(f"Found {len(raw_files)} files in RAW_DIR:")
+        for f in raw_files:
+            size_kb = f.stat().st_size / 1024 if f.is_file() else 0
+            logger.log(f"  - {f.name} ({size_kb:.1f} KB)")
+    else:
+        logger.log("No files found in RAW_DIR. Add raw data files to get started.")
+    return raw_files
+
+
 def main():
     """Main ingestion workflow."""
     # Initialize logging (validates directory and creates log file)
@@ -47,25 +60,29 @@ def main():
     logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
     logger.log(f"Final data directory: {FINAL_DIR}")
 
-    # TODO: Implement data ingestion logic
-    # - Download data from APIs/databases
-    # - Extract archives using zipfile/patool
-    # - Initial data validation with pandas
-    # - Save to RAW_DIR/
+    # List existing raw files
+    raw_files = list_raw_files(logger)
 
-    # Example:
-    # import requests
-    # import pandas as pd
+    # ==========================================================================
+    # CUSTOMIZE: Add your data ingestion logic below
+    # ==========================================================================
+    # Examples of common ingestion patterns:
     #
-    # # Download data
-    # response = requests.get("https://example.com/data.csv")
-    # raw_file = RAW_DIR / "downloaded_data.csv"
-    # with open(raw_file, 'wb') as f:
-    #     f.write(response.content)
+    # 1. Download from URL:
+    #    import requests
+    #    response = requests.get("https://example.com/data.csv")
+    #    with open(RAW_DIR / "data.csv", 'wb') as f:
+    #        f.write(response.content)
     #
-    # # Quick validation
-    # df = pd.read_csv(raw_file)
-    # logger.log(f"Downloaded {len(df)} rows with columns: {list(df.columns)}")
+    # 2. Copy from local source:
+    #    import shutil
+    #    shutil.copy("/path/to/source/data.csv", RAW_DIR / "data.csv")
+    #
+    # 3. Query database:
+    #    import pandas as pd
+    #    df = pd.read_sql("SELECT * FROM table", connection)
+    #    df.to_csv(RAW_DIR / "data.csv", index=False)
+    # ==========================================================================
 
     logger.log("Data ingestion completed successfully.")
     logger.close()

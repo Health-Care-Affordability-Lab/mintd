@@ -1,0 +1,50 @@
+#' {{ package_name }}: {{ project_name }} Infrastructure Package
+#'
+#' This package provides utility functions and infrastructure for
+#' {{ project_name }}.
+#'
+#' @docType package
+#' @name {{ package_name }}
+#' @author {{ author or 'Developer' }}
+NULL
+
+#' Package version
+#'
+#' @return Character string with package version
+#' @export
+#' @examples
+#' {{ package_name }}_version()
+{{ package_name }}_version <- function() {
+  utils::packageVersion("{{ package_name }}")
+}
+
+#' Package information
+#'
+#' Print information about the {{ package_name }} package.
+#'
+#' @return Invisibly returns NULL
+#' @export
+#' @examples
+#' {{ package_name }}_info()
+{{ package_name }}_info <- function() {
+  cat("{{ package_name }} - {{ project_name }}\n")
+  cat("Version:", as.character({{ package_name }}_version()), "\n")
+  cat("Author: {{ author or 'Developer' }}\n")
+  invisible(NULL)
+}
+
+# =============================================================================
+# CUSTOMIZE: Add your package functions below
+# =============================================================================
+
+#' Example utility function
+#'
+#' @param x Input value
+#' @return Processed value
+#' @export
+#' @examples
+#' example_function(1)
+example_function <- function(x) {
+  # Replace with your implementation
+  x
+}

@@ -1,23 +1,10 @@
 """Git repository initialization and management."""
 
-import subprocess
 import shutil
 from pathlib import Path
-from typing import Optional
 
-from ..utils import format_project_name
-
-
-def _is_command_available(command: str) -> bool:
-    """Check if a command is available on the system.
-
-    Args:
-        command: Command name to check
-
-    Returns:
-        True if command is available
-    """
-    return shutil.which(command) is not None
+from ..exceptions import GitError
+from ..shell import git_command
 
 
 def init_git(project_path: Path) -> None:
@@ -30,16 +17,18 @@ def init_git(project_path: Path) -> None:
         RuntimeError: If git operations fail
     """
     try:
+        git = git_command(cwd=project_path)
+
         # Initialize git repository
-        _run_git_command(project_path, ["init"])
+        git.run("init")
 
         # Add all files
-        _run_git_command(project_path, ["add", "."])
+        git.run("add", ".")
 
         # Create initial commit
-        _run_git_command(project_path, ["commit", "-m", "Initial commit: Project scaffolded with mintd"])
+        git.run("commit", "-m", "Initial commit: Project scaffolded with mintd")
 
-    except Exception as e:
+    except GitError as e:
         # For any git-related error, just warn and continue
         # This allows the project creation to succeed even without git
         print(f"Warning: Failed to initialize git repository: {e}")
@@ -81,33 +70,3 @@ def is_git_repo(project_path: Path) -> bool:
     return git_dir.is_dir()
 
 
-def _run_git_command(project_path: Path, args: list[str]) -> str:
-    """Run a git command in the project directory.
-
-    Args:
-        project_path: Path to the project directory
-        args: Git command arguments
-
-    Returns:
-        Command output
-
-    Raises:
-        subprocess.CalledProcessError: If the command fails
-        FileNotFoundError: If git is not available
-    """
-    try:
-        result = subprocess.run(
-            ["git"] + args,
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        return result.stdout
-    except FileNotFoundError:
-        raise FileNotFoundError("git command not found")
-    except subprocess.CalledProcessError as e:
-        # Check if it's a "command not found" type error
-        if "returned non-zero exit status" in str(e) and b"git: command not found" in e.stderr.encode():
-            raise FileNotFoundError("git command not found")
-        raise

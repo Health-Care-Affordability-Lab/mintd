@@ -5,13 +5,12 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from mintd.data_import import (
     ImportTransaction, ImportResult, DataImportError,
-    RegistryError, DVCImportError, MetadataUpdateError,
-    query_data_product, validate_project_directory,
+    RegistryError, DVCImportError, query_data_product, validate_project_directory,
     run_dvc_import, update_project_metadata,
     import_data_product, pull_data_product, list_data_products
 )

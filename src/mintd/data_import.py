@@ -4,22 +4,20 @@ Handles pulling data from registered data products and importing DVC dependencie
 into project/infra repositories with robust error handling and rollback support.
 """
 
-import os
 import json
 import shutil
-import subprocess
 import tempfile
 from datetime import datetime
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple, Callable
-from dataclasses import dataclass, asdict
+from typing import Any, Callable, Dict, List, Optional
 
-import yaml
 import git
 from rich.console import Console
 
+from .exceptions import DVCImportError
 from .registry import get_registry_client, load_project_metadata
-from .config import get_config
+from .shell import dvc_command
 
 console = Console()
 
@@ -119,24 +117,8 @@ class ImportTransaction:
         }
 
 
-class DataImportError(Exception):
-    """Base exception for data import operations."""
-    pass
-
-
-class RegistryError(DataImportError):
-    """Error accessing the registry."""
-    pass
-
-
-class DVCImportError(DataImportError):
-    """Error during DVC import operation."""
-    pass
-
-
-class MetadataUpdateError(DataImportError):
-    """Error updating project metadata."""
-    pass
+# Re-export exceptions for backwards compatibility
+from .exceptions import DataImportError, MetadataUpdateError, RegistryError
 
 
 def query_data_product(product_name: str) -> Dict[str, Any]:
@@ -216,19 +198,14 @@ def run_dvc_import(
     else:
         ssh_url = repo_url
 
-    cmd = ["dvc", "import", ssh_url, source_path, dest_path]
+    dvc = dvc_command(cwd=project_path)
+    args = ["import", ssh_url, source_path, dest_path]
 
     if repo_rev:
-        cmd.extend(["--rev", repo_rev])
+        args.extend(["--rev", repo_rev])
 
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=project_path,
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        dvc.run(*args)
 
         # Extract .dvc file path from output or construct it
         # DVC typically creates file.dvc for destination file
@@ -241,8 +218,8 @@ def run_dvc_import(
 
         return dvc_file
 
-    except subprocess.CalledProcessError as e:
-        error_msg = e.stderr.strip() if e.stderr else str(e)
+    except Exception as e:
+        error_msg = str(e)
         raise DVCImportError(f"DVC import failed: {error_msg}")
 
 
@@ -454,7 +431,7 @@ def pull_data_product(
         # Clone repository
         temp_dir = Path(tempfile.mkdtemp())
         try:
-            repo = git.Repo.clone_from(ssh_url, temp_dir)
+            git.Repo.clone_from(ssh_url, temp_dir)
 
             # Determine what to copy
             if stage:

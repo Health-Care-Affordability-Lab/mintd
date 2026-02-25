@@ -1,10 +1,47 @@
 * Data cleaning for {{ project_name }}
 *
 * This do-file handles data cleaning and preprocessing.
-* NOTE: This script runs from the src/ directory. Data paths use ../data/
+* NOTE: This script runs from the code/ directory. Data paths use ../data/
 
-* Import mint utilities (located in same src/ directory)
+* Import mint utilities (located in same code/ directory)
 do _mintd_utils.do
+
+* Clean dataset program
+capture program drop clean_dataset
+program define clean_dataset
+    args dataset_name
+
+    local initial_rows = _N
+
+    * Remove completely empty rows (all missing)
+    egen _row_missing = rowmiss(_all)
+    local total_vars = c(k) - 1  // exclude _row_missing
+    drop if _row_missing == `total_vars'
+    local empty_removed = `initial_rows' - _N
+    drop _row_missing
+
+    if `empty_removed' > 0 {
+        log_message "  Removed `empty_removed' empty rows"
+    }
+
+    * Strip whitespace from string variables
+    local string_count = 0
+    foreach var of varlist _all {
+        capture confirm string variable `var'
+        if !_rc {
+            replace `var' = strtrim(`var')
+            local ++string_count
+        }
+    }
+    if `string_count' > 0 {
+        log_message "  Stripped whitespace from `string_count' string variables"
+    }
+
+    * Standardize variable names (lowercase)
+    rename *, lower
+
+    log_message "  Final row count: `c(N)'"
+end
 
 // Main cleaning program
 capture program drop main
@@ -24,27 +61,34 @@ program define main
     log_message "  Intermediate: $INTERMEDIATE_DIR"
     log_message "  Final data: $FINAL_DIR"
 
-    // TODO: Implement data cleaning logic
-    // - Load raw data from $RAW_DIR/
-    // - Handle missing values, data types, outliers
-    // - Standardize formats and encodings
-    // - Save cleaned data to $INTERMEDIATE_DIR/
+    * Process all CSV files in RAW_DIR
+    local raw_files : dir "$RAW_DIR" files "*.csv"
+    local file_count : word count `raw_files'
 
-    // Example:
-    // // Load raw data
-    // local raw_files : dir "$RAW_DIR" files "*.csv"
-    // foreach file of local raw_files {
-    //     import delimited "$RAW_DIR/`file'", clear
-    //
-    //     // Basic cleaning
-    //     drop if missing(var1)  // Remove missing values
-    //     rename *, lower        // Lowercase variable names
-    //
-    //     // Save cleaned data
-    //     local final_file = subinstr("`file'", ".csv", "_clean.csv", .)
-    //     export delimited "$FINAL_DIR/`final_file'", replace
-    //     log_message "Cleaned `c(N)' observations, saved to $FINAL_DIR/`final_file'"
-    // }
+    if `file_count' == 0 {
+        log_message "No CSV files found in RAW_DIR. Run ingest.do first."
+    }
+    else {
+        log_message "Found `file_count' CSV files to clean"
+
+        foreach file of local raw_files {
+            log_message "Processing: `file'"
+
+            * Load raw data
+            import delimited "$RAW_DIR/`file'", clear
+            log_message "  Loaded `c(N)' rows, `c(k)' columns"
+
+            * Apply cleaning
+            clean_dataset "`file'"
+
+            * Save to intermediate directory
+            local output_file = "clean_`file'"
+            * Replace .csv with .dta for Stata format
+            local output_dta = subinstr("`output_file'", ".csv", ".dta", .)
+            save "$INTERMEDIATE_DIR/`output_dta'", replace
+            log_message "  Saved to: `output_dta'"
+        }
+    }
 
     log_message "Data cleaning completed successfully."
     close_logger

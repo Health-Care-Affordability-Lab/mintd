@@ -8,27 +8,83 @@ This repository contains the {{ project_name }} infrastructure package.
 
 ## Installation
 
+{% if language == 'r' %}
+Install from source:
+```r
+devtools::install(".")
+```
+
+Or install from GitHub:
+```r
+devtools::install_github("{{ organization | default('your-org') }}/{{ full_project_name }}")
+```
+{% elif language == 'stata' %}
+Copy the ado files to your PERSONAL ado directory:
+```stata
+adopath
+copy "code/{{ package_name }}.ado" "`c(sysdir_personal)'{{ package_name }}.ado", replace
+copy "code/{{ package_name }}.sthlp" "`c(sysdir_personal)'{{ package_name }}.sthlp", replace
+```
+{% else %}
 Install in development mode:
 ```bash
 pip install -e .
 ```
+{% endif %}
 
 ## Usage
 
+{% if language == 'r' %}
+```r
+library({{ package_name }})
+```
+{% elif language == 'stata' %}
+```stata
+{{ package_name }} varlist, options
+help {{ package_name }}
+```
+{% else %}
 ```python
 from {{ package_name }} import *
 ```
+{% endif %}
 
 ## Development
 
+{% if language == 'r' %}
+Run tests:
+```r
+devtools::test()
+```
+
+Build documentation:
+```r
+devtools::document()
+```
+{% elif language == 'stata' %}
+Test the ado file:
+```stata
+do tests/test_{{ package_name }}.do
+```
+{% else %}
 Run tests:
 ```bash
 pytest
 ```
+{% endif %}
 
 ## Project Structure
 
-- `src/{{ package_name }}/`: Main package code
+{% if language == 'r' %}
+- `code/`: R package source files
+- `DESCRIPTION`: Package metadata
+- `NAMESPACE`: Export declarations
+{% elif language == 'stata' %}
+- `code/{{ package_name }}.ado`: Stata program file
+- `code/{{ package_name }}.sthlp`: Help documentation
+{% else %}
+- `code/{{ package_name }}/`: Main package code
+{% endif %}
 - `tests/`: Test files
 - `docs/`: Documentation
 

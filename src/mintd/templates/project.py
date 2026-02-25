@@ -12,23 +12,36 @@ class ProjectTemplate(BaseTemplate):
     template_type = "project"
 
     def define_structure(self, use_current_repo: bool = False) -> Dict[str, Any]:
-        """Return directory structure for research projects."""
+        """Return directory structure for research projects.
+
+        Follows AEA Data Editor guidelines for reproducible research packages.
+        See: https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+        """
         return {
             "README.md": None,
             "metadata.json": None,
+            "citations.md": None,
             "data": {
                 "raw": {
                     ".gitkeep": None,
                 },
-                "intermediate": {
-                    ".gitkeep": None,
-                },
-                "final": {
+                "analysis": {
                     ".gitkeep": None,
                 },
             },
             self.source_dir: {
-                ".gitkeep": None, # Base code directory
+                "01_data_prep": {
+                    ".gitkeep": None,
+                },
+                "02_analysis": {
+                    ".gitkeep": None,
+                },
+                "03_tables": {
+                    ".gitkeep": None,
+                },
+                "04_figures": {
+                    ".gitkeep": None,
+                },
             },
             "notebooks": {
                 ".gitkeep": None,
@@ -38,6 +51,9 @@ class ProjectTemplate(BaseTemplate):
                     ".gitkeep": None,
                 },
                 "tables": {
+                    ".gitkeep": None,
+                },
+                "estimates": {
                     ".gitkeep": None,
                 },
                 "presentations": {
@@ -62,6 +78,7 @@ class ProjectTemplate(BaseTemplate):
         return [
             ("README.md", "README_project.md.j2"),
             ("metadata.json", "metadata.json.j2"),
+            ("citations.md", "citations.md.j2"),
             (".gitignore", "gitignore.txt"),
             (".dvcignore", "dvcignore.txt"),
         ]

@@ -58,18 +58,25 @@ class PythonStrategy(LanguageStrategy):
         return {"requirements.txt": None}
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                "analysis": {
+                "_mintd_utils.py": None,
+                "config.py": None,
+                "02_analysis": {
                     "__init__.py": None,
-                }
-            }
+                },
+            },
+            "run_all.py": None,
         }
 
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
             ("requirements.txt", "requirements_project.txt.j2"),
-            (f"{source_dir}/analysis/__init__.py", "__init__.py.j2"),
+            (f"{source_dir}/_mintd_utils.py", "_mintd_utils.py.j2"),
+            (f"{source_dir}/config.py", "config.py.j2"),
+            (f"{source_dir}/02_analysis/__init__.py", "__init__.py.j2"),
+            ("run_all.py", "run_all.py.j2"),
         ]
 
     def get_data_structure(self, source_dir: str = "code") -> Dict[str, Any]:
@@ -126,19 +133,26 @@ class RStrategy(LanguageStrategy):
         }
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
-        # Standardize R to use code/ folder logic?
-        # Legacy used src/r/analysis.R. Let's modernize to code/analysis.R
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                "analysis.R": None
-            }
+                "_mintd_utils.R": None,
+                "config.R": None,
+                "02_analysis": {
+                    "analysis.R": None,
+                },
+            },
+            "run_all.R": None,
         }
 
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
             ("DESCRIPTION", "DESCRIPTION.j2"),
             ("renv.lock", "renv.lock.j2"),
-            (f"{source_dir}/analysis.R", "analysis.R.j2"),
+            (f"{source_dir}/_mintd_utils.R", "_mintd_utils.R.j2"),
+            (f"{source_dir}/config.R", "config.R.j2"),
+            (f"{source_dir}/02_analysis/analysis.R", "analysis.R.j2"),
+            ("run_all.R", "run_all.R.j2"),
             (".Rprofile", ".Rprofile.j2"),
         ]
 
@@ -165,32 +179,23 @@ class RStrategy(LanguageStrategy):
         ]
 
     def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        # R Libraries (Packages)
+        # R package structure using code/ directory for consistency with other mintd projects
+        # Note: Standard R packages use R/ directory, but we use code/ for mintd consistency.
+        # Users can configure .Rbuildignore or symlink if needed for CRAN submission.
         return {
             "DESCRIPTION": None,
             "NAMESPACE": None,
             source_dir: {
-                # R source files usually go in R/ directory in standard packages
-                # But we are using 'code' as our source root.
-                # Standard R packages expect 'R/' directory.
-                # We might need to map 'code' -> 'R' for R packages OR configure R to use 'code'
-                # But R is strict.
-                # However, for Mint consistency we want 'code'.
-                # Let's assume for now we use 'code' and user might symlink or we stick to 'code' as the 'src' equivalent.
-                # Wait, standard R package MUST have 'R' directory.
-                # If we enforce 'code' directory, it's not a standard R package structure.
-                # For Infra (Library), satisfying the Language Standard is probably more important than Mint standard?
-                # But the User said: "should be similar to the prj_ where we have code, data, docs... Note that this maybe a stata, R or python library"
-                # If we use 'code', we can add .Rbuildignore or config?
-                # Actually, forcing 'code' instead of 'R' might break R tooling.
-                # But let's follow instruction: "refactor this, it should be similar to the prj_".
-                f"{package_name}.R": None, # Simple single file lib? No, package.
+                f"{package_name}.R": None,
             }
         }
 
     def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        # Placeholder for R infra support
-        return []
+        return [
+            ("DESCRIPTION", "DESCRIPTION_infra.j2"),
+            ("NAMESPACE", "NAMESPACE.j2"),
+            (f"{source_dir}/{package_name}.R", "package.R.j2"),
+        ]
 
 
 class StataStrategy(LanguageStrategy):
@@ -198,19 +203,29 @@ class StataStrategy(LanguageStrategy):
 
     name = "stata"
     file_extension = "do"
-    
+
     def get_system_requirements(self) -> Dict[str, Any]:
         return {}
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
+        """Return structure with numbered subdirectories per AEA guidelines."""
         return {
             source_dir: {
-                ".gitkeep": None
-            }
+                "_mintd_utils.do": None,
+                "config.do": None,
+                "02_analysis": {
+                    ".gitkeep": None,
+                },
+            },
+            "run_all.do": None,
         }
-        
+
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return []
+        return [
+            (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
+            (f"{source_dir}/config.do", "config.do.j2"),
+            ("run_all.do", "run_all.do.j2"),
+        ]
 
     def get_data_structure(self, source_dir: str = "code") -> Dict[str, Any]:
         return {
@@ -233,9 +248,13 @@ class StataStrategy(LanguageStrategy):
     def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
         return {
             source_dir: {
-                f"{package_name}.ado": None
+                f"{package_name}.ado": None,
+                f"{package_name}.sthlp": None,
             }
         }
 
     def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return []
+        return [
+            (f"{source_dir}/{package_name}.ado", "package.ado.j2"),
+            (f"{source_dir}/{package_name}.sthlp", "package.sthlp.j2"),
+        ]

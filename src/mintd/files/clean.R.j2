@@ -1,10 +1,54 @@
 #' Data cleaning for {{ project_name }}
 #'
 #' This script handles data cleaning and preprocessing.
-#' NOTE: This script runs from the src/ directory. Data paths use ../data/
+#' NOTE: This script runs from the code/ directory. Data paths use ../data/
 
-# Import mint utilities (located in same src/ directory)
+# Import mint utilities (located in same code/ directory)
 source("_mintd_utils.R")
+
+# Load tidyverse for data manipulation
+library(dplyr, warn.conflicts = FALSE)
+library(readr)
+library(stringr)
+
+#' Apply standard cleaning operations to a data frame
+#'
+#' @param df Data frame to clean
+#' @param logger Logger instance for logging
+#' @return Cleaned data frame
+clean_dataset <- function(df, logger) {
+  initial_rows <- nrow(df)
+
+
+  # Remove completely empty rows
+  df <- df %>% filter(rowSums(is.na(.)) < ncol(.))
+  empty_removed <- initial_rows - nrow(df)
+  if (empty_removed > 0) {
+    logger$log("  Removed ", empty_removed, " empty rows")
+  }
+
+  # Strip whitespace from character columns
+  char_cols <- names(df)[sapply(df, is.character)]
+  if (length(char_cols) > 0) {
+    df <- df %>%
+      mutate(across(all_of(char_cols), str_trim))
+    logger$log("  Stripped whitespace from ", length(char_cols), " character columns")
+  }
+
+  # Standardize column names (lowercase, underscores)
+  original_names <- names(df)
+  names(df) <- names(df) %>%
+    tolower() %>%
+    str_replace_all(" ", "_") %>%
+    str_replace_all("-", "_")
+  renamed <- sum(original_names != names(df))
+  if (renamed > 0) {
+    logger$log("  Standardized ", renamed, " column names")
+  }
+
+  logger$log("  Final row count: ", nrow(df))
+  return(df)
+}
 
 main <- function() {
   # Initialize logging (validates directory and creates log file)
@@ -22,30 +66,30 @@ main <- function() {
   logger$log("  Intermediate: ", INTERMEDIATE_DIR)
   logger$log("  Final data: ", FINAL_DIR)
 
-  # TODO: Implement data cleaning logic
-  # - Load raw data from RAW_DIR/
-  # - Handle missing values, data types, outliers
-  # - Standardize formats and encodings
-  # - Save cleaned data to INTERMEDIATE_DIR/
+  # Process all CSV files in RAW_DIR
+  raw_files <- list.files(RAW_DIR, pattern = "\\.csv$", full.names = TRUE)
 
-  # Example:
-  # library(dplyr)
-  # library(readr)
-  #
-  # # Load raw data
-  # raw_files <- list.files(RAW_DIR, pattern = "*.csv", full.names = TRUE)
-  # for (raw_file in raw_files) {
-  #   df <- read_csv(raw_file)
-  #
-  #   # Basic cleaning
-  #   df <- df %>% drop_na()  # Remove missing values
-  #   names(df) <- tolower(gsub(" ", "_", names(df)))
-  #
-  #   # Save cleaned data
-  #   final_file <- file.path(FINAL_DIR, paste0("clean_", basename(raw_file)))
-  #   write_csv(df, final_file)
-  #   logger$log("Cleaned ", nrow(df), " rows, saved to ", final_file)
-  # }
+  if (length(raw_files) == 0) {
+    logger$log("No CSV files found in RAW_DIR. Run ingest.R first.")
+  } else {
+    logger$log("Found ", length(raw_files), " CSV files to clean")
+
+    for (raw_file in raw_files) {
+      logger$log("Processing: ", basename(raw_file))
+
+      # Load raw data
+      df <- read_csv(raw_file, show_col_types = FALSE)
+      logger$log("  Loaded ", nrow(df), " rows, ", ncol(df), " columns")
+
+      # Apply cleaning
+      df <- clean_dataset(df, logger)
+
+      # Save to intermediate directory
+      output_file <- file.path(INTERMEDIATE_DIR, paste0("clean_", basename(raw_file)))
+      write_csv(df, output_file)
+      logger$log("  Saved to: ", basename(output_file))
+    }
+  }
 
   logger$log("Data cleaning completed successfully.")
   logger$close()
