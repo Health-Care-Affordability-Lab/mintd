@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Generate data schema for {{ project_name }}.
+
+This script is used by Stata projects to generate JSON schema from final data files.
+It runs from the schemas/ directory and writes to v1/schema.json.
+
+DO NOT MODIFY - This file is managed by mintd.
+"""
+
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# Check for pandas (required for .dta file support)
+try:
+    import pandas as pd
+except ImportError:
+    print("Error: pandas is required for schema generation.", file=sys.stderr)
+    print("Install with: pip install pandas", file=sys.stderr)
+    sys.exit(1)
+
+
+def generate_file_schema(data_path: Path) -> dict:
+    """Generate schema for a single data file.
+
+    Args:
+        data_path: Path to data file (.dta, .csv, etc.)
+
+    Returns:
+        Dict containing schema information
+    """
+    # Read data based on file extension
+    ext = data_path.suffix.lower()
+    if ext == '.dta':
+        df = pd.read_stata(data_path)
+    elif ext == '.csv':
+        df = pd.read_csv(data_path)
+    elif ext == '.json':
+        df = pd.read_json(data_path)
+    elif ext in ['.xlsx', '.xls']:
+        df = pd.read_excel(data_path)
+    else:
+        raise ValueError(f"Unsupported file format: {ext}")
+
+    # Generate schema
+    schema = {
+        "filename": data_path.name,
+        "filepath": str(data_path),
+        "observations": len(df),
+        "columns": len(df.columns),
+        "variables": []
+    }
+
+    for col in df.columns:
+        # Basic type detection
+        dtype = str(df[col].dtype)
+        if dtype.startswith('int'):
+            var_type = "integer"
+        elif dtype.startswith('float'):
+            var_type = "numeric"
+        elif dtype == 'object':
+            var_type = "string"
+        elif dtype.startswith('bool'):
+            var_type = "boolean"
+        elif dtype.startswith('datetime'):
+            var_type = "datetime"
+        elif dtype == 'category':
+            var_type = "categorical"
+        else:
+            var_type = dtype
+
+        # Generate basic label from column name
+        label = col.replace('_', ' ').replace('-', ' ').title()
+
+        variable_info = {
+            "name": col,
+            "type": var_type,
+            "label": label,
+            "missing_count": int(df[col].isna().sum()),
+            "unique_values": int(df[col].nunique()) if df[col].dtype == 'object' else None
+        }
+
+        # Add numeric statistics for numeric columns
+        if var_type in ["integer", "numeric"]:
+            variable_info.update({
+                "min": float(df[col].min()) if not pd.isna(df[col].min()) else None,
+                "max": float(df[col].max()) if not pd.isna(df[col].max()) else None,
+                "mean": float(df[col].mean()) if not pd.isna(df[col].mean()) else None,
+                "std": float(df[col].std()) if not pd.isna(df[col].std()) else None
+            })
+
+        schema["variables"].append(variable_info)
+
+    return schema
+
+
+def find_data_files(directory: Path) -> list:
+    """Find data files in a directory.
+
+    Args:
+        directory: Directory to search
+
+    Returns:
+        List of data file paths
+    """
+    extensions = ['.dta', '.csv', '.json', '.xlsx', '.xls']
+    data_files = []
+    for ext in extensions:
+        data_files.extend(directory.glob(f"**/*{ext}"))
+    return sorted(data_files)
+
+
+def main():
+    """Generate schema from final data files."""
+    # This script runs from schemas/ directory
+    final_dir = Path("../data/final")
+    schema_dir = Path("v1")
+    schema_file = schema_dir / "schema.json"
+
+    # Ensure output directory exists
+    schema_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find all data files
+    data_files = find_data_files(final_dir)
+
+    if not data_files:
+        print("No data files found in ../data/final/")
+        # Create empty schema
+        combined_schema = {
+            "generated_at": datetime.now().isoformat(),
+            "files": []
+        }
+    else:
+        combined_schema = {
+            "generated_at": datetime.now().isoformat(),
+            "files": []
+        }
+
+        for data_file in data_files:
+            try:
+                file_schema = generate_file_schema(data_file)
+                combined_schema["files"].append(file_schema)
+                print(f"  Generated schema for: {data_file.name}")
+            except Exception as e:
+                print(f"  Warning: Could not generate schema for {data_file.name}: {e}")
+
+    # Write schema
+    with open(schema_file, 'w') as f:
+        json.dump(combined_schema, f, indent=2, default=str)
+
+    print(f"Schema saved to: {schema_file}")
+
+
+if __name__ == "__main__":
+    main()

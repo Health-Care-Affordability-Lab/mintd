@@ -168,7 +168,7 @@ This PR registers a new {catalog_entry['project']['type']} project: **{project_n
 ### Details
 - **Type**: {catalog_entry['project']['type']}
 - **Full Name**: {catalog_entry['project']['full_name']}
-- **Created by**: {catalog_entry['ownership']['created_by']}
+- **Created by**: {catalog_entry.get('ownership', {}).get('created_by') or catalog_entry.get('project', {}).get('created_by', 'Unknown')}
 
 ### Checklist
 - [ ] Catalog entry follows schema requirements

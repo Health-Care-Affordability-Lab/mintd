@@ -17,6 +17,8 @@ from typing import Dict, Any, Optional, List
 # =============================================================================
 DATA_DIR = Path("../data")
 RAW_DIR = Path("../data/raw")
+INTERMEDIATE_DIR = Path("../data/intermediate")
+FINAL_DIR = Path("../data/final")
 ANALYSIS_DIR = Path("../data/analysis")
 
 
@@ -24,11 +26,13 @@ def get_data_paths() -> Dict[str, Path]:
     """Get standard data directory paths.
 
     Returns:
-        Dict with keys: 'data', 'raw', 'analysis'
+        Dict with keys: 'data', 'raw', 'intermediate', 'final', 'analysis'
     """
     return {
         'data': DATA_DIR,
         'raw': RAW_DIR,
+        'intermediate': INTERMEDIATE_DIR,
+        'final': FINAL_DIR,
         'analysis': ANALYSIS_DIR,
     }
 
@@ -46,7 +50,7 @@ def setup_project_directory() -> Path:
     Raises:
         RuntimeError: If not running from expected directory
     """
-    global DATA_DIR, RAW_DIR, ANALYSIS_DIR
+    global DATA_DIR, RAW_DIR, INTERMEDIATE_DIR, FINAL_DIR, ANALYSIS_DIR
 
     current_dir = Path.cwd()
     # Look for project root indicators
@@ -61,6 +65,8 @@ def setup_project_directory() -> Path:
         # Update paths for project-root execution
         DATA_DIR = Path("data")
         RAW_DIR = Path("data/raw")
+        INTERMEDIATE_DIR = Path("data/intermediate")
+        FINAL_DIR = Path("data/final")
         ANALYSIS_DIR = Path("data/analysis")
         return current_dir
     # Not in a valid location

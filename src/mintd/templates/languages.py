@@ -234,6 +234,9 @@ class StataStrategy(LanguageStrategy):
                 "ingest.do": None,
                 "clean.do": None,
                 "validate.do": None,
+            },
+            "schemas": {
+                "generate_schema.py": None,
             }
         }
 
@@ -243,6 +246,7 @@ class StataStrategy(LanguageStrategy):
             (f"{source_dir}/ingest.do", "ingest.do.j2"),
             (f"{source_dir}/clean.do", "clean.do.j2"),
             (f"{source_dir}/validate.do", "validate.do.j2"),
+            ("schemas/generate_schema.py", "generate_schema.py.j2"),
         ]
         
     def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:

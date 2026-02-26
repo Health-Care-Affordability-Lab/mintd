@@ -132,6 +132,11 @@ program define main
     file close `report_handle'
     log_message "Validation report saved to: $FINAL_DIR/validation_report.txt"
 
+    * Generate schema using Python helper (more reliable JSON output)
+    log_message "Generating data schema..."
+    shell python ../schemas/generate_schema.py
+    log_message "Schema generation complete."
+
     log_message "Data validation completed successfully."
     close_logger
 end

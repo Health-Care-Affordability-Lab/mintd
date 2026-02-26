@@ -12,16 +12,20 @@
 
 DATA_DIR <- "../data"
 RAW_DIR <- "../data/raw"
+INTERMEDIATE_DIR <- "../data/intermediate"
+FINAL_DIR <- "../data/final"
 ANALYSIS_DIR <- "../data/analysis"
 
 #' Get standard data directory paths
 #'
-#' @return Named list with paths: data, raw, analysis
+#' @return Named list with paths: data, raw, intermediate, final, analysis
 #' @export
 get_data_paths <- function() {
   list(
     data = DATA_DIR,
     raw = RAW_DIR,
+    intermediate = INTERMEDIATE_DIR,
+    final = FINAL_DIR,
     analysis = ANALYSIS_DIR
   )
 }
@@ -67,6 +71,8 @@ setup_project_directory <- function() {
     # Update paths for project-root execution
     DATA_DIR <<- "data"
     RAW_DIR <<- "data/raw"
+    INTERMEDIATE_DIR <<- "data/intermediate"
+    FINAL_DIR <<- "data/final"
     ANALYSIS_DIR <<- "data/analysis"
     return(normalizePath(current_dir))
   }
