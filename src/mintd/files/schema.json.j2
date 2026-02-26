@@ -1,14 +1,16 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.com/product.schema.json",
-  "title": "{{ project_name }} schema",
-  "description": "Schema for {{ project_name }} data product",
-  "type": "object",
-  "properties": {
-    "id": {
-      "description": "The unique identifier for a record",
-      "type": "integer"
+  "$schema": "https://specs.frictionlessdata.io/schemas/table-schema.json",
+  "fields": [
+    {
+      "name": "id",
+      "type": "integer",
+      "title": "Record ID",
+      "description": "Unique identifier for each record",
+      "constraints": {
+        "required": true
+      }
     }
-  },
-  "required": [ "id" ]
+  ],
+  "missingValues": ["", "NA", "."],
+  "_comment": "This is a starter Frictionless Table Schema. Run 'python generate_schema.py' from the schemas/ directory to auto-generate from your data files."
 }

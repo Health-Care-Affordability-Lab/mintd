@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Generate data schema for {{ project_name }}.
+"""Generate Frictionless Table Schema for {{ project_name }}.
 
-This script is used by Stata projects to generate JSON schema from final data files.
-It runs from the schemas/ directory and writes to v1/schema.json.
+This script generates a JSON schema file describing the structure of data files
+in data/final/. The output follows the Frictionless Table Schema specification:
+https://specs.frictionlessdata.io/table-schema/
+
+For Stata .dta files, variable labels and value labels are extracted and mapped
+to Frictionless 'title' and 'categories' fields respectively.
 
 DO NOT MODIFY - This file is managed by mintd.
 """
@@ -11,8 +15,9 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Check for pandas (required for .dta file support)
+# Check for required dependencies
 try:
     import pandas as pd
 except ImportError:
@@ -20,93 +25,141 @@ except ImportError:
     print("Install with: pip install pandas", file=sys.stderr)
     sys.exit(1)
 
+# Frictionless Table Schema URL
+FRICTIONLESS_SCHEMA_URL = "https://specs.frictionlessdata.io/schemas/table-schema.json"
 
-def generate_file_schema(data_path: Path) -> dict:
-    """Generate schema for a single data file.
+# Supported file extensions
+SUPPORTED_EXTENSIONS = {".csv", ".dta", ".xlsx", ".xls", ".json"}
 
-    Args:
-        data_path: Path to data file (.dta, .csv, etc.)
+# Default missing values (includes Stata's ".")
+DEFAULT_MISSING_VALUES = ["", "NA", "."]
 
-    Returns:
-        Dict containing schema information
-    """
-    # Read data based on file extension
-    ext = data_path.suffix.lower()
-    if ext == '.dta':
-        df = pd.read_stata(data_path)
-    elif ext == '.csv':
-        df = pd.read_csv(data_path)
-    elif ext == '.json':
-        df = pd.read_json(data_path)
-    elif ext in ['.xlsx', '.xls']:
-        df = pd.read_excel(data_path)
+
+def extract_stata_metadata(file_path: Path) -> Dict[str, Dict[str, Any]]:
+    """Extract variable labels and value labels from a Stata .dta file."""
+    metadata: Dict[str, Dict[str, Any]] = {}
+
+    reader = pd.io.stata.StataReader(file_path)
+    variable_labels = reader.variable_labels()
+    value_labels = reader.value_labels()
+    columns = list(variable_labels.keys())
+
+    for col in columns:
+        var_label = variable_labels.get(col)
+        col_meta: Dict[str, Any] = {"label": var_label if var_label else None}
+
+        if col in value_labels:
+            col_meta["categories"] = [
+                {"value": k, "label": v} for k, v in value_labels[col].items()
+            ]
+
+        metadata[col] = col_meta
+
+    return metadata
+
+
+def read_dataframe(file_path: Path) -> pd.DataFrame:
+    """Read a data file into a pandas DataFrame."""
+    ext = file_path.suffix.lower()
+
+    if ext == ".csv":
+        return pd.read_csv(file_path)
+    elif ext == ".dta":
+        return pd.read_stata(file_path)
+    elif ext in {".xlsx", ".xls"}:
+        return pd.read_excel(file_path)
+    elif ext == ".json":
+        return pd.read_json(file_path)
     else:
         raise ValueError(f"Unsupported file format: {ext}")
 
-    # Generate schema
-    schema = {
-        "filename": data_path.name,
-        "filepath": str(data_path),
-        "observations": len(df),
-        "columns": len(df.columns),
-        "variables": []
-    }
 
-    for col in df.columns:
-        # Basic type detection
-        dtype = str(df[col].dtype)
-        if dtype.startswith('int'):
-            var_type = "integer"
-        elif dtype.startswith('float'):
-            var_type = "numeric"
-        elif dtype == 'object':
-            var_type = "string"
-        elif dtype.startswith('bool'):
-            var_type = "boolean"
-        elif dtype.startswith('datetime'):
-            var_type = "datetime"
-        elif dtype == 'category':
-            var_type = "categorical"
+def infer_field_type(series: pd.Series) -> str:
+    """Infer Frictionless field type from a pandas Series."""
+    dtype = str(series.dtype).lower()
+
+    # Handle non-string types directly
+    if dtype not in ("object", "str", "string"):
+        if dtype.startswith("int"):
+            return "integer"
+        elif dtype.startswith("float"):
+            return "number"
+        elif dtype.startswith("bool"):
+            return "boolean"
+        elif dtype.startswith("datetime"):
+            return "datetime"
+        elif "date" in dtype:
+            return "date"
+        elif dtype == "category":
+            return "string"
         else:
-            var_type = dtype
+            return "string"
 
-        # Generate basic label from column name
-        label = col.replace('_', ' ').replace('-', ' ').title()
+    # For string/object columns, try to infer more specific types
+    non_null = series.dropna()
+    if len(non_null) == 0:
+        return "string"
 
-        variable_info = {
+    sample = non_null.head(100)
+
+    # Try parsing as date (YYYY-MM-DD format)
+    try:
+        pd.to_datetime(sample, format="%Y-%m-%d", errors="raise")
+        return "date"
+    except (ValueError, TypeError):
+        pass
+
+    # Try parsing as datetime
+    try:
+        pd.to_datetime(sample, format="ISO8601", errors="raise")
+        return "datetime"
+    except (ValueError, TypeError):
+        pass
+
+    return "string"
+
+
+def generate_table_schema(
+    file_path: Path,
+    stata_metadata: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Generate Frictionless Table Schema for a single data file."""
+    ext = file_path.suffix.lower()
+
+    # Extract Stata metadata if applicable
+    if ext == ".dta" and stata_metadata is None:
+        stata_metadata = extract_stata_metadata(file_path)
+
+    df = read_dataframe(file_path)
+
+    fields: List[Dict[str, Any]] = []
+    for col in df.columns:
+        field: Dict[str, Any] = {
             "name": col,
-            "type": var_type,
-            "label": label,
-            "missing_count": int(df[col].isna().sum()),
-            "unique_values": int(df[col].nunique()) if df[col].dtype == 'object' else None
+            "type": infer_field_type(df[col]),
         }
 
-        # Add numeric statistics for numeric columns
-        if var_type in ["integer", "numeric"]:
-            variable_info.update({
-                "min": float(df[col].min()) if not pd.isna(df[col].min()) else None,
-                "max": float(df[col].max()) if not pd.isna(df[col].max()) else None,
-                "mean": float(df[col].mean()) if not pd.isna(df[col].mean()) else None,
-                "std": float(df[col].std()) if not pd.isna(df[col].std()) else None
-            })
+        # Add Stata metadata if available
+        if stata_metadata and col in stata_metadata:
+            col_meta = stata_metadata[col]
+            if col_meta.get("label"):
+                field["title"] = col_meta["label"]
+            if "categories" in col_meta:
+                field["categories"] = col_meta["categories"]
 
-        schema["variables"].append(variable_info)
+        fields.append(field)
 
-    return schema
+    return {
+        "$schema": FRICTIONLESS_SCHEMA_URL,
+        "fields": fields,
+        "missingValues": DEFAULT_MISSING_VALUES,
+    }
 
 
-def find_data_files(directory: Path) -> list:
-    """Find data files in a directory.
-
-    Args:
-        directory: Directory to search
-
-    Returns:
-        List of data file paths
-    """
-    extensions = ['.dta', '.csv', '.json', '.xlsx', '.xls']
+def find_data_files(directory: Path) -> List[Path]:
+    """Find all supported data files in a directory."""
     data_files = []
-    for ext in extensions:
+    for ext in SUPPORTED_EXTENSIONS:
         data_files.extend(directory.glob(f"**/*{ext}"))
     return sorted(data_files)
 
@@ -124,30 +177,37 @@ def main():
     # Find all data files
     data_files = find_data_files(final_dir)
 
+    # Build combined schema output
+    combined: Dict[str, Any] = {
+        "generated_at": datetime.now().isoformat(),
+        "generator": "mintd",
+        "schema_standard": "frictionless-table-schema",
+        "files": [],
+    }
+
     if not data_files:
         print("No data files found in ../data/final/")
-        # Create empty schema
-        combined_schema = {
-            "generated_at": datetime.now().isoformat(),
-            "files": []
-        }
     else:
-        combined_schema = {
-            "generated_at": datetime.now().isoformat(),
-            "files": []
-        }
-
         for data_file in data_files:
             try:
-                file_schema = generate_file_schema(data_file)
-                combined_schema["files"].append(file_schema)
+                df = read_dataframe(data_file)
+                schema = generate_table_schema(data_file)
+
+                file_entry = {
+                    "filename": data_file.name,
+                    "path": str(data_file.relative_to(final_dir)),
+                    "observations": len(df),
+                    "columns": len(df.columns),
+                    "schema": schema,
+                }
+                combined["files"].append(file_entry)
                 print(f"  Generated schema for: {data_file.name}")
             except Exception as e:
                 print(f"  Warning: Could not generate schema for {data_file.name}: {e}")
 
     # Write schema
-    with open(schema_file, 'w') as f:
-        json.dump(combined_schema, f, indent=2, default=str)
+    with open(schema_file, "w") as f:
+        json.dump(combined, f, indent=2, default=str)
 
     print(f"Schema saved to: {schema_file}")
 

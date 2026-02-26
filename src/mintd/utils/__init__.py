@@ -6,6 +6,13 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
+from mintd.utils.schema import (
+    extract_stata_metadata,
+    infer_table_schema,
+    generate_schema_file,
+    FRICTIONLESS_SCHEMA_URL,
+)
+
 
 def get_platform() -> str:
     """Return 'windows', 'macos', or 'linux'.
