@@ -38,6 +38,8 @@ Requires-Dist: pyyaml>=6.0
 Requires-Dist: dvc>=3.0
 Requires-Dist: pygithub>=2.0.0
 Requires-Dist: requests>=2.25.0
+Requires-Dist: frictionless[excel,json]>=5.0
+Requires-Dist: pandas>=2.0
 Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
 Requires-Dist: ruff>=0.1; extra == "dev"
@@ -100,6 +102,21 @@ mintd create data --name healthcare_analysis --lang python --register
 
 # Create a secure enclave workspace
 mintd create enclave --name secure_workspace
+```
+
+## Updating Existing Repositories
+
+If you have an existing mintd-managed repository and want to update to the latest schema with new fields:
+
+```bash
+# Add Frictionless Table Schema support
+mintd update schema
+
+# Auto-generate schema from existing data files
+mintd update schema --generate
+
+# Update metadata fields (sensitivity, mirror URL)
+mintd update metadata
 ```
 
 See the [Documentation](https://cooper-lab.github.io/mint/) for detailed guides on configuration, Stata integration, and advanced usage.

@@ -3,10 +3,6 @@ MANIFEST.in
 README.md
 pyproject.toml
 setup.py
-notes/plan.md
-notes/produc-spec.md
-notes/registry-integration-complete.md
-notes/todo.md
 src/mintd/__init__.py
 src/mintd/__main__.py
 src/mintd/api.py
@@ -60,6 +56,7 @@ src/mintd/files/dvc_vars.yaml.j2
 src/mintd/files/dvcignore.txt
 src/mintd/files/enclave_cli.py.j2
 src/mintd/files/enclave_manifest.yaml.j2
+src/mintd/files/generate_schema.py.j2
 src/mintd/files/gitignore.txt
 src/mintd/files/ingest.R.j2
 src/mintd/files/ingest.do.j2
@@ -100,6 +97,7 @@ src/mintd/templates/languages.py
 src/mintd/templates/project.py
 src/mintd/utils/__init__.py
 src/mintd/utils/loader.py
+src/mintd/utils/schema.py
 stata/README.md
 stata/mintd.ado
 stata/mintd.pkg
@@ -116,6 +114,7 @@ tests/test_installation.py
 tests/test_loader.py
 tests/test_manifest.py
 tests/test_registry.py
+tests/test_schema.py
 tests/test_stata_integration.py
 tests/test_templates.py
 tests/test_utils.py

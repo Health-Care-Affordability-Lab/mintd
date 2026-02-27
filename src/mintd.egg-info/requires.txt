@@ -8,6 +8,8 @@ pyyaml>=6.0
 dvc>=3.0
 pygithub>=2.0.0
 requests>=2.25.0
+frictionless[excel,json]>=5.0
+pandas>=2.0
 
 [dev]
 pytest>=7.0

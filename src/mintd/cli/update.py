@@ -109,7 +109,7 @@ def storage(path, yes):
 
     acl_path = SENSITIVITY_TO_ACL.get(sensitivity, "lab")
     remote_name = full_name
-    remote_url = f"s3://{bucket_prefix}/{acl_path}/{project_name}/"
+    remote_url = f"s3://{bucket_prefix}/{acl_path}/{full_name}/"
 
     console.print("📋 Current configuration will be updated:")
     console.print(f"   - Project: {full_name}")
