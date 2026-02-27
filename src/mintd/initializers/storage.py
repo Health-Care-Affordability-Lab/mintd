@@ -37,12 +37,14 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
     remote_name = full_project_name if full_project_name else (project_name if project_name else "storage")
     
     # Compute ACL path and remote URL
+    # Use full_project_name (with type prefix) for the S3 path to avoid collisions
     acl_path = SENSITIVITY_TO_ACL.get(sensitivity, "lab")
-    if project_name:
-        remote_url = f"s3://{bucket_prefix}/{acl_path}/{project_name}/"
+    path_name = full_project_name if full_project_name else project_name
+    if path_name:
+        remote_url = f"s3://{bucket_prefix}/{acl_path}/{path_name}/"
     else:
         remote_url = f"s3://{bucket_prefix}/{acl_path}/"
-    
+
     # Default return value in case DVC init fails
     dvc_info = {"remote_name": remote_name, "remote_url": remote_url}
 
@@ -66,12 +68,15 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
         if storage.get("versioning", True):
             dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
 
+        # Set the remote as default locally in this repo's .dvc/config
+        dvc.run("remote", "default", remote_name)
+
     except DVCError as e:
         # For any DVC-related error, just warn and continue
         # This allows the project creation to succeed even without DVC
         print(f"Warning: Failed to initialize DVC: {e}")
         print("The project was created successfully, but DVC initialization was skipped.")
-    
+
     return dvc_info
 
 
@@ -133,9 +138,11 @@ def add_dvc_remote(project_path: Path, bucket_prefix: str, sensitivity: str = "r
     remote_name = full_project_name if full_project_name else (project_name if project_name else "storage")
 
     # Compute ACL path and remote URL
+    # Use full_project_name (with type prefix) for the S3 path to avoid collisions
     acl_path = SENSITIVITY_TO_ACL.get(sensitivity, "lab")
-    if project_name:
-        remote_url = f"s3://{bucket_prefix}/{acl_path}/{project_name}/"
+    path_name = full_project_name if full_project_name else project_name
+    if path_name:
+        remote_url = f"s3://{bucket_prefix}/{acl_path}/{path_name}/"
     else:
         remote_url = f"s3://{bucket_prefix}/{acl_path}/"
 
@@ -159,6 +166,9 @@ def add_dvc_remote(project_path: Path, bucket_prefix: str, sensitivity: str = "r
         # Enable cloud versioning support
         if storage.get("versioning", True):
             dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
+
+        # Set the remote as default locally in this repo's .dvc/config
+        dvc.run("remote", "default", remote_name)
 
     except DVCError as e:
         # For any DVC-related error, just warn and continue
