@@ -274,6 +274,62 @@ class TestCatalogEntryGeneration:
         assert "storage" in entry  # Data projects should have storage
         assert entry["storage"]["dvc"]["bucket"] == "lab-data"
 
+    def test_generate_catalog_entry_remote_name_uses_full_name(self):
+        """Test that remote_name uses full project name (e.g., data_test not test)."""
+        registry = LocalRegistry("https://github.com/test-org/registry")
+
+        metadata = {
+            "project": {
+                "name": "cms-pps-weights",
+                "type": "data",
+                "full_name": "data_cms-pps-weights"
+            },
+            "ownership": {
+                "created_by": "user@example.com"
+            },
+            "metadata": {
+                "version": "1.0.0"
+            },
+            "status": {
+                "state": "active"
+            },
+            "schema_version": "1.0"
+        }
+
+        entry, project_name = registry._generate_catalog_entry(metadata)
+
+        # remote_name should be full_name (data_cms-pps-weights), not just name or 'wasabi'
+        assert entry["storage"]["dvc"]["remote_name"] == "data_cms-pps-weights"
+        assert entry["storage"]["dvc"]["remote_name"] != "wasabi"
+        assert entry["storage"]["dvc"]["remote_name"] != "cms-pps-weights"
+
+    def test_generate_catalog_entry_project_remote_name_uses_full_name(self):
+        """Test that project type also uses full_name for remote_name."""
+        registry = LocalRegistry("https://github.com/test-org/registry")
+
+        metadata = {
+            "project": {
+                "name": "analysis-project",
+                "type": "project",
+                "full_name": "prj_analysis-project"
+            },
+            "ownership": {
+                "created_by": "user@example.com"
+            },
+            "metadata": {
+                "version": "1.0.0"
+            },
+            "status": {
+                "state": "active"
+            },
+            "schema_version": "1.0"
+        }
+
+        entry, project_name = registry._generate_catalog_entry(metadata)
+
+        # remote_name should be full_name (prj_analysis-project)
+        assert entry["storage"]["dvc"]["remote_name"] == "prj_analysis-project"
+
     def test_generate_catalog_entry_project(self):
         """Test generating catalog entry for analysis project."""
         registry = LocalRegistry("https://github.com/test-org/registry")

@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .exceptions import GHCLIError, GitError, RegistryError, ShellCommandError
+from .exceptions import GHCLIError, GitError, RegistryError, RegistryNotFoundError, ShellCommandError
 from .shell import gh_command, git_command
 
 
@@ -330,6 +330,169 @@ After merging this PR:
             if self.temp_dir and self.temp_dir.exists():
                 shutil.rmtree(self.temp_dir)
 
+    def _fetch_catalog_entry(self, project_name: str) -> Tuple[Dict[str, Any], Path]:
+        """Fetch an existing catalog entry from the registry.
+
+        Args:
+            project_name: Short name of the project (without type prefix)
+
+        Returns:
+            Tuple of (catalog_entry dict, catalog_path)
+
+        Raises:
+            RegistryNotFoundError: If project not found in registry
+        """
+        # Search in all catalog directories
+        type_dirs = {'data': 'data', 'project': 'projects', 'infra': 'infra'}
+
+        for project_type, dir_name in type_dirs.items():
+            catalog_path = self.repo_path / 'catalog' / dir_name / f"{project_name}.yaml"
+            if catalog_path.exists():
+                with open(catalog_path, 'r') as f:
+                    catalog_entry = yaml.safe_load(f)
+                return catalog_entry, catalog_path
+
+        # Not found - provide helpful message
+        raise RegistryNotFoundError(
+            f"Project '{project_name}' not found in registry",
+            suggestion="Run 'mintd registry register' first to register this project"
+        )
+
+    def _compute_metadata_diff(self, old: Dict[str, Any], new: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+        """Compute differences between old and new metadata.
+
+        Args:
+            old: Original metadata dictionary
+            new: Updated metadata dictionary
+            prefix: Key prefix for nested comparison
+
+        Returns:
+            Dictionary with 'changed' list of tuples (key, old_value, new_value)
+        """
+        changes = []
+
+        all_keys = set(old.keys()) | set(new.keys())
+
+        for key in all_keys:
+            full_key = f"{prefix}.{key}" if prefix else key
+            old_val = old.get(key)
+            new_val = new.get(key)
+
+            if old_val != new_val:
+                # Recurse into nested dicts
+                if isinstance(old_val, dict) and isinstance(new_val, dict):
+                    nested = self._compute_metadata_diff(old_val, new_val, full_key)
+                    changes.extend(nested.get('changed', []))
+                else:
+                    changes.append((full_key, old_val, new_val))
+
+        return {'changed': changes}
+
+    def update_project(
+        self,
+        project_name: str,
+        local_metadata: Dict[str, Any],
+        dry_run: bool = False
+    ) -> Optional[str]:
+        """Update a project's catalog entry in the registry.
+
+        Args:
+            project_name: Short name of the project
+            local_metadata: Local metadata dictionary from metadata.json
+            dry_run: If True, show changes without creating PR
+
+        Returns:
+            URL of the created pull request, or None for dry run
+
+        Raises:
+            RegistryNotFoundError: If project not found in registry
+            RegistryError: If update operation fails
+        """
+        try:
+            print("🔄 Starting project update...")
+            print(f"📋 Registry: https://github.com/{self.registry_org}/{self.registry_name}")
+
+            # Clone registry
+            self._clone_registry()
+
+            # Fetch existing catalog entry
+            existing_entry, catalog_path = self._fetch_catalog_entry(project_name)
+            print(f"📝 Found existing catalog entry: {catalog_path.relative_to(self.repo_path)}")
+
+            # Compute diff
+            diff = self._compute_metadata_diff(existing_entry, local_metadata)
+            changes = diff.get('changed', [])
+
+            if not changes:
+                print("✅ No changes detected between local and registry metadata")
+                return None
+
+            # Display changes
+            print(f"\n📊 Detected {len(changes)} change(s):")
+            for key, old_val, new_val in changes:
+                old_display = json.dumps(old_val) if isinstance(old_val, (dict, list)) else repr(old_val)
+                new_display = json.dumps(new_val) if isinstance(new_val, (dict, list)) else repr(new_val)
+                print(f"   - {key}: {old_display} → {new_display}")
+
+            if dry_run:
+                print("\n🔍 Dry run mode - no changes made")
+                return None
+
+            # Create timestamped branch for concurrent updates
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            branch_name = f"update-{project_name}-{timestamp}"
+            self._create_branch(branch_name)
+
+            # Merge changes: start with existing entry, update with local metadata
+            updated_entry = dict(existing_entry)
+            for key in local_metadata:
+                if key in ['project', 'metadata', 'ownership', 'access_control', 'repository', 'storage']:
+                    updated_entry[key] = local_metadata[key]
+
+            # Auto-update last_updated timestamp
+            current_time = datetime.now().isoformat() + 'Z'
+            if 'status' not in updated_entry:
+                updated_entry['status'] = {}
+            updated_entry['status']['last_updated'] = current_time
+
+            # Write updated catalog entry
+            with open(catalog_path, 'w') as f:
+                yaml.dump(updated_entry, f, default_flow_style=False, sort_keys=False)
+            print(f"📝 Updated catalog entry: {catalog_path.relative_to(self.repo_path)}")
+
+            # Commit and push
+            commit_message = f"Update catalog entry: {project_name}"
+            self._commit_and_push(branch_name, commit_message)
+
+            # Generate PR description with diff
+            change_lines = []
+            for key, old_val, new_val in changes:
+                old_display = json.dumps(old_val) if isinstance(old_val, (dict, list)) else repr(old_val)
+                new_display = json.dumps(new_val) if isinstance(new_val, (dict, list)) else repr(new_val)
+                change_lines.append(f"- `{key}`: {old_display} → {new_display}")
+            change_lines.append(f"- `status.last_updated`: Updated timestamp")
+
+            pr_title = f"Update catalog entry: {project_name}"
+            pr_body = f"""## Registry Update: {project_name}
+
+This PR updates the catalog entry for **{project_name}**.
+
+### Changes
+{chr(10).join(change_lines)}
+
+### Updated by
+{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+"""
+
+            pr_url = self._create_pull_request(branch_name, pr_title, pr_body)
+            print(f"✅ Project update PR created: {pr_url}")
+            return pr_url
+
+        finally:
+            # Cleanup
+            if self.temp_dir and self.temp_dir.exists():
+                shutil.rmtree(self.temp_dir)
+
     def _generate_catalog_entry(self, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Generate a catalog entry for the project using metadata.json values."""
         project_name = metadata["project"]["name"]
@@ -347,7 +510,7 @@ After merging this PR:
         if project_type in ['data', 'project'] and 'storage' not in entry:
             entry['storage'] = {
                 'dvc': {
-                    'remote_name': 'wasabi',
+                    'remote_name': full_name,
                     'bucket': "lab-data" if project_type == 'data' else "lab-projects",
                     'path': full_name,
                     'endpoint': 'https://s3.wasabisys.com',
