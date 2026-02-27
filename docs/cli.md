@@ -12,7 +12,7 @@ mintd --version                 # Show version
 ### Create Data Product
 
 ```bash
-mintd create data --name <name> [OPTIONS]
+mintd create data --name <name> --lang <language> [OPTIONS]
 ```
 
 Creates a data product repository (`data_{name}`).
@@ -20,7 +20,7 @@ Creates a data product repository (`data_{name}`).
 ### Create Project
 
 ```bash
-mintd create project --name <name> [OPTIONS]
+mintd create project --name <name> --lang <language> [OPTIONS]
 ```
 
 Creates a project repository (`prj__{name}`).
@@ -28,7 +28,7 @@ Creates a project repository (`prj__{name}`).
 ### Create Infrastructure
 
 ```bash
-mintd create infra --name <name> [OPTIONS]
+mintd create infra --name <name> --lang <language> [OPTIONS]
 ```
 
 Creates an infrastructure repository (`infra_{name}`).
@@ -41,10 +41,16 @@ mintd create enclave --name <name> [OPTIONS]
 
 Creates a secure data enclave workspace (`enclave_{name}`).
 
+Enclave-specific options:
+
+| Option | Description |
+|--------|-------------|
+| `--registry-url TEXT` | Data Commons Registry GitHub URL |
+
 ### Create from Custom Template
 
 ```bash
-mintd create custom --name <name> --template <path> [OPTIONS]
+mintd create custom <template_name> --name <name> [OPTIONS]
 ```
 
 ### Common Options
@@ -53,12 +59,26 @@ mintd create custom --name <name> --template <path> [OPTIONS]
 |--------|-------------|
 | `-n, --name TEXT` | Project name (required) |
 | `-p, --path PATH` | Output directory (default: current) |
-| `--lang TEXT` | Primary programming language (`python\|r\|stata`) |
+| `--lang TEXT` | Primary programming language (`python\|r\|stata`), required for data/project/infra |
 | `--no-git` | Skip Git initialization |
 | `--no-dvc` | Skip DVC initialization |
 | `--bucket TEXT` | Custom DVC bucket name |
 | `--register` | Register project with Data Commons Registry |
 | `--use-current-repo` | Use current directory as project root |
+
+### Governance Options
+
+These options are available for `data`, `project`, and `infra` commands:
+
+| Option | Description |
+|--------|-------------|
+| `--public` | Mark as public data |
+| `--private` | Mark as private/lab data (default) |
+| `--contract TEXT` | Mark as contract data (provide contract slug) |
+| `--contract-info TEXT` | Description or link to contract |
+| `--team TEXT` | Owning team slug |
+| `--admin-team TEXT` | Override default admin team |
+| `--researcher-team TEXT` | Override default researcher team |
 
 ## Configuration
 
@@ -80,11 +100,18 @@ mintd data pull <product>             # Pull/download data from registry
 ## Registry Management
 
 ```bash
-mintd registry register --path <path> # Register existing project
-mintd registry status <project_name>  # Check registration status
-mintd registry sync                   # Process pending registrations
-mintd registry update                 # Update project metadata in registry
+mintd registry register --path <path>                # Register existing project
+mintd registry status <project_name>                 # Check registration status
+mintd registry sync                                  # Process pending registrations
+mintd registry update [project_name] [OPTIONS]       # Update project metadata in registry
 ```
+
+### Registry Update Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path PATH` | Path to project directory |
+| `--dry-run` | Show changes without creating PR |
 
 ## Enclave Management
 
@@ -118,4 +145,30 @@ mintd templates list                  # List available project templates
 mintd update utils                    # Update mintd utility scripts
 mintd update metadata                 # Update metadata.json to latest schema
 mintd update storage                  # Update DVC storage configuration
+mintd update schema                   # Add Frictionless Table Schema support
+mintd update schema --generate        # Auto-generate schema from data files
+mintd update schema --force           # Overwrite existing schema.json
 ```
+
+### Update Metadata Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path PATH` | Path to project directory |
+| `--sensitivity TEXT` | Storage sensitivity level (`public\|restricted\|confidential`) |
+| `--mirror-url TEXT` | Mirror repository URL |
+
+### Update Storage Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path PATH` | Path to project directory |
+| `-y, --yes` | Skip confirmation |
+
+### Update Schema Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path PATH` | Path to project directory |
+| `-g, --generate` | Auto-generate schema from data files |
+| `-f, --force` | Overwrite existing schema.json |

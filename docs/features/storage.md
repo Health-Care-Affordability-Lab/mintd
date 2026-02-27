@@ -1,11 +1,11 @@
 # S3 Storage Setup
 
-mint supports S3-compatible storage for data versioning with DVC.
+mintd supports S3-compatible storage for data versioning with DVC.
 
 ## AWS S3
 
 ```bash
-mint config setup
+mintd config setup
 # Select: AWS S3
 # Region: us-east-1 (or your preferred region)
 # Bucket prefix: your-lab-name
@@ -14,7 +14,7 @@ mint config setup
 ## Wasabi
 
 ```bash
-mint config setup
+mintd config setup
 # Select: S3-compatible
 # Endpoint: https://s3.wasabisys.com
 # Region: us-east-1
@@ -24,7 +24,7 @@ mint config setup
 ## MinIO
 
 ```bash
-mint config setup
+mintd config setup
 # Select: S3-compatible
 # Endpoint: https://your-minio-server.com
 # Region: us-east-1
@@ -36,7 +36,7 @@ mint config setup
 Store credentials securely:
 
 ```bash
-mint config setup --set-credentials
+mintd config setup --set-credentials
 # Enter your access key and secret key
 ```
 

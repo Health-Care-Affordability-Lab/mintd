@@ -89,6 +89,8 @@ mkdocs build
 | `dvc>=3.0` | Data Version Control |
 | `pygithub>=2.0.0` | GitHub API integration |
 | `requests>=2.25.0` | HTTP client |
+| `frictionless[excel,json]>=5.0` | Frictionless Table Schema support |
+| `pandas>=2.0` | Data manipulation and Stata .dta support |
 
 ## Development Dependencies
 
