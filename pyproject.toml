@@ -37,6 +37,8 @@ dependencies = [
     "dvc>=3.0",         # Data Version Control
     "pygithub>=2.0.0",  # GitHub API integration
     "requests>=2.25.0", # HTTP client for API calls
+    "frictionless[excel,json]>=5.0",  # Frictionless Table Schema support
+    "pandas>=2.0",      # Data manipulation (also needed for Stata .dta support)
 ]
 
 [project.optional-dependencies]

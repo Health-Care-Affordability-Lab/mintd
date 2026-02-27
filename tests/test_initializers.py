@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from mintd.initializers.git import init_git, is_git_repo
-from mintd.initializers.storage import init_dvc, is_dvc_repo
+from mintd.initializers.storage import init_dvc, is_dvc_repo, add_dvc_remote
 
 
 def test_git_repo_detection():
@@ -110,3 +110,112 @@ def test_dvc_command_error_handling(mock_shell_run):
 
         # Should have tried to run dvc command
         mock_shell_run.assert_called()
+
+
+class TestAddDvcRemote:
+    """Tests for add_dvc_remote function - adds remote without dvc init."""
+
+    @patch('mintd.shell.ShellCommand.run')
+    @patch('mintd.config.get_config')
+    def test_add_dvc_remote_creates_remote(self, mock_get_config, mock_shell_run):
+        """Test add_dvc_remote creates remote without calling dvc init."""
+        mock_shell_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+        mock_get_config.return_value = {"storage": {}}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            # Create .dvc directory to simulate existing DVC repo
+            (temp_path / ".dvc").mkdir()
+
+            result = add_dvc_remote(
+                temp_path,
+                bucket_prefix="cooper-globus",
+                sensitivity="restricted",
+                project_name="cms-pps-weights",
+                full_project_name="data_cms-pps-weights"
+            )
+
+            # Should return remote info
+            assert result["remote_name"] == "data_cms-pps-weights"
+            assert "s3://cooper-globus/lab/data_cms-pps-weights/" in result["remote_url"]
+
+            # Should NOT call dvc init, only remote add
+            call_args = [call[0] for call in mock_shell_run.call_args_list]
+            assert ("init",) not in call_args
+            assert any("remote" in str(args) and "add" in str(args) for args in call_args)
+
+    @patch('mintd.shell.ShellCommand.run')
+    @patch('mintd.config.get_config')
+    def test_add_dvc_remote_sets_default(self, mock_get_config, mock_shell_run):
+        """Test add_dvc_remote sets the remote as default."""
+        mock_shell_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+        mock_get_config.return_value = {"storage": {}}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / ".dvc").mkdir()
+
+            add_dvc_remote(
+                temp_path,
+                bucket_prefix="cooper-globus",
+                sensitivity="restricted",
+                project_name="test",
+                full_project_name="data_test"
+            )
+
+            # Check that -d flag was used to set as default
+            call_args_list = mock_shell_run.call_args_list
+            remote_add_call = [c for c in call_args_list if "remote" in str(c) and "add" in str(c)]
+            assert len(remote_add_call) > 0
+            # The -d flag should be in the call
+            assert any("-d" in str(c) for c in call_args_list)
+
+    @patch('mintd.shell.ShellCommand.run')
+    @patch('mintd.config.get_config')
+    def test_add_dvc_remote_configures_endpoint(self, mock_get_config, mock_shell_run):
+        """Test add_dvc_remote configures endpoint when provided."""
+        mock_shell_run.return_value = MagicMock(stdout="", stderr="", returncode=0)
+        mock_get_config.return_value = {
+            "storage": {
+                "endpoint": "https://s3.us-east-1.wasabisys.com",
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / ".dvc").mkdir()
+
+            add_dvc_remote(
+                temp_path,
+                bucket_prefix="cooper-globus",
+                sensitivity="restricted",
+                project_name="test",
+                full_project_name="data_test"
+            )
+
+            # Should configure endpoint via remote modify
+            call_args_list = mock_shell_run.call_args_list
+            assert any("endpointurl" in str(c) for c in call_args_list)
+
+    @patch('mintd.shell.ShellCommand.run')
+    def test_add_dvc_remote_error_handling(self, mock_shell_run):
+        """Test add_dvc_remote handles errors gracefully."""
+        from mintd.exceptions import DVCError
+        mock_shell_run.side_effect = DVCError("dvc command failed")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            (temp_path / ".dvc").mkdir()
+
+            # Should not raise, returns empty result
+            result = add_dvc_remote(
+                temp_path,
+                bucket_prefix="bucket",
+                sensitivity="restricted",
+                project_name="test",
+                full_project_name="data_test"
+            )
+
+            # Should still return the expected remote info (computed before DVC call)
+            assert "remote_name" in result
+            assert "remote_url" in result

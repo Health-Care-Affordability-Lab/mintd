@@ -50,4 +50,19 @@ mintd create data --name healthcare_analysis --lang python --register
 mintd create enclave --name secure_workspace
 ```
 
+## Updating Existing Repositories
+
+If you have an existing mintd-managed repository and want to update to the latest schema with new fields:
+
+```bash
+# Add Frictionless Table Schema support
+mintd update schema
+
+# Auto-generate schema from existing data files
+mintd update schema --generate
+
+# Update metadata fields (sensitivity, mirror URL)
+mintd update metadata
+```
+
 See the [Documentation](https://cooper-lab.github.io/mint/) for detailed guides on configuration, Stata integration, and advanced usage.

@@ -16,7 +16,9 @@ from _mintd_utils import (
     RAW_DIR,
     INTERMEDIATE_DIR,
     FINAL_DIR,
-    get_data_paths
+    get_data_paths,
+    generate_data_schema,
+    find_data_files
 )
 
 
@@ -132,6 +134,32 @@ def main():
     with open(report_file, 'w') as f:
         json.dump(validation_report, f, indent=2)
     logger.log(f"Validation report saved to: {report_file}")
+
+    # Generate schema from final data files
+    logger.log("Generating data schema...")
+    schema_dir = Path("../schemas/v1")
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    schema_file = schema_dir / "schema.json"
+
+    final_files = find_data_files(FINAL_DIR, extensions=['.csv', '.json', '.xlsx', '.xls'])
+    if final_files:
+        combined_schema = {
+            "generated_at": datetime.now().isoformat(),
+            "files": []
+        }
+        for data_file in final_files:
+            try:
+                file_schema = generate_data_schema(data_file)
+                combined_schema["files"].append(file_schema)
+                logger.log(f"  Generated schema for: {data_file.name}")
+            except Exception as e:
+                logger.log(f"  Warning: Could not generate schema for {data_file.name}: {e}")
+
+        with open(schema_file, 'w') as f:
+            json.dump(combined_schema, f, indent=2, default=str)
+        logger.log(f"Schema saved to: {schema_file}")
+    else:
+        logger.log("No data files found in FINAL_DIR for schema generation")
 
     logger.log("Data validation completed successfully.")
     logger.close()

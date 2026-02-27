@@ -97,8 +97,13 @@ def storage(path, yes):
         console.print("❌ DVC is not initialized in this project.", style="red")
         raise click.Abort()
 
-    project_name = metadata["project"]["name"]
-    full_name = metadata["project"]["full_name"]
+    try:
+        project_name = metadata["project"]["name"]
+        full_name = metadata["project"]["full_name"]
+    except KeyError as e:
+        console.print(f"❌ metadata.json missing required field: {e}", style="red")
+        console.print("   Ensure metadata.json has project.name and project.full_name")
+        raise click.Abort()
     sensitivity = metadata.get("storage", {}).get("sensitivity", "restricted")
 
     cfg = get_config()
@@ -108,8 +113,8 @@ def storage(path, yes):
         raise click.Abort()
 
     acl_path = SENSITIVITY_TO_ACL.get(sensitivity, "lab")
-    remote_name = project_name
-    remote_url = f"s3://{bucket_prefix}/{acl_path}/{project_name}/"
+    remote_name = full_name
+    remote_url = f"s3://{bucket_prefix}/{acl_path}/{full_name}/"
 
     console.print("📋 Current configuration will be updated:")
     console.print(f"   - Project: {full_name}")
@@ -163,8 +168,13 @@ def utils(path):
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
 
-            project_name = metadata["project"]["name"]
-            project_type = metadata["project"]["type"]
+            try:
+                project_name = metadata["project"]["name"]
+                project_type = metadata["project"]["type"]
+            except KeyError as e:
+                console.print(f"❌ metadata.json missing required field: {e}", style="red")
+                console.print("   Ensure metadata.json has project.name and project.type")
+                raise click.Abort()
             language = metadata.get("language", "python")
 
             from ..templates.base import BaseTemplate
@@ -231,3 +241,97 @@ def utils(path):
         except Exception as e:
             console.print(f"❌ Error updating utilities: {e}", style="red")
             raise click.Abort()
+
+
+@update.command()
+@click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
+              help="Path to project directory")
+@click.option("--generate", "-g", is_flag=True,
+              help="Auto-generate schema from data files")
+@click.option("--force", "-f", is_flag=True,
+              help="Overwrite existing schema.json")
+def schema(path, generate, force):
+    """Add Frictionless Table Schema support to existing projects."""
+    project_path = Path(path) if path else Path.cwd()
+    metadata_path = project_path / "metadata.json"
+    schemas_dir = project_path / "schemas" / "v1"
+    schema_file = schemas_dir / "schema.json"
+
+    if not metadata_path.exists():
+        console.print("❌ metadata.json not found.", style="red")
+        raise click.Abort()
+
+    try:
+        with open(metadata_path, 'r') as f:
+            metadata_data = json.load(f)
+    except Exception as e:
+        console.print(f"❌ Failed to read metadata.json: {e}", style="red")
+        raise click.Abort()
+
+    with console.status("Updating schema configuration..."):
+        # Add schema section to metadata.json if missing
+        if "schema" not in metadata_data:
+            metadata_data["schema"] = {
+                "version": "1.0.0",
+                "standard": "frictionless-table-schema",
+                "location": "schemas/v1/schema.json"
+            }
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata_data, f, indent=2)
+            console.print("✅ Added schema section to metadata.json")
+        else:
+            console.print("ℹ️  Schema section already exists in metadata.json")
+
+        # Create schemas/v1 directory
+        schemas_dir.mkdir(parents=True, exist_ok=True)
+        console.print(f"✅ Created {schemas_dir.relative_to(project_path)}/")
+
+        # Generate or copy starter schema
+        if generate:
+            data_dir = project_path / "data"
+            if not data_dir.exists():
+                console.print("⚠️  No data/ directory found, skipping auto-generation", style="yellow")
+            else:
+                if schema_file.exists() and not force:
+                    console.print("⚠️  schema.json exists, use --force to overwrite", style="yellow")
+                else:
+                    try:
+                        from ..utils.schema import generate_schema_file
+                        generate_schema_file(data_dir, schema_file)
+                        console.print(f"✅ Generated schema from data files: {schema_file.relative_to(project_path)}")
+                    except Exception as e:
+                        console.print(f"⚠️  Could not auto-generate schema: {e}", style="yellow")
+                        console.print("   Creating starter template instead...")
+                        _write_starter_schema(schema_file, force)
+        elif not schema_file.exists() or force:
+            _write_starter_schema(schema_file, force)
+        else:
+            console.print(f"ℹ️  {schema_file.relative_to(project_path)} already exists")
+
+    console.print("✅ Schema configuration complete")
+
+
+def _write_starter_schema(schema_file: Path, force: bool):
+    """Write the starter Frictionless Table Schema template."""
+    if schema_file.exists() and not force:
+        return
+
+    starter_schema = {
+        "$schema": "https://specs.frictionlessdata.io/schemas/table-schema.json",
+        "fields": [
+            {
+                "name": "id",
+                "type": "integer",
+                "title": "Record ID",
+                "description": "Unique identifier for each record",
+                "constraints": {"required": True}
+            }
+        ],
+        "missingValues": ["", "NA", "."],
+        "_comment": "This is a starter Frictionless Table Schema. Run 'python generate_schema.py' from the schemas/ directory to auto-generate from your data files."
+    }
+
+    with open(schema_file, 'w') as f:
+        json.dump(starter_schema, f, indent=2)
+
+    console.print(f"✅ Created starter schema: {schema_file.name}")

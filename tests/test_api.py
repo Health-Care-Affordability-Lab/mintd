@@ -15,6 +15,7 @@ from mintd.api import (
     _update_metadata_with_dvc_info,
     _register_project,
 )
+from mintd.initializers.storage import add_dvc_remote
 
 
 def test_create_project_data():
@@ -280,15 +281,23 @@ class TestInitDvc:
 
         assert result == {"remote_name": "", "remote_url": ""}
 
+    @patch("mintd.api.add_dvc_remote")
     @patch("mintd.api.is_dvc_repo")
-    def test_init_dvc_already_initialized(self, mock_is_dvc_repo):
-        """Test DVC init skipped when already initialized."""
+    def test_init_dvc_already_initialized_adds_remote(self, mock_is_dvc_repo, mock_add_remote):
+        """Test DVC adds remote when already initialized (fix for --use-current-repo)."""
         mock_is_dvc_repo.return_value = True
+        mock_add_remote.return_value = {
+            "remote_name": "data_test",
+            "remote_url": "s3://bucket/lab/test/"
+        }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = _init_dvc(Path(temp_dir), "bucket")
+            result = _init_dvc(Path(temp_dir), "bucket", "restricted", "test", "data_test")
 
-        assert result == {"remote_name": "", "remote_url": ""}
+        # Should call add_dvc_remote for existing DVC repos
+        mock_add_remote.assert_called_once()
+        assert result["remote_name"] == "data_test"
+        assert result["remote_url"] == "s3://bucket/lab/test/"
 
 
 class TestUpdateMetadataWithDvcInfo:

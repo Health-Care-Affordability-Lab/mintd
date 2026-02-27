@@ -35,7 +35,7 @@ class DataTemplate(BaseTemplate):
             },
             "schemas": {
                 "v1": {
-                    "schema.json": None,
+                    ".gitkeep": None,
                 },
             },
             self.source_dir: {},  # Renamed from src
@@ -52,7 +52,6 @@ class DataTemplate(BaseTemplate):
         return [
             ("README.md", "README_data.md.j2"),
             ("metadata.json", "metadata.json.j2"),
-            ("schemas/v1/schema.json", "schema.json.j2"),
             (".gitignore", "gitignore.txt"),
             (".dvcignore", "dvcignore.txt"),
             ("dvc_vars.yaml", "dvc_vars.yaml.j2"),

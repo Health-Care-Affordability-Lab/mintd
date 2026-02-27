@@ -7,7 +7,7 @@ from typing import Optional
 from .templates import DataTemplate, ProjectTemplate, InfraTemplate, EnclaveTemplate
 from .config import get_config, get_stata_executable, get_platform_info
 from .initializers.git import init_git, is_git_repo
-from .initializers.storage import init_dvc, is_dvc_repo
+from .initializers.storage import init_dvc, is_dvc_repo, add_dvc_remote
 
 
 @dataclass
@@ -380,41 +380,46 @@ def _init_git(project_path: Path, use_current_repo: bool = False) -> None:
 
 def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivity: str = "restricted", project_name: str = "", full_project_name: str = "") -> dict:
     """Initialize DVC repository with S3 remote.
-    
+
+    For new repos: runs dvc init and adds remote.
+    For existing DVC repos: only adds remote (supports --use-current-repo).
+
     Returns:
         Dict with remote_name and remote_url for storage in metadata
     """
     empty_result = {"remote_name": "", "remote_url": ""}
-    
-    if not is_dvc_repo(project_path):
-        # Get bucket prefix from config if not provided
-        if bucket_prefix is None:
-            from .config import get_config
-            config = get_config()
-            bucket_prefix = config["storage"].get("bucket_prefix", "")
-            if not bucket_prefix:
-                print("Warning: Bucket prefix not configured. Run 'mint config setup' to configure storage.")
-                print("The project was created successfully, but DVC initialization was skipped.")
-                return empty_result
 
-        # Use provided project_name or extract from path
-        if not project_name:
-            project_name = project_path.name
-            # Extract the actual project name (remove prefix)
-            if project_name.startswith(("data_", "prj__", "infra_")):
-                parts = project_name.split("_", 1)
-                if len(parts) > 1:
-                    project_name = parts[1]
-
-        try:
-            return init_dvc(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
-        except Exception as e:
-            # Log warning but don't fail the project creation
-            print(f"Warning: Failed to initialize DVC: {e}")
+    # Get bucket prefix from config if not provided
+    if bucket_prefix is None:
+        from .config import get_config
+        config = get_config()
+        bucket_prefix = config["storage"].get("bucket_prefix", "")
+        if not bucket_prefix:
+            print("Warning: Bucket prefix not configured. Run 'mint config setup' to configure storage.")
             print("The project was created successfully, but DVC initialization was skipped.")
             return empty_result
-    
-    return empty_result
+
+    # Use provided project_name or extract from path
+    if not project_name:
+        project_name = project_path.name
+        # Extract the actual project name (remove prefix)
+        if project_name.startswith(("data_", "prj__", "infra_")):
+            parts = project_name.split("_", 1)
+            if len(parts) > 1:
+                project_name = parts[1]
+
+    try:
+        if is_dvc_repo(project_path):
+            # Existing DVC repo: just add the remote (for --use-current-repo)
+            return add_dvc_remote(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
+        else:
+            # New repo: full DVC initialization
+            return init_dvc(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
+    except Exception as e:
+        # Log warning but don't fail the project creation
+        print(f"Warning: Failed to initialize DVC: {e}")
+        print("The project was created successfully, but DVC initialization was skipped.")
+        return empty_result
 
 
 def _update_metadata_with_dvc_info(project_path: Path, dvc_info: dict) -> None:

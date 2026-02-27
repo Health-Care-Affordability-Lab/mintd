@@ -72,6 +72,11 @@ class RegistryValidationError(RegistryError):
     pass
 
 
+class RegistryNotFoundError(RegistryError):
+    """Project not found in registry."""
+    pass
+
+
 # Configuration-related exceptions
 class ConfigError(MintdError):
     """Base exception for configuration operations."""

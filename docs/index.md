@@ -25,7 +25,7 @@ Automatically register your projects with the **Data Commons Registry**. `mintd`
 pip install mintd
 
 # Create a new project
-mintd create my-research-project
+mintd create data --name my-research-project --lang python
 ```
 
 Next: [Installation Guide](installation.md) | [Quick Start](quick-start.md)

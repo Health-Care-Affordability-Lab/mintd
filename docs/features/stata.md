@@ -32,16 +32,16 @@ tools:
 
 ## Platform-Aware Script Execution
 
-Scripts run from the `src/` directory with platform-appropriate commands:
+Scripts run from the `code/` directory with platform-appropriate commands:
 
 **macOS/Linux:**
 ```yaml
-cmd: cd src && stata-mp -b do ingest.do
+cmd: cd code && stata-mp -b do ingest.do
 ```
 
 **Windows:**
 ```yaml
-cmd: cd src & stata-mp -b do ingest.do
+cmd: cd code & stata-mp -b do ingest.do
 ```
 
 This ensures consistent path handling regardless of platform, with Stata scripts using relative paths (`../data/` for data directories).

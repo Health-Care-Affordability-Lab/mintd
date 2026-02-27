@@ -15,7 +15,8 @@ def test_data_template():
     assert "code" in structure
     assert "data" in structure
     assert structure["data"]["raw"] == {".gitkeep": None}
-    assert structure["data"]["analysis"] == {".gitkeep": None}
+    assert structure["data"]["intermediate"] == {".gitkeep": None}
+    assert structure["data"]["final"] == {".gitkeep": None}
 
     # Test template files
     template_files = template.get_template_files()
@@ -86,7 +87,8 @@ def test_template_creation():
         assert (result_path / "metadata.json").exists()
         assert (result_path / "code" / "_mintd_utils.py").exists()
         assert (result_path / "data" / "raw" / ".gitkeep").exists()
-        assert (result_path / "data" / "analysis" / ".gitkeep").exists()
+        assert (result_path / "data" / "intermediate" / ".gitkeep").exists()
+        assert (result_path / "data" / "final" / ".gitkeep").exists()
 
 
 def test_template_with_context():
