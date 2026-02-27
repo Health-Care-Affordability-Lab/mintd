@@ -137,7 +137,7 @@ class TestAddDvcRemote:
 
             # Should return remote info
             assert result["remote_name"] == "data_cms-pps-weights"
-            assert "s3://cooper-globus/lab/cms-pps-weights/" in result["remote_url"]
+            assert "s3://cooper-globus/lab/data_cms-pps-weights/" in result["remote_url"]
 
             # Should NOT call dvc init, only remote add
             call_args = [call[0] for call in mock_shell_run.call_args_list]

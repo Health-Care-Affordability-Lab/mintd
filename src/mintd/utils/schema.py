@@ -41,9 +41,9 @@ def extract_stata_metadata(file_path: Path) -> Dict[str, Dict[str, Any]]:
     metadata: Dict[str, Dict[str, Any]] = {}
 
     # Use StataReader to access metadata
-    reader = pd.io.stata.StataReader(file_path)
-    variable_labels = reader.variable_labels()
-    value_labels = reader.value_labels()
+    with pd.io.stata.StataReader(file_path) as reader:
+        variable_labels = reader.variable_labels()
+        value_labels = reader.value_labels()
 
     # Get columns from variable_labels keys (always present for all columns)
     columns = list(variable_labels.keys())

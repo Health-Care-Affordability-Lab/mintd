@@ -97,8 +97,13 @@ def storage(path, yes):
         console.print("❌ DVC is not initialized in this project.", style="red")
         raise click.Abort()
 
-    project_name = metadata["project"]["name"]
-    full_name = metadata["project"]["full_name"]
+    try:
+        project_name = metadata["project"]["name"]
+        full_name = metadata["project"]["full_name"]
+    except KeyError as e:
+        console.print(f"❌ metadata.json missing required field: {e}", style="red")
+        console.print("   Ensure metadata.json has project.name and project.full_name")
+        raise click.Abort()
     sensitivity = metadata.get("storage", {}).get("sensitivity", "restricted")
 
     cfg = get_config()
@@ -163,8 +168,13 @@ def utils(path):
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
 
-            project_name = metadata["project"]["name"]
-            project_type = metadata["project"]["type"]
+            try:
+                project_name = metadata["project"]["name"]
+                project_type = metadata["project"]["type"]
+            except KeyError as e:
+                console.print(f"❌ metadata.json missing required field: {e}", style="red")
+                console.print("   Ensure metadata.json has project.name and project.type")
+                raise click.Abort()
             language = metadata.get("language", "python")
 
             from ..templates.base import BaseTemplate

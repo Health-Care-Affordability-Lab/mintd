@@ -39,9 +39,9 @@ def extract_stata_metadata(file_path: Path) -> Dict[str, Dict[str, Any]]:
     """Extract variable labels and value labels from a Stata .dta file."""
     metadata: Dict[str, Dict[str, Any]] = {}
 
-    reader = pd.io.stata.StataReader(file_path)
-    variable_labels = reader.variable_labels()
-    value_labels = reader.value_labels()
+    with pd.io.stata.StataReader(file_path) as reader:
+        variable_labels = reader.variable_labels()
+        value_labels = reader.value_labels()
     columns = list(variable_labels.keys())
 
     for col in columns:
