@@ -131,10 +131,26 @@ def storage(path, yes):
             dvc = dvc_command(cwd=project_path)
             storage_cfg = cfg["storage"]
 
+            # Update LOCAL config (committed to git, shareable with collaborators)
+            try:
+                dvc.run("remote", "modify", remote_name, "url", remote_url)
+            except Exception:
+                dvc.run("remote", "add", "-d", "-f", remote_name, remote_url)
+
+            if storage_cfg.get("endpoint"):
+                dvc.run("remote", "modify", remote_name, "endpointurl", storage_cfg["endpoint"])
+
+            if storage_cfg.get("region"):
+                dvc.run("remote", "modify", remote_name, "region", storage_cfg["region"])
+
+            if storage_cfg.get("versioning", True):
+                dvc.run("remote", "modify", remote_name, "version_aware", "true")
+
+            # Also update GLOBAL config for cross-project convenience
             try:
                 dvc.run("remote", "modify", "--global", remote_name, "url", remote_url)
             except Exception:
-                dvc.run("remote", "add", "--global", "-d", remote_name, remote_url)
+                dvc.run("remote", "add", "--global", "-d", "-f", remote_name, remote_url)
 
             if storage_cfg.get("endpoint"):
                 dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage_cfg["endpoint"])
