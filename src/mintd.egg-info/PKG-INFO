@@ -36,6 +36,7 @@ Requires-Dist: keyring>=24.0
 Requires-Dist: boto3>=1.28
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: dvc>=3.0
+Requires-Dist: dvc-s3>=3.0
 Requires-Dist: pygithub>=2.0.0
 Requires-Dist: requests>=2.25.0
 Requires-Dist: frictionless[excel,json]>=5.0

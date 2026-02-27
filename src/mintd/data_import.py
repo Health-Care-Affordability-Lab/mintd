@@ -199,7 +199,7 @@ def run_dvc_import(
         ssh_url = repo_url
 
     dvc = dvc_command(cwd=project_path)
-    args = ["import", ssh_url, source_path, dest_path]
+    args = ["import", ssh_url, source_path, "-o", dest_path]
 
     if repo_rev:
         args.extend(["--rev", repo_rev])
