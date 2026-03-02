@@ -2,7 +2,7 @@
 
 # Activate renv for reproducible package management
 # Run `renv::init()` to initialize, then `renv::snapshot()` to capture dependencies
-source("renv/activate.R")
+if (file.exists("renv/activate.R")) source("renv/activate.R")
 
 # Set CRAN mirror
 options(repos = c(CRAN = "https://cran.rstudio.com/"))
