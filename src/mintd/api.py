@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .templates import DataTemplate, ProjectTemplate, EnclaveTemplate
+from .templates import CodeTemplate, DataTemplate, ProjectTemplate, EnclaveTemplate
 from .config import get_config, get_stata_executable, get_platform_info
 from .initializers.git import init_git, is_git_repo
 from .initializers.storage import init_dvc, is_dvc_repo, add_dvc_remote
@@ -295,6 +295,8 @@ def create_project(
     elif project_type in ["project", "prj"]:
         template = ProjectTemplate()
         project_type = "project"  # Normalize
+    elif project_type == "code":
+        template = CodeTemplate()
     elif project_type == "enclave":
         template = EnclaveTemplate()
     else:

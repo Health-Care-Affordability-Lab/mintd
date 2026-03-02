@@ -175,6 +175,77 @@ def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo
             raise click.Abort()
 
 
+@create.command(name="code")
+@click.option("--name", "-n", required=True, help="Project name (repo name as-is, no prefix)")
+@click.option("--path", "-p", default=".", help="Output directory")
+@click.option("--lang", "--language", type=click.Choice(["python", "r", "stata"], case_sensitive=False), required=True, help="Primary programming language")
+@click.option("--no-git", is_flag=True, help="Skip Git initialization")
+@click.option("--register", is_flag=True, help="Register project with Data Commons Registry")
+@click.option("--use-current-repo", is_flag=True, help="Use current directory as project root")
+@click.option("--admin-team", help="Override default admin team")
+@click.option("--researcher-team", help="Override default researcher team")
+@click.option("--public", is_flag=True, help="Mark as public")
+@click.option("--contract", help="Mark as contract (provide contract slug)")
+@click.option("--private", is_flag=True, help="Mark as private/lab (default)")
+@click.option("--contract-info", help="Description or link to contract")
+@click.option("--team", help="Owning team slug")
+def create_code(name, path, lang, no_git, register, use_current_repo, admin_team, researcher_team, public, contract, private, contract_info, team):
+    """Track a code-only repository (library, package, tool).
+
+    Drops a metadata.json for governance, ownership, and mirroring.
+    No directory scaffold is created — the repo keeps its own layout.
+    """
+    from ..api import create_project
+
+    classification = "private"
+    contract_slug = None
+
+    if not public and not contract and not private:
+        console.print()
+        console.print("[bold]Governance Configuration[/bold]")
+
+    if not team:
+        team = click.prompt("Owning team slug")
+
+    if public:
+        classification = "public"
+    elif contract:
+        classification = "contract"
+        contract_slug = contract
+    elif private:
+        classification = "private"
+    else:
+        classification = click.prompt(
+            "Classification",
+            type=click.Choice(["public", "private", "contract"]),
+            default="private"
+        )
+        if classification == "contract":
+            contract_slug = click.prompt("Contract Slug (short-name for URL)")
+
+    if classification == "contract" and not contract_info:
+        contract_info = click.prompt("Contract Info (URL or description)", default="")
+
+    with console.status("Adding metadata..."):
+        try:
+            result = create_project(
+                project_type="code", name=name, path=path, language=lang,
+                init_git=not no_git, init_dvc=False, bucket_name=None,
+                register_project=register, use_current_repo=use_current_repo,
+                admin_team=admin_team, researcher_team=researcher_team,
+                classification=classification, team=team,
+                contract_slug=contract_slug, contract_info=contract_info,
+            )
+            console.print(f"✅ Tracked: {result.full_name}", style="green")
+            console.print(f"   Location: {result.path}", style="dim")
+            console.print(f"   metadata.json created for governance + mirroring", style="dim")
+            if register and result.registration_url:
+                console.print(f"   Registration PR: {result.registration_url}", style="dim")
+        except Exception as e:
+            console.print(f"❌ Error: {e}", style="red")
+            raise click.Abort()
+
+
 @create.command(name="enclave")
 @click.option("--name", "-n", required=True, help="Project name")
 @click.option("--path", "-p", default=".", help="Output directory")
