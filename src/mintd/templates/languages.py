@@ -172,6 +172,7 @@ class RStrategy(LanguageStrategy):
         return [
             ("DESCRIPTION", "DESCRIPTION.j2"),
             ("renv.lock", "renv.lock.j2"),
+            (".Rprofile", ".Rprofile.j2"),
             (f"{source_dir}/_mintd_utils.R", "_mintd_utils.R.j2"),
             (f"{source_dir}/ingest.R", "ingest.R.j2"),
             (f"{source_dir}/clean.R", "clean.R.j2"),
@@ -205,11 +206,12 @@ class StataStrategy(LanguageStrategy):
     file_extension = "do"
 
     def get_system_requirements(self) -> Dict[str, Any]:
-        return {}
+        return {"stata-packages.txt": None}
 
     def get_project_structure(self, source_dir: str = "code") -> Dict[str, Any]:
         """Return structure with numbered subdirectories per AEA guidelines."""
         return {
+            "stata-packages.txt": None,
             source_dir: {
                 "_mintd_utils.do": None,
                 "config.do": None,
@@ -222,6 +224,7 @@ class StataStrategy(LanguageStrategy):
 
     def get_project_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
+            ("stata-packages.txt", "stata-packages.txt.j2"),
             (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
             (f"{source_dir}/config.do", "config.do.j2"),
             ("run_all.do", "run_all.do.j2"),
@@ -229,6 +232,7 @@ class StataStrategy(LanguageStrategy):
 
     def get_data_structure(self, source_dir: str = "code") -> Dict[str, Any]:
         return {
+            "stata-packages.txt": None,
             source_dir: {
                 "_mintd_utils.do": None,
                 "ingest.do": None,
@@ -242,6 +246,7 @@ class StataStrategy(LanguageStrategy):
 
     def get_data_files(self, source_dir: str = "code") -> List[Tuple[str, str]]:
         return [
+            ("stata-packages.txt", "stata-packages.txt.j2"),
             (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
             (f"{source_dir}/ingest.do", "ingest.do.j2"),
             (f"{source_dir}/clean.do", "clean.do.j2"),

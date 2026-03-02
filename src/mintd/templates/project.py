@@ -69,8 +69,10 @@ class ProjectTemplate(BaseTemplate):
             "tests": {
                 ".gitkeep": None,
             },
+            "scripts": {},  # For pre-commit hooks
             ".gitignore": None,
             ".dvcignore": None,
+            ".pre-commit-config.yaml": None,
         }
 
     def define_files(self) -> List[Tuple[str, str]]:
@@ -81,4 +83,7 @@ class ProjectTemplate(BaseTemplate):
             ("citations.md", "citations.md.j2"),
             (".gitignore", "gitignore.txt"),
             (".dvcignore", "dvcignore.txt"),
+            (".pre-commit-config.yaml", "pre-commit-config.yaml.j2"),
+            ("scripts/check-dvc-sync.sh", "check-dvc-sync.sh.j2"),
+            ("scripts/check-env-lockfiles.sh", "check-env-lockfiles.sh.j2"),
         ]

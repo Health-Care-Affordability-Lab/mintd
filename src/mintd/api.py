@@ -339,6 +339,9 @@ def create_project(
     if dvc_info.get("remote_url"):
         _update_metadata_with_dvc_info(project_path, dvc_info)
 
+    # Install pre-commit hooks
+    _install_precommit_hooks(project_path)
+
     # Register project with Data Commons Registry if requested
     registration_url = None
     if register_project:
@@ -455,6 +458,66 @@ def _update_metadata_with_dvc_info(project_path: Path, dvc_info: dict) -> None:
             
     except Exception as e:
         print(f"Warning: Could not update metadata.json with DVC info: {e}")
+
+
+def _install_precommit_hooks(project_path: Path) -> None:
+    """Install pre-commit hooks if pre-commit config exists.
+
+    Also makes hook scripts executable.
+
+    Args:
+        project_path: Path to the project directory
+    """
+    import os
+    import subprocess
+
+    # Make hook scripts executable
+    scripts_to_chmod = [
+        "check-dvc-sync.sh",
+        "check-env-lockfiles.sh",
+    ]
+    for script_name in scripts_to_chmod:
+        script_path = project_path / "scripts" / script_name
+        if script_path.exists():
+            try:
+                os.chmod(script_path, 0o755)
+            except Exception as e:
+                print(f"Warning: Could not make {script_path} executable: {e}")
+
+    # Check if pre-commit config exists
+    precommit_config = project_path / ".pre-commit-config.yaml"
+    if not precommit_config.exists():
+        return
+
+    # Try to install pre-commit hooks
+    try:
+        # First check if pre-commit is available
+        result = subprocess.run(
+            ["pre-commit", "--version"],
+            capture_output=True,
+            text=True,
+            cwd=project_path
+        )
+        if result.returncode != 0:
+            print("Note: pre-commit not found. Install with: pip install pre-commit")
+            print("      Then run: pre-commit install")
+            return
+
+        # Install hooks
+        result = subprocess.run(
+            ["pre-commit", "install"],
+            capture_output=True,
+            text=True,
+            cwd=project_path
+        )
+        if result.returncode != 0:
+            print(f"Warning: Failed to install pre-commit hooks: {result.stderr}")
+
+    except FileNotFoundError:
+        print("Note: pre-commit not found. Install with: pip install pre-commit")
+        print("      Then run: pre-commit install")
+    except Exception as e:
+        print(f"Warning: Could not install pre-commit hooks: {e}")
 
 
 def _register_project(project_path: Path) -> Optional[str]:

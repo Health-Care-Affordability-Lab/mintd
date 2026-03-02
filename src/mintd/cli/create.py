@@ -8,6 +8,39 @@ from .main import main
 from .utils import console
 
 
+def _print_next_steps(language: str, project_path: str, project_type: str) -> None:
+    """Print language-specific next steps after project creation.
+
+    Args:
+        language: Primary programming language (python, r, stata)
+        project_path: Path to the created project
+        project_type: Type of project (data, project, infra)
+    """
+    console.print()
+    console.print("[bold]Next steps:[/bold]")
+    console.print(f"  1. cd {project_path}")
+
+    lang = language.lower()
+    if lang == "python":
+        console.print("  2. Set up your environment:")
+        console.print("     python -m venv .venv && source .venv/bin/activate")
+        console.print("     pip install -r requirements.txt")
+        console.print("     pip freeze > requirements-lock.txt  [dim]# Create lockfile for reproducibility[/dim]")
+    elif lang == "r":
+        console.print("  2. Initialize renv for reproducibility:")
+        console.print("     Rscript -e 'renv::init()'")
+        console.print("     [dim]# Then use renv::snapshot() after installing packages[/dim]")
+    elif lang == "stata":
+        console.print("  2. Review stata-packages.txt and install listed packages")
+        console.print("     [dim]# Add any SSC/net packages your code requires[/dim]")
+
+    if project_type in ("data", "project"):
+        console.print("  3. Configure DVC remote (if not auto-configured):")
+        console.print("     dvc remote modify myremote access_key_id <YOUR_KEY>")
+        console.print("     dvc remote modify myremote secret_access_key <YOUR_SECRET>")
+    console.print()
+
+
 @main.group()
 def create():
     """Create a new project."""
@@ -72,6 +105,7 @@ def create_data(name, path, lang, no_git, no_dvc, bucket, register, use_current_
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
+            _print_next_steps(lang, str(result.path), "data")
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
@@ -135,6 +169,7 @@ def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
+            _print_next_steps(lang, str(result.path), "project")
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
@@ -198,6 +233,7 @@ def infra(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, 
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
+            _print_next_steps(lang, str(result.path), "infra")
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
