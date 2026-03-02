@@ -38,9 +38,11 @@ class DataTemplate(BaseTemplate):
                     ".gitkeep": None,
                 },
             },
+            "scripts": {},  # For pre-commit hooks
             self.source_dir: {},  # Renamed from src
             ".gitignore": None,
             ".dvcignore": None,
+            ".pre-commit-config.yaml": None,
             "dvc_vars.yaml": None,
             "dvc.yaml": None,
         }
@@ -54,6 +56,9 @@ class DataTemplate(BaseTemplate):
             ("metadata.json", "metadata.json.j2"),
             (".gitignore", "gitignore.txt"),
             (".dvcignore", "dvcignore.txt"),
+            (".pre-commit-config.yaml", "pre-commit-config.yaml.j2"),
+            ("scripts/check-dvc-sync.sh", "check-dvc-sync.sh.j2"),
+            ("scripts/check-env-lockfiles.sh", "check-env-lockfiles.sh.j2"),
             ("dvc_vars.yaml", "dvc_vars.yaml.j2"),
             ("dvc.yaml", "dvc_data.yaml.j2"),
         ]

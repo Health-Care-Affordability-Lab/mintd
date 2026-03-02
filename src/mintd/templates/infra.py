@@ -40,7 +40,9 @@ class InfraTemplate(BaseTemplate):
             "tests": {
                 ".gitkeep": None,
             },
+            "scripts": {},  # For pre-commit hooks
             ".gitignore": None,
+            ".pre-commit-config.yaml": None,
         }
 
     def define_files(self) -> List[Tuple[str, str]]:
@@ -49,6 +51,9 @@ class InfraTemplate(BaseTemplate):
             ("README.md", "README_infra.md.j2"),
             ("metadata.json", "metadata.json.j2"),
             (".gitignore", "gitignore.txt"),
+            (".pre-commit-config.yaml", "pre-commit-config.yaml.j2"),
+            ("scripts/check-dvc-sync.sh", "check-dvc-sync.sh.j2"),
+            ("scripts/check-env-lockfiles.sh", "check-env-lockfiles.sh.j2"),
             ("pyproject.toml", "pyproject_infra.toml.j2"),
         ]
 

@@ -111,6 +111,19 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# R / renv
+# Ignore renv library (installed packages) but keep lockfile
+renv/library/
+renv/staging/
+renv/sandbox/
+renv/cellar/
+renv/local/
+renv/cache/
+renv/python/
+.Rhistory
+.RData
+.Ruserdata
+
 # Data files (let DVC handle these)
 data/
 !data/.gitkeep
@@ -138,3 +151,13 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# -----------------------------------------------------------------------------
+# FILES THAT SHOULD BE COMMITTED (do NOT add to gitignore):
+# -----------------------------------------------------------------------------
+# requirements.txt        - Python minimum version constraints
+# requirements-lock.txt   - Python pinned versions (generate with pip freeze)
+# renv.lock              - R package lockfile (generate with renv::snapshot())
+# DESCRIPTION            - R package metadata
+# stata-packages.txt     - Stata package dependencies
+# -----------------------------------------------------------------------------

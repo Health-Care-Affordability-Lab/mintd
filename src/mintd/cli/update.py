@@ -131,10 +131,26 @@ def storage(path, yes):
             dvc = dvc_command(cwd=project_path)
             storage_cfg = cfg["storage"]
 
+            # Update LOCAL config (committed to git, shareable with collaborators)
+            try:
+                dvc.run("remote", "modify", remote_name, "url", remote_url)
+            except Exception:
+                dvc.run("remote", "add", "-d", "-f", remote_name, remote_url)
+
+            if storage_cfg.get("endpoint"):
+                dvc.run("remote", "modify", remote_name, "endpointurl", storage_cfg["endpoint"])
+
+            if storage_cfg.get("region"):
+                dvc.run("remote", "modify", remote_name, "region", storage_cfg["region"])
+
+            if storage_cfg.get("versioning", True):
+                dvc.run("remote", "modify", remote_name, "version_aware", "true")
+
+            # Also update GLOBAL config for cross-project convenience
             try:
                 dvc.run("remote", "modify", "--global", remote_name, "url", remote_url)
             except Exception:
-                dvc.run("remote", "add", "--global", "-d", remote_name, remote_url)
+                dvc.run("remote", "add", "--global", "-d", "-f", remote_name, remote_url)
 
             if storage_cfg.get("endpoint"):
                 dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage_cfg["endpoint"])
@@ -309,6 +325,131 @@ def schema(path, generate, force):
             console.print(f"ℹ️  {schema_file.relative_to(project_path)} already exists")
 
     console.print("✅ Schema configuration complete")
+
+
+@update.command()
+@click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
+              help="Path to project directory")
+@click.option("--force", "-f", is_flag=True,
+              help="Overwrite existing pre-commit config")
+def hooks(path, force):
+    """Add or update pre-commit hooks for DVC sync checking."""
+    project_path = Path(path) if path else Path.cwd()
+    metadata_path = project_path / "metadata.json"
+    precommit_config = project_path / ".pre-commit-config.yaml"
+    scripts_dir = project_path / "scripts"
+    dvc_script_path = scripts_dir / "check-dvc-sync.sh"
+    env_script_path = scripts_dir / "check-env-lockfiles.sh"
+
+    if not metadata_path.exists():
+        console.print("Error: metadata.json not found.", style="red")
+        raise click.Abort()
+
+    try:
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+    except Exception as e:
+        console.print(f"Error: Failed to read metadata.json: {e}", style="red")
+        raise click.Abort()
+
+    # Check if files already exist
+    if precommit_config.exists() and not force:
+        console.print("Pre-commit config already exists. Use --force to overwrite.", style="yellow")
+        raise click.Abort()
+
+    with console.status("Adding pre-commit hooks..."):
+        try:
+            # Get project info from metadata
+            language = metadata.get("language", "python")
+            project_type = metadata.get("project", {}).get("type", "data")
+            project_name = metadata.get("project", {}).get("name", "project")
+
+            # Determine source directory based on language
+            source_dir = "code" if language == "stata" else "src"
+
+            from ..templates.base import BaseTemplate
+            mint_info = BaseTemplate._get_mint_info()
+
+            # Create scripts directory
+            scripts_dir.mkdir(parents=True, exist_ok=True)
+
+            # Get Jinja environment from base template
+            from ..templates import DataTemplate
+            template = DataTemplate()
+
+            # Render pre-commit config
+            jinja_template = template.jinja_env.get_template("pre-commit-config.yaml.j2")
+            content = jinja_template.render(
+                project_name=project_name,
+                language=language,
+                source_dir=source_dir,
+                **mint_info
+            )
+            with open(precommit_config, "w", encoding="utf-8") as f:
+                f.write(content)
+            console.print(f"Created: .pre-commit-config.yaml")
+
+            # Render check-dvc-sync.sh
+            jinja_template = template.jinja_env.get_template("check-dvc-sync.sh.j2")
+            content = jinja_template.render(
+                project_name=project_name,
+                language=language,
+                source_dir=source_dir,
+                **mint_info
+            )
+            with open(dvc_script_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            # Render check-env-lockfiles.sh
+            jinja_template = template.jinja_env.get_template("check-env-lockfiles.sh.j2")
+            content = jinja_template.render(
+                project_name=project_name,
+                language=language,
+                source_dir=source_dir,
+                **mint_info
+            )
+            with open(env_script_path, "w", encoding="utf-8") as f:
+                f.write(content)
+
+            # Make scripts executable
+            import os
+            os.chmod(dvc_script_path, 0o755)
+            os.chmod(env_script_path, 0o755)
+            console.print(f"Created: scripts/check-dvc-sync.sh")
+            console.print(f"Created: scripts/check-env-lockfiles.sh")
+
+            # Try to install pre-commit hooks
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ["pre-commit", "--version"],
+                    capture_output=True,
+                    text=True,
+                    cwd=project_path
+                )
+                if result.returncode == 0:
+                    result = subprocess.run(
+                        ["pre-commit", "install"],
+                        capture_output=True,
+                        text=True,
+                        cwd=project_path
+                    )
+                    if result.returncode == 0:
+                        console.print("Installed pre-commit hooks")
+                    else:
+                        console.print(f"Warning: Failed to install hooks: {result.stderr}", style="yellow")
+                else:
+                    console.print("Note: Install pre-commit with: pip install pre-commit", style="dim")
+                    console.print("      Then run: pre-commit install", style="dim")
+            except FileNotFoundError:
+                console.print("Note: Install pre-commit with: pip install pre-commit", style="dim")
+                console.print("      Then run: pre-commit install", style="dim")
+
+        except Exception as e:
+            console.print(f"Error adding hooks: {e}", style="red")
+            raise click.Abort()
+
+    console.print("Pre-commit hooks configured successfully", style="green")
 
 
 def _write_starter_schema(schema_file: Path, force: bool):

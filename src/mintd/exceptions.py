@@ -189,6 +189,21 @@ class DVCImportError(DataImportError):
     pass
 
 
+class DVCUpdateError(DataImportError):
+    """Error during DVC update operation."""
+    pass
+
+
+class DependencyNotFoundError(DataImportError):
+    """Specified dependency not found in project."""
+    pass
+
+
 class MetadataUpdateError(DataImportError):
     """Error updating project metadata."""
+    pass
+
+
+class DependencyRemovalError(DataImportError):
+    """Error during dependency removal operation."""
     pass

@@ -54,22 +54,31 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
         # Initialize DVC
         dvc.run("init")
 
-        # Add as global remote so it's available across all projects
-        dvc.run("remote", "add", "--global", "-d", remote_name, remote_url)
+        # Add remote to LOCAL config (committed to git, shareable with collaborators)
+        dvc.run("remote", "add", "-d", remote_name, remote_url)
 
-        # Configure remote settings (globally)
+        # Configure remote settings locally
+        if storage.get("endpoint"):
+            dvc.run("remote", "modify", remote_name, "endpointurl", storage["endpoint"])
+
+        if storage.get("region"):
+            dvc.run("remote", "modify", remote_name, "region", storage["region"])
+
+        # Enable cloud versioning support
+        if storage.get("versioning", True):
+            dvc.run("remote", "modify", remote_name, "version_aware", "true")
+
+        # Also add to GLOBAL config for cross-project convenience
+        dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
+
         if storage.get("endpoint"):
             dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
 
         if storage.get("region"):
             dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
 
-        # Enable cloud versioning support
         if storage.get("versioning", True):
             dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
-
-        # Set the remote as default locally in this repo's .dvc/config
-        dvc.run("remote", "default", remote_name)
 
     except DVCError as e:
         # For any DVC-related error, just warn and continue
@@ -152,23 +161,32 @@ def add_dvc_remote(project_path: Path, bucket_prefix: str, sensitivity: str = "r
     try:
         dvc = dvc_command(cwd=project_path)
 
-        # Add as global remote so it's available across all projects
+        # Add remote to LOCAL config (committed to git, shareable with collaborators)
         # Use -f to force overwrite if remote already exists
-        dvc.run("remote", "add", "--global", "-d", "-f", remote_name, remote_url)
+        dvc.run("remote", "add", "-d", "-f", remote_name, remote_url)
 
-        # Configure remote settings (globally)
+        # Configure remote settings locally
+        if storage.get("endpoint"):
+            dvc.run("remote", "modify", remote_name, "endpointurl", storage["endpoint"])
+
+        if storage.get("region"):
+            dvc.run("remote", "modify", remote_name, "region", storage["region"])
+
+        # Enable cloud versioning support
+        if storage.get("versioning", True):
+            dvc.run("remote", "modify", remote_name, "version_aware", "true")
+
+        # Also add to GLOBAL config for cross-project convenience
+        dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
+
         if storage.get("endpoint"):
             dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
 
         if storage.get("region"):
             dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
 
-        # Enable cloud versioning support
         if storage.get("versioning", True):
             dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
-
-        # Set the remote as default locally in this repo's .dvc/config
-        dvc.run("remote", "default", remote_name)
 
     except DVCError as e:
         # For any DVC-related error, just warn and continue

@@ -1,0 +1,20 @@
+# stata-packages.txt — Package dependencies for {{ project_name }}
+#
+# Stata does not have a built-in package manager with lockfiles. This file
+# documents non-base Stata packages required to run this project's code.
+#
+# FORMAT:
+#   package_name    # installation command and notes
+#
+# COMMON PACKAGES:
+#   reghdfe         # ssc install reghdfe (high-dimensional fixed effects)
+#   ftools          # ssc install ftools (required by reghdfe)
+#   estout          # ssc install estout (export regression tables)
+#   coefplot        # ssc install coefplot (coefficient plots)
+#   gtools          # ssc install gtools (faster collapse/egen)
+#   ivreg2          # ssc install ivreg2 (instrumental variables)
+#   ranktest        # ssc install ranktest (required by ivreg2)
+#
+# Add your project's dependencies below:
+# -------------------------------------------
+

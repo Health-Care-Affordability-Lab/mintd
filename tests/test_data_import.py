@@ -9,10 +9,14 @@ from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from mintd.data_import import (
-    ImportTransaction, ImportResult, DataImportError,
-    RegistryError, DVCImportError, query_data_product, validate_project_directory,
-    run_dvc_import, update_project_metadata,
-    import_data_product, pull_data_product, list_data_products
+    ImportTransaction, ImportResult, UpdateResult, RemoveResult, DataImportError,
+    RegistryError, DVCImportError, DVCUpdateError, DependencyNotFoundError,
+    DependencyRemovalError,
+    query_data_product, validate_project_directory,
+    run_dvc_import, run_dvc_update, update_project_metadata, update_dependency_metadata,
+    update_single_import, update_all_imports,
+    import_data_product, pull_data_product, list_data_products,
+    remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import
 )
 
 
@@ -457,6 +461,49 @@ class TestCLI:
         assert result.exit_code == 0
         assert "List available data products or imported dependencies" in result.output
 
+    def test_data_update_help(self):
+        """Test data update command help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "update", "--help"])
+        assert result.exit_code == 0
+        assert "Update DVC data imports" in result.output
+
+    @patch('mintd.data_import.update_all_imports')
+    def test_data_update_all(self, mock_update, mock_project_dir):
+        """Test data update command updates all imports."""
+        from mintd.cli import main
+        mock_update.return_value = [
+            UpdateResult(dvc_file="test.dvc", success=True)
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "update", "-p", str(mock_project_dir)])
+
+        assert result.exit_code == 0
+        mock_update.assert_called_once()
+
+    @patch('mintd.data_import.update_single_import')
+    def test_data_update_single(self, mock_update, mock_project_dir):
+        """Test data update command with specific path."""
+        from mintd.cli import main
+        mock_update.return_value = UpdateResult(
+            dvc_file="data/test.dvc", success=True
+        )
+
+        # Create the dvc file
+        dvc_file = mock_project_dir / "data" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "update", "data/test.dvc", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code == 0
+        mock_update.assert_called_once()
+
 
 # =============================================================================
 # Integration Tests
@@ -490,6 +537,231 @@ class TestIntegration:
 # =============================================================================
 # Error Handling Tests
 # =============================================================================
+
+# =============================================================================
+# DVC Update Tests
+# =============================================================================
+
+class TestDVCUpdate:
+    """Tests for DVC update functionality."""
+
+    def test_update_result_creation(self):
+        """Test UpdateResult dataclass creation."""
+        result = UpdateResult(
+            dvc_file="data/imports/test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+        assert result.dvc_file == "data/imports/test.dvc"
+        assert result.success is True
+        assert result.previous_commit == "abc123"
+        assert result.new_commit == "def456"
+        assert result.skipped is False
+
+    def test_update_result_skipped(self):
+        """Test UpdateResult when already up-to-date."""
+        result = UpdateResult(
+            dvc_file="test.dvc",
+            success=True,
+            skipped=True,
+            previous_commit="abc123",
+            new_commit="abc123"
+        )
+        assert result.skipped is True
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_success(self, mock_run, temp_dir):
+        """Test successful DVC update."""
+        mock_run.return_value = Mock(returncode=0, stdout="Updated 'data/test.dvc'")
+
+        # Create a mock .dvc file
+        dvc_file = temp_dir / "data" / "imports" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc123\n")
+
+        result = run_dvc_update(
+            project_path=temp_dir,
+            dvc_file=str(dvc_file.relative_to(temp_dir))
+        )
+
+        assert result.success is True
+        mock_run.assert_called_once()
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_with_revision(self, mock_run, temp_dir):
+        """Test DVC update with specific revision."""
+        mock_run.return_value = Mock(returncode=0, stdout="")
+
+        dvc_file = temp_dir / "test.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        run_dvc_update(
+            project_path=temp_dir,
+            dvc_file="test.dvc",
+            rev="v1.0.0"
+        )
+
+        # Check --rev flag was passed
+        call_args = mock_run.call_args
+        assert "--rev" in call_args[0][0] or any("--rev" in str(arg) for arg in call_args[0][0])
+
+    def test_run_dvc_update_missing_file(self, temp_dir):
+        """Test DVC update fails for missing .dvc file."""
+        with pytest.raises(DVCUpdateError, match="not found"):
+            run_dvc_update(
+                project_path=temp_dir,
+                dvc_file="nonexistent.dvc"
+            )
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_failure(self, mock_run, temp_dir):
+        """Test DVC update failure handling."""
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, ["dvc", "update"], stderr="Update failed"
+        )
+
+        dvc_file = temp_dir / "test.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        with pytest.raises(DVCUpdateError, match="DVC update failed"):
+            run_dvc_update(project_path=temp_dir, dvc_file="test.dvc")
+
+
+class TestUpdateSingleImport:
+    """Tests for updating a single import."""
+
+    @patch('mintd.data_import.run_dvc_update')
+    def test_update_single_import_success(self, mock_update, mock_project_dir):
+        """Test updating a single import by path."""
+        # Create the .dvc file
+        dvc_file = mock_project_dir / "data" / "imports" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc123\n")
+
+        mock_update.return_value = UpdateResult(
+            dvc_file="data/imports/test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+
+        result = update_single_import(
+            project_path=mock_project_dir,
+            dvc_file_path="data/imports/test.dvc"
+        )
+
+        assert result.success is True
+        mock_update.assert_called_once()
+
+    def test_update_single_import_not_found(self, mock_project_dir):
+        """Test error when .dvc file not found."""
+        with pytest.raises(DependencyNotFoundError):
+            update_single_import(
+                project_path=mock_project_dir,
+                dvc_file_path="nonexistent.dvc"
+            )
+
+
+class TestUpdateAllImports:
+    """Tests for updating all imports."""
+
+    @patch('mintd.data_import.run_dvc_update')
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_success(self, mock_load, mock_update, mock_project_dir):
+        """Test updating all imports."""
+        mock_load.return_value = {
+            "metadata": {
+                "data_dependencies": [
+                    {"dvc_file": "data/imports/prod1.dvc", "source": "prod1"},
+                    {"dvc_file": "data/imports/prod2.dvc", "source": "prod2"}
+                ]
+            }
+        }
+        mock_update.return_value = UpdateResult(
+            dvc_file="test.dvc", success=True
+        )
+
+        # Create the dvc files
+        for f in ["data/imports/prod1.dvc", "data/imports/prod2.dvc"]:
+            dvc_path = mock_project_dir / f
+            dvc_path.parent.mkdir(parents=True, exist_ok=True)
+            dvc_path.write_text("md5: abc\n")
+
+        results = update_all_imports(project_path=mock_project_dir)
+
+        assert len(results) == 2
+        assert all(r.success for r in results)
+
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_no_dependencies(self, mock_load, mock_project_dir):
+        """Test when no dependencies to update."""
+        mock_load.return_value = {"metadata": {}}
+
+        results = update_all_imports(project_path=mock_project_dir)
+
+        assert len(results) == 0
+
+    @patch('mintd.data_import.run_dvc_update')
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_dry_run(self, mock_load, mock_update, mock_project_dir):
+        """Test dry-run mode doesn't actually update."""
+        mock_load.return_value = {
+            "metadata": {
+                "data_dependencies": [
+                    {"dvc_file": "test.dvc", "source": "prod1"}
+                ]
+            }
+        }
+
+        # Create the dvc file
+        (mock_project_dir / "test.dvc").write_text("md5: abc\n")
+
+        results = update_all_imports(project_path=mock_project_dir, dry_run=True)
+
+        mock_update.assert_not_called()
+        assert len(results) == 1
+
+
+class TestUpdateDependencyMetadata:
+    """Tests for updating metadata after update."""
+
+    def test_update_dependency_metadata(self, mock_project_dir):
+        """Test metadata is updated after successful update."""
+        # First add a dependency
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "prod1",
+                    "dvc_file": "test.dvc",
+                    "source_commit": "abc123",
+                    "local_path": "data/imports/prod1/"
+                }]
+            },
+            "ownership": {},
+            "access_control": {"teams": []},
+            "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        update_result = UpdateResult(
+            dvc_file="test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+
+        update_dependency_metadata(mock_project_dir, update_result)
+
+        # Check metadata was updated
+        with open(mock_project_dir / "metadata.json", "r") as f:
+            updated = json.load(f)
+
+        deps = updated["metadata"]["data_dependencies"]
+        assert deps[0]["source_commit"] == "def456"
+
 
 class TestErrorHandling:
 
@@ -543,3 +815,260 @@ class TestErrorHandling:
         summary = transaction.get_summary()
         assert summary["successful"] == 1
         assert len(summary["failed"]) == 1
+
+
+# =============================================================================
+# Remove Data Import Tests
+# =============================================================================
+
+class TestRemoveResult:
+    """Tests for RemoveResult dataclass."""
+
+    def test_remove_result_creation(self):
+        """Test RemoveResult dataclass creation."""
+        result = RemoveResult(
+            product_name="cms-pps-weights",
+            success=True,
+            removed_path="data/imports/cms-pps-weights/",
+            removed_dvc_file="data/imports/cms-pps-weights.dvc"
+        )
+        assert result.product_name == "cms-pps-weights"
+        assert result.success is True
+        assert result.removed_path == "data/imports/cms-pps-weights/"
+        assert result.warnings == []
+
+    def test_remove_result_with_warnings(self):
+        """Test RemoveResult with warnings."""
+        result = RemoveResult(
+            product_name="test",
+            success=True,
+            warnings=["dvc.yaml still references data/imports/test/"]
+        )
+        assert len(result.warnings) == 1
+
+    def test_remove_result_failure(self):
+        """Test RemoveResult with failure."""
+        result = RemoveResult(
+            product_name="test",
+            success=False,
+            error_message="Dependency not found"
+        )
+        assert result.success is False
+        assert "not found" in result.error_message
+
+
+class TestRemoveDependencyFromMetadata:
+    """Tests for removing dependency from metadata.json."""
+
+    def test_remove_dependency_success(self, mock_project_dir):
+        """Test successful removal of dependency from metadata."""
+        # Setup: add a dependency first
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "data_cms-pps-weights",
+                    "local_path": "data/imports/cms-pps-weights/",
+                    "dvc_file": "data/imports/cms-pps-weights.dvc",
+                    "imported_at": "2025-01-01T00:00:00Z"
+                }]
+            },
+            "ownership": {"created_by": "test"},
+            "access_control": {"teams": []},
+            "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        # Remove the dependency
+        removed = remove_dependency_from_metadata(
+            mock_project_dir, "data_cms-pps-weights"
+        )
+
+        # Verify it was removed
+        assert removed["source"] == "data_cms-pps-weights"
+
+        with open(mock_project_dir / "metadata.json", "r") as f:
+            updated = json.load(f)
+        assert len(updated["metadata"]["data_dependencies"]) == 0
+
+    def test_remove_dependency_not_found(self, mock_project_dir):
+        """Test error when dependency doesn't exist."""
+        with pytest.raises(DependencyNotFoundError):
+            remove_dependency_from_metadata(
+                mock_project_dir, "nonexistent-import"
+            )
+
+    def test_remove_dependency_partial_match(self, mock_project_dir):
+        """Test removal matches by source name without data_ prefix."""
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "data_cms-pps-weights",
+                    "local_path": "data/imports/cms-pps-weights/",
+                    "dvc_file": "data/imports/cms-pps-weights.dvc"
+                }]
+            },
+            "ownership": {}, "access_control": {"teams": []}, "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        # Should match without data_ prefix
+        removed = remove_dependency_from_metadata(
+            mock_project_dir, "cms-pps-weights"
+        )
+        assert removed["source"] == "data_cms-pps-weights"
+
+
+class TestCheckDvcYamlReferences:
+    """Tests for checking dvc.yaml references."""
+
+    def test_no_dvc_yaml(self, mock_project_dir):
+        """Test when dvc.yaml doesn't exist."""
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 0
+
+    def test_no_references(self, mock_project_dir):
+        """Test when dvc.yaml has no references to removed paths."""
+        dvc_yaml = mock_project_dir / "dvc.yaml"
+        dvc_yaml.write_text("stages:\n  build:\n    cmd: echo hello\n")
+
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 0
+
+    def test_has_references(self, mock_project_dir):
+        """Test when dvc.yaml references removed paths."""
+        dvc_yaml = mock_project_dir / "dvc.yaml"
+        dvc_yaml.write_text(
+            "stages:\n  build:\n    deps:\n      - data/imports/test/file.dta\n"
+        )
+
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 1
+        assert "dvc.yaml" in warnings[0]
+
+
+class TestRemoveDataImport:
+    """Tests for full remove workflow."""
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    def test_remove_success(self, mock_remove_meta, mock_project_dir):
+        """Test successful removal of data import."""
+        # Setup directory and dvc file
+        import_dir = mock_project_dir / "data" / "imports" / "cms-pps-weights"
+        import_dir.mkdir(parents=True)
+        (import_dir / "test.dta").write_text("test data")
+        dvc_file = mock_project_dir / "data" / "imports" / "cms-pps-weights.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        mock_remove_meta.return_value = {
+            "source": "data_cms-pps-weights",
+            "local_path": "data/imports/cms-pps-weights/",
+            "dvc_file": "data/imports/cms-pps-weights.dvc"
+        }
+
+        result = remove_data_import(mock_project_dir, "cms-pps-weights")
+
+        assert result.success is True
+        assert not import_dir.exists()
+        assert not dvc_file.exists()
+
+    def test_remove_not_found(self, mock_project_dir):
+        """Test error when import doesn't exist in metadata."""
+        result = remove_data_import(mock_project_dir, "nonexistent")
+
+        assert result.success is False
+        assert "not found" in result.error_message.lower()
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    @patch('mintd.data_import.check_dvc_yaml_references')
+    def test_remove_with_warnings(self, mock_check, mock_remove_meta, mock_project_dir):
+        """Test removal warns about dvc.yaml references."""
+        import_dir = mock_project_dir / "data" / "imports" / "test"
+        import_dir.mkdir(parents=True)
+
+        mock_remove_meta.return_value = {
+            "source": "data_test",
+            "local_path": "data/imports/test/",
+            "dvc_file": "data/imports/test.dvc"
+        }
+        mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
+
+        result = remove_data_import(mock_project_dir, "test", force=False)
+
+        assert result.success is False
+        assert len(result.warnings) == 1
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    @patch('mintd.data_import.check_dvc_yaml_references')
+    def test_remove_force_ignores_warnings(self, mock_check, mock_remove_meta, mock_project_dir):
+        """Test --force removes despite dvc.yaml references."""
+        import_dir = mock_project_dir / "data" / "imports" / "test"
+        import_dir.mkdir(parents=True)
+
+        mock_remove_meta.return_value = {
+            "source": "data_test",
+            "local_path": "data/imports/test/",
+            "dvc_file": "data/imports/test.dvc"
+        }
+        mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
+
+        result = remove_data_import(mock_project_dir, "test", force=True)
+
+        assert result.success is True
+        assert len(result.warnings) == 1
+
+
+class TestRemoveCLI:
+    """Tests for data remove CLI command."""
+
+    def test_data_remove_help(self):
+        """Test data remove command help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "remove", "--help"])
+        assert result.exit_code == 0
+        assert "Remove a data import" in result.output
+
+    @patch('mintd.data_import.remove_data_import')
+    def test_data_remove_success(self, mock_remove, mock_project_dir):
+        """Test successful removal via CLI."""
+        from mintd.cli import main
+        mock_remove.return_value = RemoveResult(
+            product_name="test",
+            success=True,
+            removed_path="data/imports/test/"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "remove", "test", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code == 0
+        mock_remove.assert_called_once()
+
+    @patch('mintd.data_import.remove_data_import')
+    def test_data_remove_not_found(self, mock_remove, mock_project_dir):
+        """Test CLI error when import not found."""
+        from mintd.cli import main
+        mock_remove.return_value = RemoveResult(
+            product_name="nonexistent",
+            success=False,
+            error_message="Dependency not found"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "remove", "nonexistent", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code != 0

@@ -1,9 +1,14 @@
 # R profile for {{ project_name }}
 
+# Activate renv for reproducible package management
+# Run `renv::init()` to initialize, then `renv::snapshot()` to capture dependencies
+if (file.exists("renv/activate.R")) source("renv/activate.R")
+
 # Set CRAN mirror
 options(repos = c(CRAN = "https://cran.rstudio.com/"))
 
 # Load common packages if available
 if (interactive()) {
   message("Welcome to {{ project_name }} R environment")
+  message("Run renv::status() to check package sync")
 }

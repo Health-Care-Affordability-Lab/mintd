@@ -78,9 +78,13 @@ def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "
         except DVCError:
             pass
 
-    # Fallback: search global DVC config (simplified for now)
+    # Fallback: construct URL using expected_remote (which should be full project name)
+    # or fall back to repo_name if expected_remote is just "storage"
+    config = get_config()
+    bucket = config.get('storage', {}).get('bucket_prefix', 'cooper-globus')
+    path_name = expected_remote if expected_remote != "storage" else repo_name
     try:
-        dvc.run("remote", "add", "-f", expected_remote, f"s3://cooper-globus/lab/{repo_name}/")
+        dvc.run("remote", "add", "-f", expected_remote, f"s3://{bucket}/lab/{path_name}/")
     except DVCError:
         pass
 
