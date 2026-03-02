@@ -92,3 +92,73 @@ def data_list(imported, path):
     except Exception as e:
         console.print(f"❌ Error: {e}", style="red")
         raise click.Abort()
+
+
+@data.command(name="update")
+@click.argument("path", required=False)
+@click.option("--rev", help="Specific git revision to update to")
+@click.option("--dry-run", is_flag=True, help="Show what would be updated")
+@click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
+def data_update(path, rev, dry_run, project_path):
+    """Update DVC data imports to latest version.
+
+    If PATH is provided, update only that specific .dvc file.
+    Otherwise, update all imports in the project.
+    """
+    from ..data_import import update_all_imports, update_single_import
+
+    project_path = Path(project_path) if project_path else Path.cwd()
+
+    try:
+        if path:
+            # Update single import
+            result = update_single_import(
+                project_path=project_path,
+                dvc_file_path=path,
+                rev=rev
+            )
+            if result.success:
+                if result.skipped:
+                    console.print(f"⏭️  {path} is already up-to-date", style="yellow")
+                else:
+                    console.print(f"✅ Updated {path}", style="green")
+            else:
+                console.print(f"❌ Failed to update {path}: {result.error_message}", style="red")
+                raise click.Abort()
+        else:
+            # Update all imports
+            if dry_run:
+                console.print("🔍 Dry run - showing what would be updated:", style="blue")
+
+            results = update_all_imports(
+                project_path=project_path,
+                rev=rev,
+                dry_run=dry_run
+            )
+
+            if not results:
+                console.print("No data imports found to update.", style="yellow")
+                return
+
+            success_count = sum(1 for r in results if r.success)
+            fail_count = sum(1 for r in results if not r.success)
+
+            for r in results:
+                if r.success:
+                    if dry_run or r.skipped:
+                        console.print(f"  📦 {r.dvc_file}", style="dim")
+                    else:
+                        console.print(f"  ✅ {r.dvc_file}", style="green")
+                else:
+                    console.print(f"  ❌ {r.dvc_file}: {r.error_message}", style="red")
+
+            if not dry_run:
+                console.print(f"\n📊 Updated {success_count}/{len(results)} imports")
+                if fail_count > 0:
+                    raise click.Abort()
+
+    except click.Abort:
+        raise
+    except Exception as e:
+        console.print(f"❌ Error: {e}", style="red")
+        raise click.Abort()

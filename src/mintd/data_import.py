@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 import git
 from rich.console import Console
 
-from .exceptions import DVCImportError
+from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError
 from .registry import get_registry_client, load_project_metadata
 from .shell import dvc_command
 
@@ -31,6 +31,17 @@ class ImportResult:
     dvc_file: Optional[str] = None
     local_path: Optional[str] = None
     source_commit: Optional[str] = None
+
+
+@dataclass
+class UpdateResult:
+    """Result of a DVC update operation."""
+    dvc_file: str
+    success: bool
+    error_message: Optional[str] = None
+    previous_commit: Optional[str] = None
+    new_commit: Optional[str] = None
+    skipped: bool = False  # True if already up-to-date
 
 
 class ImportTransaction:
@@ -118,7 +129,7 @@ class ImportTransaction:
 
 
 # Re-export exceptions for backwards compatibility
-from .exceptions import DataImportError, MetadataUpdateError, RegistryError
+from .exceptions import DataImportError, MetadataUpdateError, RegistryError, DVCUpdateError, DependencyNotFoundError
 
 
 def query_data_product(product_name: str) -> Dict[str, Any]:
@@ -509,3 +520,161 @@ def list_data_products(show_imported: bool = False, project_path: Optional[Path]
 
         except Exception as e:
             console.print(f"❌ Error accessing registry: {e}", style="red")
+
+
+def run_dvc_update(
+    project_path: Path,
+    dvc_file: str,
+    rev: Optional[str] = None
+) -> UpdateResult:
+    """Run dvc update command on an existing .dvc file.
+
+    Args:
+        project_path: Project directory
+        dvc_file: Path to the .dvc file to update (relative to project_path)
+        rev: Specific revision to update to (optional)
+
+    Returns:
+        UpdateResult with update information
+
+    Raises:
+        DVCUpdateError: If update fails
+    """
+    dvc_path = project_path / dvc_file
+    if not dvc_path.exists():
+        raise DVCUpdateError(f"DVC file not found: {dvc_file}")
+
+    dvc = dvc_command(cwd=project_path)
+    args = ["update", dvc_file]
+
+    if rev:
+        args.extend(["--rev", rev])
+
+    try:
+        result = dvc.run(*args)
+
+        return UpdateResult(
+            dvc_file=dvc_file,
+            success=True,
+            previous_commit=None,  # Could parse from .dvc file before update
+            new_commit=None  # Could parse from .dvc file after update
+        )
+
+    except Exception as e:
+        raise DVCUpdateError(f"DVC update failed: {e}")
+
+
+def update_single_import(
+    project_path: Path,
+    dvc_file_path: str,
+    rev: Optional[str] = None
+) -> UpdateResult:
+    """Update a single DVC import by path.
+
+    Args:
+        project_path: Path to the project
+        dvc_file_path: Path to the .dvc file to update
+        rev: Specific revision to update to
+
+    Returns:
+        UpdateResult with update status
+
+    Raises:
+        DependencyNotFoundError: If .dvc file not found
+    """
+    dvc_path = project_path / dvc_file_path
+    if not dvc_path.exists():
+        raise DependencyNotFoundError(f"DVC file not found: {dvc_file_path}")
+
+    return run_dvc_update(project_path, dvc_file_path, rev)
+
+
+def update_all_imports(
+    project_path: Path,
+    rev: Optional[str] = None,
+    dry_run: bool = False
+) -> List[UpdateResult]:
+    """Update all data imports in a project.
+
+    Args:
+        project_path: Path to the project
+        rev: Specific revision for all updates (optional)
+        dry_run: If True, show what would be updated without making changes
+
+    Returns:
+        List of UpdateResult for each dependency
+    """
+    results: List[UpdateResult] = []
+
+    try:
+        metadata = load_project_metadata(project_path)
+    except Exception:
+        return results
+
+    dependencies = metadata.get("metadata", {}).get("data_dependencies", [])
+
+    if not dependencies:
+        return results
+
+    for dep in dependencies:
+        dvc_file = dep.get("dvc_file")
+        if not dvc_file:
+            continue
+
+        dvc_path = project_path / dvc_file
+        if not dvc_path.exists():
+            results.append(UpdateResult(
+                dvc_file=dvc_file,
+                success=False,
+                error_message=f"DVC file not found: {dvc_file}"
+            ))
+            continue
+
+        if dry_run:
+            results.append(UpdateResult(
+                dvc_file=dvc_file,
+                success=True,
+                skipped=True
+            ))
+        else:
+            try:
+                result = run_dvc_update(project_path, dvc_file, rev)
+                results.append(result)
+            except DVCUpdateError as e:
+                results.append(UpdateResult(
+                    dvc_file=dvc_file,
+                    success=False,
+                    error_message=str(e)
+                ))
+
+    return results
+
+
+def update_dependency_metadata(
+    project_path: Path,
+    update_result: UpdateResult
+) -> None:
+    """Update metadata.json after a successful dependency update.
+
+    Args:
+        project_path: Project directory
+        update_result: Result of the update operation
+    """
+    metadata_file = project_path / "metadata.json"
+
+    with open(metadata_file, 'r') as f:
+        metadata = json.load(f)
+
+    dependencies = metadata.get("metadata", {}).get("data_dependencies", [])
+
+    for dep in dependencies:
+        if dep.get("dvc_file") == update_result.dvc_file:
+            if update_result.previous_commit:
+                dep["previous_commit"] = update_result.previous_commit
+            if update_result.new_commit:
+                dep["source_commit"] = update_result.new_commit
+            dep["updated_at"] = datetime.now().isoformat()
+            break
+
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)

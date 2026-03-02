@@ -9,9 +9,11 @@ from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from mintd.data_import import (
-    ImportTransaction, ImportResult, DataImportError,
-    RegistryError, DVCImportError, query_data_product, validate_project_directory,
-    run_dvc_import, update_project_metadata,
+    ImportTransaction, ImportResult, UpdateResult, DataImportError,
+    RegistryError, DVCImportError, DVCUpdateError, DependencyNotFoundError,
+    query_data_product, validate_project_directory,
+    run_dvc_import, run_dvc_update, update_project_metadata, update_dependency_metadata,
+    update_single_import, update_all_imports,
     import_data_product, pull_data_product, list_data_products
 )
 
@@ -457,6 +459,49 @@ class TestCLI:
         assert result.exit_code == 0
         assert "List available data products or imported dependencies" in result.output
 
+    def test_data_update_help(self):
+        """Test data update command help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "update", "--help"])
+        assert result.exit_code == 0
+        assert "Update DVC data imports" in result.output
+
+    @patch('mintd.data_import.update_all_imports')
+    def test_data_update_all(self, mock_update, mock_project_dir):
+        """Test data update command updates all imports."""
+        from mintd.cli import main
+        mock_update.return_value = [
+            UpdateResult(dvc_file="test.dvc", success=True)
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "update", "-p", str(mock_project_dir)])
+
+        assert result.exit_code == 0
+        mock_update.assert_called_once()
+
+    @patch('mintd.data_import.update_single_import')
+    def test_data_update_single(self, mock_update, mock_project_dir):
+        """Test data update command with specific path."""
+        from mintd.cli import main
+        mock_update.return_value = UpdateResult(
+            dvc_file="data/test.dvc", success=True
+        )
+
+        # Create the dvc file
+        dvc_file = mock_project_dir / "data" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "update", "data/test.dvc", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code == 0
+        mock_update.assert_called_once()
+
 
 # =============================================================================
 # Integration Tests
@@ -490,6 +535,231 @@ class TestIntegration:
 # =============================================================================
 # Error Handling Tests
 # =============================================================================
+
+# =============================================================================
+# DVC Update Tests
+# =============================================================================
+
+class TestDVCUpdate:
+    """Tests for DVC update functionality."""
+
+    def test_update_result_creation(self):
+        """Test UpdateResult dataclass creation."""
+        result = UpdateResult(
+            dvc_file="data/imports/test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+        assert result.dvc_file == "data/imports/test.dvc"
+        assert result.success is True
+        assert result.previous_commit == "abc123"
+        assert result.new_commit == "def456"
+        assert result.skipped is False
+
+    def test_update_result_skipped(self):
+        """Test UpdateResult when already up-to-date."""
+        result = UpdateResult(
+            dvc_file="test.dvc",
+            success=True,
+            skipped=True,
+            previous_commit="abc123",
+            new_commit="abc123"
+        )
+        assert result.skipped is True
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_success(self, mock_run, temp_dir):
+        """Test successful DVC update."""
+        mock_run.return_value = Mock(returncode=0, stdout="Updated 'data/test.dvc'")
+
+        # Create a mock .dvc file
+        dvc_file = temp_dir / "data" / "imports" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc123\n")
+
+        result = run_dvc_update(
+            project_path=temp_dir,
+            dvc_file=str(dvc_file.relative_to(temp_dir))
+        )
+
+        assert result.success is True
+        mock_run.assert_called_once()
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_with_revision(self, mock_run, temp_dir):
+        """Test DVC update with specific revision."""
+        mock_run.return_value = Mock(returncode=0, stdout="")
+
+        dvc_file = temp_dir / "test.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        run_dvc_update(
+            project_path=temp_dir,
+            dvc_file="test.dvc",
+            rev="v1.0.0"
+        )
+
+        # Check --rev flag was passed
+        call_args = mock_run.call_args
+        assert "--rev" in call_args[0][0] or any("--rev" in str(arg) for arg in call_args[0][0])
+
+    def test_run_dvc_update_missing_file(self, temp_dir):
+        """Test DVC update fails for missing .dvc file."""
+        with pytest.raises(DVCUpdateError, match="not found"):
+            run_dvc_update(
+                project_path=temp_dir,
+                dvc_file="nonexistent.dvc"
+            )
+
+    @patch('subprocess.run')
+    def test_run_dvc_update_failure(self, mock_run, temp_dir):
+        """Test DVC update failure handling."""
+        mock_run.side_effect = subprocess.CalledProcessError(
+            1, ["dvc", "update"], stderr="Update failed"
+        )
+
+        dvc_file = temp_dir / "test.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        with pytest.raises(DVCUpdateError, match="DVC update failed"):
+            run_dvc_update(project_path=temp_dir, dvc_file="test.dvc")
+
+
+class TestUpdateSingleImport:
+    """Tests for updating a single import."""
+
+    @patch('mintd.data_import.run_dvc_update')
+    def test_update_single_import_success(self, mock_update, mock_project_dir):
+        """Test updating a single import by path."""
+        # Create the .dvc file
+        dvc_file = mock_project_dir / "data" / "imports" / "test.dvc"
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("md5: abc123\n")
+
+        mock_update.return_value = UpdateResult(
+            dvc_file="data/imports/test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+
+        result = update_single_import(
+            project_path=mock_project_dir,
+            dvc_file_path="data/imports/test.dvc"
+        )
+
+        assert result.success is True
+        mock_update.assert_called_once()
+
+    def test_update_single_import_not_found(self, mock_project_dir):
+        """Test error when .dvc file not found."""
+        with pytest.raises(DependencyNotFoundError):
+            update_single_import(
+                project_path=mock_project_dir,
+                dvc_file_path="nonexistent.dvc"
+            )
+
+
+class TestUpdateAllImports:
+    """Tests for updating all imports."""
+
+    @patch('mintd.data_import.run_dvc_update')
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_success(self, mock_load, mock_update, mock_project_dir):
+        """Test updating all imports."""
+        mock_load.return_value = {
+            "metadata": {
+                "data_dependencies": [
+                    {"dvc_file": "data/imports/prod1.dvc", "source": "prod1"},
+                    {"dvc_file": "data/imports/prod2.dvc", "source": "prod2"}
+                ]
+            }
+        }
+        mock_update.return_value = UpdateResult(
+            dvc_file="test.dvc", success=True
+        )
+
+        # Create the dvc files
+        for f in ["data/imports/prod1.dvc", "data/imports/prod2.dvc"]:
+            dvc_path = mock_project_dir / f
+            dvc_path.parent.mkdir(parents=True, exist_ok=True)
+            dvc_path.write_text("md5: abc\n")
+
+        results = update_all_imports(project_path=mock_project_dir)
+
+        assert len(results) == 2
+        assert all(r.success for r in results)
+
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_no_dependencies(self, mock_load, mock_project_dir):
+        """Test when no dependencies to update."""
+        mock_load.return_value = {"metadata": {}}
+
+        results = update_all_imports(project_path=mock_project_dir)
+
+        assert len(results) == 0
+
+    @patch('mintd.data_import.run_dvc_update')
+    @patch('mintd.data_import.load_project_metadata')
+    def test_update_all_imports_dry_run(self, mock_load, mock_update, mock_project_dir):
+        """Test dry-run mode doesn't actually update."""
+        mock_load.return_value = {
+            "metadata": {
+                "data_dependencies": [
+                    {"dvc_file": "test.dvc", "source": "prod1"}
+                ]
+            }
+        }
+
+        # Create the dvc file
+        (mock_project_dir / "test.dvc").write_text("md5: abc\n")
+
+        results = update_all_imports(project_path=mock_project_dir, dry_run=True)
+
+        mock_update.assert_not_called()
+        assert len(results) == 1
+
+
+class TestUpdateDependencyMetadata:
+    """Tests for updating metadata after update."""
+
+    def test_update_dependency_metadata(self, mock_project_dir):
+        """Test metadata is updated after successful update."""
+        # First add a dependency
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "prod1",
+                    "dvc_file": "test.dvc",
+                    "source_commit": "abc123",
+                    "local_path": "data/imports/prod1/"
+                }]
+            },
+            "ownership": {},
+            "access_control": {"teams": []},
+            "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        update_result = UpdateResult(
+            dvc_file="test.dvc",
+            success=True,
+            previous_commit="abc123",
+            new_commit="def456"
+        )
+
+        update_dependency_metadata(mock_project_dir, update_result)
+
+        # Check metadata was updated
+        with open(mock_project_dir / "metadata.json", "r") as f:
+            updated = json.load(f)
+
+        deps = updated["metadata"]["data_dependencies"]
+        assert deps[0]["source_commit"] == "def456"
+
 
 class TestErrorHandling:
 
