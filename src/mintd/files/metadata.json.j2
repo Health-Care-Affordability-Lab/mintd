@@ -14,7 +14,12 @@
   },
   "metadata": {
     "version": "1.0.0",
-    "mint_version": "{{ mint_version }}"
+    "mint_version": "{{ mint_version }}",
+    "description": "{{ description | default('') }}",
+    "tags": {{ tags | default([]) | tojson }},
+    "configurations": {{ configurations | default([]) | tojson }},
+    "methods": {{ methods | default([]) | tojson }},
+    "data_dependencies": {{ data_dependencies | default([]) | tojson }}
   },
   "ownership": {
     "team": "{{ team }}",

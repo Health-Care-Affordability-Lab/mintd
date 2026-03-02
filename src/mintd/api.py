@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .templates import DataTemplate, ProjectTemplate, InfraTemplate, EnclaveTemplate
+from .templates import DataTemplate, ProjectTemplate, EnclaveTemplate
 from .config import get_config, get_stata_executable, get_platform_info
 from .initializers.git import init_git, is_git_repo
 from .initializers.storage import init_dvc, is_dvc_repo, add_dvc_remote
@@ -39,7 +39,7 @@ class ProjectBuilder:
         """Initialize the builder with required parameters.
 
         Args:
-            project_type: Type of project ("data", "project", "infra", "enclave")
+            project_type: Type of project ("data", "project", "enclave")
             name: Project name (without prefix)
             language: Primary programming language ("python", "r", "stata")
         """
@@ -195,7 +195,7 @@ def create_project(
     """Main API function called by both CLI and Stata.
 
     Args:
-        project_type: Type of project ("data", "project", "infra", or "enclave")
+        project_type: Type of project ("data", "project", or "enclave")
         name: Project name (without prefix)
         path: Directory to create project in
         language: Primary programming language ("python", "r", or "stata")
@@ -290,14 +290,11 @@ def create_project(
     })
 
     # Select and create template
-    # Select and create template
     if project_type == "data":
         template = DataTemplate()
     elif project_type in ["project", "prj"]:
         template = ProjectTemplate()
         project_type = "project"  # Normalize
-    elif project_type == "infra":
-        template = InfraTemplate()
     elif project_type == "enclave":
         template = EnclaveTemplate()
     else:
@@ -406,7 +403,7 @@ def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivi
     if not project_name:
         project_name = project_path.name
         # Extract the actual project name (remove prefix)
-        if project_name.startswith(("data_", "prj__", "infra_")):
+        if project_name.startswith(("data_", "prj__")):
             parts = project_name.split("_", 1)
             if len(parts) > 1:
                 project_name = parts[1]

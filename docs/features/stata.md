@@ -87,7 +87,6 @@ help mintd
    // Create projects directly from Stata
    mintd, type(data) name(hospital_project)
    mintd, type(project) name(analysis) path(/projects)
-   mintd, type(infra) name(tools) nogit
 
    // Access created project path
    mintd, type(data) name(mydata)
@@ -100,7 +99,7 @@ help mintd
 mintd, type(string) name(string) [path(string) nogit nodvc bucket(string)]
 
 Options:
-  type(string)     - Project type: data, project, infra
+  type(string)     - Project type: data, project
   name(string)     - Project name
   path(string)     - Output directory (default: current)
   nogit           - Skip Git initialization

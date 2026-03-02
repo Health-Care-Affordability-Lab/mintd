@@ -25,10 +25,9 @@ def test_package_installation():
     assert create_project is not None
 
     # Test template imports
-    from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate
+    from mintd.templates import DataTemplate, ProjectTemplate
     assert DataTemplate is not None
     assert ProjectTemplate is not None
-    assert InfraTemplate is not None
 
     # Test initializer imports
     from mintd.initializers.git import init_git

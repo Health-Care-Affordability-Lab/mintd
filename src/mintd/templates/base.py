@@ -19,7 +19,7 @@ from .. import __version__
 class BaseTemplate(ABC):
     """Base class for all project templates."""
 
-    prefix: str  # e.g., "data_", "prj__", "infra_"
+    prefix: str  # e.g., "data_", "prj_"
     strategy: LanguageStrategy = None
 
     def __init__(self):
@@ -73,7 +73,7 @@ class BaseTemplate(ABC):
 
     @property
     def template_type(self) -> str:
-        """Return the template type (project, data, infra, etc)."""
+        """Return the template type (project, data, etc)."""
         return "base"
 
     def _merge_structure(self, base: Dict[str, Any], updates: Dict[str, Any]) -> None:

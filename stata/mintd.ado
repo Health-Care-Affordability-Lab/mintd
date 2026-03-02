@@ -7,8 +7,8 @@ program define mintd
     syntax, Type(string) Name(string) [Path(string) NOGit NODvc Bucket(string)]
 
     * Validate type
-    if !inlist("`type'", "data", "project", "prj", "infra") {
-        display as error "Invalid type. Use: data, project, or infra"
+    if !inlist("`type'", "data", "project", "prj") {
+        display as error "Invalid type. Use: data or project"
         exit 198
     }
 

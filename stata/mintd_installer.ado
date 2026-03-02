@@ -49,7 +49,6 @@ program define mintd_installer
     display as text "Usage:"
     display as text "  mintd, type(data) name(myproject)"
     display as text "  mintd, type(project) name(analysis)"
-    display as text "  mintd, type(infra) name(package)"
     display as text ""
     display as text "For help: help mintd"
 

@@ -64,23 +64,23 @@ def test_create_project_project():
         assert (result.path / "results" / "estimates").exists()
 
 
-def test_create_project_infra():
-    """Test creating an infra project."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        result = create_project(
-            project_type="infra",
-            name="test_api",
-            language="python",
-            path=temp_dir,
-            init_git=False,
-            init_dvc=False
-        )
+def test_create_project_infra_rejected():
+    """Test that infra project type is no longer supported.
 
-        assert result.name == "test_api"
-        assert result.full_name == "infra_test_api"
-        assert result.project_type == "infra"
-        assert result.path.exists()
-        assert (result.path / "code" / "test_api" / "__init__.py").exists()
+    The infra type was removed in v0.5.0. Users should either:
+    - Use 'data' type for repos that produce datasets
+    - Use standard language tooling for pure code packages
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        with pytest.raises(ValueError, match="Unknown project type"):
+            create_project(
+                project_type="infra",
+                name="test_api",
+                language="python",
+                path=temp_dir,
+                init_git=False,
+                init_dvc=False
+            )
 
 
 def test_create_project_invalid_type():
@@ -98,6 +98,46 @@ def test_create_project_invalid_type():
             assert False, "Should have raised ValueError"
         except ValueError as e:
             assert "Unknown project type" in str(e)
+
+
+def test_create_project_metadata_discoverability_fields():
+    """Test that metadata.json includes discoverability fields.
+
+    These optional fields help with registry discovery:
+    - configurations: Dataset configurations supported
+    - methods: Methods implemented (e.g., HHI, diversion ratios)
+    - data_dependencies: Upstream data products
+    """
+    with tempfile.TemporaryDirectory() as temp_dir:
+        result = create_project(
+            project_type="data",
+            name="test_discoverability",
+            language="python",
+            path=temp_dir,
+            init_git=False,
+            init_dvc=False
+        )
+
+        metadata_path = result.path / "metadata.json"
+        assert metadata_path.exists()
+
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        # Check discoverability fields exist (empty by default)
+        assert "metadata" in metadata
+        assert "configurations" in metadata["metadata"]
+        assert "methods" in metadata["metadata"]
+        assert "data_dependencies" in metadata["metadata"]
+        assert "description" in metadata["metadata"]
+        assert "tags" in metadata["metadata"]
+
+        # Default values should be empty lists/strings
+        assert metadata["metadata"]["configurations"] == []
+        assert metadata["metadata"]["methods"] == []
+        assert metadata["metadata"]["data_dependencies"] == []
+        assert metadata["metadata"]["description"] == ""
+        assert metadata["metadata"]["tags"] == []
 
 
 def test_create_project_invalid_name():

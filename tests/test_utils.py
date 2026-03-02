@@ -276,10 +276,10 @@ class TestFormatProjectName:
         result = format_project_name("project", "myproject")
         assert result == "prj_myproject"
 
-    def test_infra_project(self):
-        """Test formatting infra project name."""
-        result = format_project_name("infra", "myinfra")
-        assert result == "infra_myinfra"
+    def test_infra_project_rejected(self):
+        """Test that infra project type is no longer supported."""
+        with pytest.raises(ValueError, match="Unknown project type"):
+            format_project_name("infra", "myinfra")
 
     def test_invalid_project_type(self):
         """Test error for invalid project type."""

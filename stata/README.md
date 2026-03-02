@@ -245,7 +245,7 @@ mint, type(project) name(hospital_closures)
 mint, type(data) name(mydata) path(/path/to/projects)
 
 // Skip git/dvc initialization
-mint, type(infra) name(mypackage) nogit nodvc
+mint, type(data) name(mypackage) nogit nodvc
 
 // Use custom DVC bucket
 mint, type(data) name(mydata) bucket(my-custom-bucket)

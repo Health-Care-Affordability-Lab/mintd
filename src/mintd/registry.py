@@ -76,7 +76,7 @@ class LocalRegistry:
     def _write_catalog_entry(self, catalog_entry: Dict[str, Any], project_name: str) -> Path:
         """Write catalog entry to the appropriate file."""
         project_type = catalog_entry['project']['type']
-        type_dir = {'data': 'data', 'project': 'projects', 'infra': 'infra'}[project_type]
+        type_dir = {'data': 'data', 'project': 'projects'}[project_type]
 
         # Ensure catalog directory exists
         catalog_dir = self.repo_path / 'catalog' / type_dir
@@ -208,8 +208,8 @@ After merging this PR:
             self._clone_registry()
 
             # Try different project types
-            for project_type in ["data", "project", "infra"]:
-                catalog_path = self.repo_path / 'catalog' / {'data': 'data', 'project': 'projects', 'infra': 'infra'}[project_type] / f"{project_name}.yaml"
+            for project_type in ["data", "project"]:
+                catalog_path = self.repo_path / 'catalog' / {'data': 'data', 'project': 'projects'}[project_type] / f"{project_name}.yaml"
 
                 if catalog_path.exists():
                     return {
@@ -343,7 +343,7 @@ After merging this PR:
             RegistryNotFoundError: If project not found in registry
         """
         # Search in all catalog directories
-        type_dirs = {'data': 'data', 'project': 'projects', 'infra': 'infra'}
+        type_dirs = {'data': 'data', 'project': 'projects'}
 
         for project_type, dir_name in type_dirs.items():
             catalog_path = self.repo_path / 'catalog' / dir_name / f"{project_name}.yaml"

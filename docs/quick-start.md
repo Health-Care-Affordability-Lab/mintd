@@ -19,10 +19,9 @@ mintd create data --name hospital_project --lang python
 
 # Create a research analysis project
 mintd create project --name cost_study --lang r
-
-# Create an infrastructure package
-mintd create infra --name stat_tools --lang python
 ```
+
+> **Note:** For reusable code packages, use standard language tooling (e.g., `uv init`, `poetry init`, `usethis::create_package()`) instead of mintd. See [Project Types](project-types.md#standalone-packages-no-mintd-scaffolding) for details.
 
 ## With Registry Integration
 

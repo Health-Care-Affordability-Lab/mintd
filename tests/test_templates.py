@@ -2,7 +2,7 @@
 
 import tempfile
 
-from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate
+from mintd.templates import DataTemplate, ProjectTemplate
 
 
 def test_data_template():
@@ -54,25 +54,6 @@ def test_project_template():
     file_names = [name for _, name in template_files]
     assert "README_project.md.j2" in file_names
     assert "citations.md.j2" in file_names
-
-
-def test_infra_template():
-    """Test infra template creation."""
-    template = InfraTemplate()
-
-    # Test directory structure
-    structure = template.get_directory_structure()
-    assert "code" in structure
-    assert "tests" in structure
-    assert "data" in structure
-    assert structure["data"]["analysis"] == {".gitkeep": None}
-    assert structure["data"]["raw"] == {".gitkeep": None}
-
-    # Test template files
-    template_files = template.get_template_files()
-    file_names = [name for _, name in template_files]
-    assert "README_infra.md.j2" in file_names
-    assert "pyproject_infra.toml.j2" in file_names
 
 
 def test_template_creation():

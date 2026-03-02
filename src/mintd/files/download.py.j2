@@ -261,7 +261,7 @@ def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "
             print(f"  Warning: Could not configure DVC remote from registry URL: {e}")
     
     # Fallback: search global DVC config for a matching remote
-    project_name = repo_name.replace("data_", "").replace("prj_", "").replace("infra_", "")
+    project_name = repo_name.replace("data_", "").replace("prj_", "")
     
     try:
         result = subprocess.run(

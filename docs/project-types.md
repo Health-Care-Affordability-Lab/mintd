@@ -200,60 +200,39 @@ spec = case2vars("baseline")      # Returns {"depvar": "...", "controls": [...]}
 label = pretty_name("outcome")    # Returns "Outcome Variable"
 ```
 
-## Infrastructure Projects (`infra_*`)
+## Standalone Packages (No mintd Scaffolding)
 
-For reusable packages and tools:
+For reusable code packages (Python, R, or Stata), use standard language tooling instead of mintd. Packages have their own conventions that don't need DVC pipelines or data governance metadata.
+
+### When to Create a Package
+
+Code should live inside a `data` repo until there's a reason to extract it. The trigger for extraction is **a second consumer**:
+
+1. You build a data product with specialized code (e.g., HHI calculation)
+2. Another project needs the *code*, not just the output
+3. Extract the code into a standalone package
+
+### Extraction Checklist
+
+- [ ] Second consumer exists (not hypothetical)
+- [ ] Code has clear API boundary (inputs/outputs well-defined)
+- [ ] Can be versioned independently of the data pipeline
+- [ ] Has tests that run without the full data pipeline
+
+### Package Setup by Language
 
 **Python:**
-```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── pyproject.toml            # Package configuration
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   └── stat_tools/           # Main package
-│       └── __init__.py
-├── tests/
-│   └── __init__.py
-├── docs/
-└── .gitignore
+```bash
+uv init my-package  # or: poetry init
 ```
 
 **R:**
-```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── DESCRIPTION               # R package description
-├── NAMESPACE                 # R namespace exports
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   └── stat_tools.R          # Package functions
-├── tests/
-├── docs/
-└── .gitignore
+```r
+usethis::create_package("mypackage")
 ```
 
 **Stata:**
-```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   ├── stat_tools.ado        # Stata command
-│   └── stat_tools.sthlp      # Help file
-├── tests/
-├── docs/
-└── .gitignore
-```
+Create `.ado` and `.sthlp` files manually.
 
 ## Secure Enclave Projects (`enclave_*`)
 

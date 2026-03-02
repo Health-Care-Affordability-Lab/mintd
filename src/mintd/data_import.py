@@ -1,7 +1,7 @@
 """Data import functionality for mintd - pull and import DVC-tracked data.
 
 Handles pulling data from registered data products and importing DVC dependencies
-into project/infra repositories with robust error handling and rollback support.
+into project repositories with robust error handling and rollback support.
 """
 
 import json
@@ -186,9 +186,9 @@ def validate_project_directory(project_path: Path) -> None:
         metadata = load_project_metadata(project_path)
         project_type = metadata["project"]["type"]
 
-        if project_type not in ["project", "infra"]:
+        if project_type != "project":
             raise DataImportError(
-                f"Data import only supported for project/infra repositories, "
+                f"Data import only supported for project repositories, "
                 f"not '{project_type}' repositories"
             )
 

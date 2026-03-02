@@ -33,12 +33,18 @@ def test_create_project_help():
     assert "prj__{name}" in result.output
 
 
-def test_create_infra_help():
-    """Test the create infra command help."""
+def test_create_infra_removed():
+    """Test that the infra command has been removed.
+
+    The infra type was removed in v0.5.0. Users should either:
+    - Use 'data' type for repos that produce datasets
+    - Use standard language tooling for pure code packages
+    """
     runner = CliRunner()
     result = runner.invoke(main, ["create", "infra", "--help"])
-    assert result.exit_code == 0
-    assert "infra_{name}" in result.output
+    # Command should not exist - Click returns exit code 2 for unknown commands
+    assert result.exit_code == 2
+    assert "No such command 'infra'" in result.output
 
 
 class TestUpdateStorageRemoteName:

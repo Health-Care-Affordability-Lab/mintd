@@ -25,14 +25,6 @@ mintd create project --name <name> --lang <language> [OPTIONS]
 
 Creates a project repository (`prj__{name}`).
 
-### Create Infrastructure
-
-```bash
-mintd create infra --name <name> --lang <language> [OPTIONS]
-```
-
-Creates an infrastructure repository (`infra_{name}`).
-
 ### Create Enclave Workspace
 
 ```bash
@@ -59,7 +51,7 @@ mintd create custom <template_name> --name <name> [OPTIONS]
 |--------|-------------|
 | `-n, --name TEXT` | Project name (required) |
 | `-p, --path PATH` | Output directory (default: current) |
-| `--lang TEXT` | Primary programming language (`python\|r\|stata`), required for data/project/infra |
+| `--lang TEXT` | Primary programming language (`python\|r\|stata`), required for data/project |
 | `--no-git` | Skip Git initialization |
 | `--no-dvc` | Skip DVC initialization |
 | `--bucket TEXT` | Custom DVC bucket name |
@@ -68,7 +60,7 @@ mintd create custom <template_name> --name <name> [OPTIONS]
 
 ### Governance Options
 
-These options are available for `data`, `project`, and `infra` commands:
+These options are available for `data` and `project` commands:
 
 | Option | Description |
 |--------|-------------|
