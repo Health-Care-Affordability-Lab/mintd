@@ -9,12 +9,14 @@ from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from mintd.data_import import (
-    ImportTransaction, ImportResult, UpdateResult, DataImportError,
+    ImportTransaction, ImportResult, UpdateResult, RemoveResult, DataImportError,
     RegistryError, DVCImportError, DVCUpdateError, DependencyNotFoundError,
+    DependencyRemovalError,
     query_data_product, validate_project_directory,
     run_dvc_import, run_dvc_update, update_project_metadata, update_dependency_metadata,
     update_single_import, update_all_imports,
-    import_data_product, pull_data_product, list_data_products
+    import_data_product, pull_data_product, list_data_products,
+    remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import
 )
 
 
@@ -813,3 +815,260 @@ class TestErrorHandling:
         summary = transaction.get_summary()
         assert summary["successful"] == 1
         assert len(summary["failed"]) == 1
+
+
+# =============================================================================
+# Remove Data Import Tests
+# =============================================================================
+
+class TestRemoveResult:
+    """Tests for RemoveResult dataclass."""
+
+    def test_remove_result_creation(self):
+        """Test RemoveResult dataclass creation."""
+        result = RemoveResult(
+            product_name="cms-pps-weights",
+            success=True,
+            removed_path="data/imports/cms-pps-weights/",
+            removed_dvc_file="data/imports/cms-pps-weights.dvc"
+        )
+        assert result.product_name == "cms-pps-weights"
+        assert result.success is True
+        assert result.removed_path == "data/imports/cms-pps-weights/"
+        assert result.warnings == []
+
+    def test_remove_result_with_warnings(self):
+        """Test RemoveResult with warnings."""
+        result = RemoveResult(
+            product_name="test",
+            success=True,
+            warnings=["dvc.yaml still references data/imports/test/"]
+        )
+        assert len(result.warnings) == 1
+
+    def test_remove_result_failure(self):
+        """Test RemoveResult with failure."""
+        result = RemoveResult(
+            product_name="test",
+            success=False,
+            error_message="Dependency not found"
+        )
+        assert result.success is False
+        assert "not found" in result.error_message
+
+
+class TestRemoveDependencyFromMetadata:
+    """Tests for removing dependency from metadata.json."""
+
+    def test_remove_dependency_success(self, mock_project_dir):
+        """Test successful removal of dependency from metadata."""
+        # Setup: add a dependency first
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "data_cms-pps-weights",
+                    "local_path": "data/imports/cms-pps-weights/",
+                    "dvc_file": "data/imports/cms-pps-weights.dvc",
+                    "imported_at": "2025-01-01T00:00:00Z"
+                }]
+            },
+            "ownership": {"created_by": "test"},
+            "access_control": {"teams": []},
+            "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        # Remove the dependency
+        removed = remove_dependency_from_metadata(
+            mock_project_dir, "data_cms-pps-weights"
+        )
+
+        # Verify it was removed
+        assert removed["source"] == "data_cms-pps-weights"
+
+        with open(mock_project_dir / "metadata.json", "r") as f:
+            updated = json.load(f)
+        assert len(updated["metadata"]["data_dependencies"]) == 0
+
+    def test_remove_dependency_not_found(self, mock_project_dir):
+        """Test error when dependency doesn't exist."""
+        with pytest.raises(DependencyNotFoundError):
+            remove_dependency_from_metadata(
+                mock_project_dir, "nonexistent-import"
+            )
+
+    def test_remove_dependency_partial_match(self, mock_project_dir):
+        """Test removal matches by source name without data_ prefix."""
+        metadata = {
+            "project": {"name": "test", "type": "project", "full_name": "prj_test"},
+            "metadata": {
+                "data_dependencies": [{
+                    "source": "data_cms-pps-weights",
+                    "local_path": "data/imports/cms-pps-weights/",
+                    "dvc_file": "data/imports/cms-pps-weights.dvc"
+                }]
+            },
+            "ownership": {}, "access_control": {"teams": []}, "status": {}
+        }
+        with open(mock_project_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        # Should match without data_ prefix
+        removed = remove_dependency_from_metadata(
+            mock_project_dir, "cms-pps-weights"
+        )
+        assert removed["source"] == "data_cms-pps-weights"
+
+
+class TestCheckDvcYamlReferences:
+    """Tests for checking dvc.yaml references."""
+
+    def test_no_dvc_yaml(self, mock_project_dir):
+        """Test when dvc.yaml doesn't exist."""
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 0
+
+    def test_no_references(self, mock_project_dir):
+        """Test when dvc.yaml has no references to removed paths."""
+        dvc_yaml = mock_project_dir / "dvc.yaml"
+        dvc_yaml.write_text("stages:\n  build:\n    cmd: echo hello\n")
+
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 0
+
+    def test_has_references(self, mock_project_dir):
+        """Test when dvc.yaml references removed paths."""
+        dvc_yaml = mock_project_dir / "dvc.yaml"
+        dvc_yaml.write_text(
+            "stages:\n  build:\n    deps:\n      - data/imports/test/file.dta\n"
+        )
+
+        warnings = check_dvc_yaml_references(
+            mock_project_dir, ["data/imports/test/"]
+        )
+        assert len(warnings) == 1
+        assert "dvc.yaml" in warnings[0]
+
+
+class TestRemoveDataImport:
+    """Tests for full remove workflow."""
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    def test_remove_success(self, mock_remove_meta, mock_project_dir):
+        """Test successful removal of data import."""
+        # Setup directory and dvc file
+        import_dir = mock_project_dir / "data" / "imports" / "cms-pps-weights"
+        import_dir.mkdir(parents=True)
+        (import_dir / "test.dta").write_text("test data")
+        dvc_file = mock_project_dir / "data" / "imports" / "cms-pps-weights.dvc"
+        dvc_file.write_text("md5: abc123\n")
+
+        mock_remove_meta.return_value = {
+            "source": "data_cms-pps-weights",
+            "local_path": "data/imports/cms-pps-weights/",
+            "dvc_file": "data/imports/cms-pps-weights.dvc"
+        }
+
+        result = remove_data_import(mock_project_dir, "cms-pps-weights")
+
+        assert result.success is True
+        assert not import_dir.exists()
+        assert not dvc_file.exists()
+
+    def test_remove_not_found(self, mock_project_dir):
+        """Test error when import doesn't exist in metadata."""
+        result = remove_data_import(mock_project_dir, "nonexistent")
+
+        assert result.success is False
+        assert "not found" in result.error_message.lower()
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    @patch('mintd.data_import.check_dvc_yaml_references')
+    def test_remove_with_warnings(self, mock_check, mock_remove_meta, mock_project_dir):
+        """Test removal warns about dvc.yaml references."""
+        import_dir = mock_project_dir / "data" / "imports" / "test"
+        import_dir.mkdir(parents=True)
+
+        mock_remove_meta.return_value = {
+            "source": "data_test",
+            "local_path": "data/imports/test/",
+            "dvc_file": "data/imports/test.dvc"
+        }
+        mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
+
+        result = remove_data_import(mock_project_dir, "test", force=False)
+
+        assert result.success is False
+        assert len(result.warnings) == 1
+
+    @patch('mintd.data_import.remove_dependency_from_metadata')
+    @patch('mintd.data_import.check_dvc_yaml_references')
+    def test_remove_force_ignores_warnings(self, mock_check, mock_remove_meta, mock_project_dir):
+        """Test --force removes despite dvc.yaml references."""
+        import_dir = mock_project_dir / "data" / "imports" / "test"
+        import_dir.mkdir(parents=True)
+
+        mock_remove_meta.return_value = {
+            "source": "data_test",
+            "local_path": "data/imports/test/",
+            "dvc_file": "data/imports/test.dvc"
+        }
+        mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
+
+        result = remove_data_import(mock_project_dir, "test", force=True)
+
+        assert result.success is True
+        assert len(result.warnings) == 1
+
+
+class TestRemoveCLI:
+    """Tests for data remove CLI command."""
+
+    def test_data_remove_help(self):
+        """Test data remove command help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "remove", "--help"])
+        assert result.exit_code == 0
+        assert "Remove a data import" in result.output
+
+    @patch('mintd.data_import.remove_data_import')
+    def test_data_remove_success(self, mock_remove, mock_project_dir):
+        """Test successful removal via CLI."""
+        from mintd.cli import main
+        mock_remove.return_value = RemoveResult(
+            product_name="test",
+            success=True,
+            removed_path="data/imports/test/"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "remove", "test", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code == 0
+        mock_remove.assert_called_once()
+
+    @patch('mintd.data_import.remove_data_import')
+    def test_data_remove_not_found(self, mock_remove, mock_project_dir):
+        """Test CLI error when import not found."""
+        from mintd.cli import main
+        mock_remove.return_value = RemoveResult(
+            product_name="nonexistent",
+            success=False,
+            error_message="Dependency not found"
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "remove", "nonexistent", "-p", str(mock_project_dir)
+        ])
+
+        assert result.exit_code != 0

@@ -202,3 +202,8 @@ class DependencyNotFoundError(DataImportError):
 class MetadataUpdateError(DataImportError):
     """Error updating project metadata."""
     pass
+
+
+class DependencyRemovalError(DataImportError):
+    """Error during dependency removal operation."""
+    pass

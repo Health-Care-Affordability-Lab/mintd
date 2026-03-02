@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 import git
 from rich.console import Console
 
-from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError
+from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
 from .registry import get_registry_client, load_project_metadata
 from .shell import dvc_command
 
@@ -42,6 +42,21 @@ class UpdateResult:
     previous_commit: Optional[str] = None
     new_commit: Optional[str] = None
     skipped: bool = False  # True if already up-to-date
+
+
+@dataclass
+class RemoveResult:
+    """Result of a dependency removal operation."""
+    product_name: str
+    success: bool
+    error_message: Optional[str] = None
+    removed_path: Optional[str] = None
+    removed_dvc_file: Optional[str] = None
+    warnings: List[str] = None
+
+    def __post_init__(self):
+        if self.warnings is None:
+            self.warnings = []
 
 
 class ImportTransaction:
@@ -129,7 +144,7 @@ class ImportTransaction:
 
 
 # Re-export exceptions for backwards compatibility
-from .exceptions import DataImportError, MetadataUpdateError, RegistryError, DVCUpdateError, DependencyNotFoundError
+from .exceptions import DataImportError, MetadataUpdateError, RegistryError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
 
 
 def query_data_product(product_name: str) -> Dict[str, Any]:
@@ -678,3 +693,166 @@ def update_dependency_metadata(
 
     with open(metadata_file, 'w') as f:
         json.dump(metadata, f, indent=2)
+
+
+def remove_dependency_from_metadata(
+    project_path: Path,
+    dependency_name: str
+) -> Dict[str, Any]:
+    """Remove a dependency entry from metadata.json.
+
+    Args:
+        project_path: Path to the project
+        dependency_name: Name of the dependency (with or without data_ prefix)
+
+    Returns:
+        The removed dependency info for confirmation
+
+    Raises:
+        DependencyNotFoundError: If dependency not found in metadata
+    """
+    metadata_file = project_path / "metadata.json"
+
+    with open(metadata_file, 'r') as f:
+        metadata = json.load(f)
+
+    dependencies = metadata.get("metadata", {}).get("data_dependencies", [])
+
+    # Find the dependency (match with or without data_ prefix)
+    removed = None
+    remaining = []
+    for dep in dependencies:
+        source = dep.get("source", "")
+        # Match either exact name or with/without data_ prefix
+        if (source == dependency_name or
+            source == f"data_{dependency_name}" or
+            source.replace("data_", "") == dependency_name):
+            removed = dep
+        else:
+            remaining.append(dep)
+
+    if removed is None:
+        raise DependencyNotFoundError(
+            f"Dependency '{dependency_name}' not found in project metadata"
+        )
+
+    # Update metadata
+    metadata["metadata"]["data_dependencies"] = remaining
+
+    with open(metadata_file, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    return removed
+
+
+def check_dvc_yaml_references(
+    project_path: Path,
+    removed_paths: List[str]
+) -> List[str]:
+    """Check if dvc.yaml still references any of the removed paths.
+
+    Args:
+        project_path: Path to the project
+        removed_paths: List of paths that were removed
+
+    Returns:
+        List of warning messages for each reference found
+    """
+    dvc_yaml = project_path / "dvc.yaml"
+    warnings = []
+
+    if not dvc_yaml.exists():
+        return warnings
+
+    content = dvc_yaml.read_text()
+
+    for path in removed_paths:
+        # Normalize path for matching
+        normalized = path.rstrip("/")
+        if normalized in content or path in content:
+            warnings.append(
+                f"Warning: dvc.yaml still references '{path}'. "
+                f"You may need to update your pipeline."
+            )
+
+    return warnings
+
+
+def remove_data_import(
+    project_path: Path,
+    import_name: str,
+    force: bool = False
+) -> RemoveResult:
+    """Remove a data import from the project.
+
+    Args:
+        project_path: Path to the project
+        import_name: Name of the import to remove (e.g., "cms-pps-weights")
+        force: If True, remove even if dvc.yaml still references paths
+
+    Returns:
+        RemoveResult with operation details
+    """
+    result = RemoveResult(product_name=import_name, success=False)
+
+    try:
+        # Remove from metadata first (validates the dependency exists)
+        removed_info = remove_dependency_from_metadata(project_path, import_name)
+
+        local_path = removed_info.get("local_path", "")
+        dvc_file = removed_info.get("dvc_file", "")
+
+        # Check for dvc.yaml references
+        paths_to_check = [p for p in [local_path] if p]
+        warnings = check_dvc_yaml_references(project_path, paths_to_check)
+        result.warnings = warnings
+
+        if warnings and not force:
+            result.error_message = (
+                "Cannot remove: dvc.yaml still references this import. "
+                "Use --force to remove anyway."
+            )
+            return result
+
+        # Remove the import directory (with path validation)
+        if local_path:
+            import_dir = (project_path / local_path).resolve()
+            # Security: ensure path is within project directory
+            if not str(import_dir).startswith(str(project_path.resolve())):
+                raise DependencyRemovalError(
+                    f"Invalid path in metadata: {local_path}"
+                )
+            if import_dir.exists():
+                shutil.rmtree(import_dir)
+                result.removed_path = local_path
+
+        # Remove the .dvc file (with path validation)
+        if dvc_file:
+            dvc_path = (project_path / dvc_file).resolve()
+            # Security: ensure path is within project directory
+            if not str(dvc_path).startswith(str(project_path.resolve())):
+                raise DependencyRemovalError(
+                    f"Invalid dvc file path in metadata: {dvc_file}"
+                )
+            if dvc_path.exists():
+                dvc_path.unlink()
+                result.removed_dvc_file = dvc_file
+
+        result.success = True
+        console.print(f"✅ Removed data import '{import_name}'", style="green")
+        if result.removed_path:
+            console.print(f"   Removed directory: {result.removed_path}")
+        if result.removed_dvc_file:
+            console.print(f"   Removed DVC file: {result.removed_dvc_file}")
+
+        for warning in warnings:
+            console.print(f"⚠️  {warning}", style="yellow")
+
+        return result
+
+    except (DependencyNotFoundError, DependencyRemovalError) as e:
+        result.error_message = str(e)
+        return result
+    except Exception as e:
+        result.error_message = f"Failed to remove import: {e}"
+        return result

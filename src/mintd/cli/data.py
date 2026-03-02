@@ -78,6 +78,40 @@ def import_(product_name, stage, source_path, dest, rev, project_path):
         raise click.Abort()
 
 
+@data.command(name="remove")
+@click.argument("import_name")
+@click.option("--force", "-f", is_flag=True, help="Remove even if dvc.yaml has references")
+@click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
+def data_remove(import_name, force, project_path):
+    """Remove a data import from the project.
+
+    Removes the import directory, .dvc file, and metadata entry.
+    """
+    from ..data_import import remove_data_import
+
+    project_path = Path(project_path) if project_path else Path.cwd()
+
+    try:
+        result = remove_data_import(
+            project_path=project_path,
+            import_name=import_name,
+            force=force
+        )
+
+        if not result.success:
+            if result.warnings:
+                for warning in result.warnings:
+                    console.print(f"⚠️  {warning}", style="yellow")
+            console.print(f"❌ {result.error_message}", style="red")
+            raise click.Abort()
+
+    except click.Abort:
+        raise
+    except Exception as e:
+        console.print(f"❌ Error: {e}", style="red")
+        raise click.Abort()
+
+
 @data.command(name="list")
 @click.option("--imported", "-i", is_flag=True, help="Show imported dependencies")
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path))

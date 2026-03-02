@@ -93,11 +93,20 @@ mintd config setup --set-credentials  # Set storage credentials
 
 ```bash
 mintd data list                       # List available data products
+mintd data list --imported            # List imported dependencies
 mintd data import <product>           # Import data product as DVC dependency
 mintd data pull <product>             # Pull/download data from registry
 mintd data update                     # Update all DVC imports to latest version
 mintd data update <path>              # Update specific .dvc file
+mintd data remove <import>            # Remove a data import from the project
 ```
+
+### Data Remove Options
+
+| Option | Description |
+|--------|-------------|
+| `-f, --force` | Remove even if dvc.yaml still has references |
+| `-p, --project-path PATH` | Path to project directory |
 
 ### Data Update Options
 
