@@ -95,7 +95,17 @@ mintd config setup --set-credentials  # Set storage credentials
 mintd data list                       # List available data products
 mintd data import <product>           # Import data product as DVC dependency
 mintd data pull <product>             # Pull/download data from registry
+mintd data update                     # Update all DVC imports to latest version
+mintd data update <path>              # Update specific .dvc file
 ```
+
+### Data Update Options
+
+| Option | Description |
+|--------|-------------|
+| `--rev TEXT` | Specific git revision to update to |
+| `--dry-run` | Show what would be updated without making changes |
+| `-p, --project-path PATH` | Path to project directory |
 
 ## Registry Management
 

@@ -87,6 +87,7 @@ mkdocs build
 | `boto3>=1.28` | S3-compatible storage |
 | `pyyaml>=6.0` | YAML configuration |
 | `dvc>=3.0` | Data Version Control |
+| `dvc-s3>=3.0` | S3 storage support for DVC |
 | `pygithub>=2.0.0` | GitHub API integration |
 | `requests>=2.25.0` | HTTP client |
 | `frictionless[excel,json]>=5.0` | Frictionless Table Schema support |
