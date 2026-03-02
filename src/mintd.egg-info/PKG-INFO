@@ -95,15 +95,14 @@ mintd create data --name healthcare_analysis --lang python
 # Create a research analysis project
 mintd create project --name cost_study --lang r
 
-# Create an infrastructure package
-mintd create infra --name stat_tools --lang python
-
 # Create with Registry Integration
 mintd create data --name healthcare_analysis --lang python --register
 
 # Create a secure enclave workspace
 mintd create enclave --name secure_workspace
 ```
+
+> **Note:** For reusable code packages, use standard language tooling (e.g., `uv init`, `poetry init`) instead of mintd.
 
 ## Updating Existing Repositories
 

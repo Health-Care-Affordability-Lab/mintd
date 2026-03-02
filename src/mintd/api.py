@@ -266,7 +266,7 @@ def create_project(
     # Governance and Storage Prefix Logic
     # Default values
     classification = classification or "private"
-    target_team = team or context["admin_team"]
+    target_team = team or "all-lab"
     
     # Calculate storage prefix
     if classification == "public":

@@ -200,13 +200,6 @@ def create_code(name, path, lang, no_git, register, use_current_repo, admin_team
     classification = "private"
     contract_slug = None
 
-    if not public and not contract and not private:
-        console.print()
-        console.print("[bold]Governance Configuration[/bold]")
-
-    if not team:
-        team = click.prompt("Owning team slug")
-
     if public:
         classification = "public"
     elif contract:
@@ -215,8 +208,10 @@ def create_code(name, path, lang, no_git, register, use_current_repo, admin_team
     elif private:
         classification = "private"
     else:
+        console.print()
+        console.print("[bold]Governance Configuration[/bold]")
         classification = click.prompt(
-            "Classification",
+            "Data Classification",
             type=click.Choice(["public", "private", "contract"]),
             default="private"
         )
