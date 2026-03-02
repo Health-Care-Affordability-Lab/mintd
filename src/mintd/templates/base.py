@@ -224,6 +224,8 @@ class BaseTemplate(ABC):
             "platform_os": context.get("platform_os", "linux"),
             "command_sep": context.get("command_sep", "&&"),
             "stata_executable": context.get("stata_executable", "stata"),
+            # Source directory for templates (used by pre-commit hooks)
+            "source_dir": self.source_dir,
         }
 
         # Add mint version information
