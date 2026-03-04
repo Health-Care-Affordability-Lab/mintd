@@ -25,6 +25,14 @@ mintd create project --name <name> --lang <language> [OPTIONS]
 
 Creates a project repository (`prj__{name}`).
 
+### Track Code Repository
+
+```bash
+mintd create code --name <name> --lang <language> [OPTIONS]
+```
+
+Tracks a code-only repository (library, package, tool) by dropping a `metadata.json` for governance, ownership, and mirroring. No directory scaffold is created.
+
 ### Create Enclave Workspace
 
 ```bash
@@ -60,7 +68,7 @@ mintd create custom <template_name> --name <name> [OPTIONS]
 
 ### Governance Options
 
-These options are available for `data` and `project` commands:
+These options are available for `data`, `project`, and `code` commands:
 
 | Option | Description |
 |--------|-------------|
@@ -86,12 +94,24 @@ mintd config setup --set-credentials  # Set storage credentials
 ```bash
 mintd data list                       # List available data products
 mintd data list --imported            # List imported dependencies
-mintd data import <product>           # Import data product as DVC dependency
+mintd data import <product>           # Import data product as DVC dependency (data/project repos)
 mintd data pull <product>             # Pull/download data from registry
+mintd data push                       # Push all DVC-tracked data to project remote
+mintd data push <targets>             # Push specific .dvc files or stages
 mintd data update                     # Update all DVC imports to latest version
 mintd data update <path>              # Update specific .dvc file
 mintd data remove <import>            # Remove a data import from the project
 ```
+
+### Data Push Options
+
+| Option | Description |
+|--------|-------------|
+| `TARGETS` | Specific .dvc files or pipeline stages to push (optional) |
+| `-j, --jobs INT` | Number of parallel upload jobs |
+| `-p, --project-path PATH` | Path to project directory |
+
+The push command reads the DVC remote name from `metadata.json` so data is always pushed to the correct S3 location. There is no need to specify the remote manually.
 
 ### Data Remove Options
 
