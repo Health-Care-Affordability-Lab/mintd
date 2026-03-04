@@ -14,6 +14,32 @@ def data():
     pass
 
 
+@data.command(name="push")
+@click.argument("targets", nargs=-1)
+@click.option("--jobs", "-j", type=int, help="Number of parallel upload jobs")
+@click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
+def data_push(targets, jobs, project_path):
+    """Push DVC-tracked data to the project's configured remote.
+
+    Reads the remote name from metadata.json so data is always pushed to the
+    correct S3 location. Optionally specify TARGETS to push specific .dvc files
+    or pipeline stages instead of everything.
+    """
+    from ..data_import import push_data
+
+    project_path = Path(project_path) if project_path else Path.cwd()
+
+    try:
+        push_data(
+            project_path=project_path,
+            targets=list(targets) if targets else None,
+            jobs=jobs,
+        )
+    except Exception as e:
+        console.print(f"Error: {e}", style="red")
+        raise click.Abort()
+
+
 @data.command(name="pull")
 @click.argument("product_name")
 @click.option("--destination", "-d", help="Local destination directory")

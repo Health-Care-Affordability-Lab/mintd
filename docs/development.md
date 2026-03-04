@@ -24,8 +24,9 @@ mintd/
 ├── src/mintd/           # Main package
 │   ├── cli/             # CLI commands (Click-based)
 │   ├── files/           # Template files (.j2 Jinja2 templates)
-│   ├── templates.py     # Template handling
+│   ├── templates/       # Template classes (data, project, code, enclave)
 │   ├── registry.py      # Data Commons Registry integration
+│   ├── data_import.py   # Data import/push/update/remove operations
 │   └── ...
 ├── tests/               # Test suite
 ├── docs/                # Documentation (MkDocs)

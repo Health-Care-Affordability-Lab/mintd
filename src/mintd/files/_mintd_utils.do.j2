@@ -202,7 +202,10 @@ program define generate_data_schema
     }
 
     * Load data based on extension
-    local ext = lower(substr("`data_path'", strrpos("`data_path'", ".") + 1, .))
+    local ext ""
+    if ustrregexm("`data_path'", "\.([^.]*)$") {
+        local ext = lower(ustrregexs(1))
+    }
 
     if "`ext'" == "csv" {
         quietly import delimited "`data_path'", clear
@@ -217,7 +220,10 @@ program define generate_data_schema
     }
 
     * Generate schema information
-    local filename = substr("`data_path'", strrpos("`data_path'", "/") + 1, .)
+    local filename ""
+    if ustrregexm("`data_path'", "([^/]+)$") {
+        local filename = ustrregexs(1)
+    }
     local observations = _N
     local columns = c(k)
 
@@ -306,7 +312,10 @@ program define generate_data_schema
     * Save schema if output path provided
     if "`output_path'" != "" {
         * Ensure output directory exists
-        local out_dir = substr("`output_path'", 1, strrpos("`output_path'", "/") - 1)
+        local out_dir ""
+        if ustrregexm("`output_path'", "^(.*)/") {
+            local out_dir = ustrregexs(1)
+        }
         capture mkdir "`out_dir'"
 
         copy "`schema_temp'" "`output_path'", replace

@@ -200,60 +200,35 @@ spec = case2vars("baseline")      # Returns {"depvar": "...", "controls": [...]}
 label = pretty_name("outcome")    # Returns "Outcome Variable"
 ```
 
-## Infrastructure Projects (`infra_*`)
+## Code Projects (no prefix)
 
-For reusable packages and tools:
+For libraries, packages, and tools that need governance tracking without directory scaffolding. Unlike data and project types, `mintd create code` only drops a `metadata.json` — no directories, no DVC, no templates. The repo keeps its own layout.
 
-**Python:**
-```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── pyproject.toml            # Package configuration
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   └── stat_tools/           # Main package
-│       └── __init__.py
-├── tests/
-│   └── __init__.py
-├── docs/
-└── .gitignore
+```bash
+mintd create code --name mylib --lang python
 ```
 
-**R:**
 ```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── DESCRIPTION               # R package description
-├── NAMESPACE                 # R namespace exports
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   └── stat_tools.R          # Package functions
-├── tests/
-├── docs/
-└── .gitignore
+mylib/
+└── metadata.json             # Governance, ownership, access control
 ```
 
-**Stata:**
-```
-infra_stat_tools/
-├── README.md
-├── metadata.json
-├── data/
-│   ├── raw/
-│   └── analysis/
-├── code/
-│   ├── stat_tools.ado        # Stata command
-│   └── stat_tools.sthlp      # Help file
-├── tests/
-├── docs/
-└── .gitignore
-```
+Use this when you want the registry to track a code repository for governance, mirroring, or discoverability, but the repo manages its own structure.
+
+### When to Use Code vs. Data
+
+Code should live inside a `data` repo until there's a reason to extract it. The trigger for extraction is **a second consumer**:
+
+1. You build a data product with specialized code (e.g., HHI calculation)
+2. Another project needs the *code*, not just the output
+3. Extract the code into a standalone package and track it with `mintd create code`
+
+### Extraction Checklist
+
+- [ ] Second consumer exists (not hypothetical)
+- [ ] Code has clear API boundary (inputs/outputs well-defined)
+- [ ] Can be versioned independently of the data pipeline
+- [ ] Has tests that run without the full data pipeline
 
 ## Secure Enclave Projects (`enclave_*`)
 

@@ -203,11 +203,11 @@ def utils(path):
 
             console.print(f"✅ Updated mintd version in metadata.json to {mint_info['mint_version']}")
 
-            from ..templates import DataTemplate, EnclaveTemplate, InfraTemplate, ProjectTemplate
+            from ..templates import DataTemplate, EnclaveTemplate, ProjectTemplate
 
             template_map = {
                 "data": DataTemplate, "project": ProjectTemplate, "prj": ProjectTemplate,
-                "infra": InfraTemplate, "enclave": EnclaveTemplate
+                "enclave": EnclaveTemplate
             }
             template_class = template_map.get(project_type)
             if not template_class:

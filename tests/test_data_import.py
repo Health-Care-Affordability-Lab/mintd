@@ -15,7 +15,8 @@ from mintd.data_import import (
     query_data_product, validate_project_directory,
     run_dvc_import, run_dvc_update, update_project_metadata, update_dependency_metadata,
     update_single_import, update_all_imports,
-    import_data_product, pull_data_product, list_data_products,
+    import_data_product, pull_data_product, push_data, get_project_remote,
+    list_data_products,
     remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import
 )
 
@@ -194,14 +195,33 @@ class TestProjectValidation:
         with pytest.raises(DataImportError, match="Not a mintd project directory"):
             validate_project_directory(temp_dir)
 
+    def test_validate_project_directory_valid_data_type(self, temp_dir):
+        """Test validation passes for data project type."""
+        metadata = {
+            "project": {
+                "name": "test_data",
+                "type": "data",
+                "full_name": "data_test_data"
+            },
+            "metadata": {},
+            "ownership": {},
+            "access_control": {"teams": [{"name": "test", "permission": "admin"}]},
+            "status": {}
+        }
+
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        # Should not raise exception
+        validate_project_directory(temp_dir)
+
     def test_validate_project_directory_invalid_type(self, temp_dir):
-        """Test validation fails for invalid project type."""
-        # Create metadata with invalid type
+        """Test validation fails for unsupported project type."""
         metadata = {
             "project": {
                 "name": "test_project",
-                "type": "invalid",
-                "full_name": "prj_test_project"
+                "type": "code",
+                "full_name": "test_project"
             },
             "metadata": {},
             "ownership": {},
@@ -382,6 +402,203 @@ class TestPullDataProduct:
         )
 
         assert success == True
+
+
+# =============================================================================
+# Push Data Tests
+# =============================================================================
+
+class TestGetProjectRemote:
+    """Tests for get_project_remote."""
+
+    def test_get_remote_from_metadata(self, temp_dir):
+        """Test reading remote name from metadata.json."""
+        metadata = {
+            "project": {"name": "test", "type": "data", "full_name": "data_test"},
+            "storage": {
+                "dvc": {
+                    "remote_name": "data_test",
+                    "remote_url": "s3://bucket/lab/data_test/"
+                }
+            }
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        remote = get_project_remote(temp_dir)
+        assert remote == "data_test"
+
+    def test_get_remote_no_metadata(self, temp_dir):
+        """Test error when metadata.json is missing."""
+        with pytest.raises(DataImportError, match="Not a mintd project"):
+            get_project_remote(temp_dir)
+
+    def test_get_remote_no_dvc_config(self, temp_dir):
+        """Test error when DVC remote is not configured in metadata."""
+        metadata = {
+            "project": {"name": "test", "type": "data"},
+            "storage": {}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        with pytest.raises(DataImportError, match="No DVC remote configured"):
+            get_project_remote(temp_dir)
+
+    def test_get_remote_empty_remote_name(self, temp_dir):
+        """Test error when remote_name is empty string."""
+        metadata = {
+            "project": {"name": "test", "type": "data"},
+            "storage": {"dvc": {"remote_name": "", "remote_url": ""}}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        with pytest.raises(DataImportError, match="No DVC remote configured"):
+            get_project_remote(temp_dir)
+
+
+class TestPushData:
+    """Tests for push_data function."""
+
+    @patch('subprocess.run')
+    def test_push_data_success(self, mock_run, temp_dir):
+        """Test successful DVC push."""
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+
+        metadata = {
+            "project": {"name": "test", "type": "data", "full_name": "data_test"},
+            "storage": {
+                "dvc": {
+                    "remote_name": "data_test",
+                    "remote_url": "s3://bucket/lab/data_test/"
+                }
+            }
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        result = push_data(project_path=temp_dir)
+        assert result is True
+
+        # Verify dvc push was called with correct remote
+        call_args = mock_run.call_args[0][0]
+        assert "push" in call_args
+        assert "-r" in call_args
+        assert "data_test" in call_args
+
+    @patch('subprocess.run')
+    def test_push_data_with_targets(self, mock_run, temp_dir):
+        """Test push with specific targets."""
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+
+        metadata = {
+            "project": {"name": "test", "type": "data", "full_name": "data_test"},
+            "storage": {"dvc": {"remote_name": "data_test", "remote_url": "s3://x/"}}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        push_data(project_path=temp_dir, targets=["data/raw.dvc"])
+
+        call_args = mock_run.call_args[0][0]
+        assert "data/raw.dvc" in call_args
+
+    @patch('subprocess.run')
+    def test_push_data_with_jobs(self, mock_run, temp_dir):
+        """Test push with parallel jobs option."""
+        mock_run.return_value = Mock(returncode=0, stdout="", stderr="")
+
+        metadata = {
+            "project": {"name": "test", "type": "data", "full_name": "data_test"},
+            "storage": {"dvc": {"remote_name": "data_test", "remote_url": "s3://x/"}}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        push_data(project_path=temp_dir, jobs=4)
+
+        call_args = mock_run.call_args[0][0]
+        assert "-j" in call_args
+        assert "4" in call_args
+
+    def test_push_data_no_remote(self, temp_dir):
+        """Test push fails gracefully when no remote configured."""
+        metadata = {"project": {"name": "test"}, "storage": {}}
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        with pytest.raises(DataImportError, match="No DVC remote configured"):
+            push_data(project_path=temp_dir)
+
+
+class TestPushCLI:
+    """Tests for data push CLI command."""
+
+    def test_data_push_help(self):
+        """Test data push command help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "push", "--help"])
+        assert result.exit_code == 0
+        assert "Push DVC-tracked data" in result.output
+
+    @patch('mintd.data_import.push_data')
+    def test_data_push_success(self, mock_push, temp_dir):
+        """Test successful push via CLI."""
+        from mintd.cli import main
+        mock_push.return_value = True
+
+        # Create metadata so the path exists
+        metadata = {
+            "project": {"name": "test", "type": "data"},
+            "storage": {"dvc": {"remote_name": "data_test", "remote_url": "s3://x/"}}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "push", "-p", str(temp_dir)])
+
+        assert result.exit_code == 0
+        mock_push.assert_called_once()
+
+    @patch('mintd.data_import.push_data')
+    def test_data_push_with_targets(self, mock_push, temp_dir):
+        """Test push with specific targets via CLI."""
+        from mintd.cli import main
+        mock_push.return_value = True
+
+        metadata = {
+            "project": {"name": "test", "type": "data"},
+            "storage": {"dvc": {"remote_name": "data_test", "remote_url": "s3://x/"}}
+        }
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "push", "data/raw.dvc", "data/clean.dvc", "-p", str(temp_dir)
+        ])
+
+        assert result.exit_code == 0
+        call_kwargs = mock_push.call_args[1]
+        assert call_kwargs["targets"] == ["data/raw.dvc", "data/clean.dvc"]
+
+    @patch('mintd.data_import.push_data')
+    def test_data_push_failure(self, mock_push, temp_dir):
+        """Test CLI handles push failure."""
+        from mintd.cli import main
+        mock_push.side_effect = DataImportError("No DVC remote configured")
+
+        metadata = {"project": {"name": "test"}, "storage": {}}
+        with open(temp_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f)
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "push", "-p", str(temp_dir)])
+
+        assert result.exit_code != 0
 
 
 # =============================================================================

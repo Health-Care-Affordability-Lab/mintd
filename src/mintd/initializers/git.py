@@ -43,7 +43,7 @@ def create_gitignore(project_path: Path, project_type: str) -> None:
 
     Args:
         project_path: Path to the project directory
-        project_type: Type of project ("data", "project", "infra")
+        project_type: Type of project ("data", "project")
     """
     # The .gitignore is already created by the template system
     # This function can be extended later for project-type-specific additions

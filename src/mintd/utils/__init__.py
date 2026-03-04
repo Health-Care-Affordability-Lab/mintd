@@ -260,17 +260,20 @@ def format_project_name(project_type: str, name: str) -> str:
     """Format a full project name with the appropriate prefix.
 
     Args:
-        project_type: Type of project ("data", "project", or "infra")
+        project_type: Type of project ("data" or "project")
         name: Base project name
 
     Returns:
         Full project name with prefix
+
+    Note:
+        The "infra" type was removed in v0.5.0. Use "data" for repos
+        that produce datasets, or standard language tooling for pure
+        code packages.
     """
     if project_type == "data":
         return f"data_{name}"
     elif project_type == "project":
         return f"prj_{name}"
-    elif project_type == "infra":
-        return f"infra_{name}"
     else:
         raise ValueError(f"Unknown project type: {project_type}")

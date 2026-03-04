@@ -1,7 +1,7 @@
 """mintd - Lab Project Scaffolding Tool
 
 A Python package that automates the creation of standardized project repositories
-(data_, prj__, infra_) with pre-configured Git and DVC initialization.
+(data_, prj_) with pre-configured Git and DVC initialization.
 """
 
 __version__ = "0.1.0"

@@ -20,9 +20,11 @@ mintd create data --name hospital_project --lang python
 # Create a research analysis project
 mintd create project --name cost_study --lang r
 
-# Create an infrastructure package
-mintd create infra --name stat_tools --lang python
+# Track a code-only repo (metadata only, no scaffold)
+mintd create code --name mylib --lang python
 ```
+
+> **Note:** `mintd create code` only drops a `metadata.json` for governance/mirroring — no directory scaffold. See [Project Types](project-types.md#code-projects-no-prefix) for details.
 
 ## With Registry Integration
 

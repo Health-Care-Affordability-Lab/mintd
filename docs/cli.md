@@ -25,13 +25,13 @@ mintd create project --name <name> --lang <language> [OPTIONS]
 
 Creates a project repository (`prj__{name}`).
 
-### Create Infrastructure
+### Track Code Repository
 
 ```bash
-mintd create infra --name <name> --lang <language> [OPTIONS]
+mintd create code --name <name> --lang <language> [OPTIONS]
 ```
 
-Creates an infrastructure repository (`infra_{name}`).
+Tracks a code-only repository (library, package, tool) by dropping a `metadata.json` for governance, ownership, and mirroring. No directory scaffold is created.
 
 ### Create Enclave Workspace
 
@@ -59,7 +59,7 @@ mintd create custom <template_name> --name <name> [OPTIONS]
 |--------|-------------|
 | `-n, --name TEXT` | Project name (required) |
 | `-p, --path PATH` | Output directory (default: current) |
-| `--lang TEXT` | Primary programming language (`python\|r\|stata`), required for data/project/infra |
+| `--lang TEXT` | Primary programming language (`python\|r\|stata`), required for data/project |
 | `--no-git` | Skip Git initialization |
 | `--no-dvc` | Skip DVC initialization |
 | `--bucket TEXT` | Custom DVC bucket name |
@@ -68,7 +68,7 @@ mintd create custom <template_name> --name <name> [OPTIONS]
 
 ### Governance Options
 
-These options are available for `data`, `project`, and `infra` commands:
+These options are available for `data`, `project`, and `code` commands:
 
 | Option | Description |
 |--------|-------------|
@@ -94,12 +94,24 @@ mintd config setup --set-credentials  # Set storage credentials
 ```bash
 mintd data list                       # List available data products
 mintd data list --imported            # List imported dependencies
-mintd data import <product>           # Import data product as DVC dependency
+mintd data import <product>           # Import data product as DVC dependency (data/project repos)
 mintd data pull <product>             # Pull/download data from registry
+mintd data push                       # Push all DVC-tracked data to project remote
+mintd data push <targets>             # Push specific .dvc files or stages
 mintd data update                     # Update all DVC imports to latest version
 mintd data update <path>              # Update specific .dvc file
 mintd data remove <import>            # Remove a data import from the project
 ```
+
+### Data Push Options
+
+| Option | Description |
+|--------|-------------|
+| `TARGETS` | Specific .dvc files or pipeline stages to push (optional) |
+| `-j, --jobs INT` | Number of parallel upload jobs |
+| `-p, --project-path PATH` | Path to project directory |
+
+The push command reads the DVC remote name from `metadata.json` so data is always pushed to the correct S3 location. There is no need to specify the remote manually.
 
 ### Data Remove Options
 

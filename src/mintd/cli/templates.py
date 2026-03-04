@@ -27,7 +27,6 @@ def list_templates():
 
     table.add_row("project", "prj_", "Built-in", "Standard research project")
     table.add_row("data", "data_", "Built-in", "Data product")
-    table.add_row("infra", "infra_", "Built-in", "Infrastructure library")
     table.add_row("enclave", "enclave_", "Built-in", "Secure data enclave")
 
     custom_templates = load_custom_templates()

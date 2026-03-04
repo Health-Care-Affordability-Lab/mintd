@@ -30,15 +30,14 @@
 
 {pstd}
 {cmd:mintd} creates standardized project repositories using the mintd Python package.
-This command provides Stata users with easy access to create data repositories,
-research projects, and infrastructure packages with proper versioning and structure.
+This command provides Stata users with easy access to create data repositories
+and research projects with proper versioning and structure.
 
 {pstd}
-The command supports three project types:
+The command supports two project types:
 {p2colset 9 18 20 2}{...}
 {p2col :{it:data}}Data product repositories ({cmd:data_}{it:name}){p_end}
 {p2col :{it:project}}Research project repositories ({cmd:prj__}{it:name}){p_end}
-{p2col :{it:infra}}Infrastructure package repositories ({cmd:infra_}{it:name}){p_end}
 {p2colreset}{...}
 
 {pstd}
@@ -54,7 +53,7 @@ Projects are created with:
 {title:Options}
 
 {p2colset 5 18 20 2}{...}
-{p2col :{cmdab:t:ype}({it:string})}Project type: {cmd:data}, {cmd:project}, or {cmd:infra}{p_end}
+{p2col :{cmdab:t:ype}({it:string})}Project type: {cmd:data} or {cmd:project}{p_end}
 {p2col :{cmdab:n:ame}({it:string})}Project name (required){p_end}
 {p2col :{cmdab:p:ath}({it:string})}Output directory (default: current directory){p_end}
 {p2col :{cmdab:nog:it}}Skip Git repository initialization{p_end}
@@ -70,9 +69,6 @@ Projects are created with:
 
 {pstd}Create a research project in a specific location:{p_end}
 {phang2}{cmd:. mintd, type(project) name(hospital_closures) path(/path/to/repos)}{p_end}
-
-{pstd}Create an infrastructure package without Git initialization:{p_end}
-{phang2}{cmd:. mintd, type(infra) name(price_index) nogit}{p_end}
 
 {pstd}Create a project with custom DVC bucket:{p_end}
 {phang2}{cmd:. mintd, type(data) name(mydata) bucket(my-custom-bucket)}{p_end}

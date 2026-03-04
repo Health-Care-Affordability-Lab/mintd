@@ -39,14 +39,6 @@ class LanguageStrategy(ABC):
         """Return files for Data template."""
         return []
 
-    def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        """Return structure for Infra (Library) template."""
-        return {}
-
-    def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        """Return files for Infra (Library) template."""
-        return []
-
 
 class PythonStrategy(LanguageStrategy):
     """Python language strategy."""
@@ -97,26 +89,6 @@ class PythonStrategy(LanguageStrategy):
             (f"{source_dir}/ingest.py", "ingest.py.j2"),
             (f"{source_dir}/clean.py", "clean.py.j2"),
             (f"{source_dir}/validate.py", "validate.py.j2"),
-        ]
-
-    def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        return {
-            "pyproject.toml": None,
-            source_dir: {
-                package_name: {
-                    "__init__.py": None,
-                },
-            },
-            "tests": {
-                "__init__.py": None,
-            },
-        }
-
-    def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return [
-            ("pyproject.toml", "pyproject_infra.toml.j2"),
-            (f"{source_dir}/{package_name}/__init__.py", "__init__.py.j2"),
-            ("tests/__init__.py", "__init__.py.j2"),
         ]
 
 
@@ -179,25 +151,6 @@ class RStrategy(LanguageStrategy):
             (f"{source_dir}/validate.R", "validate.R.j2"),
         ]
 
-    def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        # R package structure using code/ directory for consistency with other mintd projects
-        # Note: Standard R packages use R/ directory, but we use code/ for mintd consistency.
-        # Users can configure .Rbuildignore or symlink if needed for CRAN submission.
-        return {
-            "DESCRIPTION": None,
-            "NAMESPACE": None,
-            source_dir: {
-                f"{package_name}.R": None,
-            }
-        }
-
-    def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return [
-            ("DESCRIPTION", "DESCRIPTION_infra.j2"),
-            ("NAMESPACE", "NAMESPACE.j2"),
-            (f"{source_dir}/{package_name}.R", "package.R.j2"),
-        ]
-
 
 class StataStrategy(LanguageStrategy):
     """Stata language strategy."""
@@ -252,18 +205,4 @@ class StataStrategy(LanguageStrategy):
             (f"{source_dir}/clean.do", "clean.do.j2"),
             (f"{source_dir}/validate.do", "validate.do.j2"),
             ("schemas/generate_schema.py", "generate_schema.py.j2"),
-        ]
-        
-    def get_infra_structure(self, package_name: str, source_dir: str = "code") -> Dict[str, Any]:
-        return {
-            source_dir: {
-                f"{package_name}.ado": None,
-                f"{package_name}.sthlp": None,
-            }
-        }
-
-    def get_infra_files(self, package_name: str, source_dir: str = "code") -> List[Tuple[str, str]]:
-        return [
-            (f"{source_dir}/{package_name}.ado", "package.ado.j2"),
-            (f"{source_dir}/{package_name}.sthlp", "package.sthlp.j2"),
         ]
