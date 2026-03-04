@@ -288,6 +288,7 @@ def get_registry_url() -> str:
     )
 
 
+
 def set_storage_credentials(access_key: str, secret_key: str) -> None:
     """Store S3 credentials securely in keychain.
 
