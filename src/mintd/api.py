@@ -39,7 +39,7 @@ class ProjectBuilder:
         """Initialize the builder with required parameters.
 
         Args:
-            project_type: Type of project ("data", "project", "enclave")
+            project_type: Type of project ("data", "project", "code", "enclave")
             name: Project name (without prefix)
             language: Primary programming language ("python", "r", "stata")
         """
@@ -195,14 +195,13 @@ def create_project(
     """Main API function called by both CLI and Stata.
 
     Args:
-        project_type: Type of project ("data", "project", or "enclave")
+        project_type: Type of project ("data", "project", "code", or "enclave")
         name: Project name (without prefix)
         path: Directory to create project in
         language: Primary programming language ("python", "r", or "stata")
         init_git: Whether to initialize Git
         init_dvc: Whether to initialize DVC
         bucket_name: Override bucket name for DVC
-        register_project: Whether to register project with Data Commons Registry
         register_project: Whether to register project with Data Commons Registry
         use_current_repo: Whether to use current directory as project root (when in existing git repo)
         registry_url: Data Commons Registry GitHub URL (required for enclaves)

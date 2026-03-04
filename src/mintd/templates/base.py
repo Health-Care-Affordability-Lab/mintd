@@ -96,7 +96,7 @@ class BaseTemplate(ABC):
                 updates = self.strategy.get_project_structure(self.source_dir)
             elif self.template_type == "data":
                 updates = self.strategy.get_data_structure(self.source_dir)
-            # Infra requires dynamic handling in the subclass, so we skip it here.
+            # Code type has no scaffold, so we skip it here.
             
             self._merge_structure(structure, updates)
 
@@ -151,7 +151,7 @@ class BaseTemplate(ABC):
             self.strategy = StataStrategy()
         else:
             # Fallback or error? For now fallback to None or raise
-            # Only Project, Data, Infra really use it. Enclave might not.
+            # Only Project and Data really use it. Enclave and Code might not.
             self.strategy = None
 
         use_current_repo = context.get("use_current_repo", False)
