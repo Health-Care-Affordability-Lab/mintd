@@ -74,7 +74,7 @@ def data_pull(product_name, destination, stage, path):
 @click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
 def import_(product_name, stage, source_path, dest, rev, project_path):
     """Import data product as DVC dependency into current project."""
-    from ..data_import import import_data_product, query_data_product, update_project_metadata
+    from ..data_import import import_data_product
 
     project_path = Path(project_path) if project_path else Path.cwd()
 
@@ -88,14 +88,7 @@ def import_(product_name, stage, source_path, dest, rev, project_path):
             stage=stage, path=source_path, dest=dest, repo_rev=rev
         )
 
-        if result.success:
-            try:
-                product_info = query_data_product(product_name)
-                update_project_metadata(project_path, result, product_info)
-                console.print("✅ Metadata updated with dependency information", style="green")
-            except Exception as e:
-                console.print(f"⚠️ Import succeeded but metadata update failed: {e}", style="yellow")
-        else:
+        if not result.success:
             console.print(f"❌ Import failed: {result.error_message}", style="red")
             raise click.Abort()
 

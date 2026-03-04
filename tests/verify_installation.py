@@ -65,7 +65,7 @@ def verify_installation():
 
     # Check templates
     try:
-        from mintd.templates import DataTemplate, ProjectTemplate, InfraTemplate  # noqa: F401
+        from mintd.templates import DataTemplate, ProjectTemplate, CodeTemplate  # noqa: F401
         check("Template modules import", True)
     except ImportError:
         check("Template modules import", False)
@@ -120,7 +120,7 @@ def verify_installation():
         print("Quick start:")
         print("  mint create data --name myproject")
         print("  mint create project --name analysis")
-        print("  mint create infra --name tools")
+        print("  mint create code --name tools")
         print()
         print("For Stata users, see stata/README.md for installation instructions.")
     else:

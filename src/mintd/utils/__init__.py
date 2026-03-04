@@ -275,5 +275,7 @@ def format_project_name(project_type: str, name: str) -> str:
         return f"data_{name}"
     elif project_type == "project":
         return f"prj_{name}"
+    elif project_type == "code":
+        return name
     else:
         raise ValueError(f"Unknown project type: {project_type}")

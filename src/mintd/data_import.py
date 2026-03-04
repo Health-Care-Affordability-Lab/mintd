@@ -138,7 +138,7 @@ class ImportTransaction:
         return {
             "total": len(self.completed) + len(self.failed),
             "successful": len(self.completed),
-            "failed": len(self.failed),
+            "failed_count": len(self.failed),
             "completed": self.completed,
             "failed": self.failed
         }
@@ -863,13 +863,28 @@ def remove_data_import(
     result = RemoveResult(product_name=import_name, success=False)
 
     try:
-        # Remove from metadata first (validates the dependency exists)
-        removed_info = remove_dependency_from_metadata(project_path, import_name)
+        # Look up the dependency in metadata (validates it exists) without removing yet
+        metadata_file = project_path / "metadata.json"
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        dependencies = metadata.get("metadata", {}).get("data_dependencies", [])
+        matched = None
+        for dep in dependencies:
+            source = dep.get("source", "")
+            if (source == import_name or
+                source == f"data_{import_name}" or
+                source.replace("data_", "") == import_name):
+                matched = dep
+                break
+        if matched is None:
+            raise DependencyNotFoundError(
+                f"Dependency '{import_name}' not found in project metadata"
+            )
 
-        local_path = removed_info.get("local_path", "")
-        dvc_file = removed_info.get("dvc_file", "")
+        local_path = matched.get("local_path", "")
+        dvc_file = matched.get("dvc_file", "")
 
-        # Check for dvc.yaml references
+        # Check for dvc.yaml references BEFORE modifying metadata
         paths_to_check = [p for p in [local_path] if p]
         warnings = check_dvc_yaml_references(project_path, paths_to_check)
         result.warnings = warnings
@@ -880,6 +895,9 @@ def remove_data_import(
                 "Use --force to remove anyway."
             )
             return result
+
+        # Now safe to remove from metadata
+        removed_info = remove_dependency_from_metadata(project_path, import_name)
 
         # Remove the import directory (with path validation)
         if local_path:

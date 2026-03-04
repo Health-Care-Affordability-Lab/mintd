@@ -54,10 +54,10 @@ def test_stata_integration():
         if path:
             print("✅ Stata project creation with options successful")
 
-        # Test infra project creation
-        path = _prjsetup_create("infra", "stata_infra_test", temp_dir, "False", "False", "None")
+        # Test code project creation
+        path = _prjsetup_create("code", "stata_code_test", temp_dir, "False", "True", "None")
         if path:
-            print("✅ Stata infra project creation successful")
+            print("✅ Stata code project creation successful")
 
     print("🎉 Stata integration tests completed successfully!")
 
