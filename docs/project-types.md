@@ -92,7 +92,8 @@ prj_cost_study/
 ├── run_all.py                # Master run script
 ├── data/
 │   ├── raw/                  # Original source data
-│   └── analysis/             # Processed data for analysis
+│   ├── analysis/             # Processed data for analysis
+│   └── enclave-out/          # Outputs downloaded from secure enclaves
 ├── code/
 │   ├── config.py             # Configuration (paths, seeds, lookups)
 │   ├── _mintd_utils.py       # Utilities
@@ -126,7 +127,8 @@ prj_cost_study/
 ├── .Rprofile
 ├── data/
 │   ├── raw/
-│   └── analysis/
+│   ├── analysis/
+│   └── enclave-out/          # Outputs downloaded from secure enclaves
 ├── code/
 │   ├── config.R              # Configuration (paths, seeds, lookups)
 │   ├── _mintd_utils.R
@@ -157,7 +159,8 @@ prj_cost_study/
 ├── run_all.do                # Master run script
 ├── data/
 │   ├── raw/
-│   └── analysis/
+│   ├── analysis/
+│   └── enclave-out/          # Outputs downloaded from secure enclaves
 ├── code/
 │   ├── config.do             # Configuration (paths, seeds, lookups)
 │   ├── _mintd_utils.do

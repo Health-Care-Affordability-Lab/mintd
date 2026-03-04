@@ -28,6 +28,9 @@ class ProjectTemplate(BaseTemplate):
                 "analysis": {
                     ".gitkeep": None,
                 },
+                "enclave-out": {
+                    ".gitkeep": None,
+                },
             },
             self.source_dir: {
                 "01_data_prep": {

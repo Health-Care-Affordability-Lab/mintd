@@ -25,7 +25,6 @@ class StorageConfig:
     endpoint: str = ""
     region: str = ""
     versioning: bool = True
-    cache_dir: str = ""
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "StorageConfig":
@@ -36,7 +35,6 @@ class StorageConfig:
             endpoint=data.get("endpoint", ""),
             region=data.get("region", ""),
             versioning=data.get("versioning", True),
-            cache_dir=data.get("cache_dir", str(Path.home() / ".mintd" / "cache")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -47,7 +45,6 @@ class StorageConfig:
             "endpoint": self.endpoint,
             "region": self.region,
             "versioning": self.versioning,
-            "cache_dir": self.cache_dir,
         }
 
     def validate(self) -> None:
@@ -291,25 +288,6 @@ def get_registry_url() -> str:
     )
 
 
-def get_cache_dir() -> str:
-    """Get the shared DVC cache directory from config.
-
-    Returns the configured shared cache directory. Defaults to ~/.mintd/cache
-    if not explicitly configured.
-
-    Returns:
-        Absolute path to the shared DVC cache directory
-    """
-    config = get_config()
-    storage = config.get("storage", {})
-    cache_dir = storage.get("cache_dir", "")
-
-    if cache_dir:
-        return cache_dir
-
-    # Default location
-    return str(Path.home() / ".mintd" / "cache")
-
 
 def set_storage_credentials(access_key: str, secret_key: str) -> None:
     """Store S3 credentials securely in keychain.
@@ -386,8 +364,6 @@ def _get_default_config() -> dict:
     current_platform = get_platform()
     detected_stata = detect_stata_executable()
     
-    default_cache_dir = str(Path.home() / ".mintd" / "cache")
-
     return {
         "storage": {
             "provider": "s3",
@@ -395,7 +371,6 @@ def _get_default_config() -> dict:
             "region": "",
             "bucket_prefix": "",
             "versioning": True,
-            "cache_dir": default_cache_dir,
         },
         "registry": {
             "url": "https://github.com/cooper-lab/data-commons-registry",
@@ -473,36 +448,6 @@ def init_config() -> None:
         default=""
     )
     config["storage"]["bucket_prefix"] = bucket_prefix
-
-    # Shared DVC cache directory
-    default_cache = str(Path.home() / ".mintd" / "cache")
-    console.print("\n[bold blue]Shared Data Cache[/bold blue]")
-    console.print("mintd uses a shared DVC cache so data downloaded by one project")
-    console.print("is available to all your projects without re-downloading.")
-    console.print(f"[dim]Your home directory (~/.mintd/cache) is recommended.[/dim]")
-
-    cache_dir = Prompt.ask(
-        "Shared cache directory",
-        default=default_cache
-    )
-    config["storage"]["cache_dir"] = cache_dir
-
-    # Create the cache directory
-    cache_path = Path(cache_dir)
-    cache_path.mkdir(parents=True, exist_ok=True)
-    console.print(f"✅ Cache directory ready: [green]{cache_dir}[/green]")
-
-    # Configure DVC global cache
-    try:
-        import subprocess as _sp
-        _sp.run(
-            ["dvc", "cache", "dir", "--global", cache_dir],
-            capture_output=True, text=True, check=True,
-        )
-        console.print("✅ DVC global cache configured")
-    except Exception as e:
-        console.print(f"[yellow]⚠️  Could not configure DVC global cache: {e}[/yellow]")
-        console.print("[dim]You can set it manually later: dvc cache dir --global " + cache_dir + "[/dim]")
 
     # Author
     author = Prompt.ask(
