@@ -1,7 +1,8 @@
-"""Data import functionality for mintd - pull and import DVC-tracked data.
+"""Data import functionality for mintd - pull, push, and import DVC-tracked data.
 
-Handles pulling data from registered data products and importing DVC dependencies
-into project repositories with robust error handling and rollback support.
+Handles pulling data from registered data products, pushing data to the correct
+DVC remote, and importing DVC dependencies into project repositories with robust
+error handling and rollback support.
 """
 
 import json
@@ -186,9 +187,9 @@ def validate_project_directory(project_path: Path) -> None:
         metadata = load_project_metadata(project_path)
         project_type = metadata["project"]["type"]
 
-        if project_type != "project":
+        if project_type not in ("project", "data"):
             raise DataImportError(
-                f"Data import only supported for project repositories, "
+                f"Data import only supported for project and data repositories, "
                 f"not '{project_type}' repositories"
             )
 
@@ -485,6 +486,72 @@ def pull_data_product(
     except Exception as e:
         console.print(f"❌ Failed to pull data: {e}", style="red")
         return False
+
+
+def get_project_remote(project_path: Path) -> str:
+    """Get the DVC remote name for a mintd project from its metadata.
+
+    Args:
+        project_path: Path to the project directory
+
+    Returns:
+        Remote name string
+
+    Raises:
+        DataImportError: If metadata is missing or has no remote configured
+    """
+    metadata_file = project_path / "metadata.json"
+    if not metadata_file.exists():
+        raise DataImportError(
+            f"Not a mintd project directory. Missing metadata.json in {project_path}"
+        )
+
+    with open(metadata_file, 'r') as f:
+        metadata = json.load(f)
+
+    remote_name = metadata.get("storage", {}).get("dvc", {}).get("remote_name", "")
+    if not remote_name:
+        raise DataImportError(
+            "No DVC remote configured in metadata.json. "
+            "Was this project created with DVC enabled?"
+        )
+
+    return remote_name
+
+
+def push_data(
+    project_path: Path,
+    targets: Optional[List[str]] = None,
+    jobs: Optional[int] = None,
+) -> bool:
+    """Push DVC-tracked data to the project's configured remote.
+
+    Reads the remote name from metadata.json and runs dvc push with the
+    correct -r flag to ensure data goes to the right remote.
+
+    Args:
+        project_path: Path to the project directory
+        targets: Optional list of specific .dvc files or stages to push
+        jobs: Number of parallel upload jobs
+
+    Returns:
+        True if push succeeded
+    """
+    remote_name = get_project_remote(project_path)
+
+    dvc = dvc_command(cwd=project_path)
+    args = ["push", "-r", remote_name]
+
+    if jobs:
+        args.extend(["-j", str(jobs)])
+
+    if targets:
+        args.extend(targets)
+
+    console.print(f"Pushing to remote '{remote_name}'...")
+    dvc.run(*args)
+    console.print("Push complete.", style="green")
+    return True
 
 
 def list_data_products(show_imported: bool = False, project_path: Optional[Path] = None) -> None:
