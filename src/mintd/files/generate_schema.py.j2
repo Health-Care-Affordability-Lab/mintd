@@ -166,9 +166,10 @@ def find_data_files(directory: Path) -> List[Path]:
 
 def main():
     """Generate schema from final data files."""
-    # This script runs from schemas/ directory
-    final_dir = Path("../data/final")
-    schema_dir = Path("v1")
+    # Resolve paths relative to this script's location (schemas/)
+    script_dir = Path(__file__).resolve().parent
+    final_dir = script_dir / ".." / "data" / "final"
+    schema_dir = script_dir / "v1"
     schema_file = schema_dir / "schema.json"
 
     # Ensure output directory exists

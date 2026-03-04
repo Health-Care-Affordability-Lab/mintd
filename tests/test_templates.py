@@ -3,7 +3,10 @@
 import json
 import tempfile
 
+from jinja2 import Environment, FileSystemLoader
+
 from mintd.templates import CodeTemplate, DataTemplate, ProjectTemplate
+from mintd.templates.base import BaseTemplate
 
 
 def test_data_template():
@@ -255,6 +258,66 @@ class TestCodeRegistry:
         # Cleanup
         import shutil
         shutil.rmtree(registry.temp_dir)
+
+
+class TestStataScaffoldBugs:
+    """Regression tests for Stata scaffold bugs."""
+
+    def _render_template(self, template_name, **context):
+        """Render a Jinja2 template with given context."""
+        template = DataTemplate()
+        jinja_env = template.jinja_env
+        tmpl = jinja_env.get_template(template_name)
+        return tmpl.render(**context)
+
+    def test_dvc_yaml_stata_uses_code_wdir(self):
+        """Bug 3: dvc.yaml should use wdir: code for Stata projects."""
+        content = self._render_template(
+            "dvc_data.yaml.j2",
+            language="stata",
+            source_dir="code",
+        )
+        assert "wdir: code" in content
+        assert "wdir: src" not in content
+
+    def test_dvc_yaml_python_uses_src_wdir(self):
+        """dvc.yaml should still use wdir: src for Python projects."""
+        content = self._render_template(
+            "dvc_data.yaml.j2",
+            language="python",
+            source_dir="src",
+        )
+        assert "wdir: src" in content
+        assert "wdir: code" not in content
+
+    def test_dvc_yaml_r_uses_src_wdir(self):
+        """dvc.yaml should still use wdir: src for R projects."""
+        content = self._render_template(
+            "dvc_data.yaml.j2",
+            language="r",
+            source_dir="src",
+        )
+        assert "wdir: src" in content
+        assert "wdir: code" not in content
+
+    def test_mintd_utils_do_no_strrpos(self):
+        """Bug 1: _mintd_utils.do must not use non-existent strrpos function."""
+        content = self._render_template(
+            "_mintd_utils.do.j2",
+            project_name="test_project",
+        )
+        assert "strrpos" not in content
+        assert "ustrregexm" in content
+
+    def test_generate_schema_py_uses_file_path(self):
+        """Bug 2: generate_schema.py should resolve paths via __file__, not CWD."""
+        content = self._render_template(
+            "generate_schema.py.j2",
+            project_name="test_project",
+        )
+        assert '__file__' in content
+        assert 'Path("v1")' not in content
+        assert 'Path("../data/final")' not in content
 
 
 class TestCodeCLI:

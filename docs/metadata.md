@@ -95,7 +95,7 @@ A complex data product like `data_market-competition` might have:
 | Section | Field | Type | Description |
 |---------|-------|------|-------------|
 | `project` | `name` | string | Project name without prefix |
-| `project` | `type` | string | `data` or `project` |
+| `project` | `type` | string | `data`, `project`, or `code` |
 | `project` | `full_name` | string | Full name with prefix (e.g., `data_my-project`) |
 | `metadata` | `version` | string | Data product version |
 | `metadata` | `description` | string | Brief description |

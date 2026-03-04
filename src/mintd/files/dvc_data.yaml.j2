@@ -3,7 +3,7 @@ vars:
 
 stages:
   ingest:
-    wdir: src
+    wdir: {{ source_dir }}
 {% if language == "python" %}
     cmd: ${python_cmd} ingest.py
 {% elif language == "r" %}
@@ -24,7 +24,7 @@ stages:
       - ../data/raw/
 
   clean:
-    wdir: src
+    wdir: {{ source_dir }}
 {% if language == "python" %}
     cmd: ${python_cmd} clean.py
 {% elif language == "r" %}
@@ -46,7 +46,7 @@ stages:
       - ../data/intermediate/
 
   validate:
-    wdir: src
+    wdir: {{ source_dir }}
 {% if language == "python" %}
     cmd: ${python_cmd} validate.py
 {% elif language == "r" %}

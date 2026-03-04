@@ -19,9 +19,12 @@ mintd create data --name hospital_project --lang python
 
 # Create a research analysis project
 mintd create project --name cost_study --lang r
+
+# Track a code-only repo (metadata only, no scaffold)
+mintd create code --name mylib --lang python
 ```
 
-> **Note:** For reusable code packages, use standard language tooling (e.g., `uv init`, `poetry init`, `usethis::create_package()`) instead of mintd. See [Project Types](project-types.md#standalone-packages-no-mintd-scaffolding) for details.
+> **Note:** `mintd create code` only drops a `metadata.json` for governance/mirroring — no directory scaffold. See [Project Types](project-types.md#code-projects-no-prefix) for details.
 
 ## With Registry Integration
 

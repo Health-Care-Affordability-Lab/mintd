@@ -200,17 +200,28 @@ spec = case2vars("baseline")      # Returns {"depvar": "...", "controls": [...]}
 label = pretty_name("outcome")    # Returns "Outcome Variable"
 ```
 
-## Standalone Packages (No mintd Scaffolding)
+## Code Projects (no prefix)
 
-For reusable code packages (Python, R, or Stata), use standard language tooling instead of mintd. Packages have their own conventions that don't need DVC pipelines or data governance metadata.
+For libraries, packages, and tools that need governance tracking without directory scaffolding. Unlike data and project types, `mintd create code` only drops a `metadata.json` — no directories, no DVC, no templates. The repo keeps its own layout.
 
-### When to Create a Package
+```bash
+mintd create code --name mylib --lang python
+```
+
+```
+mylib/
+└── metadata.json             # Governance, ownership, access control
+```
+
+Use this when you want the registry to track a code repository for governance, mirroring, or discoverability, but the repo manages its own structure.
+
+### When to Use Code vs. Data
 
 Code should live inside a `data` repo until there's a reason to extract it. The trigger for extraction is **a second consumer**:
 
 1. You build a data product with specialized code (e.g., HHI calculation)
 2. Another project needs the *code*, not just the output
-3. Extract the code into a standalone package
+3. Extract the code into a standalone package and track it with `mintd create code`
 
 ### Extraction Checklist
 
@@ -218,21 +229,6 @@ Code should live inside a `data` repo until there's a reason to extract it. The 
 - [ ] Code has clear API boundary (inputs/outputs well-defined)
 - [ ] Can be versioned independently of the data pipeline
 - [ ] Has tests that run without the full data pipeline
-
-### Package Setup by Language
-
-**Python:**
-```bash
-uv init my-package  # or: poetry init
-```
-
-**R:**
-```r
-usethis::create_package("mypackage")
-```
-
-**Stata:**
-Create `.ado` and `.sthlp` files manually.
 
 ## Secure Enclave Projects (`enclave_*`)
 
