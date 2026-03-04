@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from ..config import get_config
+from ..config import get_config, get_cache_dir
 from ..exceptions import DVCError
 from ..shell import dvc_command
 
@@ -53,6 +53,17 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
 
         # Initialize DVC
         dvc.run("init")
+
+        # Configure shared cache so all projects share downloaded data
+        cache_dir = get_cache_dir()
+        if cache_dir:
+            try:
+                from pathlib import Path as _Path
+                _Path(cache_dir).mkdir(parents=True, exist_ok=True)
+                dvc.run("cache", "dir", cache_dir)
+            except DVCError:
+                # Non-fatal: project will use its own .dvc/cache
+                pass
 
         # Add remote to LOCAL config (committed to git, shareable with collaborators)
         dvc.run("remote", "add", "-d", remote_name, remote_url)
