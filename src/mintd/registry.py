@@ -495,6 +495,8 @@ This PR updates the catalog entry for **{project_name}**.
 
     def _generate_catalog_entry(self, metadata: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         """Generate a catalog entry for the project using metadata.json values."""
+        from .config import get_config
+
         project_name = metadata["project"]["name"]
         project_type = metadata["project"]["type"]
         full_name = metadata["project"]["full_name"]
@@ -506,19 +508,33 @@ This PR updates the catalog entry for **{project_name}**.
         current_time = datetime.now().isoformat() + 'Z'
         entry['status']['last_updated'] = current_time
 
+        # Read endpoint/region from mintd config for enrichment
+        cfg = get_config()
+        cfg_endpoint = cfg.get("storage", {}).get("endpoint", "")
+        cfg_region = cfg.get("storage", {}).get("region", "")
+
         # Add storage section for data and project types if not present
         if project_type in ['data', 'project'] and 'storage' not in entry:
+            bucket = "lab-data" if project_type == 'data' else "lab-projects"
             entry['storage'] = {
                 'dvc': {
                     'remote_name': full_name,
-                    'bucket': "lab-data" if project_type == 'data' else "lab-projects",
+                    'remote_url': f"s3://{bucket}/{full_name}/",
+                    'bucket': bucket,
                     'path': full_name,
-                    'endpoint': 'https://s3.wasabisys.com',
-                    'region': 'us-east-1'
+                    'endpoint': cfg_endpoint or 'https://s3.wasabisys.com',
+                    'region': cfg_region or 'us-east-1',
                 },
                 'estimated_size': 'TBD',
                 'sensitivity': 'restricted'
             }
+        elif 'storage' in entry and 'dvc' in entry.get('storage', {}):
+            # Enrich existing storage.dvc with endpoint and region if missing
+            dvc = entry['storage']['dvc']
+            if 'endpoint' not in dvc and cfg_endpoint:
+                dvc['endpoint'] = cfg_endpoint
+            if 'region' not in dvc and cfg_region:
+                dvc['region'] = cfg_region
 
         # Add data dependencies for projects if not present
         if project_type == 'project' and 'data_dependencies' not in entry['metadata']:

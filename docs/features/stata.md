@@ -60,13 +60,13 @@ help mintd
 **Option 2: Via Stata's net install**
 ```stata
 // Install Stata package from GitHub (may not work if repository is private)
-net install mintd, from("https://github.com/Cooper-lab/mint/raw/main/stata/")
+net install mintd, from("https://github.com/health-care-affordability-lab/mintd/raw/main/stata/")
 
 // If net install fails, use the automated installer instead:
 mintd_installer, github
 
 // Install Python package
-python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
+python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/health-care-affordability-lab/mintd.git"])
 
 // Verify installation
 help mintd
@@ -76,7 +76,7 @@ help mintd
 
 1. **Install mintd in Stata's Python environment**:
    ```stata
-   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
+   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/health-care-affordability-lab/mintd.git"])
    ```
 
 2. **Install Stata files**:

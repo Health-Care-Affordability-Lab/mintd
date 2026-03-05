@@ -57,11 +57,11 @@ docs = [
 mintd = "mintd.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Cooper-lab/mint"
-Documentation = "https://mint.readthedocs.io/"
-Repository = "https://github.com/Cooper-lab/mint"
-Issues = "https://github.com/Cooper-lab/mint/issues"
-Changelog = "https://github.com/Cooper-lab/mint/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/health-care-affordability-lab/mintd"
+Documentation = "https://health-care-affordability-lab.github.io/mintd/"
+Repository = "https://github.com/health-care-affordability-lab/mintd"
+Issues = "https://github.com/health-care-affordability-lab/mintd/issues"
+Changelog = "https://github.com/health-care-affordability-lab/mintd/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

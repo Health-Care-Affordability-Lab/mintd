@@ -60,7 +60,7 @@ You can install `mintd` directly from GitHub using pip (simplest), or for develo
 
 **Option A: Simple Install (Recommended for Users)**
 ```powershell
-pip install git+https://github.com/Cooper-lab/mint.git
+pip install git+https://github.com/health-care-affordability-lab/mintd.git
 ```
 
 **Option B: Developer Install (for contributing code)**

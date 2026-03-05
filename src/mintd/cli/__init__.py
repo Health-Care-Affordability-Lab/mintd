@@ -8,6 +8,7 @@ split into focused modules for better maintainability.
 from .main import main
 
 # Import all command groups to register them with main
+from . import check  # noqa: F401
 from . import config_cmd  # noqa: F401
 from . import create  # noqa: F401
 from . import data  # noqa: F401

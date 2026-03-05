@@ -17,7 +17,8 @@ from mintd.data_import import (
     update_single_import, update_all_imports,
     import_data_product, pull_data_product, push_data, get_project_remote,
     list_data_products,
-    remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import
+    remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import,
+    list_remote_data_paths, validate_source_path, prompt_stage_selection,
 )
 
 
@@ -339,13 +340,15 @@ class TestImportDataProduct:
     @patch('mintd.data_import.validate_project_directory')
     @patch('mintd.data_import.run_dvc_import')
     @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.validate_source_path')
     def test_import_data_product_success(
-        self, mock_update_metadata, mock_run_dvc, mock_validate, mock_query,
+        self, mock_validate_src, mock_update_metadata, mock_run_dvc, mock_validate, mock_query,
         mock_project_dir, mock_data_product
     ):
         """Test successful data product import."""
         mock_query.return_value = mock_data_product
         mock_run_dvc.return_value = "test.dvc"
+        mock_validate_src.return_value = (True, ["data/final"])
 
         result = import_data_product(
             product_name="data_cms-provider-data-service",
@@ -731,13 +734,15 @@ class TestIntegration:
     @patch('mintd.data_import.query_data_product')
     @patch('mintd.data_import.run_dvc_import')
     @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.validate_source_path')
     def test_import_e2e_workflow(
-        self, mock_update, mock_dvc_import, mock_query,
+        self, mock_validate_src, mock_update, mock_dvc_import, mock_query,
         mock_project_dir, mock_data_product
     ):
         """Test full import workflow end-to-end."""
         mock_query.return_value = mock_data_product
         mock_dvc_import.return_value = "test.dvc"
+        mock_validate_src.return_value = (True, ["data/final"])
 
         result = import_data_product(
             product_name="data_cms-provider-data-service",
@@ -1288,4 +1293,293 @@ class TestRemoveCLI:
             "data", "remove", "nonexistent", "-p", str(mock_project_dir)
         ])
 
+        assert result.exit_code != 0
+
+
+# =============================================================================
+# Smart Import Default Tests (list_remote_data_paths, validate, prompt, --all)
+# =============================================================================
+
+class TestListRemoteDataPaths:
+    """Tests for listing available data paths in a remote repo."""
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_lists_data_directories(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test listing data directories from remote repo via shallow clone."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        # First call: clone, second call: ls-tree
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="raw\nintermediate\nfinal\n"),  # ls-tree
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert "data/raw" in paths
+        assert "data/intermediate" in paths
+        assert "data/final" in paths
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_returns_empty_on_failure(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test returns empty list when git clone fails."""
+        from mintd.exceptions import GitError
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = GitError(
+            message="failed", command=["git"], returncode=1
+        )
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert paths == []
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_with_revision(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test listing paths at a specific revision."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="final\n"),  # ls-tree
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+            rev="v1.0",
+        )
+
+        # Clone call should include --branch v1.0
+        clone_call = mock_git.run.call_args_list[0]
+        assert "--branch" in str(clone_call)
+        assert "v1.0" in str(clone_call)
+        assert "data/final" in paths
+
+
+class TestValidateSourcePath:
+    """Tests for validating that a source path exists in the remote."""
+
+    @patch('mintd.data_import.list_remote_data_paths')
+    def test_path_exists(self, mock_list):
+        """Test validation passes when path exists."""
+        mock_list.return_value = ["data/raw", "data/intermediate", "data/final"]
+
+        exists, available = validate_source_path(
+            repo_url="git@github.com:test/data_test.git",
+            source_path="data/final/",
+        )
+
+        assert exists is True
+        assert "data/final" in available
+
+    @patch('mintd.data_import.list_remote_data_paths')
+    def test_path_not_exists(self, mock_list):
+        """Test validation fails when path doesn't exist."""
+        mock_list.return_value = ["data/raw", "data/intermediate"]
+
+        exists, available = validate_source_path(
+            repo_url="git@github.com:test/data_test.git",
+            source_path="data/final/",
+        )
+
+        assert exists is False
+        assert "data/raw" in available
+        assert "data/intermediate" in available
+
+    @patch('mintd.data_import.list_remote_data_paths')
+    def test_empty_remote(self, mock_list):
+        """Test when remote has no data directories."""
+        mock_list.return_value = []
+
+        exists, available = validate_source_path(
+            repo_url="git@github.com:test/data_test.git",
+            source_path="data/final/",
+        )
+
+        assert exists is False
+        assert available == []
+
+
+class TestPromptStageSelection:
+    """Tests for interactive stage selection."""
+
+    def test_prompt_with_choices(self):
+        """Test prompting user to select from available paths."""
+        from click.testing import CliRunner
+        runner = CliRunner()
+
+        import click
+        @click.command()
+        def _test_cmd():
+            nonlocal selected
+            selected = prompt_stage_selection(
+                ["data/raw", "data/intermediate", "data/final"]
+            )
+
+        selected = None
+        runner.invoke(_test_cmd, input="3\n")
+        assert selected == "data/final"
+
+    def test_prompt_single_choice(self):
+        """Test when only one path is available, auto-selects it."""
+        selected = prompt_stage_selection(["data/raw"])
+        assert selected == "data/raw"
+
+    def test_prompt_no_choices_raises(self):
+        """Test raises error when no paths available."""
+        with pytest.raises(DataImportError, match="No data directories"):
+            prompt_stage_selection([])
+
+
+class TestImportDataProductSmartDefault:
+    """Tests for the updated import_data_product with validation and --all."""
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_default_imports_final(self, mock_validate, mock_query, mock_validate_src,
+                                    mock_dvc_import, mock_update_meta, mock_project_dir,
+                                    mock_data_product):
+        """Test default import targets data/final/ and validates it exists."""
+        mock_query.return_value = mock_data_product
+        mock_validate_src.return_value = (True, ["data/raw", "data/intermediate", "data/final"])
+        mock_dvc_import.return_value = "data/imports/cms-provider-data-service.dvc"
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is True
+        mock_validate_src.assert_called_once()
+        call_args = mock_validate_src.call_args
+        assert "data/final/" in str(call_args)
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_import_all_flag(self, mock_validate, mock_query, mock_validate_src,
+                              mock_dvc_import, mock_update_meta, mock_project_dir,
+                              mock_data_product):
+        """Test --all imports entire data/ directory."""
+        mock_query.return_value = mock_data_product
+        mock_validate_src.return_value = (True, ["data/raw", "data/intermediate", "data/final"])
+        mock_dvc_import.return_value = "data/imports/cms-provider-data-service.dvc"
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+            import_all=True,
+        )
+
+        assert result.success is True
+        dvc_call = mock_dvc_import.call_args
+        # source_path arg should be "data/"
+        assert dvc_call.kwargs.get("source_path") == "data/" or dvc_call[1].get("source_path") == "data/"
+
+    @patch('mintd.data_import.prompt_stage_selection')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_fallback_prompts_when_final_missing(self, mock_validate, mock_query,
+                                                   mock_validate_src, mock_dvc_import,
+                                                   mock_prompt, mock_project_dir,
+                                                   mock_data_product):
+        """Test prompts user when data/final/ doesn't exist."""
+        mock_query.return_value = mock_data_product
+        mock_validate_src.return_value = (False, ["data/raw", "data/intermediate"])
+        mock_prompt.return_value = "data/raw"
+        mock_dvc_import.return_value = "data/imports/cms-provider-data-service.dvc"
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+        )
+
+        mock_prompt.assert_called_once_with(["data/raw", "data/intermediate"])
+
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_fails_when_no_data_dirs(self, mock_validate, mock_query,
+                                      mock_validate_src, mock_project_dir,
+                                      mock_data_product):
+        """Test fails with clear error when no data dirs found."""
+        mock_query.return_value = mock_data_product
+        mock_validate_src.return_value = (False, [])
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is False
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_source_path_skips_validation(self, mock_validate, mock_query,
+                                           mock_dvc_import, mock_update_meta,
+                                           mock_project_dir, mock_data_product):
+        """Test --source-path bypasses smart default validation."""
+        mock_query.return_value = mock_data_product
+        mock_dvc_import.return_value = "custom/path/file.csv.dvc"
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+            path="custom/path/file.csv",
+        )
+
+        assert result.success is True
+
+
+class TestImportCLIAllFlag:
+    """Tests for the --all CLI flag."""
+
+    def test_import_help_shows_all_flag(self):
+        """Test --all flag appears in help."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["data", "import", "--help"])
+        assert result.exit_code == 0
+        assert "--all" in result.output
+
+    @patch('mintd.data_import.import_data_product')
+    def test_import_all_and_stage_mutually_exclusive(self, mock_import):
+        """Test --all and --stage cannot be used together."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "import", "test-product", "--all", "--stage", "raw"
+        ])
+        assert result.exit_code != 0
+
+    @patch('mintd.data_import.import_data_product')
+    def test_import_all_and_source_path_mutually_exclusive(self, mock_import):
+        """Test --all and --source-path cannot be used together."""
+        from mintd.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "import", "test-product", "--all", "--source-path", "some/path"
+        ])
         assert result.exit_code != 0

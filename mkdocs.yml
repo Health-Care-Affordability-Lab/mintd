@@ -1,6 +1,6 @@
 site_name: Mintd
 site_description: Lab project scaffolding tool
-site_url: https://cooper-lab.github.io/mint/
+site_url: https://health-care-affordability-lab.github.io/mintd/
 
 theme:
   name: material

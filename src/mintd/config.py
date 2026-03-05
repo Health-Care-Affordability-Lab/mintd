@@ -373,8 +373,8 @@ def _get_default_config() -> dict:
             "versioning": True,
         },
         "registry": {
-            "url": "https://github.com/cooper-lab/data-commons-registry",
-            "org": "cooper-lab",
+            "url": "https://github.com/health-care-affordability-lab/data-commons-registry",
+            "org": "health-care-affordability-lab",
             "default_branch": "main",
             "admin_team": "infrastructure-admins",
             "researcher_team": "all-researchers",
@@ -469,13 +469,13 @@ def init_config() -> None:
 
     registry_url = Prompt.ask(
         "Registry repository URL",
-        default="https://github.com/cooper-lab/data-commons-registry"
+        default="https://github.com/health-care-affordability-lab/data-commons-registry"
     )
     config["registry"]["url"] = registry_url
 
     registry_org = Prompt.ask(
         "GitHub organization",
-        default="cooper-lab"
+        default="health-care-affordability-lab"
     )
     config["registry"]["org"] = registry_org
 

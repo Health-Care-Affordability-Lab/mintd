@@ -257,7 +257,7 @@ def create_project(
         "command_sep": platform_info["command_separator"],  # '&&' or '&'
         "stata_executable": stata_executable or "stata",  # Fallback to 'stata'
         # Registry context for metadata generation
-        "registry_org": registry_config.get("org", "cooper-lab"),
+        "registry_org": registry_config.get("org", "health-care-affordability-lab"),
         "admin_team": admin_team or registry_config.get("admin_team", "infrastructure-admins"),
         "researcher_team": researcher_team or registry_config.get("researcher_team", "all-researchers"),
     }

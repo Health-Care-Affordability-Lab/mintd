@@ -68,17 +68,18 @@ def init_dvc(project_path: Path, bucket_prefix: str, sensitivity: str = "restric
         if storage.get("versioning", True):
             dvc.run("remote", "modify", remote_name, "version_aware", "true")
 
-        # Also add to GLOBAL config for cross-project convenience
-        dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
+        # Also add to GLOBAL config for cross-project convenience (opt-in)
+        if storage.get("sync_global", True):
+            dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
 
-        if storage.get("endpoint"):
-            dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
+            if storage.get("endpoint"):
+                dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
 
-        if storage.get("region"):
-            dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
+            if storage.get("region"):
+                dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
 
-        if storage.get("versioning", True):
-            dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
+            if storage.get("versioning", True):
+                dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
 
     except DVCError as e:
         # For any DVC-related error, just warn and continue
@@ -176,17 +177,18 @@ def add_dvc_remote(project_path: Path, bucket_prefix: str, sensitivity: str = "r
         if storage.get("versioning", True):
             dvc.run("remote", "modify", remote_name, "version_aware", "true")
 
-        # Also add to GLOBAL config for cross-project convenience
-        dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
+        # Also add to GLOBAL config for cross-project convenience (opt-in)
+        if storage.get("sync_global", True):
+            dvc.run("remote", "add", "--global", "-f", remote_name, remote_url)
 
-        if storage.get("endpoint"):
-            dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
+            if storage.get("endpoint"):
+                dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage["endpoint"])
 
-        if storage.get("region"):
-            dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
+            if storage.get("region"):
+                dvc.run("remote", "modify", "--global", remote_name, "region", storage["region"])
 
-        if storage.get("versioning", True):
-            dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
+            if storage.get("versioning", True):
+                dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
 
     except DVCError as e:
         # For any DVC-related error, just warn and continue

@@ -11,14 +11,15 @@ import tempfile
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import click
 import git
 from rich.console import Console
 
 from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
 from .registry import get_registry_client, load_project_metadata
-from .shell import dvc_command
+from .shell import dvc_command, git_command
 
 console = Console()
 
@@ -148,6 +149,13 @@ class ImportTransaction:
 from .exceptions import DataImportError, MetadataUpdateError, RegistryError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
 
 
+def _https_to_ssh(url: str) -> str:
+    """Convert a GitHub HTTPS URL to SSH format for authentication."""
+    if url.startswith('https://github.com/'):
+        return url.replace('https://github.com/', 'git@github.com:')
+    return url
+
+
 def query_data_product(product_name: str) -> Dict[str, Any]:
     """Query registry for data product information.
 
@@ -219,11 +227,7 @@ def run_dvc_import(
     Raises:
         DVCImportError: If import fails
     """
-    # Convert HTTPS URL to SSH for authentication
-    if repo_url.startswith('https://github.com/'):
-        ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
-    else:
-        ssh_url = repo_url
+    ssh_url = _https_to_ssh(repo_url)
 
     dvc = dvc_command(cwd=project_path)
     args = ["import", ssh_url, source_path, "-o", dest_path]
@@ -232,7 +236,7 @@ def run_dvc_import(
         args.extend(["--rev", repo_rev])
 
     try:
-        dvc.run(*args)
+        dvc.run_live(*args)
 
         # Extract .dvc file path from output or construct it
         # DVC typically creates file.dvc for destination file
@@ -314,15 +318,107 @@ def update_project_metadata(
         raise MetadataUpdateError(f"Failed to update metadata.json: {e}")
 
 
+def list_remote_data_paths(
+    repo_url: str,
+    rev: Optional[str] = None,
+) -> List[str]:
+    """List available data directories in a remote git repository.
+
+    Performs a shallow clone to inspect the data/ directory structure.
+
+    Args:
+        repo_url: SSH or HTTPS URL of the source repository
+        rev: Git revision to inspect (default: HEAD)
+
+    Returns:
+        List of directory paths under data/ (e.g., ["data/raw", "data/final"])
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-ls-"))
+        clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
+        return [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+    except Exception:
+        return []
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def validate_source_path(
+    repo_url: str,
+    source_path: str,
+    rev: Optional[str] = None,
+) -> Tuple[bool, List[str]]:
+    """Validate that a source path exists in the remote repository.
+
+    Args:
+        repo_url: SSH or HTTPS URL of the source repository
+        source_path: Path to validate (e.g., "data/final/")
+        rev: Git revision to check
+
+    Returns:
+        Tuple of (exists: bool, available_paths: List[str])
+    """
+    available = list_remote_data_paths(repo_url, rev=rev)
+    normalized = source_path.rstrip("/")
+    exists = normalized in available
+    return exists, available
+
+
+def prompt_stage_selection(available_paths: List[str]) -> str:
+    """Prompt user to select from available data directories.
+
+    Args:
+        available_paths: List of available data paths
+
+    Returns:
+        Selected path
+
+    Raises:
+        DataImportError: If no paths available
+    """
+    if not available_paths:
+        raise DataImportError(
+            "No data directories found in the source repository"
+        )
+
+    if len(available_paths) == 1:
+        console.print(f"Only one data directory available: {available_paths[0]}")
+        return available_paths[0]
+
+    console.print("\nThe default 'data/final/' was not found. Available directories:")
+    for i, path in enumerate(available_paths, 1):
+        console.print(f"  {i}. {path}")
+
+    choice = click.prompt(
+        "Select a directory to import",
+        type=click.IntRange(1, len(available_paths)),
+    )
+    return available_paths[choice - 1]
+
+
 def import_data_product(
     product_name: str,
     project_path: Path,
     stage: Optional[str] = None,
     path: Optional[str] = None,
     dest: Optional[str] = None,
-    repo_rev: Optional[str] = None
+    repo_rev: Optional[str] = None,
+    import_all: bool = False,
 ) -> ImportResult:
     """Import a data product as a DVC dependency.
+
+    By default imports only data/final/ (the validated output). If data/final/
+    is not found, prompts the user to choose from available directories.
 
     Args:
         product_name: Name of the data product to import
@@ -331,6 +427,7 @@ def import_data_product(
         path: Specific path to import from the product
         dest: Local destination path (default: data/imports/{product_name}/)
         repo_rev: Specific revision to import from
+        import_all: If True, import the entire data/ directory
 
     Returns:
         ImportResult with operation details
@@ -348,24 +445,50 @@ def import_data_product(
         console.print(f"🔍 Querying registry for '{product_name}'...")
         product_info = query_data_product(product_name)
 
-        # Determine what to import
-        if stage and path:
-            raise DataImportError("Cannot specify both --stage and --path")
-        elif not stage and not path:
-            # Default to final stage
-            stage = "final"
+        repo_url = product_info["repository"]["github_url"]
+        ssh_url = _https_to_ssh(repo_url)
 
-        if stage:
-            # Import pipeline stage output
-            source_path = f"data/{stage}/"
+        # Determine what to import — stage, path, and import_all are mutually exclusive
+        exclusive_count = sum(bool(x) for x in [stage, path, import_all])
+        if exclusive_count > 1:
+            raise DataImportError(
+                "Cannot combine --stage, --source-path, and --all. Use only one."
+            )
+
+        if import_all:
+            # Import entire data/ directory
+            source_path = "data/"
             if not dest:
                 dest = f"data/imports/{product_name.replace('data_', '')}/"
-        else:
-            # Import specific path
+        elif path:
+            # Import specific path (skip validation)
             source_path = path
             if not dest:
-                # Use same relative path structure
                 dest = path
+        else:
+            # Smart default: validate data/final/ exists, prompt if not
+            if not stage:
+                stage = "final"
+
+            source_path = f"data/{stage}/"
+
+            exists, available_paths = validate_source_path(
+                repo_url=ssh_url,
+                source_path=source_path,
+                rev=repo_rev,
+            )
+
+            if not exists:
+                if not available_paths:
+                    raise DataImportError(
+                        f"No data directories found in '{product_name}'. "
+                        f"Use --source-path to specify a custom path."
+                    )
+                # Prompt user to select from available paths
+                source_path = prompt_stage_selection(available_paths) + "/"
+
+            if not dest:
+                dest = f"data/imports/{product_name.replace('data_', '')}/"
 
         # Ensure destination directory exists
         dest_path = project_path / dest
@@ -549,7 +672,7 @@ def push_data(
         args.extend(targets)
 
     console.print(f"Pushing to remote '{remote_name}'...")
-    dvc.run(*args)
+    dvc.run_live(*args)
     console.print("Push complete.", style="green")
     return True
 
@@ -633,7 +756,7 @@ def run_dvc_update(
         args.extend(["--rev", rev])
 
     try:
-        result = dvc.run(*args)
+        dvc.run_live(*args)
 
         return UpdateResult(
             dvc_file=dvc_file,

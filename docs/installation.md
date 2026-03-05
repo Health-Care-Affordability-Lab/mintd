@@ -2,32 +2,23 @@
 
 ## Using uv (Recommended)
 
+[uv](https://docs.astral.sh/uv/) is a fast Python package manager that can install `mintd` as a global CLI tool in one command.
+
 ```bash
-# Install uv package manager
+# Install uv (if you don't have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Clone and install mintd
-git clone <repository-url>
-cd mintd
-uv sync --dev
+# Install mintd from GitHub
+uv tool install git+https://github.com/health-care-affordability-lab/mintd.git
 ```
+
+This makes the `mintd` command available globally — no clone or virtual environment needed.
 
 ## Using pip
 
 ```bash
-# Install directly from git (PyPI not available)
-pip install git+https://github.com/Cooper-lab/mint.git
-
-# Install from source (development)
-git clone https://github.com/Cooper-lab/mint.git
-cd mintd
-pip install -e ".[dev]"
-
-# Verify installation
-python verify_installation.py
+pip install git+https://github.com/health-care-affordability-lab/mintd.git
 ```
-
-**Version 1.0.0** includes complete Data Commons Registry integration with tokenless GitOps-based project registration, plus mandatory language selection, parameter-aware logging, and auto-generated utility scripts.
 
 > [!TIP]
 > **Windows Users**: Check out our [Windows Setup Guide](windows-setup.md) for native PowerShell and WSL instructions.
@@ -47,3 +38,7 @@ python verify_installation.py
 ## Next Steps
 
 After installation, proceed to the [Configuration Guide](configuration.md) to set up your environment.
+
+For contributing or developing mintd itself, see the [Development Guide](development.md).
+
+**Source Code**: [github.com/health-care-affordability-lab/mintd](https://github.com/health-care-affordability-lab/mintd)

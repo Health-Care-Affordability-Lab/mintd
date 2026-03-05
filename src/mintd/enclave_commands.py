@@ -15,6 +15,7 @@ import git
 import yaml
 
 from .config import get_config
+from .data_import import run_dvc_import
 from .exceptions import DVCError
 from .registry import query_registry_for_product
 from .shell import dvc_command
@@ -37,6 +38,8 @@ def get_repo_info(repo_name: str) -> Dict:
         'repo_url': repository.get('github_url', ''),
         'dvc_remote_name': dvc_config.get('remote_name', ''),
         'dvc_remote_url': dvc_config.get('remote_url', ''),
+        'endpoint': dvc_config.get('endpoint', ''),
+        'region': dvc_config.get('region', ''),
         'data_stage': 'final',  # Default to final stage
     }
 
@@ -49,8 +52,22 @@ def convert_to_ssh_url(https_url: str) -> str:
         return f"git@github.com:{path}.git"
     return https_url
 
-def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "") -> None:
-    """Configure DVC remote in cloned repo."""
+def configure_dvc_remote(
+    repo_dir: Path,
+    repo_name: str,
+    dvc_remote_url: str = "",
+    endpoint: str = "",
+    region: str = "",
+) -> None:
+    """Configure DVC remote in cloned repo.
+
+    Args:
+        repo_dir: Path to the cloned repository
+        repo_name: Name of the repository
+        dvc_remote_url: Explicit remote URL from registry
+        endpoint: S3 endpoint URL (from registry; falls back to global config)
+        region: S3 region (from registry; falls back to global config)
+    """
     # First, check what remote name the repo expects
     repo_config = repo_dir / ".dvc" / "config"
     expected_remote = "storage"  # Default
@@ -69,11 +86,18 @@ def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "
         try:
             dvc.run("remote", "add", "-f", expected_remote, dvc_remote_url)
 
-            # Copy endpoint configuration from mintd config if needed
-            config = get_config()
-            endpoint = config.get('storage', {}).get('endpoint', '')
+            # Use endpoint/region from params first, fall back to global config
+            if not endpoint or not region:
+                config = get_config()
+                if not endpoint:
+                    endpoint = config.get('storage', {}).get('endpoint', '')
+                if not region:
+                    region = config.get('storage', {}).get('region', '')
+
             if endpoint:
                 dvc.run("remote", "modify", expected_remote, "endpointurl", endpoint)
+            if region:
+                dvc.run("remote", "modify", expected_remote, "region", region)
             return
         except DVCError:
             pass
@@ -88,11 +112,18 @@ def configure_dvc_remote(repo_dir: Path, repo_name: str, dvc_remote_url: str = "
     except DVCError:
         pass
 
-def pull_dvc_data(repo_dir: Path, repo_name: str, stage: str, dvc_remote_url: str = "") -> None:
+def pull_dvc_data(
+    repo_dir: Path,
+    repo_name: str,
+    stage: str,
+    dvc_remote_url: str = "",
+    endpoint: str = "",
+    region: str = "",
+) -> None:
     """Pull DVC data for a specific stage using DVC Repo API."""
     from dvc.repo import Repo as DVCRepo
-    
-    configure_dvc_remote(repo_dir, repo_name, dvc_remote_url)
+
+    configure_dvc_remote(repo_dir, repo_name, dvc_remote_url, endpoint=endpoint, region=region)
     
     repo = DVCRepo(repo_dir)
     stage_dvc = repo_dir / "data" / f"{stage}.dvc"
@@ -187,19 +218,31 @@ def pull_enclave_data(enclave_path: Path, repo_name: Optional[str] = None, pull_
     for item in targets:
         curr_repo = item['repo']
         print(f"📥 Pulling {curr_repo}...")
-        
+
         repo_info = get_repo_info(curr_repo)
-        repo_dir = clone_or_update_repo(curr_repo, repo_info['repo_url'], enclave_path)
-        
+
         data_stage = item.get('stage', 'final')
-        pull_dvc_data(repo_dir, curr_repo, data_stage, repo_info.get('dvc_remote_url', ''))
-        
-        dvc_hash, git_commit = get_dvc_hash(repo_dir, data_stage)
+
+        # Use dvc import to fetch data directly into staging
+        staging_dir = enclave_path / "data" / "staging" / curr_repo
+        staging_dir.mkdir(parents=True, exist_ok=True)
+
+        source_path = f"data/{data_stage}/"
+        dest_path = str(staging_dir / data_stage)
+
+        run_dvc_import(
+            project_path=enclave_path,
+            repo_url=repo_info['repo_url'],
+            source_path=source_path,
+            dest_path=dest_path,
+        )
+
+        dvc_hash, git_commit = get_dvc_hash(staging_dir, data_stage)
         # Unified naming: hash-date
         today = datetime.now().strftime('%Y-%m-%d')
         version_str = f"{dvc_hash[:7]}-{today}"
         
-        downloads_dir = copy_to_downloads(curr_repo, version_str, repo_dir, data_stage, enclave_path)
+        downloads_dir = copy_to_downloads(curr_repo, version_str, staging_dir, data_stage, enclave_path)
         
         # Check if already transferred
         transferred = manifest.get('transferred', [])

@@ -37,15 +37,15 @@ If you prefer manual installation, you can try Stata's built-in package manager 
 
 ```stata
 // Install Stata package from GitHub (may fail if repository is private)
-net install mint, from("https://github.com/Cooper-lab/mint/raw/main/stata/")
+net install mint, from("https://github.com/health-care-affordability-lab/mintd/raw/main/stata/")
 ```
 
 **If net install fails**, download and install manually:
 
 1. **Download the Stata files:**
-   - Go to: https://github.com/Cooper-lab/mint/tree/main/stata
+   - Go to: https://github.com/health-care-affordability-lab/mintd/tree/main/stata
    - Download: `mint.ado`, `mint.sthlp`, `mint_installer.ado`, `mint_installer.sthlp`
-   - Or clone the repo: `git clone https://github.com/Cooper-lab/mint.git`
+   - Or clone the repo: `git clone https://github.com/health-care-affordability-lab/mintd.git`
 
 2. **Install in Stata's personal ado directory:**
    ```bash
@@ -71,7 +71,7 @@ net install mint, from("https://github.com/Cooper-lab/mint/raw/main/stata/")
 3. **Install the Python package:**
    ```stata
    // Install from GitHub
-   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
+   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/health-care-affordability-lab/mintd.git"])
 
    // Or from local source
    python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
@@ -111,7 +111,7 @@ cp mint.sthlp ~/ado/personal/
 3. **Install the mint Python package:**
    ```stata
    // Install from GitHub (only option)
-   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])
+   python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/health-care-affordability-lab/mintd.git"])
 
    // Or for development/testing from local source
    python: import subprocess; subprocess.run(["pip", "install", "-e", "/path/to/mint"])
@@ -153,7 +153,7 @@ The `pythonpath()` option specifies the **local path** to the mint source code o
    **Option B: Manual cloning**
    ```bash
    # Clone the repository first
-   git clone https://github.com/Cooper-lab/mint.git
+   git clone https://github.com/health-care-affordability-lab/mintd.git
    cd mint
 
    # Then run the installer with the path
@@ -182,7 +182,7 @@ This means that in most cases, you only need to install the Stata package - the 
 ### "mint package not installed"
 - Verify that Python integration is working in Stata: `python: print("Hello")`
 - Check that pip is available in Stata's Python environment
-- Try installing mint manually: `python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/Cooper-lab/mint.git"])`
+- Try installing mint manually: `python: import subprocess; subprocess.run(["pip", "install", "git+https://github.com/health-care-affordability-lab/mintd.git"])`
 
 ### Permission issues
 - On macOS, you may need to create the directory first:
@@ -195,7 +195,7 @@ This means that in most cases, you only need to install the Stata package - the 
 - If `net install` fails with "stata.toc not found", the GitHub repository may be private or inaccessible
 - Use manual installation instead (see Option 2 above)
 - Check your internet connection
-- Verify the GitHub repository is public and accessible: https://github.com/Cooper-lab/mint
+- Verify the GitHub repository is public and accessible: https://github.com/health-care-affordability-lab/mintd
 
 ### Testing the installation
 ```stata

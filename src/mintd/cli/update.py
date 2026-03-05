@@ -146,24 +146,32 @@ def storage(path, yes):
             if storage_cfg.get("versioning", True):
                 dvc.run("remote", "modify", remote_name, "version_aware", "true")
 
-            # Also update GLOBAL config for cross-project convenience
-            try:
-                dvc.run("remote", "modify", "--global", remote_name, "url", remote_url)
-            except Exception:
-                dvc.run("remote", "add", "--global", "-d", "-f", remote_name, remote_url)
+            # Also update GLOBAL config for cross-project convenience (opt-in)
+            if storage_cfg.get("sync_global", True):
+                try:
+                    dvc.run("remote", "modify", "--global", remote_name, "url", remote_url)
+                except Exception:
+                    dvc.run("remote", "add", "--global", "-d", "-f", remote_name, remote_url)
 
-            if storage_cfg.get("endpoint"):
-                dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage_cfg["endpoint"])
+                if storage_cfg.get("endpoint"):
+                    dvc.run("remote", "modify", "--global", remote_name, "endpointurl", storage_cfg["endpoint"])
 
-            if storage_cfg.get("region"):
-                dvc.run("remote", "modify", "--global", remote_name, "region", storage_cfg["region"])
+                if storage_cfg.get("region"):
+                    dvc.run("remote", "modify", "--global", remote_name, "region", storage_cfg["region"])
 
-            if storage_cfg.get("versioning", True):
-                dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
+                if storage_cfg.get("versioning", True):
+                    dvc.run("remote", "modify", "--global", remote_name, "version_aware", "true")
 
         except Exception as e:
             console.print(f"❌ Failed to update storage configuration: {e}", style="red")
             raise click.Abort()
+
+    # Sync metadata.json with updated DVC remote info
+    from ..api import _update_metadata_with_dvc_info
+    _update_metadata_with_dvc_info(
+        project_path,
+        {"remote_name": remote_name, "remote_url": remote_url},
+    )
 
     console.print("✅ Updated DVC storage configuration")
 

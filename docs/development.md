@@ -4,18 +4,20 @@
 
 ```bash
 # Clone repository
-git clone <repository-url>
+git clone https://github.com/health-care-affordability-lab/mintd.git
 cd mintd
 
 # Create virtual environment and install dependencies
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install with development dependencies
+# Install with development dependencies (pick one)
 uv sync --dev
 # or
 pip install -e ".[dev]"
 ```
+
+> For end-user installation (no clone needed), see the [Installation Guide](installation.md).
 
 ## Project Structure
 
