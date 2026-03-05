@@ -232,7 +232,7 @@ def run_dvc_import(
         args.extend(["--rev", repo_rev])
 
     try:
-        dvc.run(*args)
+        dvc.run_live(*args)
 
         # Extract .dvc file path from output or construct it
         # DVC typically creates file.dvc for destination file
@@ -549,7 +549,7 @@ def push_data(
         args.extend(targets)
 
     console.print(f"Pushing to remote '{remote_name}'...")
-    dvc.run(*args)
+    dvc.run_live(*args)
     console.print("Push complete.", style="green")
     return True
 
@@ -633,7 +633,7 @@ def run_dvc_update(
         args.extend(["--rev", rev])
 
     try:
-        result = dvc.run(*args)
+        dvc.run_live(*args)
 
         return UpdateResult(
             dvc_file=dvc_file,

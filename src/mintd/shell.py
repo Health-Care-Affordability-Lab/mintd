@@ -167,6 +167,57 @@ class ShellCommand:
                 suggestion=self.command_type.install_hint,
             ) from e
 
+    def run_live(
+        self,
+        *args: str,
+        env: Optional[dict] = None,
+    ) -> subprocess.CompletedProcess:
+        """Run the command with output streamed directly to the terminal.
+
+        Use this for long-running operations (e.g. dvc push/pull/import)
+        where the user needs to see progress.
+
+        Args:
+            *args: Command arguments
+            env: Environment variables to set
+
+        Returns:
+            CompletedProcess with command results (stdout/stderr not captured)
+
+        Raises:
+            CommandNotFoundError: If the executable is not found
+            GitError/DVCError/GHCLIError: On command failure
+        """
+        self._check_executable()
+        cmd = self._build_command(*args)
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=self.cwd,
+                capture_output=False,
+                env=env,
+            )
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode, cmd, output="", stderr=""
+                )
+            return result
+        except subprocess.CalledProcessError as e:
+            raise self._create_error(
+                message=f"{self.command_type.executable} command failed",
+                cmd=cmd,
+                returncode=e.returncode,
+                stdout=e.stdout or "",
+                stderr=e.stderr or "",
+            ) from e
+        except FileNotFoundError as e:
+            raise CommandNotFoundError(
+                message=f"{self.executable} command not found",
+                command=cmd,
+                suggestion=self.command_type.install_hint,
+            ) from e
+
     def run_output(self, *args: str) -> str:
         """Run the command and return stdout only.
 
