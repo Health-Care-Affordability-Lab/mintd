@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import click
 import git
@@ -149,6 +149,13 @@ class ImportTransaction:
 from .exceptions import DataImportError, MetadataUpdateError, RegistryError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
 
 
+def _https_to_ssh(url: str) -> str:
+    """Convert a GitHub HTTPS URL to SSH format for authentication."""
+    if url.startswith('https://github.com/'):
+        return url.replace('https://github.com/', 'git@github.com:')
+    return url
+
+
 def query_data_product(product_name: str) -> Dict[str, Any]:
     """Query registry for data product information.
 
@@ -220,11 +227,7 @@ def run_dvc_import(
     Raises:
         DVCImportError: If import fails
     """
-    # Convert HTTPS URL to SSH for authentication
-    if repo_url.startswith('https://github.com/'):
-        ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
-    else:
-        ssh_url = repo_url
+    ssh_url = _https_to_ssh(repo_url)
 
     dvc = dvc_command(cwd=project_path)
     args = ["import", ssh_url, source_path, "-o", dest_path]
@@ -336,8 +339,8 @@ def list_remote_data_paths(
         clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
         if rev:
             clone_args.extend(["--branch", rev])
-        git = git_command()
-        git.run(*clone_args)
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
 
         cloned_git = git_command(cwd=temp_dir / "repo")
         ref = rev or "HEAD"
@@ -354,7 +357,7 @@ def validate_source_path(
     repo_url: str,
     source_path: str,
     rev: Optional[str] = None,
-) -> tuple:
+) -> Tuple[bool, List[str]]:
     """Validate that a source path exists in the remote repository.
 
     Args:
@@ -443,15 +446,14 @@ def import_data_product(
         product_info = query_data_product(product_name)
 
         repo_url = product_info["repository"]["github_url"]
-        # Convert HTTPS to SSH for consistency
-        if repo_url.startswith('https://github.com/'):
-            ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
-        else:
-            ssh_url = repo_url
+        ssh_url = _https_to_ssh(repo_url)
 
-        # Determine what to import
-        if stage and path:
-            raise DataImportError("Cannot specify both --stage and --path")
+        # Determine what to import — stage, path, and import_all are mutually exclusive
+        exclusive_count = sum(bool(x) for x in [stage, path, import_all])
+        if exclusive_count > 1:
+            raise DataImportError(
+                "Cannot combine --stage, --source-path, and --all. Use only one."
+            )
 
         if import_all:
             # Import entire data/ directory

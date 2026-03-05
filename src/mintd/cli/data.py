@@ -103,6 +103,8 @@ def import_(product_name, stage, source_path, dest, rev, import_all, project_pat
             console.print(f"❌ Import failed: {result.error_message}", style="red")
             raise click.Abort()
 
+    except click.Abort:
+        raise
     except Exception as e:
         console.print(f"❌ Error: {e}", style="red")
         raise click.Abort()

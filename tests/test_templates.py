@@ -141,13 +141,13 @@ class TestCodeTemplate:
         template = CodeTemplate()
         context = {
             "author": "mad265",
-            "organization": "cooper-lab",
+            "organization": "health-care-affordability-lab",
             "team": "health-econ",
             "admin_team": "infrastructure-admins",
             "researcher_team": "all-researchers",
             "classification": "private",
             "contract_info": "",
-            "registry_org": "cooper-lab",
+            "registry_org": "health-care-affordability-lab",
             "language": "python",
         }
 
@@ -172,13 +172,13 @@ class TestCodeTemplate:
         template = CodeTemplate()
         context = {
             "author": "mad265",
-            "organization": "cooper-lab",
+            "organization": "health-care-affordability-lab",
             "team": "health-econ",
             "admin_team": "infrastructure-admins",
             "researcher_team": "all-researchers",
             "classification": "private",
             "contract_info": "",
-            "registry_org": "cooper-lab",
+            "registry_org": "health-care-affordability-lab",
             "language": "stata",
         }
 
@@ -215,13 +215,13 @@ class TestCodeTemplate:
         template = CodeTemplate()
         context = {
             "author": "mad265",
-            "organization": "cooper-lab",
+            "organization": "health-care-affordability-lab",
             "team": "health-econ",
             "admin_team": "infrastructure-admins",
             "researcher_team": "all-researchers",
             "classification": "public",
             "contract_info": "",
-            "registry_org": "cooper-lab",
+            "registry_org": "health-care-affordability-lab",
             "language": "python",
             "use_current_repo": True,
         }
@@ -241,7 +241,7 @@ class TestCodeRegistry:
         """Registry should map 'code' type to 'code' catalog directory."""
         from mintd.registry import LocalRegistry
 
-        registry = LocalRegistry("https://github.com/cooper-lab/test-registry")
+        registry = LocalRegistry("https://github.com/health-care-affordability-lab/test-registry")
 
         # _write_catalog_entry uses a type_dir mapping — code should be included
         # We test indirectly by checking it doesn't KeyError

@@ -41,7 +41,7 @@ def consistent_project():
         dvc_config.write_text(
             "[core]\n"
             "    remote = data_test-project\n"
-            "['remote \"data_test-project\"']\n"
+            '[remote "data_test-project"]\n'
             "    url = s3://bucket/lab/data_test-project/\n"
         )
 
@@ -78,7 +78,7 @@ def drifted_project():
         dvc_config.write_text(
             "[core]\n"
             "    remote = data_test-project\n"
-            "['remote \"data_test-project\"']\n"
+            '[remote "data_test-project"]\n'
             "    url = s3://new-bucket/lab/data_test-project/\n"
         )
 

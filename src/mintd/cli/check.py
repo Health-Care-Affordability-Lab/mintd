@@ -21,30 +21,17 @@ def _parse_dvc_config(dvc_config_path: Path) -> dict:
     if not dvc_config_path.exists():
         return result
 
-    content = dvc_config_path.read_text()
+    parser = configparser.ConfigParser()
+    parser.read(dvc_config_path)
 
     # Extract default remote name from [core] section
-    for line in content.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("remote") and "=" in stripped:
-            result["remote_name"] = stripped.split("=", 1)[1].strip()
-            break
+    result["remote_name"] = parser.get("core", "remote", fallback="")
 
     # Extract remote URL from ['remote "NAME"'] section
     remote_name = result["remote_name"]
     if remote_name:
-        in_remote_section = False
-        for line in content.splitlines():
-            stripped = line.strip()
-            if remote_name in stripped and "remote" in stripped:
-                in_remote_section = True
-                continue
-            if in_remote_section:
-                if stripped.startswith("["):
-                    break  # Next section
-                if stripped.startswith("url") and "=" in stripped:
-                    result["remote_url"] = stripped.split("=", 1)[1].strip()
-                    break
+        section = f'remote "{remote_name}"'
+        result["remote_url"] = parser.get(section, "url", fallback="")
 
     return result
 

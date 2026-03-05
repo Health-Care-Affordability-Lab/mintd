@@ -29,7 +29,7 @@ storage:
   versioning: true
 
 registry:
-  url: "https://github.com/cooper-lab/data-commons-registry"
+  url: "https://github.com/health-care-affordability-lab/data-commons-registry"
 
 defaults:
   author: "Jane Researcher"
