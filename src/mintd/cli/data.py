@@ -110,6 +110,38 @@ def import_(product_name, stage, source_path, dest, rev, import_all, project_pat
         raise click.Abort()
 
 
+@data.command(name="get")
+@click.argument("product_name")
+@click.option("--dest", help="Target directory (default: ./<product-name>/)")
+@click.option("--rev", help="Version tag or git ref (default: latest)")
+@click.option("--path", "source_path", help="Path inside source repo (default: data/final/)")
+@click.option("--with-schema/--no-schema", default=True, help="Include schemas/v1/schema.json")
+@click.option("--dry-run", is_flag=True, help="Show what would be downloaded")
+def data_get(product_name, dest, rev, source_path, with_schema, dry_run):
+    """Download data product files without requiring a project.
+
+    Fetches files directly from the data product's DVC remote. No git clone,
+    no .dvc tracking files, no pipeline metadata — just the data.
+
+    By default downloads data/final/. Use --path to target a different
+    directory or specific file.
+    """
+    from ..data_import import get_data_product
+
+    result = get_data_product(
+        product_name=product_name,
+        path=source_path,
+        dest=dest,
+        rev=rev,
+        with_schema=with_schema,
+        dry_run=dry_run,
+    )
+
+    if not result.success:
+        console.print(f"Error: {result.error_message}", style="red")
+        raise click.Abort()
+
+
 @data.command(name="remove")
 @click.argument("import_name")
 @click.option("--force", "-f", is_flag=True, help="Remove even if dvc.yaml has references")
