@@ -3,7 +3,7 @@
 A comprehensive Python CLI tool that automates the creation of standardized research project repositories with pre-configured version control, data versioning, **mandatory language selection (Python/R/Stata)**, and **Data Commons Registry integration**.
 
 > [!NOTE]
-> **Full Documentation**: [https://cooper-lab.github.io/mint/](https://cooper-lab.github.io/mint/)
+> **Full Documentation**: [https://health-care-affordability-lab.github.io/mintd/](https://health-care-affordability-lab.github.io/mintd/)
 
 ## Features
 
@@ -19,17 +19,20 @@ A comprehensive Python CLI tool that automates the creation of standardized rese
 ### Using uv (Recommended)
 
 ```bash
+# Install uv (if you don't have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-git clone <repository-url>
-cd mintd
-uv sync --dev
+
+# Install mintd as a CLI tool
+uv tool install git+https://github.com/health-care-affordability-lab/mintd.git
 ```
 
 ### Using pip
 
 ```bash
-pip install git+https://github.com/Cooper-lab/mint.git
+pip install git+https://github.com/health-care-affordability-lab/mintd.git
 ```
+
+> For development setup, see the [Development Guide](docs/development.md).
 
 ## Quick Start
 
@@ -64,4 +67,4 @@ mintd update schema --generate
 mintd update metadata
 ```
 
-See the [Documentation](https://cooper-lab.github.io/mint/) for detailed guides on configuration, Stata integration, and advanced usage.
+See the [Documentation](https://health-care-affordability-lab.github.io/mintd/) for detailed guides on configuration, Stata integration, and advanced usage.

@@ -22,10 +22,10 @@ Automatically register your projects with the **Data Commons Registry**. `mintd`
 
 ```bash
 # Install mintd
-pip install mintd
+uv tool install git+https://github.com/health-care-affordability-lab/mintd.git
 
 # Create a new project
 mintd create data --name my-research-project --lang python
 ```
 
-Next: [Installation Guide](installation.md) | [Quick Start](quick-start.md)
+Next: [Installation Guide](installation.md) | [Quick Start](quick-start.md) | [GitHub](https://github.com/health-care-affordability-lab/mintd)

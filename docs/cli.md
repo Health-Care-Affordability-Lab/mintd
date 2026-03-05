@@ -94,7 +94,9 @@ mintd config setup --set-credentials  # Set storage credentials
 ```bash
 mintd data list                       # List available data products
 mintd data list --imported            # List imported dependencies
-mintd data import <product>           # Import data product as DVC dependency (data/project repos)
+mintd data import <product>           # Import data/final/ from product (default)
+mintd data import <product> --all     # Import entire data/ directory
+mintd data import <product> --stage raw  # Import specific stage
 mintd data pull <product>             # Pull/download data from registry
 mintd data push                       # Push all DVC-tracked data to project remote
 mintd data push <targets>             # Push specific .dvc files or stages
@@ -102,6 +104,21 @@ mintd data update                     # Update all DVC imports to latest version
 mintd data update <path>              # Update specific .dvc file
 mintd data remove <import>            # Remove a data import from the project
 ```
+
+### Data Import Options
+
+By default, `mintd data import` imports only `data/final/` (the validated output) from the source data product. If `data/final/` is not found, you are prompted to choose from available directories.
+
+| Option | Description |
+|--------|-------------|
+| `--stage TEXT` | Pipeline stage to import (`raw`, `intermediate`, `final`) |
+| `--source-path TEXT` | Specific path to import from the product |
+| `--all` | Import the entire `data/` directory |
+| `--dest TEXT` | Local destination path (default: `data/imports/<product>/`) |
+| `--rev TEXT` | Specific git revision to import from |
+| `-p, --project-path PATH` | Path to project directory |
+
+`--stage`, `--source-path`, and `--all` are mutually exclusive.
 
 ### Data Push Options
 

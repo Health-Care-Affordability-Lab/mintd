@@ -67,25 +67,36 @@ def data_pull(product_name, destination, stage, path):
 
 @data.command(name="import")
 @click.argument("product_name")
-@click.option("--stage", help="Pipeline stage to import")
+@click.option("--stage", help="Pipeline stage to import (raw, intermediate, final)")
 @click.option("--source-path", help="Specific path to import")
 @click.option("--dest", help="Local destination path")
 @click.option("--rev", help="Specific git revision")
+@click.option("--all", "import_all", is_flag=True, help="Import entire data/ directory")
 @click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
-def import_(product_name, stage, source_path, dest, rev, project_path):
-    """Import data product as DVC dependency into current project."""
+def import_(product_name, stage, source_path, dest, rev, import_all, project_path):
+    """Import data product as DVC dependency into current project.
+
+    By default imports only data/final/ (the validated output). If data/final/
+    is not found in the source, prompts you to choose from available directories.
+    """
     from ..data_import import import_data_product
 
     project_path = Path(project_path) if project_path else Path.cwd()
 
     try:
-        if stage and source_path:
-            console.print("❌ Cannot specify both --stage and --source-path", style="red")
+        # Mutual exclusivity checks
+        exclusive_count = sum(bool(x) for x in [stage, source_path, import_all])
+        if exclusive_count > 1:
+            console.print(
+                "❌ Cannot combine --stage, --source-path, and --all. Use only one.",
+                style="red",
+            )
             raise click.Abort()
 
         result = import_data_product(
             product_name=product_name, project_path=project_path,
-            stage=stage, path=source_path, dest=dest, repo_rev=rev
+            stage=stage, path=source_path, dest=dest, repo_rev=rev,
+            import_all=import_all,
         )
 
         if not result.success:
