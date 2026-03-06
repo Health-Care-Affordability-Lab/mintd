@@ -12,7 +12,6 @@ from mintd.api import (
     ProjectResult,
     _init_git,
     _init_dvc,
-    _update_metadata_with_dvc_info,
     _register_project,
 )
 from mintd.initializers.storage import add_dvc_remote
@@ -312,14 +311,13 @@ class TestInitDvc:
     @patch("mintd.api.is_dvc_repo")
     @patch("mintd.config.get_config")
     def test_init_dvc_no_bucket_configured(self, mock_config, mock_is_dvc_repo):
-        """Test DVC init skipped when no bucket configured."""
+        """Test DVC init raises when no bucket configured."""
         mock_is_dvc_repo.return_value = False
         mock_config.return_value = {"storage": {"bucket_prefix": ""}}
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = _init_dvc(Path(temp_dir))
-
-        assert result == {"remote_name": "", "remote_url": ""}
+            with pytest.raises(ValueError, match="Storage bucket not configured"):
+                _init_dvc(Path(temp_dir))
 
     @patch("mintd.api.add_dvc_remote")
     @patch("mintd.api.is_dvc_repo")
@@ -328,62 +326,15 @@ class TestInitDvc:
         mock_is_dvc_repo.return_value = True
         mock_add_remote.return_value = {
             "remote_name": "data_test",
-            "remote_url": "s3://bucket/lab/test/"
+            "remote_url": "s3://bucket/lab/data_test/"
         }
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            result = _init_dvc(Path(temp_dir), "bucket", "restricted", "test", "data_test")
+            _init_dvc(Path(temp_dir), "bucket", "restricted", "test", "data_test")
 
         # Should call add_dvc_remote for existing DVC repos
         mock_add_remote.assert_called_once()
-        assert result["remote_name"] == "data_test"
-        assert result["remote_url"] == "s3://bucket/lab/test/"
 
-
-class TestUpdateMetadataWithDvcInfo:
-    """Tests for _update_metadata_with_dvc_info function."""
-
-    def test_update_metadata_no_file(self):
-        """Test update when metadata.json doesn't exist."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Should not raise
-            _update_metadata_with_dvc_info(
-                Path(temp_dir),
-                {"remote_name": "s3", "remote_url": "s3://bucket/path"}
-            )
-
-    def test_update_metadata_success(self):
-        """Test successful metadata update."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            metadata_path = Path(temp_dir) / "metadata.json"
-            metadata_path.write_text('{"project": {"name": "test"}}')
-
-            _update_metadata_with_dvc_info(
-                Path(temp_dir),
-                {"remote_name": "s3", "remote_url": "s3://bucket/path"}
-            )
-
-            with open(metadata_path) as f:
-                updated = json.load(f)
-
-            assert "storage" in updated
-            assert updated["storage"]["dvc"]["remote_name"] == "s3"
-
-    def test_update_metadata_with_existing_storage(self):
-        """Test update when storage section already exists."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            metadata_path = Path(temp_dir) / "metadata.json"
-            metadata_path.write_text('{"project": {"name": "test"}, "storage": {"other": "data"}}')
-
-            _update_metadata_with_dvc_info(
-                Path(temp_dir),
-                {"remote_name": "s3", "remote_url": "s3://bucket/path"}
-            )
-
-            with open(metadata_path) as f:
-                updated = json.load(f)
-
-            assert updated["storage"]["dvc"]["remote_url"] == "s3://bucket/path"
 
 
 class TestRegisterProject:

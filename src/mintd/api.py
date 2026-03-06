@@ -254,31 +254,36 @@ def create_project(
     classification = classification or "private"
     target_team = team or "all-lab"
 
-    # Calculate storage prefix
+    # Determine the type prefix to build the full project name
+    # This must match the template's prefix attribute
+    _prefix_map = {
+        "data": "data_",
+        "project": "prj_",
+        "prj": "prj_",
+        "code": "",
+        "enclave": "enclave_",
+    }
+    type_prefix = _prefix_map.get(project_type, "")
+    full_project_name = f"{type_prefix}{name}"
+
+    # Calculate storage prefix using full_project_name
+    # Path patterns match initializers/storage.py SENSITIVITY_TO_ACL mapping
     if classification == "public":
-        storage_prefix = f"public/{name}/"
+        storage_prefix = f"pub/{full_project_name}/"
     elif classification == "contract":
         if not contract_slug:
             # Fallback if slug missing (should be handled by CLI)
             contract_slug = "unknown-contract"
-        storage_prefix = f"contract/{contract_slug}/{name}/"
+        storage_prefix = f"contract/{contract_slug}/{full_project_name}/"
     else:
         # Private/Lab
-        storage_prefix = f"lab/{target_team}/{name}/"
+        storage_prefix = f"lab/{full_project_name}/"
 
-    # Calculate DVC remote info if DVC will be initialized
-    dvc_remote_name = ""
+    # Always populate DVC remote info for metadata (even if DVC init is deferred)
+    dvc_remote_name = full_project_name
     dvc_remote_url = ""
-    if init_dvc and bucket_name:
-        dvc_remote_name = "myremote"
-        # Build the S3 URL with endpoint if configured
-        endpoint = storage_config.get("endpoint", "")
-        if endpoint:
-            # For S3-compatible services like Wasabi
-            dvc_remote_url = f"s3://{bucket_name}/{storage_prefix}"
-        else:
-            # Standard AWS S3
-            dvc_remote_url = f"s3://{bucket_name}/{storage_prefix}"
+    if bucket_name:
+        dvc_remote_url = f"s3://{bucket_name}/{storage_prefix}"
 
     context = {
         "author": defaults.get("author", ""),

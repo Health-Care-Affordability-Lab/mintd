@@ -139,9 +139,9 @@ def validate_storage_prefix(classification: str, prefix: str, team: str = None,
         Tuple of (is_valid, error_message)
     """
     if classification == "public":
-        # Expected: public/{name}/
-        if not prefix.startswith("public/"):
-            return False, f"Public classification should have prefix starting with 'public/', got '{prefix}'"
+        # Expected: pub/{full_name}/
+        if not prefix.startswith("pub/"):
+            return False, f"Public classification should have prefix starting with 'pub/', got '{prefix}'"
     elif classification == "contract":
         # Expected: contract/{contract_slug}/{name}/
         if not prefix.startswith("contract/"):
