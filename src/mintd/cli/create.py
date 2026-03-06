@@ -31,10 +31,6 @@ def _print_next_steps(language: str, project_path: str, project_type: str, confi
         console.print("  2. Initialize renv for reproducibility:")
         console.print("     Rscript -e 'renv::init()'")
         console.print("     [dim]# Then use renv::snapshot() after installing packages[/dim]")
-    elif lang == "stata":
-        console.print("  2. Review stata-packages.txt and install listed packages")
-        console.print("     [dim]# Add any SSC/net packages your code requires[/dim]")
-
     # Only show mintd config message if not configured and needed for data projects
     if project_type in ("data", "project") and not config_exists:
         console.print("  3. Run 'mintd config' to set up AWS credentials for data storage")
