@@ -631,11 +631,6 @@ def validate_config() -> bool:
     if not storage.get("bucket_prefix"):
         return False
 
-    try:
-        get_storage_credentials()
-    except ValueError:
-        return False
-
     # Check registry URL is configured
     try:
         get_registry_url()
