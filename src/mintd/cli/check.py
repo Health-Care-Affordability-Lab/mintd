@@ -39,7 +39,8 @@ def _parse_dvc_config(dvc_config_path: Path) -> dict:
 @main.command()
 @click.option("--path", "-p", type=click.Path(exists=True, path_type=Path),
               help="Path to project directory")
-def check(path):
+@click.option("--validate", is_flag=True, help="Validate metadata completeness")
+def check(path, validate):
     """Validate consistency between metadata.json and DVC configuration."""
     project_path = Path(path) if path else Path.cwd()
     metadata_path = project_path / "metadata.json"
@@ -54,6 +55,31 @@ def check(path):
     except Exception as e:
         console.print(f"Failed to read metadata.json: {e}", style="red")
         raise click.Abort()
+
+    # If validate flag is set, run metadata validation
+    if validate:
+        from ..utils.validation import validate_metadata
+        is_valid, errors = validate_metadata(metadata)
+        if not is_valid:
+            console.print("Metadata validation errors:", style="red")
+            for error in errors:
+                console.print(f"  - {error}", style="yellow")
+        else:
+            console.print("Metadata validation passed", style="green")
+
+        # Also run completeness check with config
+        from ..config import get_config
+        from ..utils.validation import check_metadata_completeness
+        config = get_config()
+        completeness_errors = check_metadata_completeness(metadata, config)
+        if completeness_errors:
+            console.print("\nCompleteness issues:", style="yellow")
+            for error in completeness_errors:
+                console.print(f"  - {error}", style="yellow")
+
+        # If validate was requested, we can return early
+        if not is_valid or completeness_errors:
+            return
 
     # Extract metadata DVC info
     dvc_meta = metadata.get("storage", {}).get("dvc", {})

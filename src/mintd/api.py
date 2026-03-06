@@ -236,21 +236,58 @@ def create_project(
     # Get platform information for cross-platform support
     platform_info = get_platform_info()
     stata_executable = get_stata_executable()
-    
+
+    # Get bucket from config if not provided
+    storage_config = config.get("storage", {})
+    if not bucket_name:
+        bucket_name = storage_config.get("bucket_prefix", "")
+
     # Prepare template context
     registry_config = config.get("registry", {})
     if not registry_config.get("org"):
         raise ValueError(
             "GitHub organization not configured. Run 'mintd config setup' to set registry.org."
         )
+
+    # Governance and Storage Prefix Logic
+    # Default values
+    classification = classification or "private"
+    target_team = team or "all-lab"
+
+    # Calculate storage prefix
+    if classification == "public":
+        storage_prefix = f"public/{name}/"
+    elif classification == "contract":
+        if not contract_slug:
+            # Fallback if slug missing (should be handled by CLI)
+            contract_slug = "unknown-contract"
+        storage_prefix = f"contract/{contract_slug}/{name}/"
+    else:
+        # Private/Lab
+        storage_prefix = f"lab/{target_team}/{name}/"
+
+    # Calculate DVC remote info if DVC will be initialized
+    dvc_remote_name = ""
+    dvc_remote_url = ""
+    if init_dvc and bucket_name:
+        dvc_remote_name = "myremote"
+        # Build the S3 URL with endpoint if configured
+        endpoint = storage_config.get("endpoint", "")
+        if endpoint:
+            # For S3-compatible services like Wasabi
+            dvc_remote_url = f"s3://{bucket_name}/{storage_prefix}"
+        else:
+            # Standard AWS S3
+            dvc_remote_url = f"s3://{bucket_name}/{storage_prefix}"
+
     context = {
         "author": defaults.get("author", ""),
         "organization": defaults.get("organization", ""),
-        "storage_provider": config.get("storage", {}).get("provider", "s3"),
-        "storage_endpoint": config.get("storage", {}).get("endpoint", ""),
-        "storage_versioning": config.get("storage", {}).get("versioning", True),
-        "storage_sensitivity": "restricted",  # Default sensitivity level
-        "bucket_name": "",  # Will be set later when DVC is implemented
+        "storage_provider": storage_config.get("provider", "s3"),
+        "storage_endpoint": storage_config.get("endpoint", ""),
+        "storage_versioning": storage_config.get("versioning", True),
+        "storage_sensitivity": "public" if classification == "public" else "restricted",
+        "bucket_name": bucket_name,  # Now properly set from config or parameter
         "project_type": project_type,
         "language": language,
         "use_current_repo": use_current_repo,
@@ -264,33 +301,15 @@ def create_project(
         "registry_org": registry_config.get("org", ""),
         "admin_team": admin_team or registry_config.get("admin_team", "infrastructure-admins"),
         "researcher_team": researcher_team or registry_config.get("researcher_team", "all-researchers"),
-    }
-    
-    # Governance and Storage Prefix Logic
-    # Default values
-    classification = classification or "private"
-    target_team = team or "all-lab"
-    
-    # Calculate storage prefix
-    if classification == "public":
-        storage_prefix = f"public/{name}/"
-    elif classification == "contract":
-        if not contract_slug:
-            # Fallback if slug missing (should be handled by CLI)
-            contract_slug = "unknown-contract"
-        storage_prefix = f"contract/{contract_slug}/{name}/"
-    else:
-        # Private/Lab
-        storage_prefix = f"lab/{target_team}/{name}/"
-
-    context.update({
+        # Governance
         "classification": classification,
         "team": target_team,
         "contract_info": contract_info or "",
         "storage_prefix": storage_prefix,
-        # Map classification to DVC sensitivity (for backward compatibility/ACLs)
-        "storage_sensitivity": "public" if classification == "public" else "restricted",
-    })
+        # DVC remote info for metadata
+        "dvc_remote_name": dvc_remote_name,
+        "dvc_remote_url": dvc_remote_url,
+    }
 
     # Select and create template
     if project_type == "data":
@@ -326,20 +345,33 @@ def create_project(
     # Create the project
     project_path = template.create(name, path, **context)
 
+    # Validate metadata if it was created
+    metadata_path = project_path / "metadata.json"
+    if metadata_path.exists():
+        import json
+        from .utils.validation import validate_metadata
+        try:
+            with open(metadata_path) as f:
+                metadata = json.load(f)
+            is_valid, errors = validate_metadata(metadata)
+            if not is_valid:
+                print("Warning: Metadata validation issues found:")
+                for error in errors:
+                    print(f"  - {error}")
+        except Exception as e:
+            print(f"Warning: Could not validate metadata: {e}")
+
     # Initialize Git if requested
     if init_git:
         _init_git(project_path, use_current_repo)
 
-    # Initialize DVC if requested and capture remote info for metadata
-    dvc_info = {"remote_name": "", "remote_url": ""}
+    # Initialize DVC if requested
     if init_dvc:
         sensitivity = context.get("storage_sensitivity", "restricted")
         full_project_name = template.prefix + name
-        dvc_info = _init_dvc(project_path, bucket_name, sensitivity, name, full_project_name)
-    
-    # Update metadata.json with DVC remote info if DVC was initialized
-    if dvc_info.get("remote_url"):
-        _update_metadata_with_dvc_info(project_path, dvc_info)
+        _init_dvc(project_path, bucket_name, sensitivity, name, full_project_name)
+
+    # Note: We no longer need to update metadata.json with DVC info since it's in the template context
 
     # Install pre-commit hooks
     _install_precommit_hooks(project_path)
@@ -383,26 +415,24 @@ def _init_git(project_path: Path, use_current_repo: bool = False) -> None:
             init_git(project_path)
 
 
-def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivity: str = "restricted", project_name: str = "", full_project_name: str = "") -> dict:
+def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivity: str = "restricted", project_name: str = "", full_project_name: str = "") -> None:
     """Initialize DVC repository with S3 remote.
 
     For new repos: runs dvc init and adds remote.
     For existing DVC repos: only adds remote (supports --use-current-repo).
-
-    Returns:
-        Dict with remote_name and remote_url for storage in metadata
     """
-    empty_result = {"remote_name": "", "remote_url": ""}
-
     # Get bucket prefix from config if not provided
     if bucket_prefix is None:
         from .config import get_config
         config = get_config()
         bucket_prefix = config["storage"].get("bucket_prefix", "")
-        if not bucket_prefix:
-            print("Warning: Bucket prefix not configured. Run 'mint config setup' to configure storage.")
-            print("The project was created successfully, but DVC initialization was skipped.")
-            return empty_result
+
+    # Require bucket for DVC initialization
+    if not bucket_prefix:
+        raise ValueError(
+            "Storage bucket not configured. "
+            "Run 'mintd config setup' to configure storage before using DVC."
+        )
 
     # Use provided project_name or extract from path
     if not project_name:
@@ -416,50 +446,17 @@ def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivi
     try:
         if is_dvc_repo(project_path):
             # Existing DVC repo: just add the remote (for --use-current-repo)
-            return add_dvc_remote(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
+            add_dvc_remote(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
         else:
             # New repo: full DVC initialization
-            return init_dvc(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
+            init_dvc(project_path, bucket_prefix, sensitivity, project_name, full_project_name)
     except Exception as e:
         # Log warning but don't fail the project creation
         print(f"Warning: Failed to initialize DVC: {e}")
         print("The project was created successfully, but DVC initialization was skipped.")
-        return empty_result
 
 
-def _update_metadata_with_dvc_info(project_path: Path, dvc_info: dict) -> None:
-    """Update metadata.json with DVC remote information.
-    
-    Args:
-        project_path: Path to the project directory
-        dvc_info: Dict with remote_name and remote_url
-    """
-    import json
-    
-    metadata_path = project_path / "metadata.json"
-    if not metadata_path.exists():
-        return
-    
-    try:
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-        
-        # Ensure storage section exists
-        if "storage" not in metadata:
-            metadata["storage"] = {}
-        
-        # Add/update DVC info
-        metadata["storage"]["dvc"] = {
-            "remote_name": dvc_info.get("remote_name", ""),
-            "remote_url": dvc_info.get("remote_url", "")
-        }
-        
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-            f.write("\n")  # Trailing newline
-            
-    except Exception as e:
-        print(f"Warning: Could not update metadata.json with DVC info: {e}")
+# Function removed - DVC info is now passed directly to template context
 
 
 def _install_precommit_hooks(project_path: Path) -> None:
