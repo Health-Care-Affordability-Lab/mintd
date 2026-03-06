@@ -32,6 +32,33 @@ result = create_project(
 )
 ```
 
+## Data Get
+
+Download data product files without requiring a project context:
+
+```python
+from mintd.data_import import get_data_product
+
+# Download data/final/ to ./aha-annual-survey/
+result = get_data_product("aha-annual-survey")
+
+# Download a specific directory
+result = get_data_product("aha-annual-survey", path="data/raw", dest="/tmp/aha-raw")
+
+# Pin to a version, skip schema
+result = get_data_product("aha-annual-survey", rev="v2.0", with_schema=False)
+
+# Dry run
+result = get_data_product("aha-annual-survey", dry_run=True)
+
+if result.success:
+    print(f"Downloaded to {result.dest_path}")
+```
+
+### `get_data_product(product_name, path=None, dest=None, rev=None, with_schema=True, dry_run=False)`
+
+Downloads files from a registered data product via `dvc get`. No git clone, no `.dvc` files, no pipeline metadata. Defaults to `data/final/`; use `path` to target any directory or file in the source repo. Returns a `GetResult` dataclass with `success`, `dest_path`, `source_path`, and `error_message` fields.
+
 ## Data Push
 
 Push DVC-tracked data to a project's configured remote:
