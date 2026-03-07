@@ -151,11 +151,9 @@ def validate_storage_prefix(classification: str, prefix: str, team: str = None,
         if "unknown-contract" in prefix:
             return False, "Contract classification using invalid 'unknown-contract' slug"
     elif classification == "private":
-        # Expected: lab/{team}/{name}/
+        # Expected: lab/{full_name}/
         if not prefix.startswith("lab/"):
             return False, f"Private classification should have prefix starting with 'lab/', got '{prefix}'"
-        if team and f"lab/{team}/" not in prefix:
-            return False, f"Private prefix should contain team '{team}', got '{prefix}'"
     else:
         return False, f"Unknown classification: {classification}"
 

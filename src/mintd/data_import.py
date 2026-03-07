@@ -588,6 +588,8 @@ def pull_data_product(
         # Convert to SSH URL
         if repo_url.startswith('https://github.com/'):
             ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
+        else:
+            ssh_url = repo_url
 
         # Clone repository
         temp_dir = Path(tempfile.mkdtemp())
@@ -646,6 +648,14 @@ def get_data_product(
     Returns:
         GetResult with operation details
     """
+    # Validate product name to prevent path traversal
+    if "/" in product_name or ".." in product_name:
+        return GetResult(
+            product_name=product_name, success=False,
+            dest_path=dest or "", source_path=path or "",
+            error_message=f"Invalid product name: {product_name}",
+        )
+
     source_path = path or "data/final/"
     dest = dest or f"./{product_name}"
     result = GetResult(product_name=product_name, success=False,

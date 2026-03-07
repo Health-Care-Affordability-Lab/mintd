@@ -443,7 +443,7 @@ def _init_dvc(project_path: Path, bucket_prefix: Optional[str] = None, sensitivi
     if not project_name:
         project_name = project_path.name
         # Extract the actual project name (remove prefix)
-        if project_name.startswith(("data_", "prj__")):
+        if project_name.startswith(("data_", "prj_")):
             parts = project_name.split("_", 1)
             if len(parts) > 1:
                 project_name = parts[1]
