@@ -61,6 +61,17 @@ class RemoveResult:
             self.warnings = []
 
 
+@dataclass
+class GetResult:
+    """Result of a data get operation."""
+    product_name: str
+    success: bool
+    error_message: Optional[str] = None
+    dest_path: Optional[str] = None
+    source_path: Optional[str] = None
+    files_downloaded: int = 0
+
+
 class ImportTransaction:
     """Track import operations for rollback on failure.
 
@@ -577,6 +588,8 @@ def pull_data_product(
         # Convert to SSH URL
         if repo_url.startswith('https://github.com/'):
             ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
+        else:
+            ssh_url = repo_url
 
         # Clone repository
         temp_dir = Path(tempfile.mkdtemp())
@@ -609,6 +622,90 @@ def pull_data_product(
     except Exception as e:
         console.print(f"❌ Failed to pull data: {e}", style="red")
         return False
+
+
+def get_data_product(
+    product_name: str,
+    path: Optional[str] = None,
+    dest: Optional[str] = None,
+    rev: Optional[str] = None,
+    with_schema: bool = True,
+    dry_run: bool = False,
+) -> GetResult:
+    """Download data product files without requiring a project context.
+
+    Uses ``dvc get`` to fetch files directly from S3 via the source repo's
+    DVC configuration.  No git clone, no .dvc files, no pipeline metadata.
+
+    Args:
+        product_name: Registered data product name
+        path: Path inside the source repo to download (default: ``data/final/``)
+        dest: Local destination directory (default: ``./<product_name>/``)
+        rev: Git tag or ref in the source repo
+        with_schema: Also download ``schemas/v1/schema.json``
+        dry_run: Show what would be downloaded without downloading
+
+    Returns:
+        GetResult with operation details
+    """
+    # Validate product name to prevent path traversal
+    if "/" in product_name or ".." in product_name:
+        return GetResult(
+            product_name=product_name, success=False,
+            dest_path=dest or "", source_path=path or "",
+            error_message=f"Invalid product name: {product_name}",
+        )
+
+    source_path = path or "data/final/"
+    dest = dest or f"./{product_name}"
+    result = GetResult(product_name=product_name, success=False,
+                       dest_path=dest, source_path=source_path)
+
+    try:
+        # Resolve product from registry
+        console.print(f"Looking up '{product_name}' in registry...")
+        product_info = query_data_product(product_name)
+        repo_url = product_info["repository"]["github_url"]
+        ssh_url = _https_to_ssh(repo_url)
+
+        if dry_run:
+            console.print(f"Would download {source_path} -> {dest}")
+            if with_schema and not path:
+                console.print(f"Would download schemas/v1/schema.json -> {dest}")
+            result.success = True
+            return result
+
+        # Download data
+        console.print(f"Downloading {source_path} from {product_name}...")
+        dvc = dvc_command()
+        args = ["get", ssh_url, source_path, "-o", dest]
+        if rev:
+            args.extend(["--rev", rev])
+        dvc.run_live(*args)
+
+        result.success = True
+
+        # Optionally download schema (only when using default path)
+        if with_schema and not path:
+            try:
+                schema_args = ["get", ssh_url, "schemas/v1/schema.json", "-o", dest]
+                if rev:
+                    schema_args.extend(["--rev", rev])
+                dvc.run_live(*schema_args)
+            except Exception:
+                console.print("Schema not found — skipping.", style="yellow")
+
+        console.print(f"Downloaded to {dest}", style="green")
+        console.print(
+            f"\nTo track this data as a dependency, run:\n"
+            f"  mintd data import {product_name}",
+            style="dim",
+        )
+        return result
+
+    except Exception as e:
+        result.error_message = str(e)
+        return result
 
 
 def get_project_remote(project_path: Path) -> str:

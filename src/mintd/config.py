@@ -373,8 +373,8 @@ def _get_default_config() -> dict:
             "versioning": True,
         },
         "registry": {
-            "url": "https://github.com/health-care-affordability-lab/data-commons-registry",
-            "org": "health-care-affordability-lab",
+            "url": "",
+            "org": "",
             "default_branch": "main",
             "admin_team": "infrastructure-admins",
             "researcher_team": "all-researchers",
@@ -468,15 +468,21 @@ def init_config() -> None:
     console.print("For project registration in the Data Commons Registry:")
 
     registry_url = Prompt.ask(
-        "Registry repository URL",
-        default="https://github.com/health-care-affordability-lab/data-commons-registry"
+        "Registry repository URL (e.g., https://github.com/your-org/data-commons-registry)",
+        default=""
     )
+    if not registry_url:
+        console.print("[yellow]Warning: Registry URL is required for project registration.[/yellow]")
+        registry_url = Prompt.ask("Registry repository URL")
     config["registry"]["url"] = registry_url
 
     registry_org = Prompt.ask(
-        "GitHub organization",
-        default="health-care-affordability-lab"
+        "GitHub organization for project repositories (e.g., cooper-lab-yale)",
+        default=""
     )
+    if not registry_org:
+        console.print("[yellow]Warning: GitHub organization is required for project creation.[/yellow]")
+        registry_org = Prompt.ask("GitHub organization")
     config["registry"]["org"] = registry_org
 
     # GitHub CLI Setup
@@ -623,11 +629,6 @@ def validate_config() -> bool:
     # Check required fields
     storage = config.get("storage", {})
     if not storage.get("bucket_prefix"):
-        return False
-
-    try:
-        get_storage_credentials()
-    except ValueError:
         return False
 
     # Check registry URL is configured

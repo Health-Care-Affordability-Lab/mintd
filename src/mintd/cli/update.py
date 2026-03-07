@@ -167,11 +167,19 @@ def storage(path, yes):
             raise click.Abort()
 
     # Sync metadata.json with updated DVC remote info
-    from ..api import _update_metadata_with_dvc_info
-    _update_metadata_with_dvc_info(
-        project_path,
-        {"remote_name": remote_name, "remote_url": remote_url},
-    )
+    try:
+        with open(metadata_path, 'r') as f:
+            meta = json.load(f)
+        if "storage" not in meta:
+            meta["storage"] = {}
+        if "dvc" not in meta["storage"]:
+            meta["storage"]["dvc"] = {}
+        meta["storage"]["dvc"]["remote_name"] = remote_name
+        meta["storage"]["dvc"]["remote_url"] = remote_url
+        with open(metadata_path, 'w') as f:
+            json.dump(meta, f, indent=2)
+    except Exception as e:
+        console.print(f"⚠️  Could not sync metadata.json: {e}", style="yellow")
 
     console.print("✅ Updated DVC storage configuration")
 

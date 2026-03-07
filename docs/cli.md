@@ -94,6 +94,9 @@ mintd config setup --set-credentials  # Set storage credentials
 ```bash
 mintd data list                       # List available data products
 mintd data list --imported            # List imported dependencies
+mintd data get <product>              # Download data/final/ to ./<product>/
+mintd data get <product> --path data  # Download entire data/ directory
+mintd data get <product> --rev v2.0   # Download a specific version
 mintd data import <product>           # Import data/final/ from product (default)
 mintd data import <product> --all     # Import entire data/ directory
 mintd data import <product> --stage raw  # Import specific stage
@@ -103,6 +106,37 @@ mintd data push <targets>             # Push specific .dvc files or stages
 mintd data update                     # Update all DVC imports to latest version
 mintd data update <path>              # Update specific .dvc file
 mintd data remove <import>            # Remove a data import from the project
+```
+
+### Data Get Options
+
+`mintd data get` downloads data product files directly without requiring a mintd project context. No git clone, no `.dvc` tracking files, no pipeline metadata -- just the data files. Use this to explore a dataset before deciding to import it.
+
+| Option | Description |
+|--------|-------------|
+| `--dest TEXT` | Target directory (default: `./<product-name>/`) |
+| `--rev TEXT` | Version tag or git ref (default: latest) |
+| `--path TEXT` | Path inside source repo (default: `data/final/`) |
+| `--with-schema / --no-schema` | Include `schemas/v1/schema.json` (default: on) |
+| `--dry-run` | Show what would be downloaded without downloading |
+
+Examples:
+
+```bash
+# Quick exploration -- download final data and schema
+mintd data get aha-annual-survey
+
+# Download to a specific directory
+mintd data get aha-annual-survey --dest ~/Desktop/aha-data
+
+# Download raw data instead of final
+mintd data get aha-annual-survey --path data/raw
+
+# Download everything under data/
+mintd data get aha-annual-survey --path data
+
+# Preview without downloading
+mintd data get aha-annual-survey --dry-run
 ```
 
 ### Data Import Options

@@ -8,13 +8,14 @@ from .main import main
 from .utils import console
 
 
-def _print_next_steps(language: str, project_path: str, project_type: str) -> None:
+def _print_next_steps(language: str, project_path: str, project_type: str, config_exists: bool = True) -> None:
     """Print language-specific next steps after project creation.
 
     Args:
         language: Primary programming language (python, r, stata)
         project_path: Path to the created project
         project_type: Type of project (data, project)
+        config_exists: Whether mintd configuration is set up
     """
     console.print()
     console.print("[bold]Next steps:[/bold]")
@@ -30,14 +31,9 @@ def _print_next_steps(language: str, project_path: str, project_type: str) -> No
         console.print("  2. Initialize renv for reproducibility:")
         console.print("     Rscript -e 'renv::init()'")
         console.print("     [dim]# Then use renv::snapshot() after installing packages[/dim]")
-    elif lang == "stata":
-        console.print("  2. Review stata-packages.txt and install listed packages")
-        console.print("     [dim]# Add any SSC/net packages your code requires[/dim]")
-
-    if project_type in ("data", "project"):
-        console.print("  3. Configure DVC remote (if not auto-configured):")
-        console.print("     dvc remote modify myremote access_key_id <YOUR_KEY>")
-        console.print("     dvc remote modify myremote secret_access_key <YOUR_SECRET>")
+    # Only show mintd config message if not configured and needed for data projects
+    if project_type in ("data", "project") and not config_exists:
+        console.print("  3. Run 'mintd config' to set up AWS credentials for data storage")
     console.print()
 
 
@@ -66,6 +62,7 @@ def create():
 def create_data(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team, public, contract, private, contract_info, team):
     """Create a data product repository (data_{name})."""
     from ..api import create_project
+    from ..config import validate_config
 
     classification = "private"
     contract_slug = None
@@ -105,7 +102,10 @@ def create_data(name, path, lang, no_git, no_dvc, bucket, register, use_current_
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
-            _print_next_steps(lang, str(result.path), "data")
+
+            # Check if mintd config is set up
+            config_exists = validate_config()
+            _print_next_steps(lang, str(result.path), "data", config_exists)
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
@@ -130,6 +130,7 @@ def create_data(name, path, lang, no_git, no_dvc, bucket, register, use_current_
 def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team, public, contract, private, contract_info, team):
     """Create a project repository (prj__{name})."""
     from ..api import create_project
+    from ..config import validate_config
 
     classification = "private"
     contract_slug = None
@@ -169,7 +170,10 @@ def project(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
-            _print_next_steps(lang, str(result.path), "project")
+
+            # Check if mintd config is set up
+            config_exists = validate_config()
+            _print_next_steps(lang, str(result.path), "project", config_exists)
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
@@ -306,6 +310,7 @@ def create_enclave(name, path, registry_url, no_git):
 def custom(template_name, name, path, lang, no_git, no_dvc, register, use_current_repo):
     """Create a project from a custom template."""
     from ..api import create_project
+    from ..config import validate_config
 
     with console.status(f"Scaffolding {template_name} project..."):
         try:
@@ -318,6 +323,9 @@ def custom(template_name, name, path, lang, no_git, no_dvc, register, use_curren
             console.print(f"   Location: {result.path}", style="dim")
             if register and result.registration_url:
                 console.print(f"   Registration PR: {result.registration_url}", style="dim")
+            # Check if mintd config is set up and show next steps
+            config_exists = validate_config()
+            _print_next_steps(lang, str(result.path), template_name, config_exists)
         except Exception as e:
             console.print(f"❌ Error: {e}", style="red")
             raise click.Abort()
@@ -348,6 +356,7 @@ def register_custom_commands():
                 @click.option("--researcher-team", help="Override researcher team")
                 def custom_cmd(name, path, lang, no_git, no_dvc, bucket, register, use_current_repo, admin_team, researcher_team):
                     from ..api import create_project
+                    from ..config import validate_config
                     with console.status("Scaffolding project..."):
                         try:
                             result = create_project(
@@ -358,6 +367,9 @@ def register_custom_commands():
                             )
                             console.print(f"✅ Created: {result.full_name}", style="green")
                             console.print(f"   Location: {result.path}", style="dim")
+                            # Check if mintd config is set up
+                            config_exists = validate_config()
+                            _print_next_steps(lang, str(result.path), cmd_name_val, config_exists)
                         except Exception as e:
                             console.print(f"❌ Error: {e}", style="red")
                             raise click.Abort()

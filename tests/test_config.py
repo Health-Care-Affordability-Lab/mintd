@@ -65,28 +65,33 @@ class TestConfig:
 
             assert not validate_config()
 
-    def test_validate_config_missing_credentials(self):
-        """Test config validation with missing credentials."""
-        with patch("mintd.config.get_config") as mock_get_config, \
-             patch("mintd.config.get_storage_credentials") as mock_creds:
+    def test_validate_config_does_not_access_keychain(self):
+        """Test that validate_config does NOT call get_storage_credentials.
 
-            mock_get_config.return_value = {
-                "storage": {"bucket_prefix": "test"}
-            }
-            mock_creds.side_effect = ValueError("No credentials")
-
-            assert not validate_config()
-
-    def test_validate_config_missing_registry_url(self):
-        """Test config validation with missing registry URL."""
+        validate_config is used post-creation to show hints. It should never
+        trigger keychain access — credentials are only needed at push/pull time.
+        """
         with patch("mintd.config.get_config") as mock_get_config, \
              patch("mintd.config.get_storage_credentials") as mock_creds, \
              patch("mintd.config.get_registry_url") as mock_registry:
 
             mock_get_config.return_value = {
+                "storage": {"bucket_prefix": "test"},
+                "registry": {"org": "test-org"},
+            }
+            mock_registry.return_value = "https://github.com/org/registry"
+
+            validate_config()
+            mock_creds.assert_not_called()
+
+    def test_validate_config_missing_registry_url(self):
+        """Test config validation with missing registry URL."""
+        with patch("mintd.config.get_config") as mock_get_config, \
+             patch("mintd.config.get_registry_url") as mock_registry:
+
+            mock_get_config.return_value = {
                 "storage": {"bucket_prefix": "test"}
             }
-            mock_creds.return_value = ("key", "secret")
             mock_registry.side_effect = ValueError("No registry URL")
 
             assert not validate_config()
@@ -94,13 +99,11 @@ class TestConfig:
     def test_validate_config_complete(self):
         """Test config validation with complete configuration."""
         with patch("mintd.config.get_config") as mock_get_config, \
-             patch("mintd.config.get_storage_credentials") as mock_creds, \
              patch("mintd.config.get_registry_url") as mock_registry:
 
             mock_get_config.return_value = {
                 "storage": {"bucket_prefix": "test"}
             }
-            mock_creds.return_value = ("key", "secret")
             mock_registry.return_value = "https://github.com/org/registry"
 
             assert validate_config() is True

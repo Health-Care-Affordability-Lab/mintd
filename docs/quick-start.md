@@ -26,6 +26,20 @@ mintd create code --name mylib --lang python
 
 > **Note:** `mintd create code` only drops a `metadata.json` for governance/mirroring — no directory scaffold. See [Project Types](project-types.md#code-projects-no-prefix) for details.
 
+## Exploring Data Products
+
+Before importing a data product into your project, you can download and inspect it:
+
+```bash
+# Download the final data files to ./aha-annual-survey/
+mintd data get aha-annual-survey
+
+# Check what's available, then import into your project
+mintd data import aha-annual-survey
+```
+
+`mintd data get` works from any directory -- no project setup required. See the [CLI Reference](cli.md#data-get-options) for all options.
+
 ## With Registry Integration
 
 ```bash
