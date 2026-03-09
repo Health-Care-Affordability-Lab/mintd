@@ -23,7 +23,7 @@ Creates a data product repository (`data_{name}`).
 mintd create project --name <name> --lang <language> [OPTIONS]
 ```
 
-Creates a project repository (`prj__{name}`).
+Creates a project repository (`prj_{name}`).
 
 ### Track Code Repository
 
@@ -214,6 +214,23 @@ mintd manifest create <path>          # Create/update file manifest
 mintd manifest check <file>           # Check if file changed vs manifest
 mintd manifest status <dir>           # Show status of files in directory
 ```
+
+## Validation
+
+```bash
+mintd check                           # Check metadata.json vs DVC config consistency
+mintd check --validate                # Also validate metadata completeness
+mintd check --path <dir>              # Check a specific project directory
+```
+
+### Check Options
+
+| Option | Description |
+|--------|-------------|
+| `-p, --path PATH` | Path to project directory |
+| `--validate` | Run metadata completeness validation in addition to DVC consistency check |
+
+The check command compares the DVC remote name and URL in `metadata.json` against the actual `.dvc/config` file. With `--validate`, it also checks that all required metadata fields are populated and consistent with your mintd configuration.
 
 ## Template Management
 
