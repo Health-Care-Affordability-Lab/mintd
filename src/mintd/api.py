@@ -373,7 +373,6 @@ def create_project(
     # Initialize DVC if requested
     if init_dvc:
         sensitivity = context.get("storage_sensitivity", "restricted")
-        full_project_name = template.prefix + name
         _init_dvc(project_path, bucket_name, sensitivity, name, full_project_name)
 
     # Note: We no longer need to update metadata.json with DVC info since it's in the template context

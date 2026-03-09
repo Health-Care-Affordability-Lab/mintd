@@ -49,6 +49,48 @@ class TestGetResult:
         assert result.files_downloaded == 3
 
 
+class TestGetDataProductValidation:
+    """Tests for input validation and path traversal prevention."""
+
+    def test_rejects_slash_in_product_name(self):
+        result = get_data_product("../evil")
+        assert result.success is False
+        assert "Invalid product name" in result.error_message
+
+    def test_rejects_backslash_in_product_name(self):
+        result = get_data_product("..\\evil")
+        assert result.success is False
+        assert "Invalid product name" in result.error_message
+
+    def test_rejects_dotdot_product_name(self):
+        result = get_data_product("..")
+        assert result.success is False
+        assert "Invalid product name" in result.error_message
+
+    def test_rejects_dot_product_name(self):
+        result = get_data_product(".")
+        assert result.success is False
+        assert "Invalid product name" in result.error_message
+
+    def test_allows_dots_in_product_name(self):
+        """Legitimate product names with dots should not be rejected."""
+        # This should NOT be rejected (dots are fine, only ".." as path component is bad)
+        # It will fail at registry lookup, not at validation
+        result = get_data_product("my-project.v2")
+        # Should get past validation (fail at registry lookup instead)
+        assert result.error_message is None or "Invalid product name" not in result.error_message
+
+    def test_rejects_traversal_in_dest(self):
+        result = get_data_product("good-name", dest="../../etc/passwd")
+        assert result.success is False
+        assert "Destination path must not contain '..'" in result.error_message
+
+    def test_rejects_traversal_in_path(self):
+        result = get_data_product("good-name", path="../../etc/passwd")
+        assert result.success is False
+        assert "Source path must not contain '..'" in result.error_message
+
+
 class TestGetDataProduct:
     """Tests for the get_data_product business logic."""
 

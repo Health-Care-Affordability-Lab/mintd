@@ -649,11 +649,25 @@ def get_data_product(
         GetResult with operation details
     """
     # Validate product name to prevent path traversal
-    if "/" in product_name or ".." in product_name:
+    if "/" in product_name or "\\" in product_name or product_name in ("..", ".") or product_name.startswith("../") or product_name.startswith("..\\"):
         return GetResult(
             product_name=product_name, success=False,
             dest_path=dest or "", source_path=path or "",
             error_message=f"Invalid product name: {product_name}",
+        )
+
+    # Validate dest and path parameters to prevent path traversal
+    if dest and ".." in Path(dest).parts:
+        return GetResult(
+            product_name=product_name, success=False,
+            dest_path=dest, source_path=path or "",
+            error_message="Destination path must not contain '..' components",
+        )
+    if path and ".." in Path(path).parts:
+        return GetResult(
+            product_name=product_name, success=False,
+            dest_path=dest or "", source_path=path,
+            error_message="Source path must not contain '..' components",
         )
 
     source_path = path or "data/final/"

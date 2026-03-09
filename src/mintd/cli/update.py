@@ -62,6 +62,7 @@ def metadata(path, sensitivity, mirror_url):
 
             with open(metadata_path, 'w') as f:
                 json.dump(metadata_data, f, indent=2)
+                f.write("\n")
 
         except Exception as e:
             console.print(f"❌ Failed to update metadata: {e}", style="red")
@@ -178,6 +179,7 @@ def storage(path, yes):
         meta["storage"]["dvc"]["remote_url"] = remote_url
         with open(metadata_path, 'w') as f:
             json.dump(meta, f, indent=2)
+            f.write("\n")
     except Exception as e:
         console.print(f"⚠️  Could not sync metadata.json: {e}", style="yellow")
 
@@ -216,6 +218,7 @@ def utils(path):
 
             with open(metadata_path, 'w') as f:
                 json.dump(metadata, f, indent=2)
+                f.write("\n")
 
             console.print(f"✅ Updated mintd version in metadata.json to {mint_info['mint_version']}")
 
@@ -310,6 +313,7 @@ def schema(path, generate, force):
             }
             with open(metadata_path, 'w') as f:
                 json.dump(metadata_data, f, indent=2)
+                f.write("\n")
             console.print("✅ Added schema section to metadata.json")
         else:
             console.print("ℹ️  Schema section already exists in metadata.json")
@@ -490,5 +494,6 @@ def _write_starter_schema(schema_file: Path, force: bool):
 
     with open(schema_file, 'w') as f:
         json.dump(starter_schema, f, indent=2)
+        f.write("\n")
 
     console.print(f"✅ Created starter schema: {schema_file.name}")

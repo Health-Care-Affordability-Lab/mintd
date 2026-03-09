@@ -1,6 +1,6 @@
 """Metadata validation utilities."""
 
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 
 def validate_metadata(metadata: dict) -> Tuple[bool, List[str]]:
