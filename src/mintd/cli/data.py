@@ -41,27 +41,66 @@ def data_push(targets, jobs, project_path):
 
 
 @data.command(name="pull")
-@click.argument("product_name")
-@click.option("--destination", "-d", help="Local destination directory")
-@click.option("--stage", help="Pipeline stage to pull")
-@click.option("--path", help="Specific path to pull from the product")
-def data_pull(product_name, destination, stage, path):
-    """Pull/download data from a registered data product."""
-    from ..data_import import pull_data_product
+@click.argument("product_name", required=False)
+@click.option("--dest", "-d", help="Destination directory (for remote pull)")
+@click.option("--rev", help="Git tag or ref (for remote pull)")
+@click.option("--all", "pull_all", is_flag=True, help="Pull all DVC data (not just primary product)")
+@click.option("--jobs", "-j", type=int, help="Number of parallel download jobs")
+@click.option("--project-path", "-p", type=click.Path(exists=True, path_type=Path))
+def data_pull(product_name, dest, rev, pull_all, jobs, project_path):
+    """Pull DVC-tracked data.
+
+    \b
+    Without PRODUCT_NAME:
+        Pull data in the current mintd project (like dvc pull).
+
+    \b
+    With PRODUCT_NAME:
+        Clone the product's repo and pull its primary data from S3.
+        Use --all to pull everything instead of just the primary product.
+    """
+    from ..data_import import clone_and_pull_product, pull_local
+
+    project_path = Path(project_path) if project_path else Path.cwd()
 
     try:
-        if stage and path:
-            console.print("❌ Cannot specify both --stage and --path", style="red")
-            raise click.Abort()
+        if product_name:
+            # Remote product pull: clone + dvc pull
+            result = clone_and_pull_product(
+                product_name=product_name,
+                dest=dest,
+                rev=rev,
+                pull_all=pull_all,
+                jobs=jobs,
+            )
+            if not result.success:
+                console.print(f"Error: {result.error_message}", style="red")
+                raise click.Abort()
+        else:
+            # Local pull: dvc pull inside current repo
+            metadata_file = project_path / "metadata.json"
+            if not metadata_file.exists():
+                console.print(
+                    "Not inside a mintd project.\n\n"
+                    "To pull data from a registered product, run:\n"
+                    "  mintd data pull <product_name>\n\n"
+                    "To pull all data from a product:\n"
+                    "  mintd data pull <product_name> --all",
+                    style="yellow",
+                )
+                raise click.Abort()
 
-        success = pull_data_product(
-            product_name=product_name, destination=destination, stage=stage, path=path
-        )
-        if not success:
-            raise click.Abort()
+            targets = None
+            pull_local(
+                project_path=project_path,
+                targets=targets,
+                jobs=jobs,
+            )
 
+    except click.Abort:
+        raise
     except Exception as e:
-        console.print(f"❌ Error: {e}", style="red")
+        console.print(f"Error: {e}", style="red")
         raise click.Abort()
 
 
@@ -109,37 +148,6 @@ def import_(product_name, stage, source_path, dest, rev, import_all, project_pat
         console.print(f"❌ Error: {e}", style="red")
         raise click.Abort()
 
-
-@data.command(name="get")
-@click.argument("product_name")
-@click.option("--dest", help="Target directory (default: ./<product-name>/)")
-@click.option("--rev", help="Version tag or git ref (default: latest)")
-@click.option("--path", "source_path", help="Path inside source repo (default: data/final/)")
-@click.option("--with-schema/--no-schema", default=True, help="Include schemas/v1/schema.json")
-@click.option("--dry-run", is_flag=True, help="Show what would be downloaded")
-def data_get(product_name, dest, rev, source_path, with_schema, dry_run):
-    """Download data product files without requiring a project.
-
-    Fetches files directly from the data product's DVC remote. No git clone,
-    no .dvc tracking files, no pipeline metadata — just the data.
-
-    By default downloads data/final/. Use --path to target a different
-    directory or specific file.
-    """
-    from ..data_import import get_data_product
-
-    result = get_data_product(
-        product_name=product_name,
-        path=source_path,
-        dest=dest,
-        rev=rev,
-        with_schema=with_schema,
-        dry_run=dry_run,
-    )
-
-    if not result.success:
-        console.print(f"Error: {result.error_message}", style="red")
-        raise click.Abort()
 
 
 @data.command(name="remove")

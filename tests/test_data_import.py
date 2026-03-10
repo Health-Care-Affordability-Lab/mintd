@@ -15,7 +15,7 @@ from mintd.data_import import (
     query_data_product, validate_project_directory,
     run_dvc_import, run_dvc_update, update_project_metadata, update_dependency_metadata,
     update_single_import, update_all_imports,
-    import_data_product, pull_data_product, push_data, get_project_remote,
+    import_data_product, push_data, get_project_remote,
     list_data_products,
     remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import,
     list_remote_data_paths, validate_source_path, prompt_stage_selection,
@@ -378,37 +378,6 @@ class TestImportDataProduct:
 
 
 # =============================================================================
-# Pull Data Product Tests
-# =============================================================================
-
-class TestPullDataProduct:
-
-    @patch('mintd.data_import.query_data_product')
-    @patch('tempfile.mkdtemp')
-    @patch('git.Repo.clone_from')
-    @patch('shutil.copytree')
-    def test_pull_data_product_success(
-        self, mock_copytree, mock_clone, mock_mkdtemp, mock_query,
-        temp_dir, mock_data_product
-    ):
-        """Test successful data product pull."""
-        mock_query.return_value = mock_data_product
-        mock_mkdtemp.return_value = str(temp_dir / "temp_repo")
-
-        # Create mock repo structure
-        temp_repo_dir = temp_dir / "temp_repo"
-        temp_repo_dir.mkdir()
-        (temp_repo_dir / "data" / "final").mkdir(parents=True)
-
-        success = pull_data_product(
-            product_name="data_cms-provider-data-service",
-            destination=str(temp_dir / "output")
-        )
-
-        assert success == True
-
-
-# =============================================================================
 # Push Data Tests
 # =============================================================================
 
@@ -664,7 +633,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(main, ["data", "pull", "--help"])
         assert result.exit_code == 0
-        assert "Pull/download data from a registered data product" in result.output
+        assert "Pull DVC-tracked data" in result.output
 
     def test_data_import_help(self):
         """Test data import command help."""

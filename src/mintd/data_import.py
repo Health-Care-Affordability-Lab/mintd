@@ -666,132 +666,94 @@ def import_data_product(
         return result
 
 
-def pull_data_product(
-    product_name: str,
-    destination: Optional[str] = None,
-    stage: Optional[str] = None,
-    path: Optional[str] = None
+def pull_local(
+    project_path: Path,
+    targets: Optional[List[str]] = None,
+    jobs: Optional[int] = None,
 ) -> bool:
-    """Pull/download data from a registered data product.
+    """Pull DVC-tracked data in the current mintd project.
 
-    This is similar to enclave data pulling but for general use.
+    Mirrors ``push_data`` — reads the remote name from metadata.json and
+    runs ``dvc pull -r <remote>``.
 
     Args:
-        product_name: Name of the data product
-        destination: Local destination directory
-        stage: Pipeline stage to pull
-        path: Specific path to pull
+        project_path: Path to the project directory
+        targets: Optional list of specific .dvc files or stages to pull
+        jobs: Number of parallel download jobs
 
     Returns:
-        True if successful
+        True if pull succeeded
     """
-    try:
-        # Query product information
-        console.print(f"🔍 Querying registry for '{product_name}'...")
-        product_info = query_data_product(product_name)
+    remote_name = get_project_remote(project_path)
 
-        # Determine destination
-        if not destination:
-            destination = f"./{product_name}_data"
+    dvc = dvc_command(cwd=project_path)
+    args = ["pull", "-r", remote_name]
 
-        dest_path = Path(destination)
-        dest_path.mkdir(parents=True, exist_ok=True)
+    if jobs:
+        args.extend(["-j", str(jobs)])
 
-        # This would implement the actual data pulling logic
-        # For now, just clone and pull the data
-        repo_url = product_info["repository"]["github_url"]
+    if targets:
+        args.extend(targets)
 
-        console.print(f"📥 Pulling data from {product_name}...")
-
-        # Convert to SSH URL
-        if repo_url.startswith('https://github.com/'):
-            ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
-        else:
-            ssh_url = repo_url
-
-        # Clone repository
-        temp_dir = Path(tempfile.mkdtemp())
-        try:
-            git.Repo.clone_from(ssh_url, temp_dir)
-
-            # Determine what to copy
-            if stage:
-                source_path = temp_dir / "data" / stage
-            elif path:
-                source_path = temp_dir / path
-            else:
-                source_path = temp_dir / "data" / "final"
-
-            if source_path.exists():
-                if source_path.is_file():
-                    shutil.copy2(source_path, dest_path)
-                else:
-                    shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
-
-                console.print(f"✅ Data pulled to {dest_path}", style="green")
-                return True
-            else:
-                console.print(f"❌ Source path {source_path} not found", style="red")
-                return False
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
-    except Exception as e:
-        console.print(f"❌ Failed to pull data: {e}", style="red")
-        return False
+    console.print(f"Pulling from remote '{remote_name}'...")
+    dvc.run_live(*args)
+    console.print("Pull complete.", style="green")
+    return True
 
 
-def get_data_product(
+def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
+    """Extract the primary data product path from catalog info.
+
+    Falls back to ``data/final/`` when the ``data_products`` section is
+    absent (backwards compatible with older catalog entries).
+    """
+    return (
+        product_info
+        .get("data_products", {})
+        .get("primary", "data/final/")
+    )
+
+
+def clone_and_pull_product(
     product_name: str,
-    path: Optional[str] = None,
     dest: Optional[str] = None,
     rev: Optional[str] = None,
-    with_schema: bool = True,
-    dry_run: bool = False,
+    pull_all: bool = False,
+    jobs: Optional[int] = None,
 ) -> GetResult:
-    """Download data product files without requiring a project context.
-
-    Uses ``dvc get`` to fetch files directly from S3 via the source repo's
-    DVC configuration.  No git clone, no .dvc files, no pipeline metadata.
+    """Clone a data product repo and ``dvc pull`` its data from S3.
 
     Args:
         product_name: Registered data product name
-        path: Path inside the source repo to download (default: ``data/final/``)
-        dest: Local destination directory (default: ``./<product_name>/``)
-        rev: Git tag or ref in the source repo
-        with_schema: Also download ``schemas/v1/schema.json``
-        dry_run: Show what would be downloaded without downloading
+        dest: Local directory to clone into (default: ``./<product_name>/``)
+        rev: Git tag or ref to checkout
+        pull_all: If True, pull all DVC data; otherwise only the primary product
+        jobs: Number of parallel DVC download jobs
 
     Returns:
         GetResult with operation details
     """
-    # Validate product name to prevent path traversal
-    if "/" in product_name or "\\" in product_name or product_name in ("..", ".") or product_name.startswith("../") or product_name.startswith("..\\"):
+    # Input validation
+    if "/" in product_name or "\\" in product_name or product_name in ("..", "."):
         return GetResult(
             product_name=product_name, success=False,
-            dest_path=dest or "", source_path=path or "",
+            dest_path=dest or "", source_path="",
             error_message=f"Invalid product name: {product_name}",
         )
-
-    # Validate dest and path parameters to prevent path traversal
     if dest and ".." in Path(dest).parts:
         return GetResult(
             product_name=product_name, success=False,
-            dest_path=dest, source_path=path or "",
+            dest_path=dest, source_path="",
             error_message="Destination path must not contain '..' components",
         )
-    if path and ".." in Path(path).parts:
-        return GetResult(
-            product_name=product_name, success=False,
-            dest_path=dest or "", source_path=path,
-            error_message="Source path must not contain '..' components",
-        )
 
-    source_path = path or "data/final/"
     dest = dest or f"./{product_name}"
-    result = GetResult(product_name=product_name, success=False,
-                       dest_path=dest, source_path=source_path)
+    dest_path = Path(dest)
+
+    result = GetResult(
+        product_name=product_name, success=False,
+        dest_path=dest, source_path="",
+    )
 
     try:
         # Resolve product from registry
@@ -799,45 +761,51 @@ def get_data_product(
         product_info = query_data_product(product_name)
         repo_url = product_info["repository"]["github_url"]
         ssh_url = _https_to_ssh(repo_url)
+        primary_path = _resolve_primary_path(product_info)
+        result.source_path = primary_path if not pull_all else "all"
 
-        if dry_run:
-            console.print(f"Would download {source_path} -> {dest}")
-            if with_schema and not path:
-                console.print(f"Would download schemas/v1/schema.json -> {dest}")
-            result.success = True
-            return result
-
-        # Download data
-        console.print(f"Downloading {source_path} from {product_name}...")
-        dvc = dvc_command()
-        args = ["get", ssh_url, source_path, "-o", dest]
+        # Clone
+        clone_args = ["clone", "--depth", "1"]
         if rev:
-            args.extend(["--rev", rev])
-        dvc.run_live(*args)
+            clone_args.extend(["--branch", rev])
+        clone_args.extend([ssh_url, str(dest_path)])
+
+        console.print(f"Cloning {product_name}...")
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        # DVC pull
+        dvc = dvc_command(cwd=dest_path)
+        pull_args = ["pull"]
+
+        remote_name = (
+            product_info.get("storage", {})
+            .get("dvc", {})
+            .get("remote_name", "")
+        )
+        if remote_name:
+            pull_args.extend(["-r", remote_name])
+
+        if jobs:
+            pull_args.extend(["-j", str(jobs)])
+
+        if not pull_all:
+            pull_args.append(primary_path)
+
+        console.print(
+            f"Pulling {'all data' if pull_all else primary_path} from DVC remote..."
+        )
+        dvc.run_live(*pull_args)
 
         result.success = True
-
-        # Optionally download schema (only when using default path)
-        if with_schema and not path:
-            try:
-                schema_args = ["get", ssh_url, "schemas/v1/schema.json", "-o", dest]
-                if rev:
-                    schema_args.extend(["--rev", rev])
-                dvc.run_live(*schema_args)
-            except Exception:
-                console.print("Schema not found — skipping.", style="yellow")
-
-        console.print(f"Downloaded to {dest}", style="green")
-        console.print(
-            f"\nTo track this data as a dependency, run:\n"
-            f"  mintd data import {product_name}",
-            style="dim",
-        )
+        console.print(f"Data available at {dest_path}", style="green")
         return result
 
     except Exception as e:
         result.error_message = str(e)
         return result
+
+
 
 
 def get_project_remote(project_path: Path) -> str:
