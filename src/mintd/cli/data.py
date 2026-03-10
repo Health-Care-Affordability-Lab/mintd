@@ -149,7 +149,6 @@ def import_(product_name, stage, source_path, dest, rev, import_all, project_pat
         raise click.Abort()
 
 
-
 @data.command(name="remove")
 @click.argument("import_name")
 @click.option("--force", "-f", is_flag=True, help="Remove even if dvc.yaml has references")

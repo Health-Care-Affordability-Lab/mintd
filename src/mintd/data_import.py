@@ -790,7 +790,9 @@ def clone_and_pull_product(
             pull_args.extend(["-j", str(jobs)])
 
         if not pull_all:
-            pull_args.append(primary_path)
+            # DVC pull targets are .dvc files, not data paths
+            dvc_target = primary_path.rstrip("/") + ".dvc"
+            pull_args.append(dvc_target)
 
         console.print(
             f"Pulling {'all data' if pull_all else primary_path} from DVC remote..."
@@ -804,7 +806,6 @@ def clone_and_pull_product(
     except Exception as e:
         result.error_message = str(e)
         return result
-
 
 
 

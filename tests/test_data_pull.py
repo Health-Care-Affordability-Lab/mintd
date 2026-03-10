@@ -104,10 +104,10 @@ class TestCloneAndPullProduct:
         assert "1" in clone_args
         assert "git@github.com:" in clone_args[-2]
 
-        # Verify dvc pull called with primary path
+        # Verify dvc pull called with primary .dvc file
         dvc_calls = mock_dvc.run_live.call_args[0]
         assert "pull" in dvc_calls
-        assert "data/final/" in dvc_calls
+        assert "data/final.dvc" in dvc_calls
 
     @patch("mintd.data_import.dvc_command")
     @patch("mintd.data_import.git_command")
@@ -125,7 +125,7 @@ class TestCloneAndPullProduct:
         assert result.success is True
         assert result.source_path == "data/analysis/"
         dvc_calls = mock_dvc.run_live.call_args[0]
-        assert "data/analysis/" in dvc_calls
+        assert "data/analysis.dvc" in dvc_calls
 
     @patch("mintd.data_import.dvc_command")
     @patch("mintd.data_import.git_command")
@@ -144,8 +144,8 @@ class TestCloneAndPullProduct:
         assert result.source_path == "all"
         dvc_calls = mock_dvc.run_live.call_args[0]
         assert "pull" in dvc_calls
-        # Should NOT contain a specific path — just "pull" + remote flags
-        assert "data/final/" not in dvc_calls
+        # Should NOT contain a specific .dvc target — just "pull" + remote flags
+        assert "data/final.dvc" not in dvc_calls
 
     @patch("mintd.data_import.dvc_command")
     @patch("mintd.data_import.git_command")
