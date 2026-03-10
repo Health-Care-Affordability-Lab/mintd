@@ -125,8 +125,12 @@ renv/python/
 .Ruserdata
 
 # Data files (let DVC handle these)
-data/
-!data/.gitkeep
+# Use data/** (not data/) so git still traverses subdirectories,
+# allowing negation patterns for .dvc files to work.
+/data/**
+!/data/.gitkeep
+!/data/**/
+!/data/**/*.dvc
 
 # Output directories
 output/

@@ -6,6 +6,7 @@ error handling and rollback support.
 """
 
 import json
+import re
 import shutil
 import tempfile
 
@@ -369,13 +370,77 @@ def update_project_metadata(
         raise MetadataUpdateError(f"Failed to update metadata.json: {e}")
 
 
+def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List[str]:
+    """Extract data/ output paths from a remote repo's dvc.yaml.
+
+    DVC pipeline outputs (like data/final/) are not git-tracked directories —
+    they only appear as ``outs`` in ``dvc.yaml``.  This function reads the
+    pipeline definition and resolves output paths relative to each stage's
+    ``wdir`` so that paths like ``../data/final/`` (with ``wdir: code``) are
+    normalised to ``data/final``.
+
+    Returns:
+        Sorted, deduplicated list of ``data/*`` paths found in pipeline outputs.
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-dvc-yaml-"))
+        clone_args = [
+            "clone", "--depth", "1", "--no-checkout",
+            repo_url, str(temp_dir / "repo"),
+        ]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        try:
+            result = cloned_git.run("show", f"{ref}:dvc.yaml")
+        except Exception:
+            return []
+
+        pipeline = yaml.safe_load(result.stdout) or {}
+        data_paths: set[str] = set()
+
+        for stage_info in (pipeline.get("stages") or {}).values():
+            wdir = stage_info.get("wdir", ".")
+            for out in stage_info.get("outs", []):
+                out_path = out if isinstance(out, str) else list(out.keys())[0]
+                # Resolve relative to wdir (e.g. wdir=code, out=../data/final/)
+                resolved = (Path(wdir) / out_path).as_posix()
+                # Normalise (collapses ../)
+                parts = resolved.rstrip("/").split("/")
+                normalized: list[str] = []
+                for p in parts:
+                    if p == "..":
+                        if normalized:
+                            normalized.pop()
+                    elif p != ".":
+                        normalized.append(p)
+                norm = "/".join(normalized)
+                if norm.startswith("data/") and norm != "data":
+                    # Keep only the first level under data/
+                    top_level = "data/" + norm.split("/")[1]
+                    data_paths.add(top_level)
+
+        return sorted(data_paths)
+    except Exception:
+        return []
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def list_remote_data_paths(
     repo_url: str,
     rev: Optional[str] = None,
 ) -> List[str]:
     """List available data directories in a remote git repository.
 
-    Performs a shallow clone to inspect the data/ directory structure.
+    Discovers directories both from the git tree (e.g. data/raw/) and from
+    DVC pipeline outputs in dvc.yaml (e.g. data/final/).
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
@@ -385,6 +450,7 @@ def list_remote_data_paths(
         List of directory paths under data/ (e.g., ["data/raw", "data/final"])
     """
     temp_dir = None
+    git_paths: List[str] = []
     try:
         temp_dir = Path(tempfile.mkdtemp(prefix="mintd-ls-"))
         clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
@@ -396,12 +462,19 @@ def list_remote_data_paths(
         cloned_git = git_command(cwd=temp_dir / "repo")
         ref = rev or "HEAD"
         result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
-        return [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+        git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
     except Exception:
-        return []
+        pass
     finally:
         if temp_dir:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Also discover DVC pipeline output paths
+    dvc_paths = _parse_dvc_yaml_data_paths(repo_url, rev=rev)
+
+    # Merge and deduplicate
+    all_paths = sorted(set(git_paths + dvc_paths))
+    return all_paths
 
 
 def list_remote_dvc_files(
@@ -505,6 +578,44 @@ def prompt_stage_selection(available_paths: List[str]) -> str:
     return available_paths[choice - 1]
 
 
+def _warn_outdated_gitignore(project_path: Path) -> None:
+    """Warn if the project .gitignore uses the old ``data/`` rule.
+
+    The old pattern (``data/``) ignores the entire directory so git refuses to
+    create ``.dvc`` tracking files inside it.  The fix is to replace it with
+    ``/data/**`` plus negation rules for directories and ``.dvc`` files.
+    """
+    gitignore = project_path / ".gitignore"
+    if not gitignore.exists():
+        return
+
+    text = gitignore.read_text()
+    # Match a bare "data/" rule that is NOT part of the "/data/**" pattern
+    has_old = any(
+        re.fullmatch(r"data/", line.strip())
+        for line in text.splitlines()
+        if not line.strip().startswith("#")
+    )
+    has_new = "/data/**" in text
+
+    if has_old and not has_new:
+        console.print(
+            "⚠️  Your .gitignore uses the outdated 'data/' rule which blocks "
+            "DVC import tracking files.\n"
+            "   Run [bold]mintd init --update-gitignore[/bold] or replace the "
+            "'data/' line with:\n\n"
+            "     /data/**\n"
+            "     !/data/.gitkeep\n"
+            "     !/data/**/\n"
+            "     !/data/**/*.dvc\n",
+            style="yellow",
+        )
+        if not click.confirm("Continue anyway?", default=False):
+            raise DataImportError(
+                "Import aborted. Please update your .gitignore first."
+            )
+
+
 def import_data_product(
     product_name: str,
     project_path: Path,
@@ -539,6 +650,9 @@ def import_data_product(
     try:
         # Validate project directory
         validate_project_directory(project_path)
+
+        # Check for outdated gitignore that blocks DVC imports
+        _warn_outdated_gitignore(project_path)
 
         # Query product information from registry
         console.print(f"🔍 Querying registry for '{product_name}'...")

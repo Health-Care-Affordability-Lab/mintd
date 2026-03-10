@@ -19,7 +19,7 @@ from mintd.data_import import (
     list_data_products,
     remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import,
     list_remote_data_paths, validate_source_path, prompt_stage_selection,
-    list_remote_dvc_files,
+    list_remote_dvc_files, _parse_dvc_yaml_data_paths,
 )
 
 
@@ -1299,13 +1299,120 @@ class TestRemoveCLI:
 # Smart Import Default Tests (list_remote_data_paths, validate, prompt, --all)
 # =============================================================================
 
-class TestListRemoteDataPaths:
-    """Tests for listing available data paths in a remote repo."""
+class TestParseDvcYamlDataPaths:
+    """Tests for extracting data paths from dvc.yaml pipeline outputs."""
 
     @patch('mintd.data_import.shutil.rmtree')
     @patch('mintd.data_import.tempfile.mkdtemp')
     @patch('mintd.data_import.git_command')
-    def test_lists_data_directories(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+    def test_extracts_output_paths_with_wdir(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test extracting data paths from dvc.yaml with wdir-relative outputs."""
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        dvc_yaml_content = """
+stages:
+  ingest:
+    wdir: code
+    cmd: stata -b do ingest.do
+    outs:
+      - ../data/intermediate/
+  validate:
+    wdir: code
+    cmd: stata -b do validate.do
+    outs:
+      - ../data/final/
+"""
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout=dvc_yaml_content),  # git show dvc.yaml
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert "data/intermediate" in paths
+        assert "data/final" in paths
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_extracts_output_paths_without_wdir(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test extracting data paths from dvc.yaml without wdir."""
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        dvc_yaml_content = """
+stages:
+  build:
+    cmd: python build.py
+    outs:
+      - data/final/
+"""
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout=dvc_yaml_content),  # git show dvc.yaml
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert paths == ["data/final"]
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_no_dvc_yaml_returns_empty(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test returns empty list when dvc.yaml doesn't exist."""
+        from mintd.exceptions import GitError
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            GitError(message="not found", command=["git"], returncode=128),  # git show fails
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert paths == []
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_ignores_non_data_outputs(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test that outputs not under data/ are ignored."""
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        dvc_yaml_content = """
+stages:
+  build:
+    cmd: python build.py
+    outs:
+      - data/final/
+      - results/output.csv
+      - models/trained.pkl
+"""
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout=dvc_yaml_content),  # git show dvc.yaml
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert paths == ["data/final"]
+
+
+class TestListRemoteDataPaths:
+    """Tests for listing available data paths in a remote repo."""
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_lists_data_directories(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
         """Test listing data directories from remote repo via shallow clone."""
         mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
         mock_git = Mock()
@@ -1324,10 +1431,11 @@ class TestListRemoteDataPaths:
         assert "data/intermediate" in paths
         assert "data/final" in paths
 
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
     @patch('mintd.data_import.shutil.rmtree')
     @patch('mintd.data_import.tempfile.mkdtemp')
     @patch('mintd.data_import.git_command')
-    def test_returns_empty_on_failure(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+    def test_returns_empty_on_failure(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
         """Test returns empty list when git clone fails."""
         from mintd.exceptions import GitError
         mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
@@ -1343,10 +1451,11 @@ class TestListRemoteDataPaths:
 
         assert paths == []
 
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
     @patch('mintd.data_import.shutil.rmtree')
     @patch('mintd.data_import.tempfile.mkdtemp')
     @patch('mintd.data_import.git_command')
-    def test_with_revision(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+    def test_with_revision(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
         """Test listing paths at a specific revision."""
         mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
         mock_git = Mock()
@@ -1366,6 +1475,48 @@ class TestListRemoteDataPaths:
         assert "--branch" in str(clone_call)
         assert "v1.0" in str(clone_call)
         assert "data/final" in paths
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths')
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_merges_git_and_dvc_paths(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """Test that git-tracked and DVC pipeline output paths are merged."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="raw\n"),  # ls-tree — only data/raw in git
+        ]
+        mock_dvc_yaml.return_value = ["data/final", "data/intermediate"]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert paths == ["data/final", "data/intermediate", "data/raw"]
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths')
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_deduplicates_paths(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """Test that duplicate paths from git and DVC are deduplicated."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="raw\nfinal\n"),  # ls-tree
+        ]
+        mock_dvc_yaml.return_value = ["data/final"]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert paths == ["data/final", "data/raw"]
 
 
 class TestValidateSourcePath:
