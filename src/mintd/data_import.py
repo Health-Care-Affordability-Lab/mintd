@@ -8,6 +8,8 @@ error handling and rollback support.
 import json
 import shutil
 import tempfile
+
+import yaml
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -742,6 +744,61 @@ def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
     )
 
 
+def _resolve_dvc_target(repo_path: Path, primary_path: str) -> List[str]:
+    """Determine the correct DVC pull target(s) for a primary data path.
+
+    Checks for:
+    1. A standalone ``.dvc`` file (e.g. ``data/final.dvc``)
+    2. Individual ``.dvc`` files inside the directory (e.g. ``data/final/*.dvc``)
+    3. An exact pipeline output match in ``dvc.yaml``
+    4. Pipeline outputs nested under the primary path in ``dvc.yaml``
+
+    Returns a list of target strings for ``dvc pull``, or an empty list if
+    nothing is found (caller should fall back to pulling everything).
+    """
+    normalized = primary_path.rstrip("/")
+
+    # 1. Check for a standalone .dvc file (e.g. data/final.dvc)
+    dvc_file = repo_path / (normalized + ".dvc")
+    if dvc_file.exists():
+        return [normalized + ".dvc"]
+
+    # 2. Check for .dvc files inside the directory (e.g. data/final/foo.dvc)
+    primary_dir = repo_path / normalized
+    if primary_dir.is_dir():
+        nested_dvc = sorted(primary_dir.rglob("*.dvc"))
+        if nested_dvc:
+            return [str(p.relative_to(repo_path)) for p in nested_dvc]
+
+    # 3. Check if it's a pipeline output in dvc.yaml (exact or nested)
+    dvc_yaml = repo_path / "dvc.yaml"
+    if dvc_yaml.exists():
+        try:
+            with open(dvc_yaml, "r") as f:
+                pipeline = yaml.safe_load(f) or {}
+
+            def _collect_outs(outs_list):
+                targets = []
+                for out in outs_list:
+                    out_path = out if isinstance(out, str) else list(out.keys())[0]
+                    out_norm = out_path.rstrip("/")
+                    if out_norm == normalized or out_norm.startswith(normalized + "/"):
+                        targets.append(out_path)
+                return targets
+
+            targets = []
+            for stage in pipeline.get("stages", {}).values():
+                targets.extend(_collect_outs(stage.get("outs", [])))
+            # Also check top-level outs (less common but valid)
+            targets.extend(_collect_outs(pipeline.get("outs", [])))
+            if targets:
+                return targets
+        except Exception:
+            pass  # Fall through to empty list
+
+    return []
+
+
 def clone_and_pull_product(
     product_name: str,
     dest: Optional[str] = None,
@@ -818,9 +875,14 @@ def clone_and_pull_product(
             pull_args.extend(["-j", str(jobs)])
 
         if not pull_all:
-            # DVC pull targets are .dvc files, not data paths
-            dvc_target = primary_path.rstrip("/") + ".dvc"
-            pull_args.append(dvc_target)
+            dvc_targets = _resolve_dvc_target(dest_path, primary_path)
+            if dvc_targets:
+                pull_args.extend(dvc_targets)
+            else:
+                console.print(
+                    f"[yellow]Warning: Could not find a DVC target for "
+                    f"'{primary_path}'. Pulling all tracked data instead.[/yellow]"
+                )
 
         console.print(
             f"Pulling {'all data' if pull_all else primary_path} from DVC remote..."
