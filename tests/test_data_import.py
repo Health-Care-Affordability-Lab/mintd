@@ -19,6 +19,7 @@ from mintd.data_import import (
     list_data_products,
     remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import,
     list_remote_data_paths, validate_source_path, prompt_stage_selection,
+    list_remote_dvc_files,
 )
 
 
@@ -1191,11 +1192,20 @@ class TestRemoveDataImport:
         dvc_file = mock_project_dir / "data" / "imports" / "cms-pps-weights.dvc"
         dvc_file.write_text("md5: abc123\n")
 
-        mock_remove_meta.return_value = {
+        # Populate data_dependencies so the inline lookup finds the dependency
+        dep_entry = {
             "source": "data_cms-pps-weights",
             "local_path": "data/imports/cms-pps-weights/",
             "dvc_file": "data/imports/cms-pps-weights.dvc"
         }
+        metadata_file = mock_project_dir / "metadata.json"
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        metadata.setdefault("metadata", {})["data_dependencies"] = [dep_entry]
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        mock_remove_meta.return_value = dep_entry
 
         result = remove_data_import(mock_project_dir, "cms-pps-weights")
 
@@ -1217,11 +1227,19 @@ class TestRemoveDataImport:
         import_dir = mock_project_dir / "data" / "imports" / "test"
         import_dir.mkdir(parents=True)
 
-        mock_remove_meta.return_value = {
+        dep_entry = {
             "source": "data_test",
             "local_path": "data/imports/test/",
             "dvc_file": "data/imports/test.dvc"
         }
+        metadata_file = mock_project_dir / "metadata.json"
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        metadata.setdefault("metadata", {})["data_dependencies"] = [dep_entry]
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        mock_remove_meta.return_value = dep_entry
         mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
 
         result = remove_data_import(mock_project_dir, "test", force=False)
@@ -1236,11 +1254,19 @@ class TestRemoveDataImport:
         import_dir = mock_project_dir / "data" / "imports" / "test"
         import_dir.mkdir(parents=True)
 
-        mock_remove_meta.return_value = {
+        dep_entry = {
             "source": "data_test",
             "local_path": "data/imports/test/",
             "dvc_file": "data/imports/test.dvc"
         }
+        metadata_file = mock_project_dir / "metadata.json"
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+        metadata.setdefault("metadata", {})["data_dependencies"] = [dep_entry]
+        with open(metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        mock_remove_meta.return_value = dep_entry
         mock_check.return_value = ["Warning: dvc.yaml references data/imports/test/"]
 
         result = remove_data_import(mock_project_dir, "test", force=True)
@@ -1583,3 +1609,211 @@ class TestImportCLIAllFlag:
             "data", "import", "test-product", "--all", "--source-path", "some/path"
         ])
         assert result.exit_code != 0
+
+
+# =============================================================================
+# Name Resolution Tests — full name (data_*) should be the primary key
+# =============================================================================
+
+class TestNameResolution:
+    """Test that registry resolves both full and short product names."""
+
+    @patch('mintd.data_import.get_registry_client')
+    def test_full_name_resolves_directly(self, mock_get_client, mock_data_product):
+        """Full name like data_mergerbuild should resolve via exact file match."""
+        mock_client = Mock()
+        mock_client.query_data_product.return_value = mock_data_product
+        mock_get_client.return_value = mock_client
+
+        result = query_data_product("data_cms-provider-data-service")
+        assert result == mock_data_product
+        mock_client.query_data_product.assert_called_once_with("data_cms-provider-data-service")
+
+    @patch('mintd.data_import.get_registry_client')
+    def test_short_name_resolves_with_prefix(self, mock_get_client, mock_data_product):
+        """Short name like mergerbuild should try data_ prefix fallback."""
+        mock_client = Mock()
+        # First call with short name raises, second with full name succeeds
+        mock_client.query_data_product.side_effect = [
+            FileNotFoundError("Not found"),
+            mock_data_product,
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = query_data_product("cms-provider-data-service")
+        assert result == mock_data_product
+        assert mock_client.query_data_product.call_count == 2
+        mock_client.query_data_product.assert_any_call("cms-provider-data-service")
+        mock_client.query_data_product.assert_any_call("data_cms-provider-data-service")
+
+    @patch('mintd.data_import.get_registry_client')
+    def test_short_name_no_match_raises(self, mock_get_client):
+        """Short name with no matching full name should raise RegistryError."""
+        mock_client = Mock()
+        mock_client.query_data_product.side_effect = FileNotFoundError("Not found")
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(RegistryError, match="Failed to query registry"):
+            query_data_product("nonexistent")
+
+
+# =============================================================================
+# CLI -s alias Tests
+# =============================================================================
+
+class TestSourcePathAlias:
+    """Test -s short alias for --source-path."""
+
+    @patch('mintd.data_import.import_data_product')
+    def test_short_s_alias_works(self, mock_import):
+        """Test -s works as alias for --source-path."""
+        from mintd.cli import main
+        mock_import.return_value = ImportResult(
+            product_name="test-product", success=True,
+            dvc_file="test.dvc", local_path="deriveddata/hosppanel"
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "data", "import", "test-product", "-s", "deriveddata/hosppanel"
+        ])
+        assert result.exit_code == 0
+        _, kwargs = mock_import.call_args
+        assert kwargs.get("path") == "deriveddata/hosppanel"
+
+
+# =============================================================================
+# Recursive Import Tests — list_remote_dvc_files + recursive import_data_product
+# =============================================================================
+
+class TestListRemoteDvcFiles:
+    """Test discovery of .dvc files in a remote repo path."""
+
+    @patch('mintd.data_import.git_command')
+    def test_discovers_dvc_files(self, mock_git_cmd):
+        """Should find .dvc files and return corresponding data paths."""
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        # Simulate git ls-tree output listing files under the path
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="file1.parquet.dvc\nfile2.dta.dvc\nREADME.md\n"),  # ls-tree
+        ]
+
+        paths = list_remote_dvc_files(
+            "git@github.com:org/data_mergerbuild.git",
+            "deriveddata/hosppanel",
+        )
+
+        assert "deriveddata/hosppanel/file1.parquet" in paths
+        assert "deriveddata/hosppanel/file2.dta" in paths
+        assert len(paths) == 2  # README.md excluded
+
+    @patch('mintd.data_import.git_command')
+    def test_no_dvc_files_returns_empty(self, mock_git_cmd):
+        """Should return empty list when no .dvc files exist."""
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="README.md\nscript.do\n"),  # ls-tree
+        ]
+
+        paths = list_remote_dvc_files(
+            "git@github.com:org/data_mergerbuild.git",
+            "deriveddata/hosppanel",
+        )
+
+        assert paths == []
+
+    @patch('mintd.data_import.git_command')
+    def test_clone_failure_returns_empty(self, mock_git_cmd):
+        """Should return empty list on clone failure."""
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = Exception("clone failed")
+
+        paths = list_remote_dvc_files(
+            "git@github.com:org/data_mergerbuild.git",
+            "deriveddata/hosppanel",
+        )
+
+        assert paths == []
+
+
+class TestRecursiveImport:
+    """Test recursive import when --source-path targets a directory with .dvc files."""
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.list_remote_dvc_files')
+    @patch('mintd.data_import.query_data_product')
+    def test_recursive_imports_each_file(
+        self, mock_query, mock_list_dvc, mock_dvc_import, mock_update_meta,
+        mock_project_dir, mock_data_product
+    ):
+        """When source-path has .dvc files, should import each one."""
+        mock_query.return_value = mock_data_product
+        mock_list_dvc.return_value = [
+            "deriveddata/hosppanel/file1.parquet",
+            "deriveddata/hosppanel/file2.dta",
+        ]
+        mock_dvc_import.return_value = "file.dvc"
+
+        result = import_data_product(
+            product_name="data_mergerbuild",
+            project_path=mock_project_dir,
+            path="deriveddata/hosppanel",
+        )
+
+        assert result.success is True
+        assert mock_dvc_import.call_count == 2
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.list_remote_dvc_files')
+    @patch('mintd.data_import.query_data_product')
+    def test_recursive_falls_back_to_single_import(
+        self, mock_query, mock_list_dvc, mock_dvc_import, mock_update_meta,
+        mock_project_dir, mock_data_product
+    ):
+        """When no .dvc files found, should fall back to single import."""
+        mock_query.return_value = mock_data_product
+        mock_list_dvc.return_value = []
+        mock_dvc_import.return_value = "test.dvc"
+
+        result = import_data_product(
+            product_name="data_mergerbuild",
+            project_path=mock_project_dir,
+            path="deriveddata/hosppanel",
+        )
+
+        assert result.success is True
+        assert mock_dvc_import.call_count == 1
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.list_remote_dvc_files')
+    @patch('mintd.data_import.query_data_product')
+    def test_recursive_partial_failure(
+        self, mock_query, mock_list_dvc, mock_dvc_import, mock_update_meta,
+        mock_project_dir, mock_data_product
+    ):
+        """Partial failure: some files import, some fail. Overall should fail."""
+        mock_query.return_value = mock_data_product
+        mock_list_dvc.return_value = [
+            "deriveddata/hosppanel/file1.parquet",
+            "deriveddata/hosppanel/file2.dta",
+        ]
+        mock_dvc_import.side_effect = [
+            "file1.dvc",
+            DVCImportError("DVC import failed"),
+        ]
+
+        result = import_data_product(
+            product_name="data_mergerbuild",
+            project_path=mock_project_dir,
+            path="deriveddata/hosppanel",
+        )
+
+        assert result.success is False
+        assert mock_dvc_import.call_count == 2

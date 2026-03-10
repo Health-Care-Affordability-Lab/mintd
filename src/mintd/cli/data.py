@@ -68,7 +68,7 @@ def data_pull(product_name, destination, stage, path):
 @data.command(name="import")
 @click.argument("product_name")
 @click.option("--stage", help="Pipeline stage to import (raw, intermediate, final)")
-@click.option("--source-path", help="Specific path to import")
+@click.option("--source-path", "-s", help="Specific path to import")
 @click.option("--dest", help="Local destination path")
 @click.option("--rev", help="Specific git revision")
 @click.option("--all", "import_all", is_flag=True, help="Import entire data/ directory")

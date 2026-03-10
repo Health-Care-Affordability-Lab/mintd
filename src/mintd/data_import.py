@@ -170,8 +170,12 @@ def _https_to_ssh(url: str) -> str:
 def query_data_product(product_name: str) -> Dict[str, Any]:
     """Query registry for data product information.
 
+    Accepts either the full name (e.g., "data_mergerbuild") or the short name
+    (e.g., "mergerbuild"). If the exact name is not found and it doesn't already
+    have a ``data_`` prefix, a second lookup with the prefix is attempted.
+
     Args:
-        product_name: Name of the data product (e.g., "data_cms-provider-data-service")
+        product_name: Name of the data product
 
     Returns:
         Dictionary with product information including repository URL, storage config, etc.
@@ -181,7 +185,13 @@ def query_data_product(product_name: str) -> Dict[str, Any]:
     """
     try:
         registry_client = get_registry_client()
-        return registry_client.query_data_product(product_name)
+        try:
+            return registry_client.query_data_product(product_name)
+        except FileNotFoundError:
+            # If the name doesn't already have data_ prefix, try with it
+            if not product_name.startswith("data_"):
+                return registry_client.query_data_product(f"data_{product_name}")
+            raise
     except Exception as e:
         raise RegistryError(f"Failed to query registry for '{product_name}': {e}")
 
@@ -364,6 +374,54 @@ def list_remote_data_paths(
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def list_remote_dvc_files(
+    repo_url: str,
+    source_path: str,
+    rev: Optional[str] = None,
+) -> List[str]:
+    """Discover .dvc files under a path in a remote git repository.
+
+    Performs a shallow clone and uses ``git ls-tree`` to list files.
+    For each ``.dvc`` file found, returns the corresponding data path
+    (i.e. the filename with the ``.dvc`` suffix stripped).
+
+    Args:
+        repo_url: SSH or HTTPS URL of the source repository
+        source_path: Directory path to inspect (e.g. "deriveddata/hosppanel")
+        rev: Git revision to inspect (default: HEAD)
+
+    Returns:
+        List of data paths tracked by .dvc files under *source_path*.
+        Returns empty list on any error.
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-ls-dvc-"))
+        clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        normalized = source_path.rstrip("/")
+        result = cloned_git.run("ls-tree", "--name-only", "-r", f"{ref}:{normalized}")
+
+        data_paths = []
+        for line in result.stdout.strip().splitlines():
+            if line.endswith(".dvc"):
+                # Strip .dvc suffix to get the actual data path
+                data_file = line[: -len(".dvc")]
+                data_paths.append(f"{normalized}/{data_file}")
+        return data_paths
+    except Exception:
+        return []
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def validate_source_path(
     repo_url: str,
     source_path: str,
@@ -472,10 +530,70 @@ def import_data_product(
             if not dest:
                 dest = f"data/imports/{product_name.replace('data_', '')}/"
         elif path:
-            # Import specific path (skip validation)
+            # Import specific path — try recursive .dvc discovery first
             source_path = path
             if not dest:
                 dest = path
+            dvc_data_paths = list_remote_dvc_files(ssh_url, path, rev=repo_rev)
+            if dvc_data_paths:
+                # Recursive import: import each discovered data file individually
+                dest_path = project_path / dest
+                dest_path.mkdir(parents=True, exist_ok=True)
+
+                source_commit = repo_rev or "HEAD"
+                success_count = 0
+                fail_count = 0
+
+                for i, data_path in enumerate(dvc_data_paths, 1):
+                    # Preserve relative structure under dest
+                    rel = data_path[len(path.rstrip("/")) + 1:]  # e.g. "file1.parquet"
+                    file_dest = f"{dest.rstrip('/')}/{rel}"
+                    file_dest_dir = (project_path / file_dest).parent
+                    file_dest_dir.mkdir(parents=True, exist_ok=True)
+
+                    console.print(
+                        f"📥 Importing file {i}/{len(dvc_data_paths)}: {data_path}..."
+                    )
+                    try:
+                        run_dvc_import(
+                            project_path=project_path,
+                            repo_url=repo_url,
+                            source_path=data_path,
+                            dest_path=file_dest,
+                            repo_rev=repo_rev,
+                        )
+                        success_count += 1
+                    except DVCImportError as e:
+                        console.print(f"  ⚠️  Failed: {e}", style="yellow")
+                        fail_count += 1
+
+                console.print(
+                    f"\n📊 Imported {success_count}/{len(dvc_data_paths)} files"
+                    + (f" ({fail_count} failed)" if fail_count else "")
+                )
+
+                result.local_path = dest
+                result.source_commit = source_commit
+                if fail_count == 0:
+                    result.success = True
+                    console.print(
+                        f"✅ Successfully imported {product_name}", style="green"
+                    )
+                else:
+                    result.success = False
+                    result.error_message = (
+                        f"{fail_count}/{len(dvc_data_paths)} files failed to import"
+                    )
+
+                try:
+                    update_project_metadata(project_path, result, product_info)
+                except MetadataUpdateError as e:
+                    console.print(
+                        f"⚠️  Failed to update metadata: {e}", style="yellow"
+                    )
+
+                return result
+            # No .dvc files found — fall through to single import
         else:
             # Smart default: validate data/final/ exists, prompt if not
             if not stage:
