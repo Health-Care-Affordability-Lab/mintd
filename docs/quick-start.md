@@ -28,17 +28,20 @@ mintd create code --name mylib --lang python
 
 ## Exploring Data Products
 
-Before importing a data product into your project, you can download and inspect it:
+Before importing a data product into your project, you can clone it and pull the data:
 
 ```bash
-# Download the final data files to ./aha-annual-survey/
-mintd data get aha-annual-survey
+# Clone the product repo and pull its primary data
+mintd data pull aha-annual-survey
 
-# Check what's available, then import into your project
+# Or pull all data (not just the primary product)
+mintd data pull aha-annual-survey --all
+
+# Then import into your project as a tracked dependency
 mintd data import aha-annual-survey
 ```
 
-`mintd data get` works from any directory -- no project setup required. See the [CLI Reference](cli.md#data-get-options) for all options.
+`mintd data pull <product>` works from any directory -- no project setup required. See the [CLI Reference](cli.md#data-pull-options) for all options.
 
 ## With Registry Integration
 
