@@ -185,13 +185,41 @@ def query_data_product(product_name: str) -> Dict[str, Any]:
     """
     try:
         registry_client = get_registry_client()
+
+        # Determine the alternate name (with or without data_ prefix)
+        if product_name.startswith("data_"):
+            alt_name = product_name.removeprefix("data_")
+        else:
+            alt_name = f"data_{product_name}"
+
+        # Try exact name first
+        exact_found = True
         try:
-            return registry_client.query_data_product(product_name)
+            result = registry_client.query_data_product(product_name)
         except FileNotFoundError:
-            # If the name doesn't already have data_ prefix, try with it
-            if not product_name.startswith("data_"):
-                return registry_client.query_data_product(f"data_{product_name}")
-            raise
+            exact_found = False
+
+        # Try alternate name
+        alt_found = True
+        try:
+            alt_result = registry_client.query_data_product(alt_name)
+        except FileNotFoundError:
+            alt_found = False
+
+        if exact_found and alt_found:
+            console.print(
+                f"[yellow]Warning: Both '{product_name}' and '{alt_name}' exist "
+                f"in the registry. Using '{product_name}'.[/yellow]"
+            )
+            return result
+        elif exact_found:
+            return result
+        elif alt_found:
+            return alt_result
+        else:
+            raise FileNotFoundError(
+                f"Data product '{product_name}' not found in registry"
+            )
     except Exception as e:
         raise RegistryError(f"Failed to query registry for '{product_name}': {e}")
 

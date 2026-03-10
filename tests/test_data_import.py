@@ -162,13 +162,17 @@ class TestRegistryQuery:
     def test_query_data_product_success(self, mock_get_client, mock_data_product):
         """Test successful data product query."""
         mock_client = Mock()
-        mock_client.query_data_product.return_value = mock_data_product
+        # Exact name found, alt name not found
+        mock_client.query_data_product.side_effect = [
+            mock_data_product,
+            FileNotFoundError("Not found"),
+        ]
         mock_get_client.return_value = mock_client
 
         result = query_data_product("test_product")
 
         assert result == mock_data_product
-        mock_client.query_data_product.assert_called_once_with("test_product")
+        mock_client.query_data_product.assert_any_call("test_product")
 
     @patch('mintd.data_import.get_registry_client')
     def test_query_data_product_registry_error(self, mock_get_client):
@@ -1591,18 +1595,22 @@ class TestNameResolution:
     def test_full_name_resolves_directly(self, mock_get_client, mock_data_product):
         """Full name like data_mergerbuild should resolve via exact file match."""
         mock_client = Mock()
-        mock_client.query_data_product.return_value = mock_data_product
+        # Exact name found, alt name not found
+        mock_client.query_data_product.side_effect = [
+            mock_data_product,
+            FileNotFoundError("Not found"),
+        ]
         mock_get_client.return_value = mock_client
 
         result = query_data_product("data_cms-provider-data-service")
         assert result == mock_data_product
-        mock_client.query_data_product.assert_called_once_with("data_cms-provider-data-service")
+        mock_client.query_data_product.assert_any_call("data_cms-provider-data-service")
 
     @patch('mintd.data_import.get_registry_client')
     def test_short_name_resolves_with_prefix(self, mock_get_client, mock_data_product):
         """Short name like mergerbuild should try data_ prefix fallback."""
         mock_client = Mock()
-        # First call with short name raises, second with full name succeeds
+        # Exact (short) name not found, alt (prefixed) name found
         mock_client.query_data_product.side_effect = [
             FileNotFoundError("Not found"),
             mock_data_product,
@@ -1614,6 +1622,44 @@ class TestNameResolution:
         assert mock_client.query_data_product.call_count == 2
         mock_client.query_data_product.assert_any_call("cms-provider-data-service")
         mock_client.query_data_product.assert_any_call("data_cms-provider-data-service")
+
+    @patch('mintd.data_import.get_registry_client')
+    def test_prefixed_name_strips_data_prefix(self, mock_get_client, mock_data_product):
+        """data_foo should try foo if data_foo.yaml doesn't exist."""
+        mock_client = Mock()
+        # Exact (prefixed) name not found, alt (stripped) name found
+        mock_client.query_data_product.side_effect = [
+            FileNotFoundError("Not found"),
+            mock_data_product,
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = query_data_product("data_graham-sdeprivation-index")
+        assert result == mock_data_product
+        assert mock_client.query_data_product.call_count == 2
+        mock_client.query_data_product.assert_any_call("data_graham-sdeprivation-index")
+        mock_client.query_data_product.assert_any_call("graham-sdeprivation-index")
+
+    @patch('mintd.data_import.console')
+    @patch('mintd.data_import.get_registry_client')
+    def test_ambiguous_names_warns_and_prefers_exact(self, mock_get_client, mock_console, mock_data_product):
+        """When both 'foo' and 'data_foo' exist, warn and use exact match."""
+        mock_client = Mock()
+        alt_product = {"name": "alt"}
+        # Both exact and alt name found
+        mock_client.query_data_product.side_effect = [
+            mock_data_product,
+            alt_product,
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = query_data_product("data_test")
+        assert result == mock_data_product
+        mock_console.print.assert_called_once()
+        warning_msg = mock_console.print.call_args[0][0]
+        assert "Warning" in warning_msg
+        assert "data_test" in warning_msg
+        assert "test" in warning_msg
 
     @patch('mintd.data_import.get_registry_client')
     def test_short_name_no_match_raises(self, mock_get_client):
