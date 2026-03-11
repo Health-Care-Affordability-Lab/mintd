@@ -58,6 +58,10 @@
       "remote_url": "{{ dvc_remote_url | default('') }}"
     }
   },
+  "data_products": {
+    "primary": "{{ data_products_primary | default('data/final/') }}",
+    "outputs": {{ data_products_outputs | default([{"path": "data/final/", "description": "Cleaned analysis-ready dataset", "primary": true}]) | tojson }}
+  },
   "schema": {
     "version": "1.0.0",
     "standard": "frictionless-table-schema",

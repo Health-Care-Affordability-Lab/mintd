@@ -32,32 +32,37 @@ result = create_project(
 )
 ```
 
-## Data Get
+## Data Pull
 
-Download data product files without requiring a project context:
+Clone a data product repo and pull its data, or pull DVC data in an existing project:
 
 ```python
-from mintd.data_import import get_data_product
+from pathlib import Path
+from mintd.data_import import clone_and_pull_product, pull_local
 
-# Download data/final/ to ./aha-annual-survey/
-result = get_data_product("aha-annual-survey")
+# Clone a product repo and pull its primary data
+result = clone_and_pull_product("aha-annual-survey")
 
-# Download a specific directory
-result = get_data_product("aha-annual-survey", path="data/raw", dest="/tmp/aha-raw")
+# Clone and pull all data (not just primary)
+result = clone_and_pull_product("aha-annual-survey", pull_all=True)
 
-# Pin to a version, skip schema
-result = get_data_product("aha-annual-survey", rev="v2.0", with_schema=False)
-
-# Dry run
-result = get_data_product("aha-annual-survey", dry_run=True)
+# Clone a specific version to a custom directory
+result = clone_and_pull_product("aha-annual-survey", rev="v2.0", dest="/tmp/aha")
 
 if result.success:
-    print(f"Downloaded to {result.dest_path}")
+    print(f"Data available at {result.dest_path}")
+
+# Pull DVC data inside an existing project
+pull_local(project_path=Path("/projects/data_my_analysis"))
 ```
 
-### `get_data_product(product_name, path=None, dest=None, rev=None, with_schema=True, dry_run=False)`
+### `clone_and_pull_product(product_name, dest=None, rev=None, pull_all=False, jobs=None)`
 
-Downloads files from a registered data product via `dvc get`. No git clone, no `.dvc` files, no pipeline metadata. Defaults to `data/final/`; use `path` to target any directory or file in the source repo. Returns a `GetResult` dataclass with `success`, `dest_path`, `source_path`, and `error_message` fields.
+Clones a registered data product's repo (shallow, `--depth 1`) and runs `dvc pull` to fetch the actual data from S3. By default pulls only the primary data product path (from `data_products.primary` in the catalog, falling back to `data/final/`). Use `pull_all=True` to pull everything. Returns a `GetResult` dataclass with `success`, `dest_path`, `source_path`, and `error_message` fields.
+
+### `pull_local(project_path, targets=None, jobs=None)`
+
+Runs `dvc pull -r <remote>` inside an existing mintd project. Reads the remote name from `metadata.json`. Mirrors `push_data()`. Returns `True` on success.
 
 ## Data Push
 

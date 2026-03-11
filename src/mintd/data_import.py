@@ -6,15 +6,17 @@ error handling and rollback support.
 """
 
 import json
+import re
 import shutil
 import tempfile
+
+import yaml
 from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import click
-import git
 from rich.console import Console
 
 from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
@@ -170,8 +172,12 @@ def _https_to_ssh(url: str) -> str:
 def query_data_product(product_name: str) -> Dict[str, Any]:
     """Query registry for data product information.
 
+    Accepts either the full name (e.g., "data_mergerbuild") or the short name
+    (e.g., "mergerbuild"). If the exact name is not found and it doesn't already
+    have a ``data_`` prefix, a second lookup with the prefix is attempted.
+
     Args:
-        product_name: Name of the data product (e.g., "data_cms-provider-data-service")
+        product_name: Name of the data product
 
     Returns:
         Dictionary with product information including repository URL, storage config, etc.
@@ -181,7 +187,25 @@ def query_data_product(product_name: str) -> Dict[str, Any]:
     """
     try:
         registry_client = get_registry_client()
-        return registry_client.query_data_product(product_name)
+
+        # Determine the alternate name (with or without data_ prefix)
+        if product_name.startswith("data_"):
+            alt_name = product_name.removeprefix("data_")
+        else:
+            alt_name = f"data_{product_name}"
+
+        # Try exact name first, fall back to alternate
+        try:
+            return registry_client.query_data_product(product_name)
+        except FileNotFoundError:
+            pass
+
+        try:
+            return registry_client.query_data_product(alt_name)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Data product '{product_name}' not found in registry"
+            )
     except Exception as e:
         raise RegistryError(f"Failed to query registry for '{product_name}': {e}")
 
@@ -329,13 +353,77 @@ def update_project_metadata(
         raise MetadataUpdateError(f"Failed to update metadata.json: {e}")
 
 
+def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List[str]:
+    """Extract data/ output paths from a remote repo's dvc.yaml.
+
+    DVC pipeline outputs (like data/final/) are not git-tracked directories —
+    they only appear as ``outs`` in ``dvc.yaml``.  This function reads the
+    pipeline definition and resolves output paths relative to each stage's
+    ``wdir`` so that paths like ``../data/final/`` (with ``wdir: code``) are
+    normalised to ``data/final``.
+
+    Returns:
+        Sorted, deduplicated list of ``data/*`` paths found in pipeline outputs.
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-dvc-yaml-"))
+        clone_args = [
+            "clone", "--depth", "1", "--no-checkout",
+            repo_url, str(temp_dir / "repo"),
+        ]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        try:
+            result = cloned_git.run("show", f"{ref}:dvc.yaml")
+        except Exception:
+            return []
+
+        pipeline = yaml.safe_load(result.stdout) or {}
+        data_paths: set[str] = set()
+
+        for stage_info in (pipeline.get("stages") or {}).values():
+            wdir = stage_info.get("wdir", ".")
+            for out in stage_info.get("outs", []):
+                out_path = out if isinstance(out, str) else list(out.keys())[0]
+                # Resolve relative to wdir (e.g. wdir=code, out=../data/final/)
+                resolved = (Path(wdir) / out_path).as_posix()
+                # Normalise (collapses ../)
+                parts = resolved.rstrip("/").split("/")
+                normalized: list[str] = []
+                for p in parts:
+                    if p == "..":
+                        if normalized:
+                            normalized.pop()
+                    elif p != ".":
+                        normalized.append(p)
+                norm = "/".join(normalized)
+                if norm.startswith("data/") and norm != "data":
+                    # Keep only the first level under data/
+                    top_level = "data/" + norm.split("/")[1]
+                    data_paths.add(top_level)
+
+        return sorted(data_paths)
+    except Exception:
+        return []
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def list_remote_data_paths(
     repo_url: str,
     rev: Optional[str] = None,
 ) -> List[str]:
     """List available data directories in a remote git repository.
 
-    Performs a shallow clone to inspect the data/ directory structure.
+    Discovers directories both from the git tree (e.g. data/raw/) and from
+    DVC pipeline outputs in dvc.yaml (e.g. data/final/).
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
@@ -345,6 +433,7 @@ def list_remote_data_paths(
         List of directory paths under data/ (e.g., ["data/raw", "data/final"])
     """
     temp_dir = None
+    git_paths: List[str] = []
     try:
         temp_dir = Path(tempfile.mkdtemp(prefix="mintd-ls-"))
         clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
@@ -356,7 +445,62 @@ def list_remote_data_paths(
         cloned_git = git_command(cwd=temp_dir / "repo")
         ref = rev or "HEAD"
         result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
-        return [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+        git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+    except Exception:
+        pass
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Also discover DVC pipeline output paths
+    dvc_paths = _parse_dvc_yaml_data_paths(repo_url, rev=rev)
+
+    # Merge and deduplicate
+    all_paths = sorted(set(git_paths + dvc_paths))
+    return all_paths
+
+
+def list_remote_dvc_files(
+    repo_url: str,
+    source_path: str,
+    rev: Optional[str] = None,
+) -> List[str]:
+    """Discover .dvc files under a path in a remote git repository.
+
+    Performs a shallow clone and uses ``git ls-tree`` to list files.
+    For each ``.dvc`` file found, returns the corresponding data path
+    (i.e. the filename with the ``.dvc`` suffix stripped).
+
+    Args:
+        repo_url: SSH or HTTPS URL of the source repository
+        source_path: Directory path to inspect (e.g. "deriveddata/hosppanel")
+        rev: Git revision to inspect (default: HEAD)
+
+    Returns:
+        List of data paths tracked by .dvc files under *source_path*.
+        Returns empty list on any error.
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-ls-dvc-"))
+        clone_args = ["clone", "--depth", "1", "--no-checkout", repo_url, str(temp_dir / "repo")]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        normalized = source_path.rstrip("/")
+        result = cloned_git.run("ls-tree", "--name-only", "-r", f"{ref}:{normalized}")
+
+        data_paths = []
+        for line in result.stdout.strip().splitlines():
+            if line.endswith(".dvc"):
+                # Strip .dvc suffix to get the actual data path
+                data_file = line[: -len(".dvc")]
+                data_paths.append(f"{normalized}/{data_file}")
+        return data_paths
     except Exception:
         return []
     finally:
@@ -417,6 +561,44 @@ def prompt_stage_selection(available_paths: List[str]) -> str:
     return available_paths[choice - 1]
 
 
+def _warn_outdated_gitignore(project_path: Path) -> None:
+    """Warn if the project .gitignore uses the old ``data/`` rule.
+
+    The old pattern (``data/``) ignores the entire directory so git refuses to
+    create ``.dvc`` tracking files inside it.  The fix is to replace it with
+    ``/data/**`` plus negation rules for directories and ``.dvc`` files.
+    """
+    gitignore = project_path / ".gitignore"
+    if not gitignore.exists():
+        return
+
+    text = gitignore.read_text()
+    # Match a bare "data/" rule that is NOT part of the "/data/**" pattern
+    has_old = any(
+        re.fullmatch(r"data/", line.strip())
+        for line in text.splitlines()
+        if not line.strip().startswith("#")
+    )
+    has_new = "/data/**" in text
+
+    if has_old and not has_new:
+        console.print(
+            "⚠️  Your .gitignore uses the outdated 'data/' rule which blocks "
+            "DVC import tracking files.\n"
+            "   Run [bold]mintd init --update-gitignore[/bold] or replace the "
+            "'data/' line with:\n\n"
+            "     /data/**\n"
+            "     !/data/.gitkeep\n"
+            "     !/data/**/\n"
+            "     !/data/**/*.dvc\n",
+            style="yellow",
+        )
+        if not click.confirm("Continue anyway?", default=False):
+            raise DataImportError(
+                "Import aborted. Please update your .gitignore first."
+            )
+
+
 def import_data_product(
     product_name: str,
     project_path: Path,
@@ -452,6 +634,9 @@ def import_data_product(
         # Validate project directory
         validate_project_directory(project_path)
 
+        # Check for outdated gitignore that blocks DVC imports
+        _warn_outdated_gitignore(project_path)
+
         # Query product information from registry
         console.print(f"🔍 Querying registry for '{product_name}'...")
         product_info = query_data_product(product_name)
@@ -472,10 +657,70 @@ def import_data_product(
             if not dest:
                 dest = f"data/imports/{product_name.replace('data_', '')}/"
         elif path:
-            # Import specific path (skip validation)
+            # Import specific path — try recursive .dvc discovery first
             source_path = path
             if not dest:
                 dest = path
+            dvc_data_paths = list_remote_dvc_files(ssh_url, path, rev=repo_rev)
+            if dvc_data_paths:
+                # Recursive import: import each discovered data file individually
+                dest_path = project_path / dest
+                dest_path.mkdir(parents=True, exist_ok=True)
+
+                source_commit = repo_rev or "HEAD"
+                success_count = 0
+                fail_count = 0
+
+                for i, data_path in enumerate(dvc_data_paths, 1):
+                    # Preserve relative structure under dest
+                    rel = data_path[len(path.rstrip("/")) + 1:]  # e.g. "file1.parquet"
+                    file_dest = f"{dest.rstrip('/')}/{rel}"
+                    file_dest_dir = (project_path / file_dest).parent
+                    file_dest_dir.mkdir(parents=True, exist_ok=True)
+
+                    console.print(
+                        f"📥 Importing file {i}/{len(dvc_data_paths)}: {data_path}..."
+                    )
+                    try:
+                        run_dvc_import(
+                            project_path=project_path,
+                            repo_url=repo_url,
+                            source_path=data_path,
+                            dest_path=file_dest,
+                            repo_rev=repo_rev,
+                        )
+                        success_count += 1
+                    except DVCImportError as e:
+                        console.print(f"  ⚠️  Failed: {e}", style="yellow")
+                        fail_count += 1
+
+                console.print(
+                    f"\n📊 Imported {success_count}/{len(dvc_data_paths)} files"
+                    + (f" ({fail_count} failed)" if fail_count else "")
+                )
+
+                result.local_path = dest
+                result.source_commit = source_commit
+                if fail_count == 0:
+                    result.success = True
+                    console.print(
+                        f"✅ Successfully imported {product_name}", style="green"
+                    )
+                else:
+                    result.success = False
+                    result.error_message = (
+                        f"{fail_count}/{len(dvc_data_paths)} files failed to import"
+                    )
+
+                try:
+                    update_project_metadata(project_path, result, product_info)
+                except MetadataUpdateError as e:
+                    console.print(
+                        f"⚠️  Failed to update metadata: {e}", style="yellow"
+                    )
+
+                return result
+            # No .dvc files found — fall through to single import
         else:
             # Smart default: validate data/final/ exists, prompt if not
             if not stage:
@@ -548,132 +793,153 @@ def import_data_product(
         return result
 
 
-def pull_data_product(
-    product_name: str,
-    destination: Optional[str] = None,
-    stage: Optional[str] = None,
-    path: Optional[str] = None
+def pull_local(
+    project_path: Path,
+    targets: Optional[List[str]] = None,
+    jobs: Optional[int] = None,
 ) -> bool:
-    """Pull/download data from a registered data product.
+    """Pull DVC-tracked data in the current mintd project.
 
-    This is similar to enclave data pulling but for general use.
+    Mirrors ``push_data`` — reads the remote name from metadata.json and
+    runs ``dvc pull -r <remote>``.
 
     Args:
-        product_name: Name of the data product
-        destination: Local destination directory
-        stage: Pipeline stage to pull
-        path: Specific path to pull
+        project_path: Path to the project directory
+        targets: Optional list of specific .dvc files or stages to pull
+        jobs: Number of parallel download jobs
 
     Returns:
-        True if successful
+        True if pull succeeded
     """
     try:
-        # Query product information
-        console.print(f"🔍 Querying registry for '{product_name}'...")
-        product_info = query_data_product(product_name)
+        remote_name = get_project_remote(project_path)
 
-        # Determine destination
-        if not destination:
-            destination = f"./{product_name}_data"
+        dvc = dvc_command(cwd=project_path)
+        args = ["pull", "-r", remote_name]
 
-        dest_path = Path(destination)
-        dest_path.mkdir(parents=True, exist_ok=True)
+        if jobs:
+            args.extend(["-j", str(jobs)])
 
-        # This would implement the actual data pulling logic
-        # For now, just clone and pull the data
-        repo_url = product_info["repository"]["github_url"]
+        if targets:
+            args.extend(targets)
 
-        console.print(f"📥 Pulling data from {product_name}...")
-
-        # Convert to SSH URL
-        if repo_url.startswith('https://github.com/'):
-            ssh_url = repo_url.replace('https://github.com/', 'git@github.com:')
-        else:
-            ssh_url = repo_url
-
-        # Clone repository
-        temp_dir = Path(tempfile.mkdtemp())
-        try:
-            git.Repo.clone_from(ssh_url, temp_dir)
-
-            # Determine what to copy
-            if stage:
-                source_path = temp_dir / "data" / stage
-            elif path:
-                source_path = temp_dir / path
-            else:
-                source_path = temp_dir / "data" / "final"
-
-            if source_path.exists():
-                if source_path.is_file():
-                    shutil.copy2(source_path, dest_path)
-                else:
-                    shutil.copytree(source_path, dest_path, dirs_exist_ok=True)
-
-                console.print(f"✅ Data pulled to {dest_path}", style="green")
-                return True
-            else:
-                console.print(f"❌ Source path {source_path} not found", style="red")
-                return False
-
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
+        console.print(f"Pulling from remote '{remote_name}'...")
+        dvc.run_live(*args)
+        console.print("Pull complete.", style="green")
+        return True
     except Exception as e:
-        console.print(f"❌ Failed to pull data: {e}", style="red")
+        console.print(f"❌ Pull failed: {e}", style="red")
         return False
 
 
-def get_data_product(
+def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
+    """Extract the primary data product path from catalog info.
+
+    Falls back to ``data/final/`` when the ``data_products`` section is
+    absent (backwards compatible with older catalog entries).
+    """
+    return (
+        product_info
+        .get("data_products", {})
+        .get("primary", "data/final/")
+    )
+
+
+def _resolve_dvc_target(repo_path: Path, primary_path: str) -> List[str]:
+    """Determine the correct DVC pull target(s) for a primary data path.
+
+    Checks for:
+    1. A standalone ``.dvc`` file (e.g. ``data/final.dvc``)
+    2. Individual ``.dvc`` files inside the directory (e.g. ``data/final/*.dvc``)
+    3. An exact pipeline output match in ``dvc.yaml``
+    4. Pipeline outputs nested under the primary path in ``dvc.yaml``
+
+    Returns a list of target strings for ``dvc pull``, or an empty list if
+    nothing is found (caller should fall back to pulling everything).
+    """
+    normalized = primary_path.rstrip("/")
+
+    # 1. Check for a standalone .dvc file (e.g. data/final.dvc)
+    dvc_file = repo_path / (normalized + ".dvc")
+    if dvc_file.exists():
+        return [normalized + ".dvc"]
+
+    # 2. Check for .dvc files inside the directory (e.g. data/final/foo.dvc)
+    primary_dir = repo_path / normalized
+    if primary_dir.is_dir():
+        nested_dvc = sorted(primary_dir.rglob("*.dvc"))
+        if nested_dvc:
+            return [str(p.relative_to(repo_path)) for p in nested_dvc]
+
+    # 3. Check if it's a pipeline output in dvc.yaml (exact or nested)
+    dvc_yaml = repo_path / "dvc.yaml"
+    if dvc_yaml.exists():
+        try:
+            with open(dvc_yaml, "r") as f:
+                pipeline = yaml.safe_load(f) or {}
+
+            def _collect_outs(outs_list):
+                targets = []
+                for out in outs_list:
+                    out_path = out if isinstance(out, str) else list(out.keys())[0]
+                    out_norm = out_path.rstrip("/")
+                    if out_norm == normalized or out_norm.startswith(normalized + "/"):
+                        targets.append(out_path)
+                return targets
+
+            targets = []
+            for stage in pipeline.get("stages", {}).values():
+                targets.extend(_collect_outs(stage.get("outs", [])))
+            # Also check top-level outs (less common but valid)
+            targets.extend(_collect_outs(pipeline.get("outs", [])))
+            if targets:
+                return targets
+        except Exception:
+            pass  # Fall through to empty list
+
+    return []
+
+
+def clone_and_pull_product(
     product_name: str,
-    path: Optional[str] = None,
     dest: Optional[str] = None,
     rev: Optional[str] = None,
-    with_schema: bool = True,
-    dry_run: bool = False,
+    pull_all: bool = False,
+    jobs: Optional[int] = None,
 ) -> GetResult:
-    """Download data product files without requiring a project context.
-
-    Uses ``dvc get`` to fetch files directly from S3 via the source repo's
-    DVC configuration.  No git clone, no .dvc files, no pipeline metadata.
+    """Clone a data product repo and ``dvc pull`` its data from S3.
 
     Args:
         product_name: Registered data product name
-        path: Path inside the source repo to download (default: ``data/final/``)
-        dest: Local destination directory (default: ``./<product_name>/``)
-        rev: Git tag or ref in the source repo
-        with_schema: Also download ``schemas/v1/schema.json``
-        dry_run: Show what would be downloaded without downloading
+        dest: Local directory to clone into (default: ``./<product_name>/``)
+        rev: Git tag or ref to checkout
+        pull_all: If True, pull all DVC data; otherwise only the primary product
+        jobs: Number of parallel DVC download jobs
 
     Returns:
         GetResult with operation details
     """
-    # Validate product name to prevent path traversal
-    if "/" in product_name or "\\" in product_name or product_name in ("..", ".") or product_name.startswith("../") or product_name.startswith("..\\"):
+    # Input validation
+    if "/" in product_name or "\\" in product_name or product_name in ("..", "."):
         return GetResult(
             product_name=product_name, success=False,
-            dest_path=dest or "", source_path=path or "",
+            dest_path=dest or "", source_path="",
             error_message=f"Invalid product name: {product_name}",
         )
-
-    # Validate dest and path parameters to prevent path traversal
     if dest and ".." in Path(dest).parts:
         return GetResult(
             product_name=product_name, success=False,
-            dest_path=dest, source_path=path or "",
+            dest_path=dest, source_path="",
             error_message="Destination path must not contain '..' components",
         )
-    if path and ".." in Path(path).parts:
-        return GetResult(
-            product_name=product_name, success=False,
-            dest_path=dest or "", source_path=path,
-            error_message="Source path must not contain '..' components",
-        )
 
-    source_path = path or "data/final/"
     dest = dest or f"./{product_name}"
-    result = GetResult(product_name=product_name, success=False,
-                       dest_path=dest, source_path=source_path)
+    dest_path = Path(dest)
+
+    result = GetResult(
+        product_name=product_name, success=False,
+        dest_path=dest, source_path="",
+    )
 
     try:
         # Resolve product from registry
@@ -681,44 +947,60 @@ def get_data_product(
         product_info = query_data_product(product_name)
         repo_url = product_info["repository"]["github_url"]
         ssh_url = _https_to_ssh(repo_url)
+        primary_path = _resolve_primary_path(product_info)
+        result.source_path = primary_path if not pull_all else "all"
 
-        if dry_run:
-            console.print(f"Would download {source_path} -> {dest}")
-            if with_schema and not path:
-                console.print(f"Would download schemas/v1/schema.json -> {dest}")
-            result.success = True
-            return result
-
-        # Download data
-        console.print(f"Downloading {source_path} from {product_name}...")
-        dvc = dvc_command()
-        args = ["get", ssh_url, source_path, "-o", dest]
+        # Clone
+        clone_args = ["clone", "--depth", "1"]
         if rev:
-            args.extend(["--rev", rev])
-        dvc.run_live(*args)
+            clone_args.extend(["--branch", rev])
+        clone_args.extend([ssh_url, str(dest_path)])
+
+        console.print(f"Cloning {product_name}...")
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        # DVC pull
+        dvc = dvc_command(cwd=dest_path)
+        pull_args = ["pull"]
+
+        remote_name = (
+            product_info.get("storage", {})
+            .get("dvc", {})
+            .get("remote_name", "")
+        )
+        if remote_name:
+            pull_args.extend(["-r", remote_name])
+
+        if jobs:
+            pull_args.extend(["-j", str(jobs)])
+
+        if not pull_all:
+            dvc_targets = _resolve_dvc_target(dest_path, primary_path)
+            if dvc_targets:
+                pull_args.extend(dvc_targets)
+            else:
+                console.print(
+                    f"[yellow]Warning: Could not find a DVC target for "
+                    f"'{primary_path}'. Pulling all tracked data instead.[/yellow]"
+                )
+
+        console.print(
+            f"Pulling {'all data' if pull_all else primary_path} from DVC remote..."
+        )
+        dvc.run_live(*pull_args)
 
         result.success = True
-
-        # Optionally download schema (only when using default path)
-        if with_schema and not path:
-            try:
-                schema_args = ["get", ssh_url, "schemas/v1/schema.json", "-o", dest]
-                if rev:
-                    schema_args.extend(["--rev", rev])
-                dvc.run_live(*schema_args)
-            except Exception:
-                console.print("Schema not found — skipping.", style="yellow")
-
-        console.print(f"Downloaded to {dest}", style="green")
-        console.print(
-            f"\nTo track this data as a dependency, run:\n"
-            f"  mintd data import {product_name}",
-            style="dim",
-        )
+        console.print(f"Data available at {dest_path}", style="green")
         return result
 
     except Exception as e:
         result.error_message = str(e)
+        if dest_path.exists():
+            console.print(
+                f"[yellow]Warning: partial clone left at {dest_path}. "
+                f"Remove it before retrying.[/yellow]"
+            )
         return result
 
 

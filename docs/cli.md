@@ -94,13 +94,13 @@ mintd config setup --set-credentials  # Set storage credentials
 ```bash
 mintd data list                       # List available data products
 mintd data list --imported            # List imported dependencies
-mintd data get <product>              # Download data/final/ to ./<product>/
-mintd data get <product> --path data  # Download entire data/ directory
-mintd data get <product> --rev v2.0   # Download a specific version
+mintd data pull                       # Pull DVC data in current project
+mintd data pull <product>             # Clone product repo + pull primary data
+mintd data pull <product> --all       # Clone product repo + pull all data
+mintd data pull <product> --rev v2.0  # Pull a specific version
 mintd data import <product>           # Import data/final/ from product (default)
 mintd data import <product> --all     # Import entire data/ directory
 mintd data import <product> --stage raw  # Import specific stage
-mintd data pull <product>             # Pull/download data from registry
 mintd data push                       # Push all DVC-tracked data to project remote
 mintd data push <targets>             # Push specific .dvc files or stages
 mintd data update                     # Update all DVC imports to latest version
@@ -108,35 +108,40 @@ mintd data update <path>              # Update specific .dvc file
 mintd data remove <import>            # Remove a data import from the project
 ```
 
-### Data Get Options
+### Data Pull Options
 
-`mintd data get` downloads data product files directly without requiring a mintd project context. No git clone, no `.dvc` tracking files, no pipeline metadata -- just the data files. Use this to explore a dataset before deciding to import it.
+`mintd data pull` has two modes:
+
+**Inside a mintd project (no arguments):** Runs `dvc pull -r <remote>` to fetch DVC-tracked data for the current project. Mirrors `mintd data push`.
+
+**With a product name:** Clones the product's GitHub repo and pulls its primary data from S3 via DVC. The primary data path is read from the catalog's `data_products.primary` field, falling back to `data/final/` for older projects.
 
 | Option | Description |
 |--------|-------------|
-| `--dest TEXT` | Target directory (default: `./<product-name>/`) |
-| `--rev TEXT` | Version tag or git ref (default: latest) |
-| `--path TEXT` | Path inside source repo (default: `data/final/`) |
-| `--with-schema / --no-schema` | Include `schemas/v1/schema.json` (default: on) |
-| `--dry-run` | Show what would be downloaded without downloading |
+| `PRODUCT_NAME` | Product to clone and pull (optional) |
+| `-d, --dest TEXT` | Destination directory (default: `./<product-name>/`) |
+| `--rev TEXT` | Git tag or ref (default: latest) |
+| `--all` | Pull all DVC data, not just the primary product |
+| `-j, --jobs INT` | Number of parallel download jobs |
+| `-p, --project-path PATH` | Path to project directory (for local pull) |
 
 Examples:
 
 ```bash
-# Quick exploration -- download final data and schema
-mintd data get aha-annual-survey
+# Pull DVC data inside your current project
+mintd data pull
 
-# Download to a specific directory
-mintd data get aha-annual-survey --dest ~/Desktop/aha-data
+# Clone a product repo and pull its primary data
+mintd data pull aha-annual-survey
 
-# Download raw data instead of final
-mintd data get aha-annual-survey --path data/raw
+# Clone and pull all data (not just primary)
+mintd data pull aha-annual-survey --all
 
-# Download everything under data/
-mintd data get aha-annual-survey --path data
+# Clone to a specific directory
+mintd data pull aha-annual-survey --dest ~/Desktop/aha-data
 
-# Preview without downloading
-mintd data get aha-annual-survey --dry-run
+# Pull a specific version
+mintd data pull aha-annual-survey --rev v2.0
 ```
 
 ### Data Import Options
