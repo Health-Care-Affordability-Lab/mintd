@@ -610,8 +610,9 @@ def import_data_product(
 ) -> ImportResult:
     """Import a data product as a DVC dependency.
 
-    By default imports only data/final/ (the validated output). If data/final/
-    is not found, prompts the user to choose from available directories.
+    By default imports the catalog's ``data_products.primary`` path (falling
+    back to ``data/final/``). If the path is not found, prompts the user to
+    choose from available directories.
 
     Args:
         product_name: Name of the data product to import
@@ -722,11 +723,18 @@ def import_data_product(
                 return result
             # No .dvc files found — fall through to single import
         else:
-            # Smart default: validate data/final/ exists, prompt if not
-            if not stage:
-                stage = "final"
-
-            source_path = f"data/{stage}/"
+            # Smart default: use catalog primary or data/{stage}/
+            if stage:
+                source_path = f"data/{stage}/"
+            else:
+                source_path = _resolve_primary_path(product_info)
+                console.print(
+                    f"📦 Using default data product: {source_path}"
+                )
+                console.print(
+                    "   Use --source-path to import a specific path, "
+                    "or --all for the entire data/ directory"
+                )
 
             exists, available_paths = validate_source_path(
                 repo_url=ssh_url,
@@ -836,13 +844,18 @@ def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
     """Extract the primary data product path from catalog info.
 
     Falls back to ``data/final/`` when the ``data_products`` section is
-    absent (backwards compatible with older catalog entries).
+    absent or the value is invalid (backwards compatible with older catalog
+    entries).
     """
-    return (
+    fallback = "data/final/"
+    primary = (
         product_info
         .get("data_products", {})
-        .get("primary", "data/final/")
+        .get("primary", fallback)
     )
+    if not primary or not isinstance(primary, str) or ".." in primary or primary.startswith("/"):
+        return fallback
+    return primary
 
 
 def _resolve_dvc_target(repo_path: Path, primary_path: str) -> List[str]:

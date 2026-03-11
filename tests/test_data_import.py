@@ -20,6 +20,7 @@ from mintd.data_import import (
     remove_dependency_from_metadata, check_dvc_yaml_references, remove_data_import,
     list_remote_data_paths, validate_source_path, prompt_stage_selection,
     list_remote_dvc_files, _parse_dvc_yaml_data_paths,
+    _resolve_primary_path,
 )
 
 
@@ -79,6 +80,64 @@ def mock_data_product():
         "access_control": {"teams": [{"name": "test", "permission": "read"}]},
         "status": {"lifecycle": "active"}
     }
+
+
+@pytest.fixture
+def mock_data_product_with_primary():
+    """Mock data product catalog entry with a custom data_products.primary."""
+    return {
+        "schema_version": "1.0",
+        "mint": {"version": "0.1.0", "commit_hash": "abc123"},
+        "project": {
+            "name": "mergerbuild",
+            "type": "data",
+            "full_name": "data_mergerbuild",
+            "created_at": "2025-01-01T00:00:00Z",
+            "created_by": "test"
+        },
+        "metadata": {"description": "Test data product"},
+        "ownership": {"created_by": "test"},
+        "repository": {
+            "github_url": "https://github.com/test/data_mergerbuild"
+        },
+        "storage": {"provider": "s3", "bucket": "test-bucket"},
+        "access_control": {"teams": [{"name": "test", "permission": "read"}]},
+        "status": {"lifecycle": "active"},
+        "data_products": {
+            "primary": "deriveddata/hosppanel/",
+            "outputs": [
+                {"path": "deriveddata/hosppanel/", "description": "Hospital panel", "primary": True}
+            ]
+        }
+    }
+
+
+# =============================================================================
+# _resolve_primary_path Tests
+# =============================================================================
+
+
+class TestResolvePrimaryPath:
+    """Tests for _resolve_primary_path helper."""
+
+    @pytest.mark.parametrize("product_info,expected", [
+        ({}, "data/final/"),
+        ({"data_products": {}}, "data/final/"),
+        ({"data_products": {"primary": "deriveddata/panel/"}}, "deriveddata/panel/"),
+        ({"data_products": {"primary": "data/raw/"}}, "data/raw/"),
+    ])
+    def test_valid_cases(self, product_info, expected):
+        assert _resolve_primary_path(product_info) == expected
+
+    @pytest.mark.parametrize("product_info", [
+        {"data_products": {"primary": ""}},
+        {"data_products": {"primary": None}},
+        {"data_products": {"primary": "/etc/passwd"}},
+        {"data_products": {"primary": "../../secrets"}},
+        {"data_products": {"primary": "data/../../../etc/passwd"}},
+    ])
+    def test_invalid_falls_back(self, product_info):
+        assert _resolve_primary_path(product_info) == "data/final/"
 
 
 # =============================================================================
@@ -1701,6 +1760,104 @@ class TestImportDataProductSmartDefault:
         )
 
         assert result.success is True
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_default_uses_primary_from_catalog(self, mock_validate, mock_query,
+                                                mock_validate_src, mock_dvc_import,
+                                                mock_update_meta, mock_project_dir,
+                                                mock_data_product_with_primary):
+        """Test default import uses data_products.primary from catalog instead of hardcoded data/final/."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (True, ["deriveddata/hosppanel"])
+        mock_dvc_import.return_value = "data/imports/mergerbuild.dvc"
+
+        result = import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is True
+        call_args = mock_validate_src.call_args
+        # Should use the catalog primary, NOT hardcoded data/final/
+        assert call_args.kwargs.get("source_path") == "deriveddata/hosppanel/"
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_default_falls_back_to_data_final_without_catalog(self, mock_validate, mock_query,
+                                                               mock_validate_src, mock_dvc_import,
+                                                               mock_update_meta, mock_project_dir,
+                                                               mock_data_product):
+        """Test default still uses data/final/ when catalog has no data_products."""
+        mock_query.return_value = mock_data_product  # no data_products key
+        mock_validate_src.return_value = (True, ["data/final"])
+        mock_dvc_import.return_value = "data/imports/cms-provider-data-service.dvc"
+
+        result = import_data_product(
+            product_name="cms-provider-data-service",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is True
+        call_args = mock_validate_src.call_args
+        assert call_args.kwargs.get("source_path") == "data/final/"
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_stage_flag_overrides_catalog_primary(self, mock_validate, mock_query,
+                                                   mock_validate_src, mock_dvc_import,
+                                                   mock_update_meta, mock_project_dir,
+                                                   mock_data_product_with_primary):
+        """Test --stage flag still uses data/{stage}/ even when catalog has custom primary."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (True, ["data/raw"])
+        mock_dvc_import.return_value = "data/imports/mergerbuild.dvc"
+
+        result = import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+            stage="raw",
+        )
+
+        assert result.success is True
+        call_args = mock_validate_src.call_args
+        assert call_args.kwargs.get("source_path") == "data/raw/"
+
+    @patch('mintd.data_import.console')
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_default_import_prints_product_info(self, mock_validate, mock_query,
+                                                 mock_validate_src, mock_dvc_import,
+                                                 mock_update_meta, mock_console,
+                                                 mock_project_dir,
+                                                 mock_data_product_with_primary):
+        """Test default import prints which data product is being used."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (True, ["deriveddata/hosppanel"])
+        mock_dvc_import.return_value = "data/imports/mergerbuild.dvc"
+
+        import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+        )
+
+        # Should print info about the default product being used
+        print_calls = [str(c) for c in mock_console.print.call_args_list]
+        combined = " ".join(print_calls)
+        assert "deriveddata/hosppanel/" in combined
+        assert "--source-path" in combined or "--all" in combined
 
 
 class TestImportCLIAllFlag:
