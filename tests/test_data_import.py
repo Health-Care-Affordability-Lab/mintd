@@ -21,6 +21,7 @@ from mintd.data_import import (
     list_remote_data_paths, validate_source_path, prompt_stage_selection,
     list_remote_dvc_files, _parse_dvc_yaml_data_paths,
     _resolve_primary_path,
+    _fetch_remote_metadata,
 )
 
 
@@ -138,6 +139,45 @@ class TestResolvePrimaryPath:
     ])
     def test_invalid_falls_back(self, product_info):
         assert _resolve_primary_path(product_info) == "data/final/"
+
+    @patch("mintd.data_import._fetch_remote_metadata")
+    def test_falls_back_to_remote_metadata(self, mock_fetch):
+        """When catalog lacks data_products, fetch from source repo metadata.json."""
+        mock_fetch.return_value = {
+            "data_products": {"primary": "deriveddata/hosppanel/"}
+        }
+        result = _resolve_primary_path({}, repo_url="git@github.com:org/repo.git")
+        assert result == "deriveddata/hosppanel/"
+        mock_fetch.assert_called_once_with("git@github.com:org/repo.git", rev=None)
+
+    @patch("mintd.data_import._fetch_remote_metadata")
+    def test_catalog_takes_precedence_over_remote(self, mock_fetch):
+        """Catalog data_products.primary should win over remote metadata."""
+        product_info = {"data_products": {"primary": "data/raw/"}}
+        result = _resolve_primary_path(product_info, repo_url="git@github.com:org/repo.git")
+        assert result == "data/raw/"
+        mock_fetch.assert_not_called()
+
+    @patch("mintd.data_import._fetch_remote_metadata")
+    def test_remote_metadata_fetch_fails_gracefully(self, mock_fetch):
+        """Falls back to data/final/ when remote fetch returns None."""
+        mock_fetch.return_value = None
+        result = _resolve_primary_path({}, repo_url="git@github.com:org/repo.git")
+        assert result == "data/final/"
+
+    @patch("mintd.data_import._fetch_remote_metadata")
+    def test_remote_metadata_invalid_primary_falls_back(self, mock_fetch):
+        """Falls back when remote metadata.json has invalid primary path."""
+        mock_fetch.return_value = {
+            "data_products": {"primary": "/etc/passwd"}
+        }
+        result = _resolve_primary_path({}, repo_url="git@github.com:org/repo.git")
+        assert result == "data/final/"
+
+    def test_no_remote_fetch_without_repo_url(self):
+        """Without repo_url, no remote fetch is attempted."""
+        result = _resolve_primary_path({})
+        assert result == "data/final/"
 
 
 # =============================================================================

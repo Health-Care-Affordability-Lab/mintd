@@ -773,7 +773,7 @@ def import_data_product(
             if stage:
                 source_path = f"data/{stage}/"
             else:
-                source_path = _resolve_primary_path(product_info)
+                source_path = _resolve_primary_path(product_info, repo_url=ssh_url, rev=repo_rev)
                 console.print(
                     f"📦 Using default data product: {source_path}"
                 )
@@ -886,19 +886,69 @@ def pull_local(
         return False
 
 
-def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
-    """Extract the primary data product path from catalog info.
+def _fetch_remote_metadata(repo_url: str, rev: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Read metadata.json from a remote git repository.
 
-    Falls back to ``data/final/`` when the ``data_products`` section is
-    absent or the value is invalid (backwards compatible with older catalog
-    entries).
+    Performs a shallow, no-checkout clone and reads the file via
+    ``git show`` so no working-tree files are created.
+
+    Returns:
+        Parsed metadata dict, or ``None`` on any failure.
+    """
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-meta-"))
+        clone_args = [
+            "clone", "--depth", "1", "--no-checkout",
+            repo_url, str(temp_dir / "repo"),
+        ]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        result = cloned_git.run("show", f"{ref}:metadata.json")
+        return json.loads(result.stdout)
+    except Exception:
+        return None
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _resolve_primary_path(
+    product_info: Dict[str, Any],
+    repo_url: Optional[str] = None,
+    rev: Optional[str] = None,
+) -> str:
+    """Extract the primary data product path from catalog or source repo.
+
+    Checks the catalog entry first. When the catalog lacks
+    ``data_products.primary``, falls back to fetching ``metadata.json``
+    from the source repository.  Returns ``data/final/`` only when
+    neither source contains the field.
     """
     fallback = "data/final/"
+
+    # 1. Try catalog entry
     primary = (
         product_info
         .get("data_products", {})
-        .get("primary", fallback)
+        .get("primary")
     )
+
+    # 2. Fall back to source repo metadata.json
+    if not primary and repo_url:
+        remote_meta = _fetch_remote_metadata(repo_url, rev=rev)
+        if remote_meta:
+            primary = (
+                remote_meta
+                .get("data_products", {})
+                .get("primary")
+            )
+
     if not primary or not isinstance(primary, str) or ".." in primary or primary.startswith("/"):
         return fallback
     return primary
@@ -1006,7 +1056,7 @@ def clone_and_pull_product(
         product_info = query_data_product(product_name)
         repo_url = product_info["repository"]["github_url"]
         ssh_url = _https_to_ssh(repo_url)
-        primary_path = _resolve_primary_path(product_info)
+        primary_path = _resolve_primary_path(product_info, repo_url=ssh_url, rev=rev)
         result.source_path = primary_path if not pull_all else "all"
 
         # Clone
