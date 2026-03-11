@@ -354,7 +354,7 @@ def update_project_metadata(
 
 
 def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List[str]:
-    """Extract data/ output paths from a remote repo's dvc.yaml.
+    """Extract output paths from a remote repo's dvc.yaml.
 
     DVC pipeline outputs (like data/final/) are not git-tracked directories —
     they only appear as ``outs`` in ``dvc.yaml``.  This function reads the
@@ -363,7 +363,8 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
     normalised to ``data/final``.
 
     Returns:
-        Sorted, deduplicated list of ``data/*`` paths found in pipeline outputs.
+        Sorted, deduplicated list of top-level output paths found in pipeline
+        outputs — both under ``data/`` and elsewhere (e.g. ``deriveddata/hosppanel``).
     """
     temp_dir = None
     try:
@@ -403,10 +404,15 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
                     elif p != ".":
                         normalized.append(p)
                 norm = "/".join(normalized)
+                if not norm or norm == ".":
+                    continue
                 if norm.startswith("data/") and norm != "data":
                     # Keep only the first level under data/
                     top_level = "data/" + norm.split("/")[1]
                     data_paths.add(top_level)
+                elif not norm.startswith("data"):
+                    # Non-data output — keep the full normalized path
+                    data_paths.add(norm)
 
         return sorted(data_paths)
     except Exception:
@@ -419,18 +425,22 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
 def list_remote_data_paths(
     repo_url: str,
     rev: Optional[str] = None,
+    primary_path: Optional[str] = None,
 ) -> List[str]:
     """List available data directories in a remote git repository.
 
     Discovers directories both from the git tree (e.g. data/raw/) and from
-    DVC pipeline outputs in dvc.yaml (e.g. data/final/).
+    DVC pipeline outputs in dvc.yaml (e.g. data/final/).  When a
+    *primary_path* outside ``data/`` is provided (e.g. ``deriveddata/hosppanel/``),
+    it is also checked for existence so it can appear in the result set.
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
         rev: Git revision to inspect (default: HEAD)
+        primary_path: Optional catalog primary path to probe explicitly
 
     Returns:
-        List of directory paths under data/ (e.g., ["data/raw", "data/final"])
+        List of directory paths (e.g., ["data/raw", "data/final", "deriveddata/hosppanel"])
     """
     temp_dir = None
     git_paths: List[str] = []
@@ -444,8 +454,23 @@ def list_remote_data_paths(
 
         cloned_git = git_command(cwd=temp_dir / "repo")
         ref = rev or "HEAD"
-        result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
-        git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+
+        # Discover data/ subdirectories
+        try:
+            result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
+            git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+        except Exception:
+            pass
+
+        # If the primary path is outside data/, check if it exists in the tree
+        if primary_path:
+            normalized = primary_path.rstrip("/")
+            if not normalized.startswith("data/") and normalized not in git_paths:
+                try:
+                    cloned_git.run("ls-tree", f"{ref}:{normalized}")
+                    git_paths.append(normalized)
+                except Exception:
+                    pass
     except Exception:
         pass
     finally:
@@ -517,13 +542,13 @@ def validate_source_path(
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
-        source_path: Path to validate (e.g., "data/final/")
+        source_path: Path to validate (e.g., "data/final/" or "deriveddata/hosppanel/")
         rev: Git revision to check
 
     Returns:
         Tuple of (exists: bool, available_paths: List[str])
     """
-    available = list_remote_data_paths(repo_url, rev=rev)
+    available = list_remote_data_paths(repo_url, rev=rev, primary_path=source_path)
     normalized = source_path.rstrip("/")
     exists = normalized in available
     return exists, available

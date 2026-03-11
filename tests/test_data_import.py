@@ -1439,8 +1439,8 @@ stages:
     @patch('mintd.data_import.shutil.rmtree')
     @patch('mintd.data_import.tempfile.mkdtemp')
     @patch('mintd.data_import.git_command')
-    def test_ignores_non_data_outputs(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
-        """Test that outputs not under data/ are ignored."""
+    def test_includes_non_data_outputs(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Test that outputs outside data/ are also included."""
         mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
         mock_git = Mock()
         mock_git_cmd.return_value = mock_git
@@ -1461,7 +1461,9 @@ stages:
 
         paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
 
-        assert paths == ["data/final"]
+        assert "data/final" in paths
+        assert "results/output.csv" in paths
+        assert "models/trained.pkl" in paths
 
 
 class TestListRemoteDataPaths:
@@ -2132,3 +2134,241 @@ class TestRecursiveImport:
 
         assert result.success is False
         assert mock_dvc_import.call_count == 2
+
+
+# =============================================================================
+# Non-data/ primary path support — regression tests for catalog primary paths
+# outside the traditional data/ directory (e.g. deriveddata/hosppanel/)
+# =============================================================================
+
+
+class TestNonDataPrimaryPaths:
+    """Tests ensuring non-data/ catalog primary paths work end-to-end."""
+
+    # -- _parse_dvc_yaml_data_paths ------------------------------------------
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_parse_dvc_yaml_returns_non_data_outputs(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """DVC outputs outside data/ (e.g. deriveddata/) must be returned."""
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        dvc_yaml_content = """
+stages:
+  build:
+    wdir: code
+    cmd: stata -b do build.do
+    outs:
+      - ../deriveddata/hosppanel/
+      - ../data/final/
+"""
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout=dvc_yaml_content),  # git show dvc.yaml
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert "deriveddata/hosppanel" in paths
+        assert "data/final" in paths
+
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_parse_dvc_yaml_top_level_output(self, mock_git_cmd, mock_mkdtemp, mock_rmtree):
+        """Top-level DVC outputs without wdir should be discovered."""
+        mock_mkdtemp.return_value = "/tmp/mintd-dvc-yaml-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        dvc_yaml_content = """
+stages:
+  build:
+    cmd: python build.py
+    outs:
+      - deriveddata/hosppanel/
+"""
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout=dvc_yaml_content),
+        ]
+
+        paths = _parse_dvc_yaml_data_paths("git@github.com:test/repo.git")
+
+        assert paths == ["deriveddata/hosppanel"]
+
+    # -- list_remote_data_paths ----------------------------------------------
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_list_remote_probes_non_data_primary(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """list_remote_data_paths should probe a non-data/ primary_path via ls-tree."""
+        from mintd.exceptions import GitError
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+
+        # clone OK, ls-tree data fails (no data/ dir), ls-tree deriveddata/hosppanel succeeds
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            GitError(message="not found", command=["git"], returncode=128),  # ls-tree data
+            Mock(stdout="file1.parquet\nfile2.dta\n"),  # ls-tree deriveddata/hosppanel
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+            primary_path="deriveddata/hosppanel/",
+        )
+
+        assert "deriveddata/hosppanel" in paths
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=["deriveddata/hosppanel"])
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_list_remote_merges_dvc_non_data_paths(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """Non-data/ paths from DVC yaml are merged into the result."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="raw\nfinal\n"),  # ls-tree data
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert "data/raw" in paths
+        assert "data/final" in paths
+        assert "deriveddata/hosppanel" in paths
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_list_remote_no_primary_preserves_old_behavior(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """Without primary_path, behaves the same as before (only data/ subdirs)."""
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            Mock(stdout="raw\nfinal\n"),  # ls-tree data
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+        )
+
+        assert paths == ["data/final", "data/raw"]
+
+    # -- validate_source_path ------------------------------------------------
+
+    @patch('mintd.data_import.list_remote_data_paths')
+    def test_validate_non_data_path_exists(self, mock_list):
+        """validate_source_path passes primary_path through so non-data/ paths can be found."""
+        mock_list.return_value = ["data/raw", "deriveddata/hosppanel"]
+
+        exists, available = validate_source_path(
+            repo_url="git@github.com:test/data_test.git",
+            source_path="deriveddata/hosppanel/",
+        )
+
+        assert exists is True
+        assert "deriveddata/hosppanel" in available
+        # Verify primary_path was passed through
+        mock_list.assert_called_once_with(
+            "git@github.com:test/data_test.git",
+            rev=None,
+            primary_path="deriveddata/hosppanel/",
+        )
+
+    @patch('mintd.data_import.list_remote_data_paths')
+    def test_validate_non_data_path_not_exists(self, mock_list):
+        """Non-data/ path that doesn't exist returns False with available alternatives."""
+        mock_list.return_value = ["data/raw", "data/final"]
+
+        exists, available = validate_source_path(
+            repo_url="git@github.com:test/data_test.git",
+            source_path="deriveddata/hosppanel/",
+        )
+
+        assert exists is False
+        assert "data/raw" in available
+
+    # -- import_data_product end-to-end --------------------------------------
+
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_import_non_data_primary_succeeds(
+        self, mock_validate, mock_query, mock_validate_src,
+        mock_dvc_import, mock_update_meta, mock_project_dir,
+        mock_data_product_with_primary
+    ):
+        """Full import with catalog primary outside data/ should succeed."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (True, ["deriveddata/hosppanel"])
+        mock_dvc_import.return_value = "data/imports/mergerbuild.dvc"
+
+        result = import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is True
+        # Verify the DVC import used the catalog primary path
+        dvc_call = mock_dvc_import.call_args
+        assert dvc_call.kwargs.get("source_path") == "deriveddata/hosppanel/"
+
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_import_non_data_primary_not_found_shows_error(
+        self, mock_validate, mock_query, mock_validate_src,
+        mock_project_dir, mock_data_product_with_primary
+    ):
+        """When catalog primary doesn't exist and no alternatives, shows clear error."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (False, [])
+
+        result = import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+        )
+
+        assert result.success is False
+        assert "No data directories" in result.error_message
+
+    @patch('mintd.data_import.prompt_stage_selection')
+    @patch('mintd.data_import.update_project_metadata')
+    @patch('mintd.data_import.run_dvc_import')
+    @patch('mintd.data_import.validate_source_path')
+    @patch('mintd.data_import.query_data_product')
+    @patch('mintd.data_import.validate_project_directory')
+    def test_import_non_data_primary_fallback_prompts(
+        self, mock_validate, mock_query, mock_validate_src,
+        mock_dvc_import, mock_update_meta, mock_prompt,
+        mock_project_dir, mock_data_product_with_primary
+    ):
+        """When non-data/ primary doesn't exist but alternatives are available, prompts user."""
+        mock_query.return_value = mock_data_product_with_primary
+        mock_validate_src.return_value = (False, ["data/raw", "deriveddata/other"])
+        mock_prompt.return_value = "deriveddata/other"
+        mock_dvc_import.return_value = "data/imports/mergerbuild.dvc"
+
+        result = import_data_product(
+            product_name="mergerbuild",
+            project_path=mock_project_dir,
+        )
+
+        mock_prompt.assert_called_once_with(["data/raw", "deriveddata/other"])
