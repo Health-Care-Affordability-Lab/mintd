@@ -1,0 +1,1486 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Lab project scaffolding tool">
+      
+      
+      
+        <link rel="canonical" href="https://health-care-affordability-lab.github.io/mintd/migration/infra-to-data/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.5">
+    
+    
+      
+        <title>Migration Guide: Infra Repos to Data Products - Mintd</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#migration-guide-infra-repos-to-data-products" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Mintd" class="md-header__button md-logo" aria-label="Mintd" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Mintd
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Migration Guide: Infra Repos to Data Products
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="lime"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../installation/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Installation
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../windows-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Windows Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../quick-start/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Quick Start
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../project-types/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Project Types
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../features/registry/" class="md-tabs__link">
+          
+  
+  
+  Features
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../cli/" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../../development/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Development
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Mintd" class="md-nav__button md-logo" aria-label="Mintd" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Mintd
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../windows-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Windows Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../project-types/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Types
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Features
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Features
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/registry/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registry Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Custom Templates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/stata/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stata Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/utilities/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Mint Utilities
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../features/storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Storage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#why-this-change" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why This Change?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#migration-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Migration Paths
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Migration Paths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#path-a-infra-repo-data-product" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Path A: Infra Repo → Data Product
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#path-b-infra-repo-standalone-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Path B: Infra Repo → Standalone Package
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#path-c-infra-repo-absorbed-into-consumer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Path C: Infra Repo → Absorbed Into Consumer
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#checklist-is-this-a-data-product" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checklist: Is This a Data Product?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#checklist-is-this-a-package" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Checklist: Is This a Package?
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#updating-existing-imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Updating Existing Imports
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Updating Existing Imports">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-the-consuming-projects-metadatajson" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In the consuming project's metadata.json:
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#update-dvc-imports" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Update DVC imports:
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#frequently-asked-questions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Frequently Asked Questions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Frequently Asked Questions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#q-my-infra-repo-has-complex-multi-stage-pipelines-is-it-still-a-data-product" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Q: My infra repo has complex multi-stage pipelines. Is it still a data product?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#q-my-infra-repo-takes-other-data-products-as-inputs-is-that-okay-for-a-data-type" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Q: My infra repo takes other data products as inputs. Is that okay for a data type?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#q-can-i-have-pythonr-code-in-a-data-repo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Q: Can I have Python/R code in a data repo?
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#q-when-should-i-extract-a-package-from-a-data-repo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Q: When should I extract a package from a data repo?
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#package-extraction-guide" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Package Extraction Guide
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Package Extraction Guide">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-to-extract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When to Extract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#how-to-extract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How to Extract
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-not-to-extract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What NOT to Extract
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Support
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="migration-guide-infra-repos-to-data-products">Migration Guide: Infra Repos to Data Products</h1>
+<p><strong>Version</strong>: mintd 0.5.0+
+<strong>Date</strong>: 2026-03-02</p>
+<h2 id="overview">Overview</h2>
+<p>Starting with mintd 0.5.0, the <code>infra</code> project type has been removed. All repositories that produce datasets should use the <code>data</code> type. Pure code packages (Python, R, Stata) should use standard language tooling without mintd scaffolding.</p>
+<h2 id="why-this-change">Why This Change?</h2>
+<p>The <code>infra</code> type was originally intended for "shared utility packages" but in practice was used for:
+- Derived data products (inputs from other data products)
+- Complex parameterized pipelines
+- Legacy research code
+- Pure code packages</p>
+<p>These are fundamentally different things. The new taxonomy clarifies:</p>
+<table>
+<thead>
+<tr>
+<th>What you're building</th>
+<th>New approach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dataset (any complexity)</td>
+<td><code>mintd create data</code></td>
+</tr>
+<tr>
+<td>Research analysis/paper</td>
+<td><code>mintd create project</code></td>
+</tr>
+<tr>
+<td>Reusable code package</td>
+<td>Standard language tooling (no mintd)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="migration-paths">Migration Paths</h2>
+<h3 id="path-a-infra-repo-data-product">Path A: Infra Repo → Data Product</h3>
+<p><strong>When</strong>: Your repo produces reusable datasets (even if derived from other data products)</p>
+<p><strong>Examples</strong>:
+- <code>infra_cms-ipps-reimbursement</code> → <code>data_cms-ipps-reimbursement</code>
+- <code>infra_market-competition</code> → <code>data_market-competition</code></p>
+<p><strong>Steps</strong>:</p>
+<ol>
+<li>
+<p><strong>Update <code>metadata.json</code></strong>
+   <div class="language-json highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">&quot;project_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;data&quot;</span><span class="p">,</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;cms-ipps-reimbursement&quot;</span><span class="p">,</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="nt">&quot;full_name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;data_cms-ipps-reimbursement&quot;</span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="err">...</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="p">}</span>
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Add optional discoverability fields</strong> (if applicable)
+   <div class="language-json highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="nt">&quot;configurations&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;hospitals&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;mergerpanel&quot;</span><span class="p">],</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="nt">&quot;methods&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;hhi&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;diversion-ratios&quot;</span><span class="p">],</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span><span class="nt">&quot;data_dependencies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;data_cms-provider&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;data_cms-ipps-weights&quot;</span><span class="p">]</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">}</span>
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Update DVC remote name</strong> (if S3 bucket uses old naming)
+   <div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>dvc<span class="w"> </span>remote<span class="w"> </span>rename<span class="w"> </span>infra-cms-ipps-reimbursement<span class="w"> </span>data-cms-ipps-reimbursement
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Update README.md</strong></p>
+</li>
+<li>Change project type references</li>
+<li>
+<p>Update any installation/usage examples</p>
+</li>
+<li>
+<p><strong>Register with new type</strong> (if using registry)
+   <div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>mintd<span class="w"> </span>update<span class="w"> </span>register<span class="w"> </span>--force
+</span></code></pre></div></p>
+</li>
+</ol>
+<h3 id="path-b-infra-repo-standalone-package">Path B: Infra Repo → Standalone Package</h3>
+<p><strong>When</strong>: Your repo produces reusable code (not datasets)</p>
+<p><strong>Examples</strong>:
+- <code>geokit</code> (Python isochrone utilities)
+- <code>statatools</code> (Stata ado packages)</p>
+<p><strong>Steps</strong>:</p>
+<ol>
+<li>
+<p><strong>Remove mintd scaffolding</strong>
+   <div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>rm<span class="w"> </span>-rf<span class="w"> </span>.dvc<span class="w"> </span>.dvcignore<span class="w"> </span>dvc.yaml<span class="w"> </span>dvc.lock
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>rm<span class="w"> </span>metadata.json
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Keep standard package structure</strong></p>
+</li>
+<li>Python: <code>pyproject.toml</code>, <code>src/</code>, <code>tests/</code></li>
+<li>R: <code>DESCRIPTION</code>, <code>NAMESPACE</code>, <code>R/</code>, <code>man/</code></li>
+<li>
+<p>Stata: <code>.ado</code>, <code>.sthlp</code> files</p>
+</li>
+<li>
+<p><strong>Set up CI/CD</strong> for package publishing</p>
+</li>
+<li>PyPI for Python</li>
+<li>CRAN or r-universe for R</li>
+<li>
+<p>SSC or GitHub releases for Stata</p>
+</li>
+<li>
+<p><strong>Remove from mintd registry</strong> (if registered)</p>
+</li>
+</ol>
+<h3 id="path-c-infra-repo-absorbed-into-consumer">Path C: Infra Repo → Absorbed Into Consumer</h3>
+<p><strong>When</strong>: The code is only used by one project and isn't a separable product</p>
+<p><strong>Examples</strong>:
+- Methodology code that's tightly coupled to a specific analysis
+- Helper scripts that don't have clean APIs</p>
+<p><strong>Steps</strong>:</p>
+<ol>
+<li><strong>Move code into the consuming repo</strong></li>
+<li><strong>Archive the original infra repo</strong></li>
+<li><strong>Update any DVC imports to use local paths</strong></li>
+</ol>
+<hr />
+<h2 id="checklist-is-this-a-data-product">Checklist: Is This a Data Product?</h2>
+<p>Answer YES to most of these → Use <code>mintd create data</code>:</p>
+<ul>
+<li>[ ] Does it produce one or more datasets as output?</li>
+<li>[ ] Would other projects import its outputs via <code>mintd data import</code>?</li>
+<li>[ ] Does it have a DVC pipeline for reproducibility?</li>
+<li>[ ] Does it need data governance metadata (PHI, PII, contracts)?</li>
+<li>[ ] Does it have schema validation for outputs?</li>
+</ul>
+<h2 id="checklist-is-this-a-package">Checklist: Is This a Package?</h2>
+<p>Answer YES to most of these → Use standard language tooling:</p>
+<ul>
+<li>[ ] Does it produce reusable code (functions, classes, commands)?</li>
+<li>[ ] Would other projects install it via pip/renv/ssc?</li>
+<li>[ ] Does it have a versioned API that consumers depend on?</li>
+<li>[ ] Does it have tests that run without any data files?</li>
+<li>[ ] Could it be published to PyPI/CRAN/SSC?</li>
+</ul>
+<hr />
+<h2 id="updating-existing-imports">Updating Existing Imports</h2>
+<p>If other projects import from your renamed repo:</p>
+<h3 id="in-the-consuming-projects-metadatajson">In the consuming project's <code>metadata.json</code>:</h3>
+<div class="language-json highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">&quot;data_dependencies&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">    </span><span class="p">{</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">      </span><span class="nt">&quot;source&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;data_cms-ipps-reimbursement&quot;</span><span class="p">,</span><span class="w">  </span><span class="c1">// Updated name</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">      </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;data/raw/ipps&quot;</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">      </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;v1.2.0&quot;</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">    </span><span class="p">}</span>
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">  </span><span class="p">]</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="p">}</span>
+</span></code></pre></div>
+<h3 id="update-dvc-imports">Update DVC imports:</h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Remove old import</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>mintd<span class="w"> </span>data<span class="w"> </span>remove<span class="w"> </span>ipps
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="c1"># Re-import with new source name</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>mintd<span class="w"> </span>data<span class="w"> </span>import<span class="w"> </span>data_cms-ipps-reimbursement<span class="w"> </span>--path<span class="w"> </span>data/raw/ipps
+</span></code></pre></div>
+<hr />
+<h2 id="frequently-asked-questions">Frequently Asked Questions</h2>
+<h3 id="q-my-infra-repo-has-complex-multi-stage-pipelines-is-it-still-a-data-product">Q: My infra repo has complex multi-stage pipelines. Is it still a data product?</h3>
+<p><strong>Yes.</strong> Complexity doesn't change the type. If the output is datasets that other projects consume, it's a data product. You'll customize <code>dvc.yaml</code> beyond the default three stages — that's expected.</p>
+<h3 id="q-my-infra-repo-takes-other-data-products-as-inputs-is-that-okay-for-a-data-type">Q: My infra repo takes other data products as inputs. Is that okay for a data type?</h3>
+<p><strong>Yes.</strong> That's exactly what <code>data_dependencies</code> tracks. Many data products are derived — combining, transforming, or analyzing upstream data products.</p>
+<h3 id="q-can-i-have-pythonr-code-in-a-data-repo">Q: Can I have Python/R code in a data repo?</h3>
+<p><strong>Yes.</strong> Data repos regularly contain substantial code for data processing. The distinction is: does the repo's <em>purpose</em> is to produce datasets (data product) or to produce reusable code (package)?</p>
+<h3 id="q-when-should-i-extract-a-package-from-a-data-repo">Q: When should I extract a package from a data repo?</h3>
+<p>When there's a <strong>second consumer</strong> that needs the code but not the specific outputs. See <a href="#package-extraction-guide">Package Extraction Guide</a> below.</p>
+<hr />
+<h2 id="package-extraction-guide">Package Extraction Guide</h2>
+<h3 id="when-to-extract">When to Extract</h3>
+<p>Extract code into a separate package when:</p>
+<ol>
+<li><strong>A second project needs the code</strong> (not hypothetical — actual)</li>
+<li><strong>The code has a clear API boundary</strong> (inputs/outputs well-defined)</li>
+<li><strong>The code can be versioned independently</strong> of the data pipeline</li>
+<li><strong>The code has tests</strong> that run without the full data pipeline</li>
+</ol>
+<h3 id="how-to-extract">How to Extract</h3>
+<ol>
+<li>
+<p><strong>Create new package repo</strong> (no mintd scaffolding)
+   <div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>mkdir<span class="w"> </span>hhi-calculator<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>hhi-calculator
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>poetry<span class="w"> </span>init<span class="w">  </span><span class="c1"># or uv init, etc.</span>
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Move code with clear boundaries</strong></p>
+</li>
+<li>Functions that take generic inputs and produce generic outputs</li>
+<li>Classes with well-defined interfaces</li>
+<li>
+<p>No hardcoded paths or dataset-specific logic</p>
+</li>
+<li>
+<p><strong>Write tests for the package</strong></p>
+</li>
+<li>Should run with synthetic/fixture data</li>
+<li>
+<p>No dependency on full data pipeline</p>
+</li>
+<li>
+<p><strong>Update original data repo</strong>
+   <div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1"># In data_market-competition</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>pip<span class="w"> </span>install<span class="w"> </span>hhi-calculator<span class="w">  </span><span class="c1"># or add to pyproject.toml</span>
+</span></code></pre></div></p>
+</li>
+<li>
+<p><strong>Update pipeline to use package</strong>
+   <div class="language-python highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1"># Before: from code.hhi import calculate_hhi</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1"># After:</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="kn">from</span><span class="w"> </span><span class="nn">hhi_calculator</span><span class="w"> </span><span class="kn">import</span> <span class="n">calculate_hhi</span>
+</span></code></pre></div></p>
+</li>
+</ol>
+<h3 id="what-not-to-extract">What NOT to Extract</h3>
+<ul>
+<li>Code that only one repo uses — leave it in the data repo</li>
+<li>Code tightly coupled to specific data structures — it's not reusable yet</li>
+<li>Code where the "API" is "run this script with these globals" — that's a script, not a package</li>
+</ul>
+<hr />
+<h2 id="support">Support</h2>
+<p>For questions about migration:
+- Open an issue in the mintd repo
+- Ask in the lab Slack channel
+- Check the <a href="../README.md">mintd documentation</a></p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "content.code.copy"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
