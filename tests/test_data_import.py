@@ -2213,11 +2213,15 @@ stages:
         mock_git = Mock()
         mock_git_cmd.return_value = mock_git
 
-        # clone OK, ls-tree data fails (no data/ dir), ls-tree deriveddata/hosppanel succeeds
+        # clone OK, ls-tree data fails (no data/ dir), top-level discovery finds
+        # deriveddata/ with hosppanel/ subdir, then primary_path probe is skipped
+        # because it's already discovered.
         mock_git.run.side_effect = [
             Mock(),  # clone
             GitError(message="not found", command=["git"], returncode=128),  # ls-tree data
-            Mock(stdout="file1.parquet\nfile2.dta\n"),  # ls-tree deriveddata/hosppanel
+            Mock(stdout="deriveddata\ncode\n"),  # ls-tree HEAD (top-level dirs)
+            Mock(stdout="hosppanel\n"),  # ls-tree HEAD:deriveddata
+            GitError(message="not found", command=["git"], returncode=128),  # ls-tree HEAD:code
         ]
 
         paths = list_remote_data_paths(
@@ -2268,6 +2272,33 @@ stages:
         )
 
         assert paths == ["data/final", "data/raw"]
+
+    @patch('mintd.data_import._parse_dvc_yaml_data_paths', return_value=[])
+    @patch('mintd.data_import.shutil.rmtree')
+    @patch('mintd.data_import.tempfile.mkdtemp')
+    @patch('mintd.data_import.git_command')
+    def test_list_remote_discovers_top_level_dirs_when_no_data(self, mock_git_cmd, mock_mkdtemp, mock_rmtree, mock_dvc_yaml):
+        """When no data/ dir exists, discovers non-data/ top-level directories."""
+        from mintd.exceptions import GitError
+        mock_mkdtemp.return_value = "/tmp/mintd-ls-test"
+        mock_git = Mock()
+        mock_git_cmd.return_value = mock_git
+        mock_git.run.side_effect = [
+            Mock(),  # clone
+            GitError(message="not found", command=["git"], returncode=128),  # ls-tree data (fails)
+            Mock(stdout="deriveddata\ncode\n"),  # ls-tree HEAD (top-level dirs)
+            Mock(stdout="hosppanel\nother\n"),  # ls-tree HEAD:deriveddata
+            Mock(stdout="scripts\n"),  # ls-tree HEAD:code
+        ]
+
+        paths = list_remote_data_paths(
+            repo_url="git@github.com:test/data_test.git",
+            primary_path="data/final/",
+        )
+
+        assert "deriveddata/hosppanel" in paths
+        assert "deriveddata/other" in paths
+        assert "code/scripts" in paths
 
     # -- validate_source_path ------------------------------------------------
 

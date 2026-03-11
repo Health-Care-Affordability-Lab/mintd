@@ -456,11 +456,32 @@ def list_remote_data_paths(
         ref = rev or "HEAD"
 
         # Discover data/ subdirectories
+        has_data_dir = False
         try:
             result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
             git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+            has_data_dir = True
         except Exception:
             pass
+
+        # When no data/ directory exists, discover other top-level directories
+        # that may contain data products (e.g. deriveddata/hosppanel/)
+        if not has_data_dir:
+            try:
+                result = cloned_git.run("ls-tree", "--name-only", "-d", ref)
+                for line in result.stdout.strip().splitlines():
+                    if line and line != "data" and not line.startswith("."):
+                        try:
+                            sub_result = cloned_git.run(
+                                "ls-tree", "--name-only", "-d", f"{ref}:{line}"
+                            )
+                            for sub in sub_result.stdout.strip().splitlines():
+                                if sub:
+                                    git_paths.append(f"{line}/{sub}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         # If the primary path is outside data/, check if it exists in the tree
         if primary_path:
