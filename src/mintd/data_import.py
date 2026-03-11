@@ -354,7 +354,7 @@ def update_project_metadata(
 
 
 def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List[str]:
-    """Extract data/ output paths from a remote repo's dvc.yaml.
+    """Extract output paths from a remote repo's dvc.yaml.
 
     DVC pipeline outputs (like data/final/) are not git-tracked directories —
     they only appear as ``outs`` in ``dvc.yaml``.  This function reads the
@@ -363,7 +363,8 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
     normalised to ``data/final``.
 
     Returns:
-        Sorted, deduplicated list of ``data/*`` paths found in pipeline outputs.
+        Sorted, deduplicated list of top-level output paths found in pipeline
+        outputs — both under ``data/`` and elsewhere (e.g. ``deriveddata/hosppanel``).
     """
     temp_dir = None
     try:
@@ -403,10 +404,15 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
                     elif p != ".":
                         normalized.append(p)
                 norm = "/".join(normalized)
+                if not norm or norm == ".":
+                    continue
                 if norm.startswith("data/") and norm != "data":
                     # Keep only the first level under data/
                     top_level = "data/" + norm.split("/")[1]
                     data_paths.add(top_level)
+                elif not norm.startswith("data"):
+                    # Non-data output — keep the full normalized path
+                    data_paths.add(norm)
 
         return sorted(data_paths)
     except Exception:
@@ -419,18 +425,22 @@ def _parse_dvc_yaml_data_paths(repo_url: str, rev: Optional[str] = None) -> List
 def list_remote_data_paths(
     repo_url: str,
     rev: Optional[str] = None,
+    primary_path: Optional[str] = None,
 ) -> List[str]:
     """List available data directories in a remote git repository.
 
     Discovers directories both from the git tree (e.g. data/raw/) and from
-    DVC pipeline outputs in dvc.yaml (e.g. data/final/).
+    DVC pipeline outputs in dvc.yaml (e.g. data/final/).  When a
+    *primary_path* outside ``data/`` is provided (e.g. ``deriveddata/hosppanel/``),
+    it is also checked for existence so it can appear in the result set.
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
         rev: Git revision to inspect (default: HEAD)
+        primary_path: Optional catalog primary path to probe explicitly
 
     Returns:
-        List of directory paths under data/ (e.g., ["data/raw", "data/final"])
+        List of directory paths (e.g., ["data/raw", "data/final", "deriveddata/hosppanel"])
     """
     temp_dir = None
     git_paths: List[str] = []
@@ -444,8 +454,44 @@ def list_remote_data_paths(
 
         cloned_git = git_command(cwd=temp_dir / "repo")
         ref = rev or "HEAD"
-        result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
-        git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+
+        # Discover data/ subdirectories
+        has_data_dir = False
+        try:
+            result = cloned_git.run("ls-tree", "--name-only", "-d", f"{ref}:data")
+            git_paths = [f"data/{line}" for line in result.stdout.strip().splitlines() if line]
+            has_data_dir = True
+        except Exception:
+            pass
+
+        # When no data/ directory exists, discover other top-level directories
+        # that may contain data products (e.g. deriveddata/hosppanel/)
+        if not has_data_dir:
+            try:
+                result = cloned_git.run("ls-tree", "--name-only", "-d", ref)
+                for line in result.stdout.strip().splitlines():
+                    if line and line != "data" and not line.startswith("."):
+                        try:
+                            sub_result = cloned_git.run(
+                                "ls-tree", "--name-only", "-d", f"{ref}:{line}"
+                            )
+                            for sub in sub_result.stdout.strip().splitlines():
+                                if sub:
+                                    git_paths.append(f"{line}/{sub}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # If the primary path is outside data/, check if it exists in the tree
+        if primary_path:
+            normalized = primary_path.rstrip("/")
+            if not normalized.startswith("data/") and normalized not in git_paths:
+                try:
+                    cloned_git.run("ls-tree", f"{ref}:{normalized}")
+                    git_paths.append(normalized)
+                except Exception:
+                    pass
     except Exception:
         pass
     finally:
@@ -517,13 +563,13 @@ def validate_source_path(
 
     Args:
         repo_url: SSH or HTTPS URL of the source repository
-        source_path: Path to validate (e.g., "data/final/")
+        source_path: Path to validate (e.g., "data/final/" or "deriveddata/hosppanel/")
         rev: Git revision to check
 
     Returns:
         Tuple of (exists: bool, available_paths: List[str])
     """
-    available = list_remote_data_paths(repo_url, rev=rev)
+    available = list_remote_data_paths(repo_url, rev=rev, primary_path=source_path)
     normalized = source_path.rstrip("/")
     exists = normalized in available
     return exists, available
@@ -610,8 +656,9 @@ def import_data_product(
 ) -> ImportResult:
     """Import a data product as a DVC dependency.
 
-    By default imports only data/final/ (the validated output). If data/final/
-    is not found, prompts the user to choose from available directories.
+    By default imports the catalog's ``data_products.primary`` path (falling
+    back to ``data/final/``). If the path is not found, prompts the user to
+    choose from available directories.
 
     Args:
         product_name: Name of the data product to import
@@ -722,11 +769,18 @@ def import_data_product(
                 return result
             # No .dvc files found — fall through to single import
         else:
-            # Smart default: validate data/final/ exists, prompt if not
-            if not stage:
-                stage = "final"
-
-            source_path = f"data/{stage}/"
+            # Smart default: use catalog primary or data/{stage}/
+            if stage:
+                source_path = f"data/{stage}/"
+            else:
+                source_path = _resolve_primary_path(product_info, repo_url=ssh_url, rev=repo_rev)
+                console.print(
+                    f"📦 Using default data product: {source_path}"
+                )
+                console.print(
+                    "   Use --source-path to import a specific path, "
+                    "or --all for the entire data/ directory"
+                )
 
             exists, available_paths = validate_source_path(
                 repo_url=ssh_url,
@@ -832,17 +886,72 @@ def pull_local(
         return False
 
 
-def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
-    """Extract the primary data product path from catalog info.
+def _fetch_remote_metadata(repo_url: str, rev: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Read metadata.json from a remote git repository.
 
-    Falls back to ``data/final/`` when the ``data_products`` section is
-    absent (backwards compatible with older catalog entries).
+    Performs a shallow, no-checkout clone and reads the file via
+    ``git show`` so no working-tree files are created.
+
+    Returns:
+        Parsed metadata dict, or ``None`` on any failure.
     """
-    return (
+    temp_dir = None
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="mintd-meta-"))
+        clone_args = [
+            "clone", "--depth", "1", "--no-checkout",
+            repo_url, str(temp_dir / "repo"),
+        ]
+        if rev:
+            clone_args.extend(["--branch", rev])
+        git_cmd = git_command()
+        git_cmd.run(*clone_args)
+
+        cloned_git = git_command(cwd=temp_dir / "repo")
+        ref = rev or "HEAD"
+        result = cloned_git.run("show", f"{ref}:metadata.json")
+        return json.loads(result.stdout)
+    except Exception:
+        return None
+    finally:
+        if temp_dir:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _resolve_primary_path(
+    product_info: Dict[str, Any],
+    repo_url: Optional[str] = None,
+    rev: Optional[str] = None,
+) -> str:
+    """Extract the primary data product path from catalog or source repo.
+
+    Checks the catalog entry first. When the catalog lacks
+    ``data_products.primary``, falls back to fetching ``metadata.json``
+    from the source repository.  Returns ``data/final/`` only when
+    neither source contains the field.
+    """
+    fallback = "data/final/"
+
+    # 1. Try catalog entry
+    primary = (
         product_info
         .get("data_products", {})
-        .get("primary", "data/final/")
+        .get("primary")
     )
+
+    # 2. Fall back to source repo metadata.json
+    if not primary and repo_url:
+        remote_meta = _fetch_remote_metadata(repo_url, rev=rev)
+        if remote_meta:
+            primary = (
+                remote_meta
+                .get("data_products", {})
+                .get("primary")
+            )
+
+    if not primary or not isinstance(primary, str) or ".." in primary or primary.startswith("/"):
+        return fallback
+    return primary
 
 
 def _resolve_dvc_target(repo_path: Path, primary_path: str) -> List[str]:
@@ -947,7 +1056,7 @@ def clone_and_pull_product(
         product_info = query_data_product(product_name)
         repo_url = product_info["repository"]["github_url"]
         ssh_url = _https_to_ssh(repo_url)
-        primary_path = _resolve_primary_path(product_info)
+        primary_path = _resolve_primary_path(product_info, repo_url=ssh_url, rev=rev)
         result.source_path = primary_path if not pull_all else "all"
 
         # Clone
