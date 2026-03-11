@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import click
-import git
 from rich.console import Console
 
 from .exceptions import DVCImportError, DVCUpdateError, DependencyNotFoundError, DependencyRemovalError
@@ -195,31 +194,15 @@ def query_data_product(product_name: str) -> Dict[str, Any]:
         else:
             alt_name = f"data_{product_name}"
 
-        # Try exact name first
-        exact_found = True
+        # Try exact name first, fall back to alternate
         try:
-            result = registry_client.query_data_product(product_name)
+            return registry_client.query_data_product(product_name)
         except FileNotFoundError:
-            exact_found = False
+            pass
 
-        # Try alternate name
-        alt_found = True
         try:
-            alt_result = registry_client.query_data_product(alt_name)
+            return registry_client.query_data_product(alt_name)
         except FileNotFoundError:
-            alt_found = False
-
-        if exact_found and alt_found:
-            console.print(
-                f"[yellow]Warning: Both '{product_name}' and '{alt_name}' exist "
-                f"in the registry. Using '{product_name}'.[/yellow]"
-            )
-            return result
-        elif exact_found:
-            return result
-        elif alt_found:
-            return alt_result
-        else:
             raise FileNotFoundError(
                 f"Data product '{product_name}' not found in registry"
             )
@@ -828,21 +811,25 @@ def pull_local(
     Returns:
         True if pull succeeded
     """
-    remote_name = get_project_remote(project_path)
+    try:
+        remote_name = get_project_remote(project_path)
 
-    dvc = dvc_command(cwd=project_path)
-    args = ["pull", "-r", remote_name]
+        dvc = dvc_command(cwd=project_path)
+        args = ["pull", "-r", remote_name]
 
-    if jobs:
-        args.extend(["-j", str(jobs)])
+        if jobs:
+            args.extend(["-j", str(jobs)])
 
-    if targets:
-        args.extend(targets)
+        if targets:
+            args.extend(targets)
 
-    console.print(f"Pulling from remote '{remote_name}'...")
-    dvc.run_live(*args)
-    console.print("Pull complete.", style="green")
-    return True
+        console.print(f"Pulling from remote '{remote_name}'...")
+        dvc.run_live(*args)
+        console.print("Pull complete.", style="green")
+        return True
+    except Exception as e:
+        console.print(f"❌ Pull failed: {e}", style="red")
+        return False
 
 
 def _resolve_primary_path(product_info: Dict[str, Any]) -> str:
@@ -1009,8 +996,12 @@ def clone_and_pull_product(
 
     except Exception as e:
         result.error_message = str(e)
+        if dest_path.exists():
+            console.print(
+                f"[yellow]Warning: partial clone left at {dest_path}. "
+                f"Remove it before retrying.[/yellow]"
+            )
         return result
-
 
 
 def get_project_remote(project_path: Path) -> str:

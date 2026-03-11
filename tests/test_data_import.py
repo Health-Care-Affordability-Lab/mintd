@@ -1793,24 +1793,16 @@ class TestNameResolution:
 
     @patch('mintd.data_import.console')
     @patch('mintd.data_import.get_registry_client')
-    def test_ambiguous_names_warns_and_prefers_exact(self, mock_get_client, mock_console, mock_data_product):
-        """When both 'foo' and 'data_foo' exist, warn and use exact match."""
+    def test_exact_match_short_circuits(self, mock_get_client, mock_console, mock_data_product):
+        """When exact name is found, return immediately without querying alternate."""
         mock_client = Mock()
-        alt_product = {"name": "alt"}
-        # Both exact and alt name found
-        mock_client.query_data_product.side_effect = [
-            mock_data_product,
-            alt_product,
-        ]
+        mock_client.query_data_product.return_value = mock_data_product
         mock_get_client.return_value = mock_client
 
         result = query_data_product("data_test")
         assert result == mock_data_product
-        mock_console.print.assert_called_once()
-        warning_msg = mock_console.print.call_args[0][0]
-        assert "Warning" in warning_msg
-        assert "data_test" in warning_msg
-        assert "test" in warning_msg
+        # Should only query once (exact name), not twice
+        mock_client.query_data_product.assert_called_once_with("data_test")
 
     @patch('mintd.data_import.get_registry_client')
     def test_short_name_no_match_raises(self, mock_get_client):
