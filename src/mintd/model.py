@@ -14,6 +14,8 @@ from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .catalog import CatalogEntry
+
 
 # ---------------------------------------------------------------------------
 # Owner × Audience annotations
@@ -55,6 +57,7 @@ _MINTD_CATALOG = FieldRole(Owner.MINTD, Audience.CATALOG)
 _MINTD_PRODUCER = FieldRole(Owner.MINTD, Audience.PRODUCER_CONTRACT)
 _PIPELINE_PRODUCER = FieldRole(Owner.PIPELINE, Audience.PRODUCER_CONTRACT)
 _PIPELINE_CONSUMER = FieldRole(Owner.PIPELINE, Audience.CONSUMER)
+_PIPELINE_CATALOG = FieldRole(Owner.PIPELINE, Audience.CATALOG)
 _PIPELINE_LOCAL = FieldRole(Owner.PIPELINE, Audience.LOCAL)
 
 
@@ -115,15 +118,15 @@ class Storage(BaseModel):
 
 class DataProductOutput(BaseModel):
     # No pin_strategy field — settled in grilling; DVC handles all pinning cases.
-    path: Annotated[str, _PIPELINE_CONSUMER]
-    description: Annotated[str, _PIPELINE_CONSUMER]
-    primary: Annotated[bool, _PIPELINE_CONSUMER]
-    last_published: Annotated[str, _PIPELINE_CONSUMER]
+    path: Annotated[str, _PIPELINE_CATALOG]
+    description: Annotated[str, _PIPELINE_CATALOG]
+    primary: Annotated[bool, _PIPELINE_CATALOG]
+    last_published: Annotated[str, _PIPELINE_CATALOG]
 
 
 class DataProducts(BaseModel):
-    primary: Annotated[str | None, _PIPELINE_PRODUCER] = None
-    outputs: Annotated[list[DataProductOutput], _PIPELINE_CONSUMER] = Field(default_factory=list)
+    primary: Annotated[str | None, _PIPELINE_CATALOG] = None
+    outputs: Annotated[list[DataProductOutput], _PIPELINE_CATALOG] = Field(default_factory=list)
 
 
 class Mirror(BaseModel):
@@ -160,7 +163,7 @@ class Metadata(BaseModel):
     access_control: Annotated[AccessControl, _USER_CATALOG]
     governance: Annotated[Governance, _USER_CATALOG]
     storage: Annotated[Storage | None, _MINTD_PRODUCER] = None
-    data_products: Annotated[DataProducts, _PIPELINE_PRODUCER] = Field(default_factory=DataProducts)
+    data_products: Annotated[DataProducts, _PIPELINE_CATALOG] = Field(default_factory=DataProducts)
     repository: Annotated[Repository, _MINTD_CATALOG]
     status: Annotated[Status, _PIPELINE_LOCAL]
 
@@ -175,20 +178,57 @@ class Metadata(BaseModel):
         data = path.read_text()
         return cls.model_validate_json(data)
 
+    def to_catalog_entry(self) -> CatalogEntry:
+        """Project this Metadata onto a CatalogEntry by keeping only fields
+        whose Audience is CATALOG. Strict per-leaf — a CATALOG container does
+        not cascade to its children; each leaf carries its own annotation.
+        """
+        return CatalogEntry.model_validate(_project_catalog(self))
+
 
 # ---------------------------------------------------------------------------
 # Field introspection
 # ---------------------------------------------------------------------------
 
 
-def _unwrap_optional(tp: Any) -> Any:
-    """Return T given T | None (or Optional[T]). Pass through otherwise."""
-    origin = get_origin(tp)
-    if origin is Union or origin is types.UnionType:
-        non_none = [a for a in get_args(tp) if a is not type(None)]
-        if len(non_none) == 1:
-            return non_none[0]
-    return tp
+def _project_catalog(model: BaseModel) -> dict[str, Any]:
+    """Build a CATALOG-audience-only dict from `model`, recursing into
+    sub-models and list[Submodel] containers. Per-leaf check at every level.
+    """
+    out: dict[str, Any] = {}
+    for name, info in type(model).model_fields.items():
+        role = next((m for m in info.metadata if isinstance(m, FieldRole)), None)
+        if role is None or role.audience != Audience.CATALOG:
+            continue
+        value = getattr(model, name)
+        if isinstance(value, BaseModel):
+            out[name] = _project_catalog(value)
+        elif isinstance(value, list) and value and isinstance(value[0], BaseModel):
+            out[name] = [_project_catalog(item) for item in value]
+        else:
+            out[name] = value
+    return out
+
+
+def _unwrap_container(tp: Any) -> Any:
+    """Repeatedly unwrap Optional[T] and list[T] until reaching a non-container.
+
+    Examples: Optional[Storage] -> Storage; list[AccessTeam] -> AccessTeam;
+    Optional[list[AccessTeam]] -> AccessTeam.
+    """
+    while True:
+        origin = get_origin(tp)
+        if origin is Union or origin is types.UnionType:
+            non_none = [a for a in get_args(tp) if a is not type(None)]
+            if len(non_none) == 1:
+                tp = non_none[0]
+                continue
+        elif origin is list:
+            args = get_args(tp)
+            if len(args) == 1:
+                tp = args[0]
+                continue
+        return tp
 
 
 def field_metadata(model_class: type[BaseModel], field_path: str) -> tuple[Owner, Audience]:
@@ -211,7 +251,7 @@ def field_metadata(model_class: type[BaseModel], field_path: str) -> tuple[Owner
                 if isinstance(m, FieldRole):
                     return (m.owner, m.audience)
             raise KeyError(f"No FieldRole annotation on '{field_path}'")
-        inner = _unwrap_optional(info.annotation)
+        inner = _unwrap_container(info.annotation)
         if not (isinstance(inner, type) and issubclass(inner, BaseModel)):
             raise KeyError(f"Cannot descend into non-model field '{part}' at '{field_path}'")
         current = inner
