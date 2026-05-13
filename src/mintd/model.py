@@ -3,9 +3,6 @@
 This is the canonical in-memory representation of a mintd project's metadata.
 Every read site goes through Metadata.from_json_file(); every write site goes
 through model.model_dump_json().
-
-See notes/SLICE-1.md for the slice-1 scope and notes/decisions.md for design
-rationale (Owner × Audience annotation style, field choices).
 """
 
 import types

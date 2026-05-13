@@ -38,3 +38,6 @@ Thumbs.db
 # Environment files
 .env
 .envrc
+
+# Local-only working notes (slice specs, retros, decisions, plan refs)
+notes/
