@@ -1,0 +1,29 @@
+[project]
+name = "mintd"
+version = "0.0.1"
+description = "Lightweight data product framework for research labs"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic ~= 2.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 7.0",
+    "mypy >= 1.0",
+    "ruff >= 0.1",
+]
+
+[build-system]
+requires = ["setuptools >= 61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
