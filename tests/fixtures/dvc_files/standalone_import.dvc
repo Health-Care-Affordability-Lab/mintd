@@ -1,0 +1,13 @@
+# Representative output of `dvc import <repo> outputs/cms_based/ -o cms_based`.
+# Producer-side path lives at `deps[0].path`; `deps[0].repo` carries the
+# repo coordinates only (url + rev + rev_lock), not a path.
+outs:
+  - md5: e8f3a2b1c4d5e6f7a8b9c0d1e2f3a4b5
+    size: 12345
+    path: cms_based
+deps:
+  - path: outputs/cms_based/
+    repo:
+      url: https://github.com/example-org/provider-xw
+      rev: main
+      rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc

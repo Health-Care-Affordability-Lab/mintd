@@ -1,0 +1,6 @@
+# Output of `dvc add data.csv` — producer-side track, NOT an import.
+# Has no `deps[*].repo` block. scan_imports must skip it.
+outs:
+  - md5: 1111222233334444aaaabbbbccccdddd
+    size: 999
+    path: local_dataset.csv

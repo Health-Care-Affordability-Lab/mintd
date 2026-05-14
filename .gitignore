@@ -41,3 +41,9 @@ Thumbs.db
 
 # Local-only working notes (slice specs, retros, decisions, plan refs)
 notes/
+.agents
+.pi
+.codex
+.agent-sync 
+.venv 
+.claude 
