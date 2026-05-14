@@ -31,14 +31,18 @@ Slice 1 scope:
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import ValidationError
 
+from .imports import DataDependency, scan_imports
 from .model import Metadata
+from .producer import ProducerError, ProducerView
 
+ProducerViewFactory = Callable[[str, str], "ProducerView | ProducerError"]
 
 # ---------------------------------------------------------------------------
 # Finding type
@@ -51,6 +55,7 @@ class CheckFinding:
     section: Literal["producer", "consumer", "environment"]
     message: str
     field_path: str | None = None
+    source: Path | None = None  # NEW: which file the finding originated from
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +63,12 @@ class CheckFinding:
 # ---------------------------------------------------------------------------
 
 
-def check_project(path: Path) -> list[CheckFinding]:
+def check_project(
+    path: Path,
+    *,
+    upgrades: bool = False,
+    producer_view_factory: ProducerViewFactory | None = None,
+) -> list[CheckFinding]:
     """Validate a mintd project at `path` (the project directory).
 
     Returns a list of findings. Empty list means clean.
@@ -69,10 +79,16 @@ def check_project(path: Path) -> list[CheckFinding]:
       - metadata.json fails Pydantic → 1 error finding per ValidationError entry
       - valid → []
 
-    Slice 4 will add: imports.yaml validation, pin resolution.
-    Slice 6 will add: env hygiene (dvc/git/gh), --upgrades network checks.
+    Slice 4 added: imports.yaml validation, pin resolution.
+    Slice 6 added: env hygiene (dvc/git/gh), --upgrades network checks.
     """
-    return _producer_findings(path)
+    findings = _producer_findings(path)
+    findings.extend(
+        _consumer_findings(
+            path, upgrades=upgrades, producer_view_factory=producer_view_factory
+        )
+    )
+    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -122,5 +138,104 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
     return []
 
 
-# Slice 4 will add: _consumer_findings(project_path) -> list[CheckFinding]
-# Slice 6 will add: _environment_findings() -> list[CheckFinding]
+def _consumer_findings(
+    project_path: Path,
+    *,
+    upgrades: bool,
+    producer_view_factory: ProducerViewFactory | None,
+    imports_under: str = "data/imports",
+) -> list[CheckFinding]:
+    deps = scan_imports(project_path, under=imports_under)
+    if not deps:
+        return []
+
+    findings: list[CheckFinding] = []
+    factory = producer_view_factory if producer_view_factory is not None else ProducerView.try_at
+
+    for dep in deps:
+        if not upgrades:
+            findings.append(_summary_finding(dep))
+            continue
+
+        result_pin = factory(dep.producer_repo, dep.contract_pin)
+        if isinstance(result_pin, ProducerError):
+            findings.append(_error_finding(dep, result_pin))
+            continue
+
+        # Compare to HEAD — empty string sentinel is a test contract.
+        result_head = factory(dep.producer_repo, "")
+        if isinstance(result_head, ProducerError):
+            # We could resolve the pin but not HEAD — degrade to "up to date"
+            findings.append(_uptodate_finding(dep))
+            continue
+
+        findings.append(_drift_finding(dep, result_pin, result_head))
+
+    return findings
+
+
+def _summary_finding(dep: DataDependency) -> CheckFinding:
+    return CheckFinding(
+        severity="info",
+        section="consumer",
+        message=f"imported {dep.local_path} from {dep.producer_repo}@{dep.contract_pin[:7]} (path: {dep.output_path})",
+        source=dep.source,
+    )
+
+
+def _uptodate_finding(dep: DataDependency) -> CheckFinding:
+    return CheckFinding(
+        severity="info",
+        section="consumer",
+        message="up to date",
+        source=dep.source,
+    )
+
+
+def _drift_finding(
+    dep: DataDependency, pin_view: ProducerView, head_view: ProducerView
+) -> CheckFinding:
+    if dep.output_path and dep.output_path not in pin_view.output_paths():
+        return _uptodate_finding(dep)
+
+    head_primary = head_view.metadata.data_products.primary
+    pin_primary = pin_view.metadata.data_products.primary
+
+    if head_primary == pin_primary:
+        return _uptodate_finding(dep)
+
+    head_primary_str = head_primary if head_primary is not None else "(no primary)"
+    return CheckFinding(
+        severity="warning",
+        section="consumer",
+        message=f"upgrade available: producer now publishes {head_primary_str!r} (you have {dep.output_path!r})",
+        source=dep.source,
+    )
+
+
+def _error_finding(dep: DataDependency, err: ProducerError) -> CheckFinding:
+    if err.reason == ProducerError.Reason.UNREACHABLE:
+        severity = "warning"
+        message = f"producer unreachable: {err.detail}"
+    elif err.reason == ProducerError.Reason.PIN_MISSING:
+        severity = "error"
+        message = f"producer pin missing: {err.pin[:7]} not found in {err.repo}"
+    elif err.reason == ProducerError.Reason.METADATA_MISSING:
+        severity = "error"
+        message = f"producer has no metadata.json at pin {err.pin[:7]}"
+    elif err.reason == ProducerError.Reason.METADATA_INVALID:
+        severity = "error"
+        message = f"producer metadata invalid at pin {err.pin[:7]}: {err.detail}"
+    elif err.reason == ProducerError.Reason.SCHEMA_TOO_OLD:
+        severity = "warning"
+        message = f"producer at pin {err.pin[:7]} uses schema_version {err.detail} (expected 2.0)"
+    else:
+        severity = "error"
+        message = f"producer error at pin {err.pin[:7]}: {err.detail}"
+
+    return CheckFinding(
+        severity=severity,  # type: ignore
+        section="consumer",
+        message=message,
+        source=dep.source,
+    )
