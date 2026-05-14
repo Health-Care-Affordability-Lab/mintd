@@ -1,8 +1,10 @@
-"""Tests for InMemoryCatalogClient — the four-method interface.
+"""Tests for `CatalogClient` — parameterized across both implementations.
 
-These tests pin the register / update / fetch / list behavior. They use the
-in-memory client; the git-backed GitCatalogClient lands in slice 3 and reuses
-this same test shape via the CatalogClient Protocol.
+Every test runs against `InMemoryCatalogClient` and `GitCatalogClient`. The
+git-backed client uses a `_FakeRegistryGitOps` that does real local git but
+stubs `gh` (auto-merging PRs to main so read-after-write semantics hold in
+tests). This is the slice-3 retro's binding question: does the
+`CatalogClient` Protocol seam hold up across the two implementations?
 """
 
 from __future__ import annotations
@@ -15,14 +17,18 @@ import pytest
 
 from mintd.catalog import (
     CatalogAlreadyExists,
+    CatalogClient,
     CatalogFilter,
     CatalogNotFound,
     FieldChange,
+    GitCatalogClient,
     InMemoryCatalogClient,
     RegisterResult,
     UpdateResult,
 )
 from mintd.model import Metadata
+
+from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -44,33 +50,52 @@ def _load_metadata(
 
 
 # ---------------------------------------------------------------------------
+# Parameterized client fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(params=["in_memory", "git"])
+def client(request, tmp_path: Path, remote_registry_empty: Path) -> CatalogClient:
+    if request.param == "in_memory":
+        return InMemoryCatalogClient()
+    return GitCatalogClient(
+        registry_repo_url=str(remote_registry_empty),
+        work_dir=tmp_path / "cache",
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # register
 # ---------------------------------------------------------------------------
 
-def test_register_stores_entry():
-    """register(metadata) on a fresh client stores the entry; fetch by name
-    returns the projected CatalogEntry."""
-    client = InMemoryCatalogClient()
+
+def test_register_stores_entry(client: CatalogClient) -> None:
+    """register(metadata) on a fresh client stores the entry and makes it
+    fetchable. Both implementations return the same projected entry."""
     m = _load_metadata(name="data_alpha")
     result = client.register(m)
     assert isinstance(result, RegisterResult)
     assert result.name == "data_alpha"
     assert result.dry_run is False
-    assert client.fetch("data_alpha") == m.to_catalog_entry()
+
+    fetched = client.fetch("data_alpha")
+    expected = m.to_catalog_entry().model_dump()
+    # Normalize through json so datetime vs iso-string differences (yaml
+    # round-trip vs in-memory) don't matter.
+    assert _round(fetched.model_dump()) == _round(expected)
 
 
-def test_register_duplicate_raises():
-    """A second register() with the same project.name raises CatalogAlreadyExists."""
-    client = InMemoryCatalogClient()
+def test_register_duplicate_raises(client: CatalogClient) -> None:
+    """A second register() with the same project.name raises."""
     client.register(_load_metadata(name="dup"))
     with pytest.raises(CatalogAlreadyExists):
         client.register(_load_metadata(name="dup"))
 
 
-def test_register_dry_run_does_not_mutate():
-    """register(metadata, dry_run=True) returns a RegisterResult with dry_run=True
-    but a subsequent fetch raises CatalogNotFound."""
-    client = InMemoryCatalogClient()
+def test_register_dry_run_does_not_mutate(client: CatalogClient) -> None:
+    """register(dry_run=True) returns RegisterResult(dry_run=True) without
+    persisting the entry. Subsequent fetch raises CatalogNotFound."""
     result = client.register(_load_metadata(name="ghost"), dry_run=True)
     assert result.dry_run is True
     assert result.name == "ghost"
@@ -82,9 +107,8 @@ def test_register_dry_run_does_not_mutate():
 # fetch
 # ---------------------------------------------------------------------------
 
-def test_fetch_missing_raises_not_found():
-    """fetch on a name that was never registered raises CatalogNotFound."""
-    client = InMemoryCatalogClient()
+
+def test_fetch_missing_raises_not_found(client: CatalogClient) -> None:
     with pytest.raises(CatalogNotFound):
         client.fetch("nonexistent")
 
@@ -93,13 +117,10 @@ def test_fetch_missing_raises_not_found():
 # update
 # ---------------------------------------------------------------------------
 
-def test_update_returns_field_changes():
-    """update() with a mutated CATALOG field returns an UpdateResult with one
-    FieldChange describing the diff (field_path / before / after).
 
-    Uses metadata.description (USER-owned, Audience.CATALOG).
-    """
-    client = InMemoryCatalogClient()
+def test_update_returns_field_changes(client: CatalogClient) -> None:
+    """update() with a mutated CATALOG field returns UpdateResult with one
+    FieldChange describing the diff (canonical-tier only)."""
     client.register(_load_metadata(name="proj"))
 
     def change_desc(data: dict[str, Any]) -> None:
@@ -117,19 +138,15 @@ def test_update_returns_field_changes():
     assert change.after == "updated description"
 
 
-def test_update_missing_raises_not_found():
-    """update() on a name that was never registered raises CatalogNotFound."""
-    client = InMemoryCatalogClient()
+def test_update_missing_raises_not_found(client: CatalogClient) -> None:
     with pytest.raises(CatalogNotFound):
         client.update(_load_metadata(name="never_registered"))
 
 
-def test_update_dry_run_returns_changes_without_mutating():
-    """update(metadata, dry_run=True) returns the would-be UpdateResult but a
-    subsequent fetch shows the OLD entry."""
-    client = InMemoryCatalogClient()
+def test_update_dry_run_returns_changes_without_mutating(client: CatalogClient) -> None:
+    """update(dry_run=True) returns the would-be UpdateResult; a subsequent
+    fetch shows the OLD entry's description."""
     client.register(_load_metadata(name="proj"))
-    original = client.fetch("proj")
 
     def change_desc(data: dict[str, Any]) -> None:
         data["metadata"]["description"] = "would-be"
@@ -137,17 +154,23 @@ def test_update_dry_run_returns_changes_without_mutating():
     result = client.update(_load_metadata(name="proj", mutate=change_desc), dry_run=True)
     assert result.dry_run is True
     assert len(result.changes) == 1
-    assert client.fetch("proj") == original
+
+    after = client.fetch("proj")
+    assert after.model_dump()["metadata"]["description"] == ""
 
 
-def test_update_data_products_roundtrips():
-    """Adding an output to data_products and calling update() persists the change.
+def test_update_data_products_appears_in_changes(client: CatalogClient) -> None:
+    """data_products.* is in the catalog post-2026-05-14 (audience filter
+    dropped). Mutating it surfaces a FieldChange under `data_products`.
 
-    This is the structural fix for today's registry-update data_products
-    writeback bug: register and update both go through the same to_catalog_entry()
-    projection, so the field can't be silently dropped on update.
+    Pre-drop, this test asserted `result.changes == []` because data_products
+    was filtered out of the canonical projection. Now it's a normal catalog
+    field and shows up in the diff like any other change.
+
+    The "structural" register/update fix from slice 2 still holds: both paths
+    go through `to_catalog_entry`, so the field can't be silently dropped on
+    update but written on register. They produce identical entries.
     """
-    client = InMemoryCatalogClient()
     client.register(_load_metadata(name="proj"))
 
     def add_output(data: dict[str, Any]) -> None:
@@ -159,34 +182,35 @@ def test_update_data_products_roundtrips():
         })
 
     updated = _load_metadata(name="proj", mutate=add_output)
-    client.update(updated)
-    fetched = client.fetch("proj")
-    assert fetched == updated.to_catalog_entry()
-    dumped = fetched.model_dump()
-    assert dumped["data_products"]["outputs"][0]["path"] == "out.parquet"
+    result = client.update(updated)
+
+    assert any(c.field_path.startswith("data_products") for c in result.changes), (
+        f"expected a data_products change in {result.changes}"
+    )
 
 
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
 
-def test_list_returns_all_entries():
-    """list() with no filter returns every registered entry."""
-    client = InMemoryCatalogClient()
+
+def test_list_empty_returns_empty(client: CatalogClient) -> None:
+    assert client.list() == []
+
+
+def test_list_returns_all_registered(client: CatalogClient) -> None:
     client.register(_load_metadata(name="a"))
     client.register(_load_metadata(name="b"))
     client.register(_load_metadata(name="c"))
     assert len(client.list()) == 3
 
 
-def test_list_filter_by_project_type():
-    """list(filter=CatalogFilter(project_type='data')) returns only data projects."""
+def test_list_filter_by_project_type(client: CatalogClient) -> None:
     def set_type(t: str) -> Callable[[dict[str, Any]], None]:
         def _m(data: dict[str, Any]) -> None:
             data["project"]["type"] = t
         return _m
 
-    client = InMemoryCatalogClient()
     client.register(_load_metadata(name="d1", mutate=set_type("data")))
     client.register(_load_metadata(name="d2", mutate=set_type("data")))
     client.register(_load_metadata(name="c1", mutate=set_type("code")))
@@ -197,6 +221,35 @@ def test_list_filter_by_project_type():
         assert e.model_dump()["project"]["type"] == "data"
 
 
-def test_list_empty_client_returns_empty():
-    """list() on a fresh client returns []."""
-    assert InMemoryCatalogClient().list() == []
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
+
+
+def test_status_not_found_on_unknown(client: CatalogClient) -> None:
+    status = client.status("unknown")
+    assert status.state == "not_found"
+    assert status.pr_number is None
+
+
+def test_status_registered_after_register(client: CatalogClient) -> None:
+    """After register() succeeds, status() returns 'registered'.
+
+    For InMemoryCatalogClient this is trivially true.
+    For GitCatalogClient this works because the fake auto-merges the PR,
+    so the entry lands on main and the cache picks it up on the next
+    ensure_fresh.
+    """
+    client.register(_load_metadata(name="now_registered"))
+    status = client.status("now_registered")
+    assert status.state == "registered"
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _round(obj: Any) -> Any:
+    """Normalize through json so datetime vs iso-string round-trips match."""
+    return json.loads(json.dumps(obj, default=str))

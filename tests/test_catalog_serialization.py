@@ -1,8 +1,15 @@
-"""Tests for Metadata.to_catalog_entry() and the audience filter.
+"""Tests for Metadata.to_catalog_entry() — the model-level projection.
 
-These tests are the "does slice-1's Owner x Audience design earn its weight?"
-suite. They pin that the projection uses the field annotations (not a parallel
-hand-maintained list) and that the right fields make it through.
+After the 2026-05-14 audience-filter drop, this projection is just
+"metadata.model_dump() minus CATALOG_EXCLUDED_PATHS." The exhaustive
+audience-tier suite from slice 2 has been replaced by:
+
+  - an exclude-list test (mint-internal fields are stripped)
+  - an inclusion test (everything else round-trips)
+  - an idempotence test
+
+The two-tier serializer tests live in test_catalog_serializer.py; the
+parameterized client tests live in test_catalog.py.
 """
 
 from __future__ import annotations
@@ -10,71 +17,35 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from mintd.catalog import CatalogEntry  # noqa: F401  (imported for slice-2 surface check)
-from mintd.model import Audience, Metadata, field_metadata
-
+from mintd.model import CATALOG_EXCLUDED_PATHS, Metadata
 
 FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
 
-# ---------------------------------------------------------------------------
-# Inclusion: every field on a CatalogEntry has Audience.CATALOG
-# ---------------------------------------------------------------------------
-
-def _leaves(obj, prefix=""):
-    """Yield (dotted_path, value) for every scalar leaf in a dict/list tree.
-
-    List indices are NOT included in the path — field_metadata looks up field
-    declarations, not values, so teams[0].name and teams[1].name both
-    correspond to the single declaration teams.name.
-    """
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            path = f"{prefix}.{k}" if prefix else k
-            yield from _leaves(v, path)
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from _leaves(item, prefix)
-    else:
-        yield prefix, obj
-
-
-def test_catalog_entry_contains_only_catalog_audience_fields():
-    """For every leaf field present on the projected CatalogEntry, the
-    corresponding field on Metadata must be annotated Audience.CATALOG.
-
-    This is the core acceptance criterion of slice 2: the projection is driven
-    by annotations, no hand-list of catalog fields.
-    """
+def test_catalog_entry_excludes_mint_internal_paths():
+    """Every path in CATALOG_EXCLUDED_PATHS is absent from to_catalog_entry()."""
     m = Metadata.from_json_file(MINIMAL)
     dumped = m.to_catalog_entry().model_dump()
-    for path, _ in _leaves(dumped):
-        _, audience = field_metadata(Metadata, path)
-        assert audience == Audience.CATALOG, (
-            f"{path} has audience {audience}, expected CATALOG"
-        )
+    for path in CATALOG_EXCLUDED_PATHS:
+        assert path not in dumped, f"{path} should be excluded from CatalogEntry but appears: {dumped[path]}"
 
 
-# ---------------------------------------------------------------------------
-# Exclusion: non-CATALOG fields are absent
-# ---------------------------------------------------------------------------
-
-def test_local_audience_fields_excluded():
-    """mint.version is Audience.LOCAL — must not appear in to_catalog_entry()."""
+def test_catalog_entry_includes_everything_else():
+    """Every top-level field on Metadata except CATALOG_EXCLUDED_PATHS shows up."""
     m = Metadata.from_json_file(MINIMAL)
-    entry = m.to_catalog_entry()
-    dumped = entry.model_dump()
-    assert "version" not in dumped.get("mint", {})
-    
+    dumped = m.to_catalog_entry().model_dump()
+    expected = set(Metadata.model_fields.keys()) - CATALOG_EXCLUDED_PATHS
+    for field in expected:
+        assert field in dumped, f"{field} should be in CatalogEntry but missing"
 
 
-def test_producer_contract_fields_excluded():
-    """storage.* fields are Audience.PRODUCER_CONTRACT — must not appear.
+def test_catalog_entry_includes_storage_when_populated():
+    """storage is now in the catalog (no longer filtered out as PRODUCER_CONTRACT).
 
-    The minimal fixture has storage=null, which would make this test pass for
-    the wrong reason. Populate storage with real values, then assert the whole
-    storage block is dropped on projection.
+    Pin this explicitly — the slice-2 design excluded storage; the 2026-05-14
+    audience-filter drop puts it back. This test would have failed under the
+    pre-drop design.
     """
     data = json.loads(MINIMAL.read_text())
     data["storage"] = {
@@ -87,37 +58,27 @@ def test_producer_contract_fields_excluded():
     }
     m = Metadata.model_validate(data)
     dumped = m.to_catalog_entry().model_dump()
-    assert "storage" not in dumped, f"storage (PRODUCER_CONTRACT) leaked: {dumped.get('storage')}"
+    assert dumped["storage"]["bucket"] == "my-bucket"
 
 
-def test_consumer_audience_fields_excluded():
-    """Any field annotated Audience.CONSUMER (slice 4+) must not appear in the
-    catalog projection. Slice 2 has no CONSUMER fields surviving the filter,
-    so this passes vacuously — kept as a forward guard for when slice 4 adds
-    CONSUMER-audience fields to Metadata.
-    """
-    m = Metadata.from_json_file(MINIMAL)
+def test_catalog_entry_includes_data_products_when_populated():
+    """data_products is in the catalog. Consumers re-read producer at pin
+    for authoritative values, but the catalog carries the latest publish
+    state for browse-time display."""
+    data = json.loads(MINIMAL.read_text())
+    data["data_products"] = {
+        "primary": "out.parquet",
+        "outputs": [
+            {"path": "out.parquet", "description": "primary output",
+             "primary": True, "last_published": "2026-05-01"},
+        ],
+    }
+    m = Metadata.model_validate(data)
     dumped = m.to_catalog_entry().model_dump()
-    for path, _ in _leaves(dumped):
-        _, audience = field_metadata(Metadata, path)
-        assert audience != Audience.CONSUMER, f"{path} has CONSUMER audience, must not appear"
+    assert dumped["data_products"]["outputs"][0]["path"] == "out.parquet"
 
-
-# ---------------------------------------------------------------------------
-# Idempotence and round-trip
-# ---------------------------------------------------------------------------
 
 def test_to_catalog_entry_idempotent():
-    """Calling to_catalog_entry() twice on the same Metadata returns equal CatalogEntries."""
+    """Calling to_catalog_entry() twice on the same Metadata returns equal entries."""
     m = Metadata.from_json_file(MINIMAL)
     assert m.to_catalog_entry() == m.to_catalog_entry()
-
-
-
-# ---------------------------------------------------------------------------
-# Optional: the slice-1 retro tripwire
-# ---------------------------------------------------------------------------
-#
-# If the implementation of to_catalog_entry() ends up requiring a hardcoded list
-# of CATALOG paths, capture that pain in notes/SLICE-2-user_input.md and
-# revisit the Owner x Audience design before slice 3 doubles down on it.

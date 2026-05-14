@@ -3,10 +3,15 @@
 This is the canonical in-memory representation of a mintd project's metadata.
 Every read site goes through Metadata.from_json_file(); every write site goes
 through model.model_dump_json().
+
+Each field carries an `Owner` annotation describing who is allowed to write
+it. The audience taxonomy (LOCAL / CATALOG / PRODUCER_CONTRACT / CONSUMER)
+that earlier drafts encoded has been dropped — the catalog is "metadata
+minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below). See
+`notes/decisions.md` 2026-05-14 for the rationale.
 """
 
 import types
-from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
@@ -18,47 +23,38 @@ from .catalog import CatalogEntry
 
 
 # ---------------------------------------------------------------------------
-# Owner × Audience annotations
+# Owner annotations
 # ---------------------------------------------------------------------------
-#
-# Every field on the model is annotated with:
-#   - Owner: who is allowed to write it (USER, MINTD, PIPELINE, REGISTRY)
-#   - Audience: who reads it as canonical (LOCAL, CATALOG, PRODUCER_CONTRACT, CONSUMER)
-#
-# These drive registry serialization (audience-based filter), mintd check
-# warnings ("USER field looks tool-generated"), and the catalog vs. producer
-# canonical-source split.
 
 
 class Owner(StrEnum):
+    """Who is allowed to write a field.
+
+    Drives `mintd check`'s warnings ("USER field looks tool-generated") and
+    informs reviewers reading the model what to expect a field's lifecycle
+    to be.
+
+    - USER: human edits in metadata.json (description, tags, ownership, ...)
+    - MINTD: tool writes (schema_version, mint.*, project.created_at, ...)
+    - PIPELINE: derived from project state (data_products.outputs[].path
+      from DVC tracking; status.last_updated from publish flow)
+    - REGISTRY: catalog regenerates (none today; reserved for the
+      registry-side rewriting flow)
+    """
     USER = "user"
     MINTD = "mintd"
     PIPELINE = "pipeline"
     REGISTRY = "registry"
 
 
-class Audience(StrEnum):
-    LOCAL = "local"
-    CATALOG = "catalog"
-    PRODUCER_CONTRACT = "producer_contract"
-    CONSUMER = "consumer"
-
-
-@dataclass(frozen=True)
-class FieldRole:
-    owner: Owner
-    audience: Audience
-
-
-# Shorthand aliases for the most common (Owner, Audience) pairs.
-_USER_CATALOG = FieldRole(Owner.USER, Audience.CATALOG)
-_MINTD_LOCAL = FieldRole(Owner.MINTD, Audience.LOCAL)
-_MINTD_CATALOG = FieldRole(Owner.MINTD, Audience.CATALOG)
-_MINTD_PRODUCER = FieldRole(Owner.MINTD, Audience.PRODUCER_CONTRACT)
-_PIPELINE_PRODUCER = FieldRole(Owner.PIPELINE, Audience.PRODUCER_CONTRACT)
-_PIPELINE_CONSUMER = FieldRole(Owner.PIPELINE, Audience.CONSUMER)
-_PIPELINE_CATALOG = FieldRole(Owner.PIPELINE, Audience.CATALOG)
-_PIPELINE_LOCAL = FieldRole(Owner.PIPELINE, Audience.LOCAL)
+# Paths excluded from the catalog projection (`Metadata.to_catalog_entry`).
+# Everything else on `Metadata` ships to the registry catalog yaml as-is.
+# Kept minimal — only fields that describe the metadata.json file itself
+# rather than the project.
+CATALOG_EXCLUDED_PATHS: frozenset[str] = frozenset({
+    "schema_version",     # provenance of the file format, not the project
+    "mint",               # mint tool version + commit_hash (file build info)
+})
 
 
 # ---------------------------------------------------------------------------
@@ -67,84 +63,83 @@ _PIPELINE_LOCAL = FieldRole(Owner.PIPELINE, Audience.LOCAL)
 
 
 class Mint(BaseModel):
-    version: Annotated[str, _MINTD_LOCAL]
-    commit_hash: Annotated[str, _MINTD_LOCAL]
+    version: Annotated[str, Owner.MINTD]
+    commit_hash: Annotated[str, Owner.MINTD]
 
 
 class Project(BaseModel):
-    name: Annotated[str, _MINTD_CATALOG]
-    type: Annotated[Literal["data", "code", "project", "enclave"], _MINTD_CATALOG]
-    full_name: Annotated[str, _MINTD_CATALOG]
-    created_at: Annotated[datetime, _MINTD_LOCAL]
-    created_by: Annotated[str, _MINTD_LOCAL]
+    name: Annotated[str, Owner.MINTD]
+    type: Annotated[Literal["data", "code", "project", "enclave"], Owner.MINTD]
+    full_name: Annotated[str, Owner.MINTD]
+    created_at: Annotated[datetime, Owner.MINTD]
+    created_by: Annotated[str, Owner.MINTD]
 
 
 class ProjectMetadataBlock(BaseModel):
-    description: Annotated[str, _USER_CATALOG]
-    tags: Annotated[list[str], _USER_CATALOG]
+    description: Annotated[str, Owner.USER]
+    tags: Annotated[list[str], Owner.USER]
 
 
 class Ownership(BaseModel):
-    team: Annotated[str, _USER_CATALOG]
-    maintainers: Annotated[list[str], _USER_CATALOG]
+    team: Annotated[str, Owner.USER]
+    maintainers: Annotated[list[str], Owner.USER]
 
 
 class AccessTeam(BaseModel):
-    name: Annotated[str, _USER_CATALOG]
-    permission: Annotated[str, _USER_CATALOG]
+    name: Annotated[str, Owner.USER]
+    permission: Annotated[str, Owner.USER]
 
 
 class AccessControl(BaseModel):
-    teams: Annotated[list[AccessTeam], _USER_CATALOG]
+    teams: Annotated[list[AccessTeam], Owner.USER]
 
 
 class Governance(BaseModel):
-    classification: Annotated[str, _USER_CATALOG]
-    contract_info: Annotated[str, _USER_CATALOG]
+    classification: Annotated[str, Owner.USER]
+    contract_info: Annotated[str, Owner.USER]
 
 
 class DvcStorage(BaseModel):
-    remote_name: Annotated[str, _MINTD_PRODUCER]
+    remote_name: Annotated[str, Owner.MINTD]
 
 
 class Storage(BaseModel):
-    provider: Annotated[str, _MINTD_PRODUCER]
-    bucket: Annotated[str, _MINTD_PRODUCER]
-    prefix: Annotated[str, _MINTD_PRODUCER]
-    endpoint: Annotated[str, _MINTD_PRODUCER]
-    versioning: Annotated[bool, _MINTD_PRODUCER]
-    dvc: Annotated[DvcStorage, _MINTD_PRODUCER]
+    provider: Annotated[str, Owner.MINTD]
+    bucket: Annotated[str, Owner.MINTD]
+    prefix: Annotated[str, Owner.MINTD]
+    endpoint: Annotated[str, Owner.MINTD]
+    versioning: Annotated[bool, Owner.MINTD]
+    dvc: Annotated[DvcStorage, Owner.MINTD]
 
 
 class DataProductOutput(BaseModel):
-    # No pin_strategy field — settled in grilling; DVC handles all pinning cases.
-    path: Annotated[str, _PIPELINE_CATALOG]
-    description: Annotated[str, _PIPELINE_CATALOG]
-    primary: Annotated[bool, _PIPELINE_CATALOG]
-    last_published: Annotated[str, _PIPELINE_CATALOG]
+    path: Annotated[str, Owner.PIPELINE]
+    description: Annotated[str, Owner.PIPELINE]
+    primary: Annotated[bool, Owner.PIPELINE]
+    last_published: Annotated[str, Owner.PIPELINE]
 
 
 class DataProducts(BaseModel):
-    primary: Annotated[str | None, _PIPELINE_CATALOG] = None
-    outputs: Annotated[list[DataProductOutput], _PIPELINE_CATALOG] = Field(default_factory=list)
+    primary: Annotated[str | None, Owner.PIPELINE] = None
+    outputs: Annotated[list[DataProductOutput], Owner.PIPELINE] = Field(default_factory=list)
 
 
 class Mirror(BaseModel):
-    url: Annotated[str, _USER_CATALOG]
-    purpose: Annotated[str, _USER_CATALOG]
+    url: Annotated[str, Owner.USER]
+    purpose: Annotated[str, Owner.USER]
 
 
 class Repository(BaseModel):
-    github_url: Annotated[str, _MINTD_CATALOG]
-    default_branch: Annotated[str, _MINTD_CATALOG]
-    visibility: Annotated[str, _MINTD_CATALOG]
-    mirror: Annotated[Mirror, _USER_CATALOG]
+    github_url: Annotated[str, Owner.MINTD]
+    default_branch: Annotated[str, Owner.MINTD]
+    visibility: Annotated[str, Owner.MINTD]
+    mirror: Annotated[Mirror, Owner.USER]
 
 
 class Status(BaseModel):
-    state: Annotated[str, _USER_CATALOG]
-    last_updated: Annotated[datetime, _PIPELINE_LOCAL]
-    last_published_version: Annotated[str, _PIPELINE_LOCAL]
+    state: Annotated[str, Owner.USER]
+    last_updated: Annotated[datetime, Owner.PIPELINE]
+    last_published_version: Annotated[str, Owner.PIPELINE]
 
 
 # ---------------------------------------------------------------------------
@@ -155,17 +150,17 @@ class Status(BaseModel):
 class Metadata(BaseModel):
     model_config = ConfigDict(extra="allow")  # tightened in slice 6
 
-    schema_version: Annotated[Literal["2.0"], _MINTD_LOCAL]
-    mint: Annotated[Mint, _MINTD_LOCAL]
-    project: Annotated[Project, _MINTD_CATALOG]
-    metadata: Annotated[ProjectMetadataBlock, _USER_CATALOG]
-    ownership: Annotated[Ownership, _USER_CATALOG]
-    access_control: Annotated[AccessControl, _USER_CATALOG]
-    governance: Annotated[Governance, _USER_CATALOG]
-    storage: Annotated[Storage | None, _MINTD_PRODUCER] = None
-    data_products: Annotated[DataProducts, _PIPELINE_CATALOG] = Field(default_factory=DataProducts)
-    repository: Annotated[Repository, _MINTD_CATALOG]
-    status: Annotated[Status, _PIPELINE_LOCAL]
+    schema_version: Annotated[Literal["2.0"], Owner.MINTD]
+    mint: Annotated[Mint, Owner.MINTD]
+    project: Annotated[Project, Owner.MINTD]
+    metadata: Annotated[ProjectMetadataBlock, Owner.USER]
+    ownership: Annotated[Ownership, Owner.USER]
+    access_control: Annotated[AccessControl, Owner.USER]
+    governance: Annotated[Governance, Owner.USER]
+    storage: Annotated[Storage | None, Owner.MINTD] = None
+    data_products: Annotated[DataProducts, Owner.PIPELINE] = Field(default_factory=DataProducts)
+    repository: Annotated[Repository, Owner.MINTD]
+    status: Annotated[Status, Owner.PIPELINE]
 
     @classmethod
     def from_json_file(cls, path: Path) -> "Metadata":
@@ -179,35 +174,20 @@ class Metadata(BaseModel):
         return cls.model_validate_json(data)
 
     def to_catalog_entry(self) -> CatalogEntry:
-        """Project this Metadata onto a CatalogEntry by keeping only fields
-        whose Audience is CATALOG. Strict per-leaf — a CATALOG container does
-        not cascade to its children; each leaf carries its own annotation.
+        """Project this Metadata onto a CatalogEntry. The catalog stores
+        metadata.json verbatim except for the paths in CATALOG_EXCLUDED_PATHS
+        (mint-internal provenance fields that describe the file, not the
+        project).
         """
-        return CatalogEntry.model_validate(_project_catalog(self))
+        dumped = self.model_dump(mode="json")
+        for path in CATALOG_EXCLUDED_PATHS:
+            dumped.pop(path, None)
+        return CatalogEntry.model_validate(dumped)
 
 
 # ---------------------------------------------------------------------------
 # Field introspection
 # ---------------------------------------------------------------------------
-
-
-def _project_catalog(model: BaseModel) -> dict[str, Any]:
-    """Build a CATALOG-audience-only dict from `model`, recursing into
-    sub-models and list[Submodel] containers. Per-leaf check at every level.
-    """
-    out: dict[str, Any] = {}
-    for name, info in type(model).model_fields.items():
-        role = next((m for m in info.metadata if isinstance(m, FieldRole)), None)
-        if role is None or role.audience != Audience.CATALOG:
-            continue
-        value = getattr(model, name)
-        if isinstance(value, BaseModel):
-            out[name] = _project_catalog(value)
-        elif isinstance(value, list) and value and isinstance(value[0], BaseModel):
-            out[name] = [_project_catalog(item) for item in value]
-        else:
-            out[name] = value
-    return out
 
 
 def _unwrap_container(tp: Any) -> Any:
@@ -231,14 +211,15 @@ def _unwrap_container(tp: Any) -> Any:
         return tp
 
 
-def field_metadata(model_class: type[BaseModel], field_path: str) -> tuple[Owner, Audience]:
-    """Return the (Owner, Audience) annotation for a dotted field path.
+def field_metadata(model_class: type[BaseModel], field_path: str) -> Owner:
+    """Return the `Owner` annotation for a dotted field path.
 
     Examples:
-        field_metadata(Metadata, "project.name") -> (Owner.MINTD, Audience.CATALOG)
-        field_metadata(Metadata, "storage.dvc.remote_name") -> (Owner.MINTD, Audience.PRODUCER_CONTRACT)
+        field_metadata(Metadata, "project.name") -> Owner.MINTD
+        field_metadata(Metadata, "metadata.description") -> Owner.USER
+        field_metadata(Metadata, "storage.dvc.remote_name") -> Owner.MINTD
 
-    Raises KeyError if the path doesn't exist or the leaf has no FieldRole.
+    Raises KeyError if the path doesn't exist or the leaf has no Owner annotation.
     """
     parts = field_path.split(".")
     current: type[BaseModel] = model_class
@@ -248,11 +229,11 @@ def field_metadata(model_class: type[BaseModel], field_path: str) -> tuple[Owner
         info = current.model_fields[part]
         if i == len(parts) - 1:
             for m in info.metadata:
-                if isinstance(m, FieldRole):
-                    return (m.owner, m.audience)
-            raise KeyError(f"No FieldRole annotation on '{field_path}'")
+                if isinstance(m, Owner):
+                    return m
+            raise KeyError(f"No Owner annotation on '{field_path}'")
         inner = _unwrap_container(info.annotation)
         if not (isinstance(inner, type) and issubclass(inner, BaseModel)):
             raise KeyError(f"Cannot descend into non-model field '{part}' at '{field_path}'")
         current = inner
-    raise KeyError(f"Empty field path")
+    raise KeyError("Empty field path")

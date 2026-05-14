@@ -1,24 +1,25 @@
 """Catalog client — the registry-side seam.
 
-Slice 2 introduces the `CatalogClient` interface and an in-memory implementation.
-Slice 3 will add `GitCatalogClient` (writes via git + gh PR) alongside the
-existing in-memory one.
+Slice 2 introduced the `CatalogClient` Protocol and `InMemoryCatalogClient`.
+Slice 3 adds `GitCatalogClient` (production: git + gh PR) and `status()` on
+the Protocol. The two implementations are interchangeable — every caller
+goes through `CatalogClient`.
 
-The four methods (register / update / fetch / list) are the only public surface
-for catalog access. Other modules (publish flow, registry update preflight, the
-CLI) MUST go through this client — no direct catalog file reads or writes.
+The four-method core (register / update / fetch / list) plus `status()` is
+the only public surface for catalog access. No other module reads or writes
+catalog files directly.
 
-Audience filter: `Metadata.to_catalog_entry()` projects a full Metadata down to
-the CATALOG-audience subset. This is the first place the slice-1 Owner x Audience
-annotations earn their weight — if you find yourself maintaining a parallel
-list of "which fields go to the catalog," stop and grill the design first.
+Audience filter: `Metadata.to_catalog_entry()` projects to the canonical
+CATALOG-audience subset. Slice 3's `_catalog_serializer.py` extends this
+with an advisory tier (PRODUCER_CONTRACT fields + `last_synced_at`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path  # noqa: F401  (likely used in slice 3 GitCatalogClient)
-from typing import TYPE_CHECKING, Any, Protocol
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -68,6 +69,20 @@ class CatalogFilter:
     project_type: str | None = None
 
 
+@dataclass(frozen=True)
+class RegistrationStatus:
+    """Result of `client.status(name)`.
+
+    For `InMemoryCatalogClient`, only REGISTERED / NOT_FOUND are possible;
+    PR-lifecycle states are git-backed concerns.
+
+    For `GitCatalogClient`, PENDING carries the open PR number so callers
+    can link to it (`https://github.com/<repo>/pull/<pr_number>`).
+    """
+    state: Literal["registered", "pending", "not_found"]
+    pr_number: int | None = None
+
+
 # ---------------------------------------------------------------------------
 # CatalogEntry — projected subset of Metadata
 # ---------------------------------------------------------------------------
@@ -90,14 +105,15 @@ class CatalogEntry(BaseModel):
 # ---------------------------------------------------------------------------
 
 class CatalogClient(Protocol):
-    """Structural interface for catalog access. InMemoryCatalogClient implements
-    it today; slice 3's GitCatalogClient will too — no inheritance, just shape.
+    """Structural interface for catalog access. `InMemoryCatalogClient` and
+    `GitCatalogClient` both implement it — no inheritance, just shape.
     """
 
     def register(self, metadata: Metadata, *, dry_run: bool = False) -> RegisterResult: ...
     def update(self, metadata: Metadata, *, dry_run: bool = False) -> UpdateResult: ...
     def fetch(self, name: str) -> CatalogEntry: ...
     def list(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]: ...
+    def status(self, name: str) -> RegistrationStatus: ...
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +159,12 @@ class InMemoryCatalogClient:
             return entries
         return [e for e in entries if e.model_dump().get("project", {}).get("type") == filter.project_type]
 
+    def status(self, name: str) -> RegistrationStatus:
+        """In-memory has no PR lifecycle — either registered or not found."""
+        if name in self._entries:
+            return RegistrationStatus(state="registered")
+        return RegistrationStatus(state="not_found")
+
 
 def _diff_entries(old: CatalogEntry, new: CatalogEntry) -> list[FieldChange]:
     """Compute leaf-level FieldChanges between two CatalogEntry dumps.
@@ -165,19 +187,181 @@ def _dict_diff(old: dict[str, Any], new: dict[str, Any], prefix: str = "") -> li
 
 
 # ---------------------------------------------------------------------------
-# (Optional) walk_fields helper — see SLICE-2.md decision 2
+# GitCatalogClient — production: writes via git + gh PR, reads via local cache
 # ---------------------------------------------------------------------------
-#
-# `field_metadata` handles dotted paths but not recursion over list[Submodel].
-# Slice 2's audience filter needs to recurse. Two options:
-#   - extend field_metadata to walk containers, or
-#   - add a sibling walk_fields(model, callback) that does the traversal.
-#
-# Slight rec: sibling function — keeps field_metadata simple, separates "lookup"
-# from "walk."
 
-# TODO: def walk_fields(model_class, callback) -> None:
-#           """Walk every leaf field on `model_class` (recursing into sub-models
-#           and list[Submodel] containers). Invoke `callback(dotted_path, owner,
-#           audience, leaf_type)` for each leaf."""
-#           ...
+
+class GitCatalogClient:
+    """Production CatalogClient.
+
+    register / update open a branch + PR against the registry repo. fetch /
+    list read from a local clone (`_catalog_cache.py`) that's kept fresh
+    transparently on every read. status() resolves PR-pending entries against
+    a local state file (`pending_registrations.py`) before falling back to
+    a `gh pr list` query.
+
+    All subprocess interaction goes through the injected `RegistryGitOps` —
+    tests pass a fake, production passes the default `SubprocessRegistryGitOps`.
+    """
+
+    _PENDING_FILE = ".mintd_pending.json"
+
+    def __init__(
+        self,
+        registry_repo_url: str,
+        *,
+        work_dir: Path,
+        git_ops: "RegistryGitOps | None" = None,
+    ) -> None:
+        from ._catalog_cache import CatalogCache
+        from ._registry_git_ops import SubprocessRegistryGitOps
+        from .pending_registrations import PendingRegistrations
+
+        self._registry_repo_url = registry_repo_url
+        self._work_dir = work_dir
+        self._git_ops = git_ops if git_ops is not None else SubprocessRegistryGitOps()
+        self._cache = CatalogCache(
+            work_dir=work_dir,
+            registry_url=registry_repo_url,
+            git_ops=self._git_ops,
+        )
+        self._pending = PendingRegistrations(path=work_dir / self._PENDING_FILE)
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    def fetch(self, name: str) -> CatalogEntry:
+        self._cache.ensure_fresh()
+        entry = self._cache.read_entry(name)
+        if entry is None:
+            raise CatalogNotFound(name)
+        return entry
+
+    def list(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]:
+        self._cache.ensure_fresh()
+        return self._cache.list_entries(filter)
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    def register(self, metadata: "Metadata", *, dry_run: bool = False) -> RegisterResult:
+        from ._catalog_serializer import deserialize, serialize
+
+        self._cache.ensure_fresh()
+        name = metadata.project.name
+
+        existing = self._cache.read_entry(name)
+        if existing is not None:
+            raise CatalogAlreadyExists(name)
+        if self._pending.find(name) is not None:
+            # A PR is already open for this name — fail loudly per slice-3
+            # decision α (refuse on PR conflict).
+            raise CatalogAlreadyExists(f"{name} (PR pending)")
+
+        if dry_run:
+            return RegisterResult(name=name, dry_run=True)
+
+        content = serialize(metadata)
+        entry = deserialize(content)
+        branch = f"register/{name}"
+        pr = self._commit_and_pr(
+            branch=branch,
+            entry=entry,
+            content=content,
+            commit_message=f"Register {name}",
+            pr_title=f"Register {name}",
+            pr_body=f"Catalog entry for `{name}`.",
+        )
+        self._record_pending(name=name, pr_number=pr, kind="register")
+        return RegisterResult(name=name, dry_run=False)
+
+    def update(self, metadata: "Metadata", *, dry_run: bool = False) -> UpdateResult:
+        from ._catalog_serializer import deserialize, serialize
+
+        self._cache.ensure_fresh()
+        name = metadata.project.name
+
+        existing = self._cache.read_entry(name)
+        if existing is None:
+            raise CatalogNotFound(name)
+
+        new_content = serialize(metadata)
+        new_entry = deserialize(new_content)
+
+        changes = _diff_entries(existing, new_entry)
+
+        if dry_run:
+            return UpdateResult(name=name, changes=changes, dry_run=True)
+
+        branch = f"update/{name}"
+        pr = self._commit_and_pr(
+            branch=branch,
+            entry=new_entry,
+            content=new_content,
+            commit_message=f"Update {name}",
+            pr_title=f"Update {name}",
+            pr_body=f"Update for catalog entry `{name}`.",
+        )
+        self._record_pending(name=name, pr_number=pr, kind="update")
+        return UpdateResult(name=name, changes=changes, dry_run=False)
+
+    # ------------------------------------------------------------------
+    # status
+    # ------------------------------------------------------------------
+
+    def status(self, name: str) -> RegistrationStatus:
+        self._cache.ensure_fresh()
+        if self._cache.read_entry(name) is not None:
+            return RegistrationStatus(state="registered")
+        pending = self._pending.find(name)
+        if pending is not None:
+            return RegistrationStatus(state="pending", pr_number=pending.pr_number)
+        return RegistrationStatus(state="not_found")
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _commit_and_pr(
+        self,
+        *,
+        branch: str,
+        entry: CatalogEntry,
+        content: str,
+        commit_message: str,
+        pr_title: str,
+        pr_body: str,
+    ) -> int:
+        self._git_ops.checkout_new_branch(self._work_dir, branch)
+        self._cache.write_entry(entry, content)
+        self._git_ops.commit_all(self._work_dir, commit_message)
+        self._git_ops.push_branch(self._work_dir, branch)
+        return self._git_ops.open_pr(
+            self._work_dir,
+            title=pr_title,
+            body=pr_body,
+        )
+
+    def _record_pending(
+        self,
+        *,
+        name: str,
+        pr_number: int,
+        kind: Literal["register", "update"],
+    ) -> None:
+        from .pending_registrations import PendingRegistration
+
+        self._pending.add(
+            PendingRegistration(
+                name=name,
+                pr_number=pr_number,
+                kind=kind,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+
+if TYPE_CHECKING:
+    from ._registry_git_ops import RegistryGitOps

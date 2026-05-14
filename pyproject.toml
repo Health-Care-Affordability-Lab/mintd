@@ -5,6 +5,7 @@ description = "Lightweight data product framework for research labs"
 requires-python = ">=3.10"
 dependencies = [
     "pydantic ~= 2.12",
+    "pyyaml ~= 6.0",
 ]
 
 [project.optional-dependencies]
@@ -12,6 +13,7 @@ dev = [
     "pytest >= 7.0",
     "mypy >= 1.0",
     "ruff >= 0.1",
+    "types-PyYAML",
 ]
 
 [build-system]
@@ -27,3 +29,6 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
+
+[project.scripts]
+mintd = "mintd.cli:main"

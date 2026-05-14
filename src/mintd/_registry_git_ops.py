@@ -1,0 +1,203 @@
+"""The only module in mintd that shells out to `git` or `gh`.
+
+Every other module that needs to interact with the registry repo (the cache,
+GitCatalogClient) goes through the `RegistryGitOps` Protocol. Production code
+uses `SubprocessRegistryGitOps`; tests inject a fake.
+
+This is the single seam that:
+  - Normalizes subprocess failures into typed exceptions.
+  - Lets us swap implementations without touching callers.
+  - Bounds the surface area of code that depends on `git` / `gh` being on PATH.
+
+If you ever find yourself reaching for `subprocess` outside this module, stop.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from typing import Protocol
+
+
+# ---------------------------------------------------------------------------
+# Typed exceptions
+# ---------------------------------------------------------------------------
+
+
+class GitOpError(Exception):
+    """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
+
+    def __init__(self, command: list[str], stderr: str) -> None:
+        super().__init__(f"git command failed: {' '.join(command)}\n{stderr}")
+        self.command = command
+        self.stderr = stderr
+
+
+class GhAuthError(Exception):
+    """`gh` reports the user is not authenticated. Caller should prompt
+    `gh auth login` and retry."""
+
+
+class GhNotInstalled(Exception):
+    """The `gh` binary is not on PATH."""
+
+
+class PRConflictError(Exception):
+    """`gh pr create` reports an existing PR on the same branch."""
+
+    def __init__(self, branch: str, existing_pr: int | None = None) -> None:
+        super().__init__(
+            f"PR already exists for branch {branch!r}"
+            + (f" (#{existing_pr})" if existing_pr else "")
+        )
+        self.branch = branch
+        self.existing_pr = existing_pr
+
+
+# ---------------------------------------------------------------------------
+# Protocol
+# ---------------------------------------------------------------------------
+
+
+class RegistryGitOps(Protocol):
+    """Every git/gh subprocess in mintd goes through one of these methods.
+
+    Implementations must:
+      - Raise `GitOpError` / `GhAuthError` / `GhNotInstalled` / `PRConflictError`
+        on the expected failure modes — no bare `CalledProcessError` leaks.
+      - Be re-entrant (clone-then-fetch-then-reset is a normal sequence).
+      - Not maintain hidden state outside the filesystem under `repo_dir`.
+    """
+
+    def clone(self, url: str, dest: Path) -> None: ...
+    def fetch(self, repo_dir: Path) -> None: ...
+    def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
+    def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def commit_all(self, repo_dir: Path, message: str) -> None: ...
+    def push_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def open_pr(
+        self,
+        repo_dir: Path,
+        *,
+        title: str,
+        body: str,
+        base: str = "main",
+    ) -> int: ...
+    def pr_exists_for_branch(self, repo_dir: Path, branch: str) -> int | None: ...
+
+
+# ---------------------------------------------------------------------------
+# Production implementation
+# ---------------------------------------------------------------------------
+
+
+class SubprocessRegistryGitOps:
+    """Production: shells out to `git` and `gh`.
+
+    Each method runs a single command and surfaces non-zero exits as the typed
+    exceptions defined above. Stdout/stderr capture is on by default for both
+    diagnostics (in errors) and parsing (for `gh pr list`).
+    """
+
+    def __init__(self, *, timeout: float = 30.0) -> None:
+        self._timeout = timeout
+
+    # ------------------------------------------------------------------
+    # git
+    # ------------------------------------------------------------------
+
+    def clone(self, url: str, dest: Path) -> None:
+        self._git(["clone", "--depth=1", url, str(dest)], cwd=None)
+
+    def fetch(self, repo_dir: Path) -> None:
+        self._git(["fetch", "origin"], cwd=repo_dir)
+
+    def reset_hard(self, repo_dir: Path, ref: str) -> None:
+        self._git(["reset", "--hard", ref], cwd=repo_dir)
+
+    def checkout_new_branch(self, repo_dir: Path, branch: str) -> None:
+        self._git(["checkout", "-b", branch], cwd=repo_dir)
+
+    def commit_all(self, repo_dir: Path, message: str) -> None:
+        self._git(["add", "-A"], cwd=repo_dir)
+        self._git(["commit", "-m", message], cwd=repo_dir)
+
+    def push_branch(self, repo_dir: Path, branch: str) -> None:
+        self._git(["push", "-u", "origin", branch], cwd=repo_dir)
+
+    # ------------------------------------------------------------------
+    # gh
+    # ------------------------------------------------------------------
+
+    def open_pr(
+        self,
+        repo_dir: Path,
+        *,
+        title: str,
+        body: str,
+        base: str = "main",
+    ) -> int:
+        result = self._gh(
+            ["pr", "create", "--title", title, "--body", body, "--base", base],
+            cwd=repo_dir,
+        )
+        # `gh pr create` prints the PR URL on success. Extract the trailing integer.
+        url = result.strip().splitlines()[-1]
+        try:
+            return int(url.rsplit("/", 1)[-1])
+        except (IndexError, ValueError) as e:
+            raise GitOpError(["gh", "pr", "create"], f"could not parse PR number from: {url}") from e
+
+    def pr_exists_for_branch(self, repo_dir: Path, branch: str) -> int | None:
+        result = self._gh(
+            ["pr", "list", "--head", branch, "--state", "open", "--json", "number"],
+            cwd=repo_dir,
+        )
+        items = json.loads(result.strip() or "[]")
+        if not items:
+            return None
+        return int(items[0]["number"])
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _git(self, args: list[str], *, cwd: Path | None) -> str:
+        cmd = ["git", *args]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=True,
+            )
+        except FileNotFoundError as e:
+            raise GitOpError(cmd, "git not installed") from e
+        except subprocess.CalledProcessError as e:
+            raise GitOpError(cmd, e.stderr or e.stdout or "")
+        return result.stdout
+
+    def _gh(self, args: list[str], *, cwd: Path) -> str:
+        cmd = ["gh", *args]
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=True,
+            )
+        except FileNotFoundError as e:
+            raise GhNotInstalled(str(e)) from e
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or "") + (e.stdout or "")
+            if "not authenticated" in stderr.lower() or "authentication" in stderr.lower():
+                raise GhAuthError(stderr) from e
+            if "already exists" in stderr.lower():
+                raise PRConflictError(branch="(unknown)") from e
+            raise GitOpError(cmd, stderr)
+        return result.stdout

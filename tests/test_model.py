@@ -2,7 +2,7 @@
 
 These tests pin the validation behavior — they're the spec for what
 metadata.json is allowed to look like, what gets rejected, and how
-Owner × Audience annotations are introspected.
+the `Owner` annotation on each field is introspected.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
-import json 
-from mintd.model import Audience, Metadata, Owner, field_metadata
+import json
+from mintd.model import Metadata, Owner, field_metadata
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -64,24 +64,33 @@ def test_wrong_schema_version_rejected():
 # Field annotation introspection
 # ---------------------------------------------------------------------------
 
-def test_field_metadata_returns_owner_audience():
-    """field_metadata(Metadata, 'project.name') returns the expected (Owner, Audience).
+def test_field_metadata_returns_owner():
+    """field_metadata(Metadata, 'project.name') returns Owner.MINTD —
+    mintd sets project.name at scaffold time."""
+    assert field_metadata(Metadata, "project.name") == Owner.MINTD
 
-    project.name is MINTD-owned (mintd sets it at create) and CATALOG-audience
-    (the catalog is canonical for product names).
-    """
-    assert field_metadata(Metadata, 'project.name') == (Owner.MINTD,Audience.CATALOG)
-    
 
 def test_field_metadata_traverses_nested():
-    """field_metadata works for deeply-nested paths.
+    """field_metadata follows dotted paths through sub-models.
 
     e.g., field_metadata(Metadata, 'storage.dvc.remote_name') returns
-    (Owner.MINTD, Audience.PRODUCER_CONTRACT).
+    Owner.MINTD.
     """
-    
-    assert field_metadata(Metadata, 'storage.dvc.remote_name') == (Owner.MINTD,Audience.PRODUCER_CONTRACT)
-    
+    assert field_metadata(Metadata, "storage.dvc.remote_name") == Owner.MINTD
+
+
+def test_field_metadata_user_owned_fields():
+    """metadata.description and ownership.team are USER-owned — human edits."""
+    assert field_metadata(Metadata, "metadata.description") == Owner.USER
+    assert field_metadata(Metadata, "ownership.team") == Owner.USER
+
+
+def test_field_metadata_pipeline_owned_fields():
+    """data_products.* and status.last_updated are PIPELINE-owned — auto-stamped
+    by the publish flow / DVC tracking."""
+    assert field_metadata(Metadata, "data_products.primary") == Owner.PIPELINE
+    assert field_metadata(Metadata, "status.last_updated") == Owner.PIPELINE
+
 
 
 # ---------------------------------------------------------------------------
