@@ -1,26 +1,26 @@
 """Orchestration for the `mintd data ...` command family.
 
 Slice 4: `import_product` — catalog lookup → path resolution → `dvc import`.
-The CLI surface (PR 8) is a thin shell over `import_product`; PR 8 also
-adds `render_imports` here, and later slices add `bump_imports`.
+Slice 5: lifts the `--rev` without `--path` restriction by resolving
+`data_products.primary` via `ProducerView.at(repo, rev)` (the producer's
+metadata.json at the pinned commit).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ._dvc_ops import DvcOps
 from .catalog import CatalogClient
+from .producer import MissingPrimaryDataProduct, ProducerView
 
-
-class MissingPrimaryDataProduct(Exception):
-    """The catalog entry has no `data_products.primary` and no `--path`/`--all`."""
-
-
-class RevRequiresExplicitPath(Exception):
-    """`--rev` was supplied without `--path`. Until PR 6's ProducerView lands,
-    we can't resolve `data_products.primary` at a non-HEAD commit."""
+__all__ = [
+    "ImportDestinationExists",
+    "MissingPrimaryDataProduct",
+    "import_product",
+]
 
 
 class ImportDestinationExists(Exception):
@@ -38,19 +38,20 @@ def import_product(
     rev: str | None = None,
     all_outputs: bool = False,
     force: bool = False,
+    producer_view_factory: Callable[[str, str], ProducerView] | None = None,
 ) -> list[Path]:
     """Catalog-driven `dvc import`. Returns the list of `.dvc` files written."""
 
     entry = client.fetch(name)
     dumped = entry.model_dump()
+    repo_url = _require_repo_url(dumped, name=name)
 
     if rev is not None and path is None and not all_outputs:
-        raise RevRequiresExplicitPath(
-            f"--rev {rev!r} requires an explicit --path until ProducerView lands (PR 6)"
-        )
+        factory = producer_view_factory or ProducerView.at
+        view = factory(repo_url, rev)
+        path = view.primary_or_raise()
 
     paths = _resolve_paths(dumped, path=path, all_outputs=all_outputs, name=name)
-    repo_url = _require_repo_url(dumped, name=name)
 
     produced: list[Path] = []
     for p in paths:

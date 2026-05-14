@@ -25,7 +25,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+markers = [
+    "integration: requires MINTD_RUN_INTEGRATION=1 and real git",
+]
 
 [tool.ruff]
 line-length = 100
