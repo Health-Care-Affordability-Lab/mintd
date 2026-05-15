@@ -40,14 +40,20 @@ from .data import (
     bump_import,
     import_product,
 )
+from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
 from .enclave import (
     AlreadyApproved,
     AppendOnlyViolation,
     EnclaveManifest,
+    InvalidTransferManifest,
+    NothingToPackage,
+    PathTraversalDetected,
     enclave_add,
     enclave_bump,
+    enclave_package,
     enclave_pull,
     enclave_remove,
+    enclave_verify,
 )
 from .imports import scan_imports
 from .init import InitDestinationExists, init_project
@@ -197,6 +203,26 @@ def _build_parser() -> argparse.ArgumentParser:
     p_epull.add_argument("--force", action="store_true")
     p_epull.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
     p_epull.set_defaults(_handler=_handle_enclave_pull)
+
+    p_epkg = p_enclave_sub.add_parser(
+        "package", help="Bundle downloads into a transfer archive"
+    )
+    p_epkg.add_argument("repo", nargs="?")
+    p_epkg.add_argument("--output", type=Path, dest="output_archive")
+    p_epkg.add_argument(
+        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
+    )
+    p_epkg.set_defaults(_handler=_handle_enclave_package)
+
+    p_ever = p_enclave_sub.add_parser(
+        "verify", help="Reconcile an extracted transfer into the manifest"
+    )
+    p_ever.add_argument("extracted_dir", type=Path)
+    p_ever.add_argument(
+        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
+    )
+    p_ever.add_argument("--data-root", type=Path, dest="data_root")
+    p_ever.set_defaults(_handler=_handle_enclave_verify)
 
     p_registry = subs.add_parser("registry", help="Catalog commands")
     p_registry_sub = p_registry.add_subparsers(dest="registry_command")
@@ -516,6 +542,59 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
         return 0
     for item in written:
         print(f"pulled: {item.repo}@{item.contract_pin[:7]} → {item.local_path}")
+    return 0
+
+
+def _handle_enclave_package(args: argparse.Namespace) -> int:
+    # When --output is unset, hand `enclave_package` an output_dir; it
+    # builds the filename from the computed `transfer_id` so same-day
+    # re-runs produce distinct archives.
+    output_dir = (
+        args.manifest.parent / "transfers"
+        if args.output_archive is None
+        else None
+    )
+    try:
+        archive = enclave_package(
+            manifest_path=args.manifest,
+            name=args.repo,
+            output_archive=args.output_archive,
+            output_dir=output_dir,
+        )
+    except (
+        NothingToPackage,
+        ArchiveAlreadyExists,
+        UnsafeArchiveMember,
+        InvalidTransferManifest,
+        AppendOnlyViolation,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"packaged: {archive}")
+    return 0
+
+
+def _handle_enclave_verify(args: argparse.Namespace) -> int:
+    try:
+        _, written = enclave_verify(
+            extracted_dir=args.extracted_dir,
+            manifest_path=args.manifest,
+            data_root=args.data_root,
+        )
+    except (
+        InvalidTransferManifest,
+        PathTraversalDetected,
+        AppendOnlyViolation,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not written:
+        print("nothing to verify (all entries already in transferred[])")
+        return 0
+    for item in written:
+        print(
+            f"verified: {item.repo} @ {item.contract_pin[:7]} → {item.local_path}"
+        )
     return 0
 
 

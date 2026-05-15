@@ -4,14 +4,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import TYPE_CHECKING, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ._archive_ops import ArchiveOps, TarGzArchiveOps
 from .catalog import CatalogClient
 from .data import (
     BumpBlocked,
@@ -32,11 +35,18 @@ __all__ = [
     "ApprovedProduct",
     "DownloadedItem",
     "EnclaveManifest",
+    "InvalidTransferManifest",
+    "NothingToPackage",
+    "PathTraversalDetected",
+    "TransferContent",
+    "TransferManifest",
     "TransferredItem",
     "enclave_add",
     "enclave_bump",
+    "enclave_package",
     "enclave_pull",
     "enclave_remove",
+    "enclave_verify",
 ]
 
 class AppendOnlyViolation(Exception):
@@ -54,6 +64,40 @@ class AlreadyApproved(Exception):
         )
         self.name = name
         self.manifest_path = manifest_path
+
+class NothingToPackage(Exception):
+    """`enclave_package` filtered `downloaded[]` to an empty set."""
+
+
+class InvalidTransferManifest(Exception):
+    """`_transfer_manifest.yaml` malformed or references a missing directory."""
+
+
+class PathTraversalDetected(Exception):
+    """A `TransferContent` member would escape the extracted dir (CVE-2007-4559)."""
+
+    def __init__(self, member: str) -> None:
+        super().__init__(
+            f"transfer manifest references {member!r} which escapes the dest dir"
+        )
+        self.member = member
+
+
+class TransferContent(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    repo: str
+    version_folder: str  # e.g. "e8f3a2b-2026-05-11"
+    contract_pin: str
+    artifact_pin: str
+
+
+class TransferManifest(BaseModel):
+    schema_version: Literal["2.0"] = "2.0"
+    enclave_name: str
+    transfer_date: datetime
+    transfer_id: str
+    contents: list[TransferContent] = []
+
 
 class ApprovedProduct(BaseModel):
     model_config = ConfigDict(frozen=False)
@@ -375,3 +419,312 @@ def _read_artifact_pin(dvc_path: Path) -> str:
     if not isinstance(md5, str):
         raise ValueError(f"{dvc_path} outs[0].md5 missing or non-str")
     return md5
+
+
+def _next_transfer_id(manifest: EnclaveManifest, today_iso: str) -> str:
+    """Pick the next sequence number for today's transfers.
+
+    Sequence resets daily. Format: `transfer-YYYY-MM-DD-NNNNNN`.
+    """
+    prefix = f"transfer-{today_iso}-"
+    used: set[int] = set()
+    for t in manifest.transferred:
+        if not t.transfer_id.startswith(prefix):
+            continue
+        suffix = t.transfer_id.removeprefix(prefix)
+        if suffix.isdigit():
+            used.add(int(suffix))
+    seq = 0
+    while seq in used:
+        seq += 1
+    return f"{prefix}{seq:06d}"
+
+
+def enclave_package(
+    *,
+    manifest_path: Path,
+    name: str | None = None,
+    downloads_root: Path | None = None,
+    output_archive: Path | None = None,
+    output_dir: Path | None = None,
+    archive_ops: ArchiveOps | None = None,
+    today: date | None = None,
+) -> Path:
+    """Bundle outside-enclave `downloaded[]` into a `.tar.gz` transfer archive.
+
+    Exactly one of `output_archive` / `output_dir` must be provided. When
+    only `output_dir` is given, the archive filename is derived from the
+    computed `transfer_id` (`<output_dir>/<transfer_id>.tar.gz`), which
+    guarantees uniqueness across same-day runs.
+
+    Filters `downloaded[]` to `name` if given; raises `NothingToPackage`
+    when the filtered set is empty. Appends one `TransferredItem` per
+    packaged entry to the outside-enclave manifest, saved through the
+    slice-8 append-only seam. If `archive_ops.pack` raises, the manifest
+    is never mutated (pack runs inside the `TemporaryDirectory`; save
+    runs only after it exits cleanly).
+
+    Returns the produced archive path.
+    """
+    if output_archive is None and output_dir is None:
+        raise ValueError("Either output_archive or output_dir must be provided")
+
+    manifest = EnclaveManifest.load(manifest_path)
+    targets = [d for d in manifest.downloaded if name is None or d.repo == name]
+    if not targets:
+        raise NothingToPackage(
+            f"no downloaded[] entries{' for ' + name if name else ''} in {manifest_path}"
+        )
+
+    downloads_root = downloads_root or (manifest_path.parent / "downloads")
+    today_iso = (today or date.today()).isoformat()
+    transfer_id = _next_transfer_id(manifest, today_iso)
+
+    if output_archive is None:
+        assert output_dir is not None  # for mypy; checked above
+        output_archive = output_dir / f"{transfer_id}.tar.gz"
+
+    contents: list[TransferContent] = []
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        for d in targets:
+            version_folder = Path(d.local_path).name
+            src = downloads_root / d.repo / version_folder
+            if not src.exists():
+                raise InvalidTransferManifest(
+                    f"downloaded[] entry references missing dir: {src}"
+                )
+            dest = tmp / d.repo / version_folder
+            # `symlinks=True` preserves symlinks so the `pack` time
+            # symlink-traversal guard can inspect them. Without it,
+            # `copytree` dereferences hostile symlinks (e.g.,
+            # `/etc/passwd`) into plain files inside the staging dir,
+            # silently bypassing `TarGzArchiveOps.pack`'s check.
+            shutil.copytree(src, dest, symlinks=True)
+            contents.append(
+                TransferContent(
+                    repo=d.repo,
+                    version_folder=version_folder,
+                    contract_pin=d.contract_pin,
+                    artifact_pin=d.artifact_pin,
+                )
+            )
+
+        transfer_manifest = TransferManifest(
+            enclave_name=manifest.enclave_name,
+            transfer_date=datetime.now(timezone.utc),
+            transfer_id=transfer_id,
+            contents=contents,
+        )
+        (tmp / "_transfer_manifest.yaml").write_text(
+            yaml.safe_dump(
+                transfer_manifest.model_dump(mode="json"), sort_keys=False
+            )
+        )
+
+        ops = archive_ops or TarGzArchiveOps()
+        ops.pack(tmp, output_archive)
+
+    # `pack` succeeded — now record each packaged item in `transferred[]`.
+    # `.resolve()` ensures the stored path is absolute regardless of whether
+    # `downloads_root` was passed as a relative path.
+    new_transferred = list(manifest.transferred)
+    for content in contents:
+        local_path = str(
+            (downloads_root / content.repo / content.version_folder).resolve()
+        )
+        new_transferred.append(
+            TransferredItem(
+                repo=content.repo,
+                contract_pin=content.contract_pin,
+                artifact_pin=content.artifact_pin,
+                transfer_date=date.fromisoformat(today_iso),
+                transfer_id=transfer_id,
+                local_path=local_path,
+            )
+        )
+    new_manifest = manifest.model_copy(update={"transferred": new_transferred})
+    new_manifest.save(manifest_path)
+    return output_archive
+
+
+def enclave_verify(
+    *,
+    extracted_dir: Path,
+    manifest_path: Path,
+    data_root: Path | None = None,
+) -> tuple[Path, list[TransferredItem]]:
+    """Reconcile a user-extracted transfer dir into the inside-enclave manifest.
+
+    Path-traversal guard runs **before** any filesystem mutation. Three
+    string-level pre-checks (`is_absolute()` and `..` segments on both
+    `content.repo` and `content.version_folder`) plus two resolve-based
+    checks (the constructed member path, and an `rglob` walk for symlinks
+    inside the data) together cover the CVE-2007-4559 family. All
+    `startswith` comparisons append `os.sep` to avoid sibling-directory
+    false positives.
+
+    Idempotent: entries whose `(repo, contract_pin, artifact_pin)` triple
+    is already in `transferred[]` are skipped, so re-running on the same
+    extracted dir is a no-op.
+
+    Returns `(manifest_path, written)` where `written` lists only the
+    newly-appended `TransferredItem`s.
+    """
+    manifest_yaml = extracted_dir / "_transfer_manifest.yaml"
+    if not manifest_yaml.is_file():
+        raise InvalidTransferManifest(
+            f"_transfer_manifest.yaml not found at {manifest_yaml}"
+        )
+
+    try:
+        raw = yaml.safe_load(manifest_yaml.read_text()) or {}
+        transfer = TransferManifest.model_validate(raw)
+    except (yaml.YAMLError, ValidationError) as e:
+        raise InvalidTransferManifest(str(e)) from e
+
+    # Load the inside-enclave manifest up front so the validation loop
+    # can skip entries that are already in `transferred[]`. Without
+    # this, a re-run after a successful `verify` would fail the
+    # existence check (the data was moved into `data_root`) — breaking
+    # the idempotence contract.
+    manifest = EnclaveManifest.load(manifest_path)
+    data_root = data_root or (manifest_path.parent / "data")
+    existing_keys = {
+        (t.repo, t.contract_pin, t.artifact_pin) for t in manifest.transferred
+    }
+
+    extracted_abs = extracted_dir.resolve()
+    extracted_prefix = str(extracted_abs) + os.sep
+
+    # Track destination paths seen so far in this single transfer to
+    # reject manifests that would move two entries to the same dest
+    # (which would surface as a `FileNotFoundError` from the second
+    # `shutil.move`, leaving the first move stranded without a
+    # `transferred[]` entry).
+    seen_dests: set[Path] = set()
+    for content in transfer.contents:
+        # (a) String pre-check on `repo`. Without this, an absolute `repo`
+        # would silently discard the left operand of `Path.__truediv__`
+        # (e.g., `extracted_dir / "/etc" / "passwd"` → `Path("/etc/passwd")`).
+        # Path-traversal pre-checks run unconditionally — even for
+        # already-verified entries — so a hostile re-uploaded manifest
+        # is rejected before any filesystem access. Empty string and `.`
+        # are also rejected because both produce `Path(...).parts == ()`,
+        # bypassing the `..` check; their effect with `Path.__truediv__`
+        # is to resolve back to `extracted_dir` / `data_root`. Nested
+        # paths (e.g., `A/B`) are rejected because the `dest`-collision
+        # check below operates on leaf paths; a manifest pairing
+        # `version_folder = "B"` and `version_folder = "B/C"` would
+        # otherwise pass collision validation, then crash mid-move
+        # when the second `shutil.move` finds `B/C`'s source under the
+        # already-moved `B`. Repo/version_folder are flat segments by
+        # design (see `_resolve_outputs` in slice 13).
+        if (
+            not content.repo
+            or content.repo == "."
+            or "/" in content.repo
+            or "\\" in content.repo
+            or Path(content.repo).is_absolute()
+            or ".." in Path(content.repo).parts
+        ):
+            raise PathTraversalDetected(
+                f"{content.repo}/{content.version_folder}"
+            )
+        # (b) String pre-check on `version_folder`. `..` resolves
+        # silently *inside* `extracted_dir` if paired with a deep
+        # subpath, bypassing a pure `resolve()`-based check. Empty
+        # string, `.`, and nested paths are rejected for the same
+        # reasons as in the `repo` check above.
+        if (
+            not content.version_folder
+            or content.version_folder == "."
+            or "/" in content.version_folder
+            or "\\" in content.version_folder
+            or Path(content.version_folder).is_absolute()
+            or ".." in Path(content.version_folder).parts
+        ):
+            raise PathTraversalDetected(
+                f"{content.repo}/{content.version_folder}"
+            )
+
+        # Skip filesystem checks for entries already in transferred[].
+        # The first verify moved them out of `extracted_dir`, so the
+        # existence check would falsely fail — see the idempotence
+        # contract in the docstring.
+        key = (content.repo, content.contract_pin, content.artifact_pin)
+        if key in existing_keys:
+            continue
+
+        # (c) Existence check — safe now that string-level guards passed.
+        member = extracted_dir / content.repo / content.version_folder
+        if not member.exists():
+            raise InvalidTransferManifest(
+                f"manifest references {content.repo}/{content.version_folder} but dir not present"
+            )
+
+        # (d) Resolve check — catches symlink at the version_folder
+        # itself pointing outside `extracted_dir`.
+        resolved = str(member.resolve())
+        if resolved != str(extracted_abs) and not resolved.startswith(extracted_prefix):
+            raise PathTraversalDetected(
+                f"{content.repo}/{content.version_folder}"
+            )
+
+        # (e) Symlink walk — catches symlinks inside the versioned data
+        # pointing outside `extracted_dir`. Target need not exist;
+        # `p.resolve()` still produces an absolute path we can check.
+        for p in member.rglob("*"):
+            if p.is_symlink():
+                target = str(p.resolve())
+                if target != str(extracted_abs) and not target.startswith(extracted_prefix):
+                    raise PathTraversalDetected(str(p))
+
+        # (f) Dest collision check — refuse to overwrite an existing
+        # `data_root/<repo>/<version_folder>` (legitimate prior data)
+        # and refuse two contents that target the same dest. Done in
+        # the validation pass so partial moves can't strand entries on
+        # disk without `transferred[]` rows.
+        dest = data_root / content.repo / content.version_folder
+        if dest in seen_dests:
+            raise InvalidTransferManifest(
+                f"transfer manifest contains duplicate destination {dest}"
+            )
+        seen_dests.add(dest)
+        if dest.exists():
+            raise InvalidTransferManifest(
+                f"refusing to overwrite existing dest {dest} for new transferred[] entry"
+            )
+
+    new_transferred = list(manifest.transferred)
+    written: list[TransferredItem] = []
+    for content in transfer.contents:
+        key = (content.repo, content.contract_pin, content.artifact_pin)
+        if key in existing_keys:
+            # Idempotent — already verified.
+            continue
+        src = extracted_dir / content.repo / content.version_folder
+        dest = data_root / content.repo / content.version_folder
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        # Validation pass already confirmed `dest` doesn't exist; if it
+        # appeared between then and now, an external process is racing
+        # us and we'd rather error out than silently overwrite.
+        if dest.exists():
+            raise InvalidTransferManifest(
+                f"dest {dest} appeared during verify (concurrent modification?)"
+            )
+        shutil.move(str(src), str(dest))
+        item = TransferredItem(
+            repo=content.repo,
+            contract_pin=content.contract_pin,
+            artifact_pin=content.artifact_pin,
+            transfer_date=transfer.transfer_date.date(),
+            transfer_id=transfer.transfer_id,
+            local_path=str(dest.resolve()),
+        )
+        new_transferred.append(item)
+        written.append(item)
+
+    new_manifest = manifest.model_copy(update={"transferred": new_transferred})
+    new_manifest.save(manifest_path)
+    return manifest_path, written

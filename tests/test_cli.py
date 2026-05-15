@@ -840,3 +840,175 @@ def test_cli_publish_full_flow_calls_each_op(
     assert len(dvc_ops.push_calls) >= 1
     # git tag called
     assert len(patched_git_ops.tag_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Slice 16 — enclave package + enclave verify
+# ---------------------------------------------------------------------------
+
+
+def test_cli_package_creates_archive(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    archive = tmp_path / "out" / "transfer-2026-05-15-000000.tar.gz"
+
+    captured: dict[str, Any] = {}
+
+    def fake_package(*args: Any, **kwargs: Any) -> Path:
+        captured.update(kwargs)
+        return archive
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(
+        [
+            "enclave",
+            "package",
+            "--manifest",
+            str(manifest),
+            "--output",
+            str(archive),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "packaged:" in out
+    # --output was passed → output_archive set, output_dir = None.
+    assert captured["output_archive"] == archive
+    assert captured["output_dir"] is None
+
+
+def test_cli_package_nothing_to_package_exits_one(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest, NothingToPackage
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    def fake_package(*args: Any, **kwargs: Any) -> Path:
+        raise NothingToPackage("no items")
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(
+        ["enclave", "package", "--manifest", str(manifest)]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+    assert "no items" in err
+
+
+def test_cli_package_unsafe_symlink_exits_one(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`UnsafeArchiveMember` must be caught in the CLI handler — without
+    this, packaging a downloads dir with a hostile symlink would crash
+    with a raw Python traceback (caught in R2 review as P0)."""
+    from mintd._archive_ops import UnsafeArchiveMember
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    def fake_package(*args: Any, **kwargs: Any) -> Path:
+        raise UnsafeArchiveMember(
+            "symlink /downloads/repo/v/evil resolves outside src_dir"
+        )
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(["enclave", "package", "--manifest", str(manifest)])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+    assert "resolves outside" in err
+
+
+def test_cli_verify_writes_transferred_entries(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date
+    from mintd.enclave import EnclaveManifest, TransferredItem
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+
+    item = TransferredItem(
+        repo="ds-alpha",
+        contract_pin="c" * 40,
+        artifact_pin="a" * 32,
+        transfer_date=date(2026, 5, 15),
+        transfer_id="transfer-2026-05-15-000000",
+        local_path="/abs/data/ds-alpha/v1",
+    )
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[TransferredItem]]:
+        return manifest, [item]
+
+    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
+
+    rc = cli.main(
+        [
+            "enclave",
+            "verify",
+            str(extracted),
+            "--manifest",
+            str(manifest),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "verified:" in out
+    assert "ds-alpha" in out
+
+
+def test_cli_verify_traversal_attack_exits_one_with_clear_error(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest, PathTraversalDetected
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        raise PathTraversalDetected("evil/../etc")
+
+    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
+
+    rc = cli.main(
+        ["enclave", "verify", str(extracted), "--manifest", str(manifest)]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+    assert "evil/../etc" in err
