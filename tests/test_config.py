@@ -1,0 +1,51 @@
+"""Tests for `mintd._config.Config.load()`."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from mintd._config import Config, ConfigError, _default_config_path
+
+FIXTURE = Path(__file__).parent / "fixtures" / "cli_config.yaml"
+
+
+def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
+    cfg = Config.load(tmp_path / "missing.yaml")
+    assert cfg.registry_url is None
+    assert cfg.cache_dir is None
+    assert cfg.dvc_timeout == 120.0
+
+
+def test_load_valid_yaml() -> None:
+    cfg = Config.load(FIXTURE)
+    assert cfg.registry_url == "https://example.com/registry.git"
+    assert cfg.cache_dir == Path("/tmp/mintd-test-cache")
+    assert cfg.dvc_timeout == 60.0
+
+
+def test_load_malformed_yaml_raises_config_error(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("key: : :::\n: not yaml :")
+    with pytest.raises(ConfigError):
+        Config.load(bad)
+
+
+def test_load_invalid_schema_raises_config_error(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text('dvc_timeout: "not a number"\n')
+    with pytest.raises(ConfigError):
+        Config.load(bad)
+
+
+def test_resolved_cache_dir_defaults_when_none() -> None:
+    cfg = Config()
+    assert cfg.resolved_cache_dir() == Path.home() / ".cache" / "mintd"
+
+
+def test_env_var_overrides_default_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path))
+    assert _default_config_path() == tmp_path / "config.yaml"

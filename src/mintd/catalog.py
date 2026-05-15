@@ -114,6 +114,14 @@ class CatalogClient(Protocol):
     def fetch(self, name: str) -> CatalogEntry: ...
     def list(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]: ...
     def status(self, name: str) -> RegistrationStatus: ...
+    def sync(self) -> int:
+        """Refresh local cache from upstream. Returns the entry count.
+
+        For in-memory implementations, this is a no-op that returns the
+        current in-process count. For git-backed implementations, this
+        forces a `git pull` of the registry cache before reporting.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +172,10 @@ class InMemoryCatalogClient:
         if name in self._entries:
             return RegistrationStatus(state="registered")
         return RegistrationStatus(state="not_found")
+
+    def sync(self) -> int:
+        """No-op for in-memory; returns the current entry count."""
+        return len(self._entries)
 
 
 def _diff_entries(old: CatalogEntry, new: CatalogEntry) -> list[FieldChange]:
@@ -319,6 +331,11 @@ class GitCatalogClient:
         if pending is not None:
             return RegistrationStatus(state="pending", pr_number=pending.pr_number)
         return RegistrationStatus(state="not_found")
+
+    def sync(self) -> int:
+        """Force-refresh the registry cache; returns the entry count."""
+        self._cache.ensure_fresh()
+        return len(self._cache.list_entries())
 
     # ------------------------------------------------------------------
     # Internals
