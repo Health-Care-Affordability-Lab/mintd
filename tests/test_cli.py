@@ -694,3 +694,63 @@ def test_enclave_pull_nothing_to_pull_message(
     out = capsys.readouterr().out
     assert rc == 0
     assert "nothing to pull" in out
+
+
+# ---------------------------------------------------------------------------
+# Slice 14 — mintd init
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def patched_init_ops(monkeypatch: pytest.MonkeyPatch):
+    from tests._fakes.init_ops import _FakeInitOps
+    fake = _FakeInitOps()
+    monkeypatch.setattr("mintd.init.SubprocessInitOps", lambda *a, **k: fake)
+    return fake
+
+
+def test_init_data_project_happy_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    rc = cli.main(["init", "data", "my_proj", "--path", str(tmp_path)])
+    assert rc == 0
+    assert (tmp_path / "metadata.json").exists()
+    assert (tmp_path / ".gitignore").exists()
+
+    out = capsys.readouterr().out
+    assert "created: metadata.json" in out
+    assert "created: .gitignore" in out
+    assert "initialized: git" in out
+    assert "initialized: dvc" in out
+
+    assert patched_init_ops.git_calls == [tmp_path]
+    assert patched_init_ops.dvc_calls == [tmp_path]
+
+
+def test_init_enclave_skips_dvc_in_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    rc = cli.main(["init", "enclave", "my_workspace", "--path", str(tmp_path)])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "initialized: dvc" not in out
+    assert "initialized: git" in out
+    assert patched_init_ops.dvc_calls == []
+
+
+def test_init_existing_metadata_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    (tmp_path / "metadata.json").write_text("{}")
+    rc = cli.main(["init", "data", "my_proj", "--path", str(tmp_path)])
+    assert rc == 1
+
+    err = capsys.readouterr().err
+    assert "error:" in err

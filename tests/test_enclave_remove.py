@@ -1,6 +1,4 @@
 import pytest
-from pathlib import Path
-import shutil
 from datetime import datetime
 from mintd.enclave import enclave_remove, ApprovedProduct, DownloadedItem, EnclaveManifest, ImportNotFound
 

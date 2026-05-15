@@ -22,6 +22,7 @@ from typing import NoReturn
 
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcOps, SubprocessDvcOps
+from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
     CatalogClient,
@@ -48,7 +49,9 @@ from .enclave import (
     enclave_remove,
 )
 from .imports import scan_imports
+from .init import InitDestinationExists, init_project
 from .model import Metadata
+
 from .pending_registrations import PendingRegistrations
 from .producer import MissingPrimaryDataProduct, ProducerError
 
@@ -107,6 +110,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version="%(prog)s 0.0.1")
     subs = parser.add_subparsers(dest="command")
+
+    p_init = subs.add_parser("init", help="Create a new mintd project")
+    p_init.add_argument(
+        "project_type",
+        metavar="type",
+        choices=["data", "code", "project", "enclave"],
+    )
+    p_init.add_argument("name")
+    p_init.add_argument("--path", type=Path, default=Path("."))
+    p_init.set_defaults(_handler=_handle_init)
 
     p_check = subs.add_parser("check", help="Validate a mintd project")
     p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
@@ -247,6 +260,24 @@ def _handle_check(args: argparse.Namespace) -> int:
             client = None
     findings = check_project(args.path, upgrades=args.upgrades, client=client)
     return _render_findings(findings, json_out=args.json_out)
+
+
+def _handle_init(args: argparse.Namespace) -> int:
+    try:
+        init_project(
+            project_type=args.project_type,
+            name=args.name,
+            target_dir=args.path,
+        )
+    except (InitDestinationExists, InitOpError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print("created: metadata.json")
+    print("created: .gitignore")
+    print("initialized: git")
+    if args.project_type in {"data", "code", "project"}:
+        print("initialized: dvc")
+    return 0
 
 
 def _handle_data_import(args: argparse.Namespace) -> int:

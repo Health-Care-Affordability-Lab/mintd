@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 from datetime import date, datetime
-from mintd.enclave import enclave_pull, ApprovedProduct, DownloadedItem, EnclaveManifest, ImportNotFound, ProducerView
+from mintd.enclave import enclave_pull, ApprovedProduct, DownloadedItem, EnclaveManifest, ImportNotFound
 
 class _Client:
     def fetch(self, name):

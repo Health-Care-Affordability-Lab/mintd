@@ -7,6 +7,7 @@ the `Owner` annotation on each field is introspected.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -115,8 +116,6 @@ def test_data_products_outputs_default_empty():
 # ---------------------------------------------------------------------------
 # Extra fields, literal enforcement, datetime coercion, all project types
 # ---------------------------------------------------------------------------
-
-from datetime import datetime
 
 
 def test_extra_fields_allowed_during_transition():
