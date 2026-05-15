@@ -1,0 +1,9 @@
+schema_version: "2.0"
+enclave_name: my_workspace
+approved_products:
+  - repo: provider-xw
+    registry_entry: catalog/data/provider-xw.yaml
+    pin: 4f7c2a1abcd1234567890abcdef0123456789abc
+    source_path: outputs/cms_based/
+downloaded: []
+transferred: []

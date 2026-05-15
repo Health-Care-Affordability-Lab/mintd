@@ -195,7 +195,7 @@ def bump_import(
         if check_findings is not None
         else check_project(project_path, upgrades=True)
     )
-    finding = _find_consumer_finding_for_source(findings, dvc_source)
+    finding = _find_consumer_finding_for_target(findings, source=dvc_source)
     if finding is None:
         raise ImportNotFound(
             f"no consumer finding for {name!r} (source={dvc_source})"
@@ -251,10 +251,10 @@ def _imports_index(project_path: Path) -> dict[str, Path]:
     return index
 
 
-def _find_consumer_finding_for_source(
-    findings: list[CheckFinding], source: Path
+def _find_consumer_finding_for_target(
+    findings: list[CheckFinding], *, source: Path, field_path: str | None = None
 ) -> CheckFinding | None:
     for f in findings:
-        if f.section == "consumer" and f.source == source:
+        if f.section == "consumer" and f.source == source and f.field_path == field_path:
             return f
     return None

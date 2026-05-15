@@ -122,6 +122,22 @@ Result types from the write methods. `UpdateResult.changes: list[FieldChange]` i
 
 Informal name for the slice-1-driven projection from `Metadata` → `CatalogEntry`. Walks fields via their `Audience` annotation; CATALOG fields go through, others are dropped. Slice 2 is the first place this pays off — if the projection feels forced or requires hand-maintained lists alongside the annotations, the slice-1 design hasn't earned its weight.
 
+### `EnclaveManifest` ([src/mintd/enclave.py](src/mintd/enclave.py))
+
+Typed Pydantic view over `enclave_manifest.yaml` (slice 8). Three sections — `approved_products` (active subscriptions), `downloaded` (outside-enclave staging), `transferred` (audit trail, populated by inside-enclave `verify`). `TransferredItem` is `frozen=True`; `EnclaveManifest.save()` diffs `transferred[]` against the on-disk version and raises `AppendOnlyViolation` if any entry was modified, removed, or reordered. The two together enforce "every pin that ever entered the enclave is recorded forever" at the I/O boundary, not by convention.
+
+### `ApprovedProduct` / `DownloadedItem` / `TransferredItem`
+
+Manifest sub-records (slice 8). `ApprovedProduct` carries the active pin (`repo`, `registry_entry`, `pin`, optional `source_path` or `all`). `DownloadedItem` records what was fetched (`contract_pin` + `artifact_pin`). `TransferredItem` is the audit-trail entry — frozen so callers can't mutate after load.
+
+### `AppendOnlyViolation`
+
+Raised by `EnclaveManifest.save()` when the in-memory `transferred[]` diverges from the on-disk version on any existing index. Carries `path` and `changed_indices: list[int]` so callers can render a diff. Slice 8.
+
+### `enclave_bump` (slice 8)
+
+The manifest-side counterpart of slice-7 `bump_import`. Consumes slice-6 `_consumer_findings`, dispatches on severity, calls `ProducerView.at_head`, mutates `approved_products[].pin` via `EnclaveManifest.apply_pin_bump`, re-saves through the append-only seam. Only the pin update — the pull/package/cross-air-gap pipeline is deferred.
+
 ---
 
 ## Architectural patterns
@@ -154,5 +170,4 @@ Listed here so they're not "missing" — they'll get definitions in the slice wh
 
 - `Pin`, `DataDependency`, `Imports` — slice 5 (`imports.yaml`).
 - `ProducerView`, `Fetcher`, `ProducerError` — slice 6 (`--upgrades` mode).
-- `EnclaveManifest`, `ApprovedProduct`, `TransferredItem` — slice 9.
 - `RegistrationStatus`, pending registrations — slice 3.

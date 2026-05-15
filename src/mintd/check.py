@@ -30,17 +30,27 @@ Slice 1 scope:
   - Environment section: returns [] (added in slice 6 with --upgrades).
 """
 
+from __future__ import annotations
+
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
+import yaml
 from pydantic import ValidationError
 
+from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import ProducerError, ProducerView
+
+if TYPE_CHECKING:
+    # Avoid module-level import of enclave.py — enclave.py imports from this
+    # module (CheckFinding) and from data.py, but data.py is imported here.
+    # Lazy import inside the manifest walker breaks the cycle for runtime.
+    from .enclave import ApprovedProduct
 
 ProducerViewFactory = Callable[[str, str], "ProducerView | ProducerError"]
 
@@ -68,6 +78,7 @@ def check_project(
     *,
     upgrades: bool = False,
     producer_view_factory: ProducerViewFactory | None = None,
+    client: CatalogClient | None = None,
 ) -> list[CheckFinding]:
     """Validate a mintd project at `path` (the project directory).
 
@@ -85,7 +96,10 @@ def check_project(
     findings = _producer_findings(path)
     findings.extend(
         _consumer_findings(
-            path, upgrades=upgrades, producer_view_factory=producer_view_factory
+            path,
+            upgrades=upgrades,
+            producer_view_factory=producer_view_factory,
+            client=client,
         )
     )
     return findings
@@ -143,6 +157,31 @@ def _consumer_findings(
     *,
     upgrades: bool,
     producer_view_factory: ProducerViewFactory | None,
+    client: CatalogClient | None = None,
+    imports_under: str = "data/imports",
+) -> list[CheckFinding]:
+    findings = _consumer_findings_from_dvc(
+        project_path,
+        upgrades=upgrades,
+        producer_view_factory=producer_view_factory,
+        imports_under=imports_under,
+    )
+    findings.extend(
+        _consumer_findings_from_enclave_manifest(
+            project_path,
+            upgrades=upgrades,
+            producer_view_factory=producer_view_factory,
+            client=client,
+        )
+    )
+    return findings
+
+
+def _consumer_findings_from_dvc(
+    project_path: Path,
+    *,
+    upgrades: bool,
+    producer_view_factory: ProducerViewFactory | None,
     imports_under: str = "data/imports",
 ) -> list[CheckFinding]:
     deps = scan_imports(project_path, under=imports_under)
@@ -174,6 +213,110 @@ def _consumer_findings(
     return findings
 
 
+def _consumer_findings_from_enclave_manifest(
+    project_path: Path,
+    *,
+    upgrades: bool,
+    producer_view_factory: ProducerViewFactory | None,
+    client: CatalogClient | None,
+) -> list[CheckFinding]:
+    manifest_path = project_path / "enclave_manifest.yaml"
+    if not manifest_path.is_file():
+        return []
+
+    # Lazy import to break the check.py ↔ enclave.py cycle.
+    from .enclave import EnclaveManifest
+
+    try:
+        manifest = EnclaveManifest.load(manifest_path)
+    except (ValidationError, yaml.YAMLError) as e:
+        return [
+            CheckFinding(
+                severity="error",
+                section="consumer",
+                message=f"enclave_manifest.yaml invalid: {e}",
+                source=manifest_path,
+            )
+        ]
+
+    findings: list[CheckFinding] = []
+    factory = (
+        producer_view_factory
+        if producer_view_factory is not None
+        else ProducerView.try_at
+    )
+
+    for ap in manifest.approved_products:
+        field_path = f"approved_products[{ap.repo}]"
+        if client is None:
+            findings.append(
+                CheckFinding(
+                    severity="error",
+                    section="consumer",
+                    message=f"catalog client not provided; cannot resolve producer URL for {ap.repo}",
+                    source=manifest_path,
+                    field_path=field_path,
+                )
+            )
+            continue
+
+        try:
+            repo_url = _resolve_approved_product_url(client, ap)
+        except (ValueError, CatalogNotFound) as e:
+            findings.append(
+                CheckFinding(
+                    severity="error",
+                    section="consumer",
+                    message=str(e),
+                    source=manifest_path,
+                    field_path=field_path,
+                )
+            )
+            continue
+
+        if not upgrades:
+            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {ap.source_path or '<primary>'})"
+            findings.append(
+                CheckFinding(
+                    severity="info",
+                    section="consumer",
+                    message=msg,
+                    source=manifest_path,
+                    field_path=field_path,
+                )
+            )
+            continue
+
+        result_pin = factory(repo_url, ap.pin)
+        if isinstance(result_pin, ProducerError):
+            findings.append(_error_finding_for(manifest_path, field_path, result_pin))
+            continue
+
+        result_head = factory(repo_url, "")
+        if isinstance(result_head, ProducerError):
+            findings.append(_uptodate_finding_for(source=manifest_path, field_path=field_path))
+            continue
+
+        findings.append(
+            _drift_finding_from_views(
+                source=manifest_path,
+                field_path=field_path,
+                pin_view=result_pin,
+                head_view=result_head,
+                expected_output_path=ap.source_path,
+            )
+        )
+    return findings
+
+
+def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) -> str:
+    """Slice-8 Decision #2α: catalog is canonical for repo identity."""
+    from .data import _require_repo_url
+
+    entry = client.fetch(ap.repo)
+    return _require_repo_url(entry.model_dump(), name=ap.repo)
+
+
 def _summary_finding(dep: DataDependency) -> CheckFinding:
     return CheckFinding(
         severity="info",
@@ -183,39 +326,64 @@ def _summary_finding(dep: DataDependency) -> CheckFinding:
     )
 
 
-def _uptodate_finding(dep: DataDependency) -> CheckFinding:
+def _uptodate_finding_for(*, source: Path, field_path: str | None = None) -> CheckFinding:
     return CheckFinding(
         severity="info",
         section="consumer",
         message="up to date",
-        source=dep.source,
+        source=source,
+        field_path=field_path,
+    )
+
+
+def _uptodate_finding(dep: DataDependency) -> CheckFinding:
+    return _uptodate_finding_for(source=dep.source)
+
+
+def _drift_finding_from_views(
+    *,
+    source: Path,
+    field_path: str | None,
+    pin_view: ProducerView,
+    head_view: ProducerView,
+    expected_output_path: str | None,
+) -> CheckFinding:
+    if expected_output_path and expected_output_path not in pin_view.output_paths():
+        return _uptodate_finding_for(source=source, field_path=field_path)
+
+    head_primary = head_view.metadata.data_products.primary
+    pin_primary = pin_view.metadata.data_products.primary
+
+    if head_primary == pin_primary:
+        return _uptodate_finding_for(source=source, field_path=field_path)
+
+    head_primary_str = head_primary if head_primary is not None else "(no primary)"
+    return CheckFinding(
+        severity="warning",
+        section="consumer",
+        message=f"upgrade available: producer now publishes {head_primary_str!r} (you have {expected_output_path!r})",
+        source=source,
+        field_path=field_path,
     )
 
 
 def _drift_finding(
     dep: DataDependency, pin_view: ProducerView, head_view: ProducerView
 ) -> CheckFinding:
-    if dep.output_path and dep.output_path not in pin_view.output_paths():
-        return _uptodate_finding(dep)
-
-    head_primary = head_view.metadata.data_products.primary
-    pin_primary = pin_view.metadata.data_products.primary
-
-    if head_primary == pin_primary:
-        return _uptodate_finding(dep)
-
-    head_primary_str = head_primary if head_primary is not None else "(no primary)"
-    return CheckFinding(
-        severity="warning",
-        section="consumer",
-        message=f"upgrade available: producer now publishes {head_primary_str!r} (you have {dep.output_path!r})",
+    return _drift_finding_from_views(
         source=dep.source,
+        field_path=None,
+        pin_view=pin_view,
+        head_view=head_view,
+        expected_output_path=dep.output_path,
     )
 
 
-def _error_finding(dep: DataDependency, err: ProducerError) -> CheckFinding:
+def _error_finding_for(
+    source: Path, field_path: str | None, err: ProducerError
+) -> CheckFinding:
     if err.reason == ProducerError.Reason.UNREACHABLE:
-        severity = "warning"
+        severity: Literal["error", "warning", "info"] = "warning"
         message = f"producer unreachable: {err.detail}"
     elif err.reason == ProducerError.Reason.PIN_MISSING:
         severity = "error"
@@ -234,8 +402,13 @@ def _error_finding(dep: DataDependency, err: ProducerError) -> CheckFinding:
         message = f"producer error at pin {err.pin[:7]}: {err.detail}"
 
     return CheckFinding(
-        severity=severity,  # type: ignore
+        severity=severity,
         section="consumer",
         message=message,
-        source=dep.source,
+        source=source,
+        field_path=field_path,
     )
+
+
+def _error_finding(dep: DataDependency, err: ProducerError) -> CheckFinding:
+    return _error_finding_for(source=dep.source, field_path=None, err=err)

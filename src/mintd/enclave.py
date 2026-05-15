@@ -1,0 +1,219 @@
+"""Typed view over `enclave_manifest.yaml` + `enclave_bump`.
+
+Slice 8 ships:
+- `EnclaveManifest` Pydantic model with append-only enforcement on
+  `transferred[]` at the I/O boundary (`save()` diffs against the existing
+  on-disk manifest; `TransferredItem` is frozen).
+- `enclave_bump` — the manifest-side counterpart of slice-7 `bump_import`.
+  Consumes slice-6 `_consumer_findings`, re-resolves the producer's HEAD
+  via `ProducerView.at_head`, and rewrites `approved_products[].pin`.
+
+The pull/package/cross-air-gap pipeline (`mintd enclave pull / package /
+unpack / verify`) is out of scope for slice 8.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from datetime import date, datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict
+
+from .catalog import CatalogClient
+from .data import (
+    BumpBlocked,
+    ImportNotFound,
+    PrimaryRemovedAtHead,
+    _find_consumer_finding_for_target,
+    _require_repo_url,
+)
+from .producer import MissingPrimaryDataProduct, ProducerView
+
+if TYPE_CHECKING:
+    # Avoid module-level import of check.py — check.py imports EnclaveManifest
+    # from this module, so a runtime import would create a cycle. CheckFinding
+    # only appears in annotations, which are strings under `from __future__
+    # import annotations`.
+    from .check import CheckFinding
+
+
+__all__ = [
+    "AppendOnlyViolation",
+    "ApprovedProduct",
+    "DownloadedItem",
+    "EnclaveManifest",
+    "TransferredItem",
+    "enclave_bump",
+]
+
+
+_DRIFT_PREFIX = "upgrade available:"
+
+
+class AppendOnlyViolation(Exception):
+    """`transferred[]` is permanent. Mutating or removing an existing entry
+    raises this at `EnclaveManifest.save` time. `changed_indices` are the
+    positions in the *existing* on-disk manifest where the new in-memory
+    manifest diverged (modified, removed, or reordered)."""
+
+    def __init__(self, path: Path, changed_indices: list[int]) -> None:
+        super().__init__(
+            f"transferred[] entries changed at indices {changed_indices} in {path}"
+        )
+        self.path = path
+        self.changed_indices = changed_indices
+
+
+class ApprovedProduct(BaseModel):
+    model_config = ConfigDict(frozen=False)
+
+    repo: str
+    registry_entry: str
+    pin: str
+    source_path: str | None = None
+    all: bool = False
+
+
+class DownloadedItem(BaseModel):
+    model_config = ConfigDict(frozen=False)
+
+    repo: str
+    output: str
+    contract_pin: str
+    artifact_pin: str
+    fetch_strategy: Literal["dvc-import", "subtree"]
+    downloaded_at: datetime
+    local_path: str
+
+
+class TransferredItem(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    repo: str
+    contract_pin: str
+    artifact_pin: str
+    transfer_date: date
+    transfer_id: str
+    local_path: str
+
+
+class EnclaveManifest(BaseModel):
+    schema_version: Literal["2.0"] = "2.0"
+    enclave_name: str
+    approved_products: list[ApprovedProduct] = []
+    downloaded: list[DownloadedItem] = []
+    transferred: list[TransferredItem] = []
+
+    @classmethod
+    def load(cls, path: Path) -> "EnclaveManifest":
+        with path.open() as fh:
+            data = yaml.safe_load(fh) or {}
+        return cls.model_validate(data)
+
+    def save(self, path: Path) -> None:
+        if path.exists():
+            existing = EnclaveManifest.load(path)
+            changed = _diff_transferred(existing.transferred, self.transferred)
+            if changed:
+                raise AppendOnlyViolation(path, changed)
+        path.write_text(yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False))
+
+    def apply_pin_bump(self, *, repo: str, new_pin: str) -> "EnclaveManifest":
+        for i, ap in enumerate(self.approved_products):
+            if ap.repo == repo:
+                new_products = list(self.approved_products)
+                new_products[i] = ap.model_copy(update={"pin": new_pin})
+                return self.model_copy(update={"approved_products": new_products})
+        raise ImportNotFound(f"{repo!r} not in approved_products[] in this manifest")
+
+
+def _diff_transferred(
+    existing: list[TransferredItem], current: list[TransferredItem]
+) -> list[int]:
+    """Indices of `existing` entries that have been modified or removed.
+
+    New entries appended past `len(existing)` are allowed and not reported.
+    Both modifications within the overlap *and* tail removals are reported,
+    so a "modify entry 0, drop entry 2" change surfaces `[0, 2]` — not
+    just `[2]`.
+    """
+    overlap = min(len(existing), len(current))
+    changed: list[int] = [i for i in range(overlap) if current[i] != existing[i]]
+    if len(current) < len(existing):
+        changed.extend(range(len(current), len(existing)))
+    return changed
+
+
+def enclave_bump(
+    client: CatalogClient,
+    *,
+    manifest_path: Path,
+    project_path: Path | None = None,
+    name: str,
+    force: bool = False,
+    producer_view_factory: Callable[[str], tuple[ProducerView, str]] | None = None,
+    check_findings: list[CheckFinding] | None = None,
+) -> Path | None:
+    """Re-resolve `name` at the producer's HEAD and rewrite its
+    `approved_products[].pin` entry in the enclave manifest.
+
+    Mirrors `bump_import`'s severity dispatch verbatim. Returns
+    `manifest_path` on success, `None` if the finding says up-to-date.
+    Raises `ImportNotFound`, `BumpBlocked`, or `PrimaryRemovedAtHead`.
+    Append-only on `transferred[]` is enforced via `EnclaveManifest.save`.
+    """
+    # Lazy import breaks the check.py ↔ enclave.py cycle.
+    from .check import check_project
+
+    project_path = project_path if project_path is not None else manifest_path.parent
+    manifest = EnclaveManifest.load(manifest_path)
+
+    target: ApprovedProduct | None = None
+    for ap in manifest.approved_products:
+        if ap.repo == name:
+            target = ap
+            break
+    if target is None:
+        raise ImportNotFound(f"{name!r} not in approved_products[] in {manifest_path}")
+
+    findings = (
+        check_findings
+        if check_findings is not None
+        else check_project(project_path, upgrades=True, client=client)
+    )
+    finding = _find_consumer_finding_for_target(
+        findings, source=manifest_path, field_path=f"approved_products[{name}]"
+    )
+    if finding is None:
+        raise ImportNotFound(
+            f"no consumer finding for {name!r} (manifest={manifest_path})"
+        )
+
+    if finding.severity == "info":
+        return None
+    if finding.severity == "error":
+        raise BumpBlocked(name, finding)
+    if not finding.message.startswith(_DRIFT_PREFIX):
+        raise BumpBlocked(name, finding)
+
+    repo_url = _resolve_approved_product_url(client, target)
+    factory = producer_view_factory or ProducerView.at_head
+    head_view, head_sha = factory(repo_url)
+    try:
+        head_view.primary_or_raise()
+    except MissingPrimaryDataProduct as e:
+        raise PrimaryRemovedAtHead(name, repo_url) from e
+
+    del force  # reserved for future --dry-run
+    new_manifest = manifest.apply_pin_bump(repo=name, new_pin=head_sha)
+    new_manifest.save(manifest_path)
+    return manifest_path
+
+
+def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) -> str:
+    """Slice-8 Decision #2α: catalog is canonical for repo identity."""
+    entry = client.fetch(ap.repo)
+    return _require_repo_url(entry.model_dump(), name=ap.repo)

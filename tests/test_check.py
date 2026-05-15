@@ -415,13 +415,100 @@ def test_upgrades_uses_producer_view_try_at_by_default(tmp_path: Path, monkeypat
 def test_finding_source_field_round_trips(tmp_path: Path):
     (tmp_path / "metadata.json").write_text("not valid json{")
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
-    
+
     findings = check_project(tmp_path)
     producer_findings = [f for f in findings if f.section == "producer"]
     consumer_findings = [f for f in findings if f.section == "consumer"]
-    
+
     assert len(producer_findings) > 0
     assert all(f.source is None for f in producer_findings)
-    
+
     assert len(consumer_findings) == 1
     assert consumer_findings[0].source == tmp_path / "data" / "imports" / "standalone_import.dvc"
+
+
+# ---------------------------------------------------------------------------
+# Slice 8 — enclave manifest walker
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil_for_enclave_tests  # noqa: E402
+
+from mintd.catalog import InMemoryCatalogClient  # noqa: E402
+
+_ENCLAVE_FIXTURE = FIXTURES / "enclave_manifest_v2_minimal.yaml"
+_PROVIDER_XW_URL = "https://github.com/example-org/provider-xw"
+
+
+def _stage_enclave_manifest(tmp_path: Path) -> Path:
+    """Copy the minimal enclave manifest fixture into tmp_path."""
+    dest = tmp_path / "enclave_manifest.yaml"
+    _shutil_for_enclave_tests.copy(_ENCLAVE_FIXTURE, dest)
+    return dest
+
+
+def _client_with_provider_xw() -> InMemoryCatalogClient:
+    client = InMemoryCatalogClient()
+    data = json.loads(MINIMAL.read_text())
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "data_provider-xw"
+    data["repository"]["github_url"] = _PROVIDER_XW_URL
+    client.register(Metadata.model_validate(data))
+    return client
+
+
+def test_consumer_section_walks_enclave_manifest_approved_products(tmp_path: Path):
+    _write_metadata(tmp_path)
+    manifest_path = _stage_enclave_manifest(tmp_path)
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    f = consumer_findings[0]
+    assert f.source == manifest_path
+    assert f.field_path == "approved_products[provider-xw]"
+
+
+def test_consumer_section_walks_both_dvc_files_and_enclave_manifest(tmp_path: Path):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    manifest_path = _stage_enclave_manifest(tmp_path)
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    dvc_findings = [f for f in consumer_findings if f.source != manifest_path]
+    manifest_findings = [f for f in consumer_findings if f.source == manifest_path]
+    assert len(dvc_findings) == 1
+    assert dvc_findings[0].field_path is None
+    assert len(manifest_findings) == 1
+    assert manifest_findings[0].field_path == "approved_products[provider-xw]"
+
+
+def test_consumer_section_handles_invalid_enclave_manifest(tmp_path: Path):
+    _write_metadata(tmp_path)
+    (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    assert consumer_findings[0].severity == "error"
+    assert consumer_findings[0].source == tmp_path / "enclave_manifest.yaml"
+
+
+def test_consumer_section_empty_approved_products_emits_nothing(tmp_path: Path):
+    _write_metadata(tmp_path)
+    (tmp_path / "enclave_manifest.yaml").write_text(
+        "schema_version: '2.0'\nenclave_name: my_workspace\napproved_products: []\n"
+        "downloaded: []\ntransferred: []\n"
+    )
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert consumer_findings == []
