@@ -35,11 +35,29 @@ class FakePR:
 
 
 @dataclass
+class FakeTag:
+    work_dir: Path
+    name: str
+    message: str
+
+
+@dataclass
+class ResetHardCall:
+    work_dir: Path
+    ref: str
+
+
+@dataclass
 class _FakeRegistryGitOps:
     """Real local-git + stubbed gh. See module docstring."""
 
     open_prs: dict[str, FakePR] = field(default_factory=dict)            # branch -> PR
     _next_pr: int = 100
+    tag_calls: list[FakeTag] = field(default_factory=list)
+    reset_hard_calls: list[ResetHardCall] = field(default_factory=list)
+    tag_raises: Exception | None = None
+    commit_all_raises: Exception | None = None
+    force_dirty: bool = False
 
     # ------------------------------------------------------------------
     # git (real)
@@ -52,12 +70,15 @@ class _FakeRegistryGitOps:
         self._git(["fetch", "origin"], cwd=repo_dir)
 
     def reset_hard(self, repo_dir: Path, ref: str) -> None:
+        self.reset_hard_calls.append(ResetHardCall(repo_dir, ref))
         self._git(["reset", "--hard", ref], cwd=repo_dir)
 
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["checkout", "-b", branch], cwd=repo_dir)
 
     def commit_all(self, repo_dir: Path, message: str) -> None:
+        if self.commit_all_raises:
+            raise self.commit_all_raises
         self._git(["add", "-A"], cwd=repo_dir)
         # Configure local user.email/user.name so commits don't require a global config.
         self._git(["-c", "user.email=test@mintd", "-c", "user.name=test", "commit", "-m", message],
@@ -65,6 +86,18 @@ class _FakeRegistryGitOps:
 
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["push", "-u", "origin", branch], cwd=repo_dir)
+
+    def tag(self, work_dir: Path, name: str, message: str) -> None:
+        if self.tag_raises:
+            raise self.tag_raises
+        self.tag_calls.append(FakeTag(work_dir, name, message))
+        self._git(["tag", "-a", name, "-m", message], cwd=work_dir)
+
+    def is_working_tree_clean(self, work_dir: Path) -> bool:
+        if self.force_dirty:
+            return False
+        stdout = self._git(["status", "--porcelain"], cwd=work_dir)
+        return stdout.strip() == ""
 
     # ------------------------------------------------------------------
     # gh (stubbed)

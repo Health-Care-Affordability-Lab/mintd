@@ -24,6 +24,7 @@ class Config(BaseModel):
     registry_url: str | None = None
     cache_dir: Path | None = None
     dvc_timeout: float = 120.0
+    git_timeout: float = 30.0
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":

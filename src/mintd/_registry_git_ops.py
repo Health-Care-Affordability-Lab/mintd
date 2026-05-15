@@ -34,6 +34,19 @@ class GitOpError(Exception):
         self.stderr = stderr
 
 
+class GitTagError(GitOpError):
+    """`git tag` failed."""
+
+
+class GitTagAlreadyExists(GitTagError):
+    """The tag already exists."""
+
+    def __init__(self, name: str, work_dir: str) -> None:
+        super().__init__(["git", "tag", name], f"tag {name} already exists")
+        self.name = name
+        self.work_dir = work_dir
+
+
 class GhAuthError(Exception):
     """`gh` reports the user is not authenticated. Caller should prompt
     `gh auth login` and retry."""
@@ -76,6 +89,8 @@ class RegistryGitOps(Protocol):
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def tag(self, work_dir: Path, name: str, message: str) -> None: ...
+    def is_working_tree_clean(self, work_dir: Path) -> bool: ...
     def open_pr(
         self,
         repo_dir: Path,
@@ -125,6 +140,18 @@ class SubprocessRegistryGitOps:
 
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["push", "-u", "origin", branch], cwd=repo_dir)
+
+    def tag(self, work_dir: Path, name: str, message: str) -> None:
+        try:
+            self._git(["tag", "-a", name, "-m", message], cwd=work_dir)
+        except GitOpError as e:
+            if "already exists" in e.stderr:
+                raise GitTagAlreadyExists(name, str(work_dir)) from e
+            raise GitTagError(e.command, e.stderr) from e
+
+    def is_working_tree_clean(self, work_dir: Path) -> bool:
+        stdout = self._git(["status", "--porcelain"], cwd=work_dir)
+        return stdout.strip() == ""
 
     # ------------------------------------------------------------------
     # gh

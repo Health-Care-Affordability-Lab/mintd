@@ -57,13 +57,15 @@ def patched_clients(
 
 def _register_provider_xw(
     client: InMemoryCatalogClient, primary: str = "outputs/main.parquet"
-) -> None:
+) -> Metadata:
     data = json.loads(MINIMAL.read_text())
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
     data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
     data["data_products"]["primary"] = primary
-    client.register(Metadata.model_validate(data))
+    metadata = Metadata.model_validate(data)
+    client.register(metadata)
+    return metadata
 
 
 # ---------------------------------------------------------------------------
@@ -754,3 +756,87 @@ def test_init_existing_metadata_exits_one(
 
     err = capsys.readouterr().err
     assert "error:" in err
+
+
+# ---------------------------------------------------------------------------
+# Slice 15 — mintd publish
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def patched_git_ops(monkeypatch: pytest.MonkeyPatch):
+    from tests._fakes.registry_git_ops import _FakeRegistryGitOps
+    fake = _FakeRegistryGitOps()
+    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg: fake)
+    return fake
+
+
+def _init_git_in(path: Path) -> None:
+    """Initialize a git repo in `path` so the slice-15 working-tree check passes."""
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        cwd=path, check=True,
+    )
+
+
+def test_cli_publish_dry_run_renders_diff(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    client, _ = patched_clients
+    metadata = _register_provider_xw(client)
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "→" in out
+
+
+def test_cli_publish_blocked_by_check_errors_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    # No metadata.json → check_project emits an error finding → publish blocked.
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+
+
+def test_cli_publish_full_flow_calls_each_op(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    client, dvc_ops = patched_clients
+    metadata = _register_provider_xw(client)
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+    # Stage the metadata so the working tree is clean.
+    subprocess.run(["git", "add", "metadata.json"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "-q", "-m", "add metadata"],
+        cwd=tmp_path, check=True,
+    )
+
+    rc = cli.main(["publish", "--path", str(tmp_path)])
+
+    assert rc == 0
+    # dvc push called
+    assert len(dvc_ops.push_calls) >= 1
+    # git tag called
+    assert len(patched_git_ops.tag_calls) >= 1

@@ -22,6 +22,7 @@ from typing import NoReturn
 
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcOps, SubprocessDvcOps
+from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
@@ -51,9 +52,15 @@ from .enclave import (
 from .imports import scan_imports
 from .init import InitDestinationExists, init_project
 from .model import Metadata
-
 from .pending_registrations import PendingRegistrations
 from .producer import MissingPrimaryDataProduct, ProducerError
+from .publish import (
+    PublishBlocked,
+    PublishError,
+    WorkingTreeDirty,
+    publish_project,
+)
+
 
 
 # Unicode prefixes assume UTF-8 stdout. Modern terminals and CI runners
@@ -212,6 +219,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_reg_sync = p_registry_sub.add_parser("sync", help="Refresh the registry cache")
     p_reg_sync.set_defaults(_handler=_handle_registry_sync)
 
+    p_publish = subs.add_parser("publish", help="Publish a new version of this project")
+    p_publish.add_argument("version", nargs="?")
+    p_publish.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_publish.add_argument("--message", "-m")
+    p_publish.add_argument("--path", type=Path, default=Path("."))
+    p_publish.set_defaults(_handler=_handle_publish)
+
     return parser
 
 
@@ -241,6 +255,13 @@ def _resolve_clients(config: Config) -> tuple[CatalogClient, DvcOps]:
     client = _resolve_catalog_client(config)
     dvc_ops: DvcOps = SubprocessDvcOps(timeout=config.dvc_timeout)
     return client, dvc_ops
+
+
+def _resolve_git_ops(config: Config) -> RegistryGitOps:
+    """Build production ``SubprocessRegistryGitOps`` from config.
+    Tests monkeypatch this function to inject fakes.
+    """
+    return SubprocessRegistryGitOps(timeout=config.git_timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +585,44 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
     client = _resolve_catalog_client(config)
     count = client.sync()
     print(f"synced ({count} entries)")
+    return 0
+
+
+def _handle_publish(args: argparse.Namespace) -> int:
+    config = Config.load()
+    client, dvc_ops = _resolve_clients(config)
+    git_ops = _resolve_git_ops(config)
+    try:
+        result = publish_project(
+            project_path=args.path,
+            version=args.version,
+            dry_run=args.dry_run,
+            client=client,
+            dvc_ops=dvc_ops,
+            git_ops=git_ops,
+            message=args.message,
+        )
+    except PublishBlocked as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        for f in exc.findings[:5]:
+            print(f"  [{f.severity}] {f.source or '<project>'}: {f.message}", file=sys.stderr)
+        if len(exc.findings) > 5:
+            print(f"  ... and {len(exc.findings) - 5} more", file=sys.stderr)
+        return 1
+    except WorkingTreeDirty as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if exc.recovery_hint:
+            print(f"note: {exc.recovery_hint}", file=sys.stderr)
+        return 1
+    except PublishError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if exc.recovery_hint:
+            print(f"note: {exc.recovery_hint}", file=sys.stderr)
+        return 1
+    # Success rendering.
+    print(f"version: {result.version}" + (" (dry-run)" if result.dry_run else ""))
+    for change in result.diff:
+        print(f"  {change.field_path}: {change.before!r} → {change.after!r}")
     return 0
 
 

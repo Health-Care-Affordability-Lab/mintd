@@ -20,11 +20,18 @@ class DvcImportCall(NamedTuple):
     force: bool
 
 
+class DvcPushCall(NamedTuple):
+    remote: str | None
+    jobs: int | None
+
+
 class _FakeDvcOps:
     """Implements `mintd._dvc_ops.DvcOps` structurally."""
 
     def __init__(self) -> None:
         self.calls: list[DvcImportCall] = []
+        self.push_calls: list[DvcPushCall] = []
+        self.push_raises: Exception | None = None
 
     def import_(
         self,
@@ -55,3 +62,8 @@ class _FakeDvcOps:
             f"      rev_lock: {rev_lock}\n"
         )
         return dvc_file
+
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
+        if self.push_raises:
+            raise self.push_raises
+        self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs))

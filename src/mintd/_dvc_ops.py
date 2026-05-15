@@ -18,6 +18,10 @@ class DvcNotInstalled(DvcOpError):
     """The `dvc` binary is not on PATH."""
 
 
+class DvcPushError(DvcOpError):
+    """`dvc push` exited non-zero."""
+
+
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
@@ -46,6 +50,10 @@ class DvcOps(Protocol):
         force: bool = False,
     ) -> Path:
         """Run `dvc import` and return the path of the produced `.dvc` file."""
+        ...
+
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
+        """Run `dvc push`."""
         ...
 
 
@@ -94,3 +102,27 @@ class SubprocessDvcOps:
             raise DvcOpError(f"dvc import failed (exit {result.returncode}): {stderr.strip()}")
 
         return dest.parent / (dest.name + ".dvc")
+
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
+        cmd = ["dvc", "push"]
+        if remote:
+            cmd.extend(["--remote", remote])
+        if jobs:
+            cmd.extend(["--jobs", str(jobs)])
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+        except subprocess.TimeoutExpired as exc:
+            # Wrap timeout as DvcPushError so publish_project's rollback fires.
+            raise DvcPushError(
+                f"dvc push timed out after {self._timeout}s"
+            ) from exc
+        if result.returncode != 0:
+            raise DvcPushError(f"dvc push failed (exit {result.returncode}): {result.stderr.strip()}")
