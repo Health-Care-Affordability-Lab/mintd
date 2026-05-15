@@ -11,6 +11,8 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from mintd.check import CheckFinding, check_project
 from mintd.model import DataProductOutput, DataProducts, Metadata
 from mintd.producer import ProducerError, ProducerView
@@ -512,3 +514,123 @@ def test_consumer_section_empty_approved_products_emits_nothing(tmp_path: Path):
     consumer_findings = [f for f in findings if f.section == "consumer"]
 
     assert consumer_findings == []
+
+
+# ---------------------------------------------------------------------------
+# Slice 9 — `kind` discriminator pins
+# ---------------------------------------------------------------------------
+
+_PIN = "4f7c2a1abcd1234567890abcdef0123456789abc"
+
+
+@pytest.mark.parametrize(
+    "result,expected_kind,expected_severity,message_fragment",
+    [
+        (ProducerError.unreachable("repo", _PIN, "timeout"), "unreachable", "warning", "producer unreachable"),
+        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "error", "producer pin missing"),
+        (ProducerError.metadata_missing("repo", _PIN), "metadata_missing", "error", "producer has no metadata.json"),
+        (ProducerError.metadata_invalid("repo", _PIN, "bad"), "metadata_invalid", "error", "producer metadata invalid"),
+        (ProducerError.schema_too_old("repo", _PIN, "1.5"), "schema_too_old", "warning", "uses schema_version"),
+    ],
+)
+def test_consumer_dvc_error_findings_assign_correct_kinds(
+    tmp_path: Path, result, expected_kind, expected_severity, message_fragment
+):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    factory = _factory_returning(result)
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    f = consumer_findings[0]
+    assert f.kind == expected_kind
+    assert f.severity == expected_severity
+    assert message_fragment in f.message
+
+
+def test_consumer_dvc_up_to_date_finding_has_up_to_date_kind(tmp_path: Path):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    factory = _factory_returning(_view_with_primary("outputs/cms_based/"))
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    assert consumer_findings[0].kind == "up_to_date"
+    assert consumer_findings[0].message == "up to date"
+
+
+def test_consumer_dvc_drift_finding_has_drift_kind(tmp_path: Path):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    pin_view = _view_with_primary("outputs/cms_based/")
+    head_view = _view_with_primary("outputs/new.parquet")
+    factory = _factory_by_pin({_PIN: pin_view, "": head_view})
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    f = consumer_findings[0]
+    assert f.kind == "drift"
+    assert f.severity == "warning"
+    assert "upgrade available:" in f.message
+
+
+@pytest.mark.parametrize(
+    "result,expected_kind,expected_severity",
+    [
+        (ProducerError.unreachable("repo", _PIN, "timeout"), "unreachable", "warning"),
+        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "error"),
+        (ProducerError.metadata_missing("repo", _PIN), "metadata_missing", "error"),
+        (ProducerError.metadata_invalid("repo", _PIN, "bad"), "metadata_invalid", "error"),
+        (ProducerError.schema_too_old("repo", _PIN, "1.5"), "schema_too_old", "warning"),
+    ],
+)
+def test_consumer_manifest_error_findings_assign_correct_kinds(
+    tmp_path: Path, result, expected_kind, expected_severity
+):
+    _write_metadata(tmp_path)
+    _stage_enclave_manifest(tmp_path)
+    client = _client_with_provider_xw()
+    factory = _factory_returning(result)
+
+    findings = check_project(
+        tmp_path, upgrades=True, producer_view_factory=factory, client=client
+    )
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    f = consumer_findings[0]
+    assert f.kind == expected_kind
+    assert f.severity == expected_severity
+    assert f.source == tmp_path / "enclave_manifest.yaml"
+    assert f.field_path == "approved_products[provider-xw]"
+
+
+def test_consumer_manifest_invalid_finding_has_invalid_manifest_kind(tmp_path: Path):
+    _write_metadata(tmp_path)
+    (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    assert consumer_findings[0].kind == "invalid_manifest"
+
+
+def test_consumer_manifest_catalog_unresolved_finding_has_catalog_unresolved_kind(tmp_path: Path):
+    """`client=None` path → kind='catalog_unresolved'."""
+    _write_metadata(tmp_path)
+    _stage_enclave_manifest(tmp_path)
+    # No client passed; manifest walker emits a catalog_unresolved finding.
+
+    findings = check_project(tmp_path)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    assert consumer_findings[0].kind == "catalog_unresolved"

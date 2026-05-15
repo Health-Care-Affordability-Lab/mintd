@@ -50,9 +50,6 @@ __all__ = [
 ]
 
 
-_DRIFT_PREFIX = "upgrade available:"
-
-
 class AppendOnlyViolation(Exception):
     """`transferred[]` is permanent. Mutating or removing an existing entry
     raises this at `EnclaveManifest.save` time. `changed_indices` are the
@@ -192,11 +189,14 @@ def enclave_bump(
             f"no consumer finding for {name!r} (manifest={manifest_path})"
         )
 
-    if finding.severity == "info":
-        return None
-    if finding.severity == "error":
+    if finding.kind is None:
+        # Contract: consumer-section findings post-slice-9 always carry a kind.
         raise BumpBlocked(name, finding)
-    if not finding.message.startswith(_DRIFT_PREFIX):
+    if finding.kind == "up_to_date":
+        return None
+    if finding.kind != "drift":
+        # unreachable / schema_too_old / pin_missing / metadata_missing /
+        # metadata_invalid / invalid_manifest / catalog_unresolved — all non-actionable.
         raise BumpBlocked(name, finding)
 
     repo_url = _resolve_approved_product_url(client, target)

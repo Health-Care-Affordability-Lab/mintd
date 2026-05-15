@@ -53,7 +53,7 @@ def test_bump_up_to_date_returns_none(tmp_path):
     client = InMemoryCatalogClient()
     client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     
-    finding = CheckFinding(severity="info", section="consumer", message="up to date", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="info", section="consumer", message="up to date", source=p, field_path="approved_products[provider-xw]", kind="up_to_date")
     result = enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
     assert result is None
 
@@ -66,9 +66,9 @@ def test_bump_with_drift_rewrites_manifest(tmp_path):
         view = ProducerView(repo="provider-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]", kind="drift")
     enclave_bump(client, manifest_path=p, name="provider-xw", producer_view_factory=factory, check_findings=[finding])
-    
+
     assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
 
 def test_bump_name_not_imported_raises_import_not_found(tmp_path):
@@ -80,14 +80,14 @@ def test_bump_name_not_imported_raises_import_not_found(tmp_path):
 def test_bump_pin_missing_raises_bump_blocked(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    finding = CheckFinding(severity="error", section="consumer", message="producer pin missing: ...", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="error", section="consumer", message="producer pin missing: ...", source=p, field_path="approved_products[provider-xw]", kind="pin_missing")
     with pytest.raises(BumpBlocked):
         enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
 
 def test_bump_unreachable_raises_bump_blocked(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    finding = CheckFinding(severity="warning", section="consumer", message="producer unreachable: ...", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="warning", section="consumer", message="producer unreachable: ...", source=p, field_path="approved_products[provider-xw]", kind="unreachable")
     with pytest.raises(BumpBlocked):
         enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
 
@@ -103,7 +103,7 @@ def test_bump_head_primary_removed_raises_primary_removed_at_head(tmp_path):
         view = ProducerView(repo="p", pin=HEAD_SHA, metadata=Metadata.model_validate(broken_meta))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]", kind="drift")
     with pytest.raises(PrimaryRemovedAtHead):
         enclave_bump(client, manifest_path=p, name="provider-xw", producer_view_factory=broken_factory, check_findings=[finding])
 
@@ -118,9 +118,9 @@ def test_bump_writes_pin_through_append_only_save(tmp_path):
         view = ProducerView(repo="provider-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]")
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[provider-xw]", kind="drift")
     enclave_bump(client, manifest_path=p, name="provider-xw", producer_view_factory=factory, check_findings=[finding])
-    
+
     m = EnclaveManifest.load(p)
     assert m.approved_products[0].pin == HEAD_SHA
     assert len(m.transferred) == 1
@@ -136,6 +136,7 @@ def test_bump_schema_too_old_raises_bump_blocked(tmp_path):
         message=f"producer at pin {PIN_SHA[:7]} uses schema_version 1.5 (expected 2.0)",
         source=p,
         field_path="approved_products[provider-xw]",
+        kind="schema_too_old",
     )
     with pytest.raises(BumpBlocked) as ei:
         enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
@@ -151,6 +152,7 @@ def test_bump_metadata_invalid_raises_bump_blocked(tmp_path):
         message=f"producer metadata invalid at pin {PIN_SHA[:7]}: validation error",
         source=p,
         field_path="approved_products[provider-xw]",
+        kind="metadata_invalid",
     )
     with pytest.raises(BumpBlocked) as ei:
         enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
@@ -174,6 +176,7 @@ def test_bump_consumes_provided_check_findings_without_recomputing(
         message="up to date",
         source=p,
         field_path="approved_products[provider-xw]",
+        kind="up_to_date",
     )
     result = enclave_bump(
         client, manifest_path=p, name="provider-xw", check_findings=[finding]
@@ -194,6 +197,7 @@ def test_bump_default_uses_check_project_when_no_findings_passed(
         message="up to date",
         source=p,
         field_path="approved_products[provider-xw]",
+        kind="up_to_date",
     )
 
     def recorder(path: Path, **kwargs: Any) -> list[CheckFinding]:
@@ -231,8 +235,30 @@ def test_bump_default_uses_producer_view_at_head(tmp_path, monkeypatch):
         message="upgrade available: producer now publishes 'X'",
         source=p,
         field_path="approved_products[provider-xw]",
+        kind="drift",
     )
     enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
 
     assert captured == [REPO_URL]
     assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
+
+
+def test_enclave_bump_missing_kind_raises_bump_blocked(tmp_path):
+    """A consumer-section finding without `kind` is a regression contract
+    violation post-slice-9; `enclave_bump` must raise `BumpBlocked` rather
+    than silently dispatching."""
+    p = _make_manifest(tmp_path)
+    client = InMemoryCatalogClient()
+    finding = CheckFinding(
+        severity="warning",
+        section="consumer",
+        message="upgrade available: ...",
+        source=p,
+        field_path="approved_products[provider-xw]",
+        # kind deliberately omitted (default None)
+    )
+
+    with pytest.raises(BumpBlocked) as ei:
+        enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
+
+    assert ei.value.finding is finding

@@ -66,6 +66,17 @@ class CheckFinding:
     message: str
     field_path: str | None = None
     source: Path | None = None  # NEW: which file the finding originated from
+    kind: Literal[
+        "drift",
+        "up_to_date",
+        "unreachable",
+        "schema_too_old",
+        "pin_missing",
+        "metadata_missing",
+        "metadata_invalid",
+        "invalid_manifest",
+        "catalog_unresolved",
+    ] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +247,7 @@ def _consumer_findings_from_enclave_manifest(
                 section="consumer",
                 message=f"enclave_manifest.yaml invalid: {e}",
                 source=manifest_path,
+                kind="invalid_manifest",
             )
         ]
 
@@ -256,6 +268,7 @@ def _consumer_findings_from_enclave_manifest(
                     message=f"catalog client not provided; cannot resolve producer URL for {ap.repo}",
                     source=manifest_path,
                     field_path=field_path,
+                    kind="catalog_unresolved",
                 )
             )
             continue
@@ -270,11 +283,13 @@ def _consumer_findings_from_enclave_manifest(
                     message=str(e),
                     source=manifest_path,
                     field_path=field_path,
+                    kind="catalog_unresolved",
                 )
             )
             continue
 
         if not upgrades:
+            # Summary-only finding (no upgrades path); kind stays None — never reaches a write command.
             msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {ap.source_path or '<primary>'})"
             findings.append(
                 CheckFinding(
@@ -333,6 +348,7 @@ def _uptodate_finding_for(*, source: Path, field_path: str | None = None) -> Che
         message="up to date",
         source=source,
         field_path=field_path,
+        kind="up_to_date",
     )
 
 
@@ -364,6 +380,7 @@ def _drift_finding_from_views(
         message=f"upgrade available: producer now publishes {head_primary_str!r} (you have {expected_output_path!r})",
         source=source,
         field_path=field_path,
+        kind="drift",
     )
 
 
@@ -382,24 +399,38 @@ def _drift_finding(
 def _error_finding_for(
     source: Path, field_path: str | None, err: ProducerError
 ) -> CheckFinding:
+    kind: Literal[
+        "unreachable",
+        "pin_missing",
+        "metadata_missing",
+        "metadata_invalid",
+        "schema_too_old",
+    ] | None
     if err.reason == ProducerError.Reason.UNREACHABLE:
         severity: Literal["error", "warning", "info"] = "warning"
         message = f"producer unreachable: {err.detail}"
+        kind = "unreachable"
     elif err.reason == ProducerError.Reason.PIN_MISSING:
         severity = "error"
         message = f"producer pin missing: {err.pin[:7]} not found in {err.repo}"
+        kind = "pin_missing"
     elif err.reason == ProducerError.Reason.METADATA_MISSING:
         severity = "error"
         message = f"producer has no metadata.json at pin {err.pin[:7]}"
+        kind = "metadata_missing"
     elif err.reason == ProducerError.Reason.METADATA_INVALID:
         severity = "error"
         message = f"producer metadata invalid at pin {err.pin[:7]}: {err.detail}"
+        kind = "metadata_invalid"
     elif err.reason == ProducerError.Reason.SCHEMA_TOO_OLD:
         severity = "warning"
         message = f"producer at pin {err.pin[:7]} uses schema_version {err.detail} (expected 2.0)"
+        kind = "schema_too_old"
     else:
+        # Reason is a closed StrEnum; this arm is defensive — kind stays None.
         severity = "error"
         message = f"producer error at pin {err.pin[:7]}: {err.detail}"
+        kind = None
 
     return CheckFinding(
         severity=severity,
@@ -407,6 +438,7 @@ def _error_finding_for(
         message=message,
         source=source,
         field_path=field_path,
+        kind=kind,
     )
 
 

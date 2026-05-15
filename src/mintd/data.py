@@ -143,10 +143,6 @@ def _require_repo_url(entry: dict[str, Any], *, name: str) -> str:
     return url
 
 
-_DRIFT_PREFIX = "upgrade available:"
-_UP_TO_DATE_MESSAGE = "up to date"
-
-
 def bump_import(
     client: CatalogClient,
     dvc_ops: DvcOps,
@@ -201,16 +197,15 @@ def bump_import(
             f"no consumer finding for {name!r} (source={dvc_source})"
         )
 
-    if finding.severity == "info":
-        # `_consumer_findings`' only info template in upgrades mode is
-        # "up to date"; treat any other info as a no-op for forward compat.
-        return None
-    if finding.severity == "error":
+    if finding.kind is None:
+        # Contract: consumer-section findings post-slice-9 always carry a kind.
+        # A None here is a regression — never silently dispatch.
         raise BumpBlocked(name, finding)
-    # severity == "warning"
-    if not finding.message.startswith(_DRIFT_PREFIX):
-        # Non-actionable warning (unreachable / schema_too_old). Producer
-        # is in a state the consumer can't safely bump past.
+    if finding.kind == "up_to_date":
+        return None
+    if finding.kind != "drift":
+        # unreachable / schema_too_old / pin_missing / metadata_missing /
+        # metadata_invalid / invalid_manifest / catalog_unresolved — all non-actionable.
         raise BumpBlocked(name, finding)
 
     factory = producer_view_factory or ProducerView.at_head

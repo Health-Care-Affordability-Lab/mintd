@@ -86,6 +86,7 @@ def _drift_finding(source: Path) -> CheckFinding:
             "'outputs/new.parquet' (you have 'cms_based')"
         ),
         source=source,
+        kind="drift",
     )
 
 
@@ -95,6 +96,7 @@ def _up_to_date_finding(source: Path) -> CheckFinding:
         section="consumer",
         message="up to date",
         source=source,
+        kind="up_to_date",
     )
 
 
@@ -175,6 +177,7 @@ def test_bump_pin_missing_raises_bump_blocked(tmp_path: Path) -> None:
         section="consumer",
         message=f"producer pin missing: {PIN_SHA[:7]} not found in {REPO_URL}",
         source=dvc_path,
+        kind="pin_missing",
     )
 
     with pytest.raises(BumpBlocked) as ei:
@@ -200,6 +203,7 @@ def test_bump_unreachable_raises_bump_blocked(tmp_path: Path) -> None:
         section="consumer",
         message="producer unreachable: git archive timed out",
         source=dvc_path,
+        kind="unreachable",
     )
 
     with pytest.raises(BumpBlocked) as ei:
@@ -226,6 +230,7 @@ def test_bump_schema_too_old_raises_bump_blocked(tmp_path: Path) -> None:
             f"producer at pin {PIN_SHA[:7]} uses schema_version 1.5 (expected 2.0)"
         ),
         source=dvc_path,
+        kind="schema_too_old",
     )
 
     with pytest.raises(BumpBlocked) as ei:
@@ -250,6 +255,7 @@ def test_bump_metadata_invalid_raises_bump_blocked(tmp_path: Path) -> None:
         section="consumer",
         message=f"producer metadata invalid at pin {PIN_SHA[:7]}: validation error",
         source=dvc_path,
+        kind="metadata_invalid",
     )
 
     with pytest.raises(BumpBlocked) as ei:
@@ -406,3 +412,36 @@ def test_at_head_returns_resolved_sha_not_symbolic_ref(tmp_path: Path) -> None:
     assert cache_files[0].name == f"{resolved}.json"
     assert "HEAD" not in str(cache_files[0])
     assert fetcher.head_calls == [REPO_URL]
+
+
+# ---------------------------------------------------------------------------
+# Slice 9 — defensive `kind is None` arm
+# ---------------------------------------------------------------------------
+
+
+def test_bump_missing_kind_raises_bump_blocked(tmp_path: Path) -> None:
+    """A consumer-section finding without `kind` is a regression contract
+    violation post-slice-9; `bump_import` must raise `BumpBlocked` rather
+    than silently dispatching as no-op."""
+    dvc_path = _stage_project(tmp_path)
+    fake = _FakeDvcOps()
+    client = InMemoryCatalogClient()
+    finding = CheckFinding(
+        severity="warning",
+        section="consumer",
+        message="upgrade available: producer now publishes 'X' (you have 'Y')",
+        source=dvc_path,
+        # kind deliberately omitted (default None)
+    )
+
+    with pytest.raises(BumpBlocked) as ei:
+        bump_import(
+            client,
+            fake,
+            project_path=tmp_path,
+            name="cms_based",
+            check_findings=[finding],
+        )
+
+    assert ei.value.finding is finding
+    assert fake.calls == []
