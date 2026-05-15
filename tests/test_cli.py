@@ -22,11 +22,17 @@ from mintd.catalog import InMemoryCatalogClient
 from mintd.check import CheckFinding
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
-
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
+ENCLAVE_FIXTURE = FIXTURES / "enclave_manifest_v2_minimal.yaml"
+STANDALONE_DVC = FIXTURES / "dvc_files" / "standalone_import.dvc"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
+
+
+def _stage_dvc_import(tmp_path: Path) -> None:
+    (tmp_path / "data" / "imports").mkdir(parents=True, exist_ok=True)
+    shutil.copy(STANDALONE_DVC, tmp_path / "data" / "imports" / "cms_based.dvc")
 
 
 @pytest.fixture
@@ -368,3 +374,84 @@ def test_python_m_mintd_version_smoke() -> None:
     )
     assert result.returncode == 0
     assert "0.0.1" in result.stdout
+
+def test_data_list_catalog_empty(patched_clients, capsys):
+    cli.main(["data", "list"])
+    out, _ = capsys.readouterr()
+    assert "no entries" in out
+
+def test_data_list_catalog_populated(patched_clients, capsys):
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    
+    # Register second
+    data = json.loads(MINIMAL.read_text())
+    data["project"]["name"] = "other-project"
+    data["project"]["full_name"] = "data_other-project"
+    data["repository"]["github_url"] = "https://github.com/example-org/other-project"
+    data["metadata"]["description"] = "other description"
+    client.register(Metadata.model_validate(data))
+    
+    cli.main(["data", "list"])
+    out, _ = capsys.readouterr()
+    assert "provider-xw" in out
+    assert "other-project" in out
+
+def test_data_list_imported_empty(patched_clients, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cli.main(["data", "list", "--imported"])
+    out, _ = capsys.readouterr()
+    assert "no imports" in out
+
+def test_data_list_imported_populated(patched_clients, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _stage_dvc_import(tmp_path)
+    cli.main(["data", "list", "--imported"])
+    out, _ = capsys.readouterr()
+    assert "provider-xw" in out
+    assert "4f7c2a1" in out
+
+def test_data_list_imported_with_type_exits_64(patched_clients):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["data", "list", "--imported", "--type", "data"])
+    assert exc.value.code == 64
+
+def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    shutil.copy(ENCLAVE_FIXTURE, manifest_path)
+    cli.main(["enclave", "list", "--manifest", str(manifest_path)])
+    out, _ = capsys.readouterr()
+    assert "approved_products:" in out
+    assert "downloaded:" in out
+    assert "transferred:" in out
+    assert out.count("(none)") == 2
+    assert "provider-xw" in out
+
+def test_enclave_list_filtered_by_repo(patched_clients, capsys, tmp_path):
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    # Create multi-entry manifest matching EnclaveManifest schema
+    content = """
+enclave_name: test-enclave
+approved_products:
+  - repo: provider-xw
+    registry_entry: entry1
+    pin: 4f7c2a1
+    source_path: path1
+  - repo: other-provider
+    registry_entry: entry2
+    pin: abcdef0
+    source_path: path2
+downloaded: []
+transferred: []
+"""
+    manifest_path.write_text(content)
+    cli.main(["enclave", "list", "provider-xw", "--manifest", str(manifest_path)])
+    out, _ = capsys.readouterr()
+    assert "provider-xw" in out
+    assert "other-provider" not in out
+
+def test_enclave_list_missing_manifest_exits_one(patched_clients, capsys, tmp_path):
+    rc = cli.main(["enclave", "list", "--manifest", str(tmp_path / "nope.yaml")])
+    assert rc == 1
+    _, err = capsys.readouterr()
+    assert "not found" in err

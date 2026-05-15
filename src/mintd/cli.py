@@ -25,6 +25,7 @@ from ._dvc_ops import DvcOps, SubprocessDvcOps
 from .catalog import (
     CatalogAlreadyExists,
     CatalogClient,
+    CatalogFilter,
     CatalogNotFound,
     GitCatalogClient,
 )
@@ -38,7 +39,8 @@ from .data import (
     bump_import,
     import_product,
 )
-from .enclave import AppendOnlyViolation, enclave_bump
+from .enclave import AppendOnlyViolation, EnclaveManifest, enclave_bump
+from .imports import scan_imports
 from .model import Metadata
 from .pending_registrations import PendingRegistrations
 from .producer import ProducerError
@@ -119,6 +121,14 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
 
+    p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
+    p_data_list.add_argument("--imported", action="store_true")
+    p_data_list.add_argument(
+        "--type", dest="project_type",
+        choices=["data", "code", "project", "enclave"],
+    )
+    p_data_list.set_defaults(_handler=_handle_data_list, _parser=p_data_list)
+
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
     p_enclave_sub = p_enclave.add_subparsers(dest="enclave_command")
     p_ebump = p_enclave_sub.add_parser("bump", help="Bump approved_products[].pin")
@@ -128,6 +138,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_ebump.add_argument("--force", action="store_true")
     p_ebump.set_defaults(_handler=_handle_enclave_bump)
+
+    p_elist = p_enclave_sub.add_parser("list", help="List manifest entries")
+    p_elist.add_argument("repo", nargs="?")
+    p_elist.add_argument(
+        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
+    )
+    p_elist.set_defaults(_handler=_handle_enclave_list)
 
     p_registry = subs.add_parser("registry", help="Catalog commands")
     p_registry_sub = p_registry.add_subparsers(dest="registry_command")
@@ -250,6 +267,75 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         return 1
     for p in produced:
         print(p)
+    return 0
+
+
+def _handle_data_list(args: argparse.Namespace) -> int:
+    if args.imported and args.project_type is not None:
+        args._parser.error("--imported cannot be combined with --type")
+
+    if args.imported:
+        deps = scan_imports(Path("."))
+        if not deps:
+            print("no imports")
+            return 0
+        for dep in deps:
+            print(f"{dep.local_path} ← {dep.producer_repo}@{dep.contract_pin[:7]} ({dep.output_path})")
+        return 0
+
+    config = Config.load()
+    client = _resolve_catalog_client(config)
+    filter_ = CatalogFilter(project_type=args.project_type) if args.project_type else None
+    entries = client.list(filter_)
+    if not entries:
+        print("no entries")
+        return 0
+    for entry in entries:
+        dumped = entry.model_dump()
+        project = dumped.get("project") or {}
+        meta = dumped.get("metadata") or {}
+        name = project.get("name", "<unnamed>")
+        ptype = project.get("type", "?")
+        desc = meta.get("description") or ""
+        print(f"{name} ({ptype}): {desc}")
+    return 0
+
+
+def _handle_enclave_list(args: argparse.Namespace) -> int:
+    try:
+        manifest = EnclaveManifest.load(args.manifest)
+    except FileNotFoundError:
+        print(f"error: enclave_manifest.yaml not found at {args.manifest}", file=sys.stderr)
+        return 1
+    repo_filter: str | None = args.repo
+
+    approved = [ap for ap in manifest.approved_products if repo_filter is None or ap.repo == repo_filter]
+    downloaded = [d for d in manifest.downloaded if repo_filter is None or d.repo == repo_filter]
+    transferred = [t for t in manifest.transferred if repo_filter is None or t.repo == repo_filter]
+
+    if repo_filter is not None and not approved and not downloaded and not transferred:
+        print(f"no entries for {repo_filter}")
+        return 0
+
+    print("approved_products:")
+    if not approved:
+        print("  (none)")
+    for ap in approved:
+        path = ap.source_path or "<primary>"
+        print(f"  {ap.repo}@{ap.pin[:7]} (path: {path})")
+
+    print("downloaded:")
+    if not downloaded:
+        print("  (none)")
+    for d in downloaded:
+        print(f"  {d.repo} @ {d.contract_pin[:7]} → {d.local_path} ({d.fetch_strategy})")
+
+    print("transferred:")
+    if not transferred:
+        print("  (none)")
+    for t in transferred:
+        print(f"  {t.repo} @ {t.contract_pin[:7]} ({t.transfer_date}) → {t.local_path}")
+
     return 0
 
 
