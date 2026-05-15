@@ -566,3 +566,131 @@ def test_enclave_add_missing_repo_url_exits_one(
     assert rc == 1
     assert "error:" in err
     assert "github_url" in err
+
+
+# ---------------------------------------------------------------------------
+# Slice 13 — enclave remove + enclave pull
+# ---------------------------------------------------------------------------
+
+
+def test_enclave_remove_subscribes(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Happy path: subscribe via enclave_add, then remove the subscription."""
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    cli.main([
+        "enclave", "add", "provider-xw",
+        "--pin", "a" * 40,
+        "--manifest", str(manifest),
+    ])
+    capsys.readouterr()  # discard add output
+
+    rc = cli.main([
+        "enclave", "remove", "provider-xw",
+        "--manifest", str(manifest),
+    ])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "removed: provider-xw" in out
+
+    from mintd.enclave import EnclaveManifest
+    loaded = EnclaveManifest.load(manifest)
+    assert loaded.approved_products == []
+
+
+def test_enclave_remove_unknown_exits_one(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    from mintd.enclave import EnclaveManifest
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    rc = cli.main([
+        "enclave", "remove", "ghost",
+        "--manifest", str(manifest),
+    ])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+
+
+def test_enclave_pull_happy_path(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime
+    from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
+
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(
+                repo="provider-xw", registry_entry="e", pin="a" * 40,
+                source_path="outputs/main.parquet",
+            ),
+        ],
+    ).save(manifest)
+
+    fake_item = DownloadedItem(
+        repo="provider-xw",
+        output="outputs/main.parquet",
+        contract_pin="a" * 40,
+        artifact_pin="f" * 32,
+        fetch_strategy="dvc-import",
+        downloaded_at=datetime.now(),
+        local_path="downloads/provider-xw/fffffff-2026-05-20",
+    )
+
+    def fake_pull(*args: Any, **kwargs: Any) -> tuple[Path, list[DownloadedItem]]:
+        return manifest, [fake_item]
+
+    monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
+
+    rc = cli.main([
+        "enclave", "pull", "provider-xw",
+        "--manifest", str(manifest),
+    ])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pulled: provider-xw" in out
+
+
+def test_enclave_pull_nothing_to_pull_message(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    def fake_pull(*args: Any, **kwargs: Any) -> tuple[Path, list]:
+        return manifest, []
+
+    monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
+
+    rc = cli.main([
+        "enclave", "pull",
+        "--manifest", str(manifest),
+    ])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nothing to pull" in out

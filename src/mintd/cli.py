@@ -34,7 +34,6 @@ from .data import (
     BumpBlocked,
     ImportDestinationExists,
     ImportNotFound,
-    MissingPrimaryDataProduct,
     PrimaryRemovedAtHead,
     bump_import,
     import_product,
@@ -45,11 +44,13 @@ from .enclave import (
     EnclaveManifest,
     enclave_add,
     enclave_bump,
+    enclave_pull,
+    enclave_remove,
 )
 from .imports import scan_imports
 from .model import Metadata
 from .pending_registrations import PendingRegistrations
-from .producer import ProducerError
+from .producer import MissingPrimaryDataProduct, ProducerError
 
 
 # Unicode prefixes assume UTF-8 stdout. Modern terminals and CI runners
@@ -162,6 +163,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, default=Path("enclave_manifest.yaml")
     )
     p_eadd.set_defaults(_handler=_handle_enclave_add)
+
+    p_erm = p_enclave_sub.add_parser("remove", help="Unsubscribe from a producer")
+    p_erm.add_argument("repo")
+    _erm_mutex = p_erm.add_mutually_exclusive_group()
+    _erm_mutex.add_argument("--source-path", dest="source_path")
+    _erm_mutex.add_argument("--all", action="store_true", dest="all_outputs")
+    p_erm.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
+    p_erm.set_defaults(_handler=_handle_enclave_remove)
+
+    p_epull = p_enclave_sub.add_parser("pull", help="Fetch subscribed data")
+    p_epull.add_argument("repo", nargs="?")
+    p_epull.add_argument("--force", action="store_true")
+    p_epull.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
+    p_epull.set_defaults(_handler=_handle_enclave_pull)
 
     p_registry = subs.add_parser("registry", help="Catalog commands")
     p_registry_sub = p_registry.add_subparsers(dest="registry_command")
@@ -399,6 +414,56 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     ap = manifest.approved_products[-1]
     src = ap.source_path or ("<all>" if ap.all else "<primary>")
     print(f"subscribed: {ap.repo}@{ap.pin[:7]} (path: {src})")
+    return 0
+
+
+def _handle_enclave_remove(args: argparse.Namespace) -> int:
+    config = Config.load()
+    client = _resolve_catalog_client(config)
+    try:
+        enclave_remove(
+            client,
+            manifest_path=args.manifest,
+            name=args.repo,
+            source_path=args.source_path,
+            all_=args.all_outputs,
+        )
+    except (ImportNotFound, AppendOnlyViolation) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    msg = f"removed: {args.repo}"
+    if args.source_path:
+        msg += f" (source_path={args.source_path})"
+    print(msg)
+    return 0
+
+
+def _handle_enclave_pull(args: argparse.Namespace) -> int:
+    config = Config.load()
+    client, dvc_ops = _resolve_clients(config)
+    try:
+        _, written = enclave_pull(
+            client,
+            dvc_ops,
+            manifest_path=args.manifest,
+            repo=args.repo,
+            force=args.force,
+        )
+    except (
+        CatalogNotFound,
+        ImportNotFound,
+        MissingPrimaryDataProduct,
+        ProducerError,
+        AppendOnlyViolation,
+        ValueError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not written:
+        print("nothing to pull")
+        return 0
+    for item in written:
+        print(f"pulled: {item.repo}@{item.contract_pin[:7]} → {item.local_path}")
     return 0
 
 
