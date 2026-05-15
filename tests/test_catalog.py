@@ -253,3 +253,39 @@ def test_status_registered_after_register(client: CatalogClient) -> None:
 def _round(obj: Any) -> Any:
     """Normalize through json so datetime vs iso-string round-trips match."""
     return json.loads(json.dumps(obj, default=str))
+
+
+# ---------------------------------------------------------------------------
+# Slice 12 — CatalogEntry display shortcuts
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_entry_name_property(client: CatalogClient) -> None:
+    client.register(_load_metadata(name="provider-xw"))
+    entry = client.fetch("provider-xw")
+    assert entry.name == "provider-xw"
+
+
+def test_catalog_entry_project_type_property(client: CatalogClient) -> None:
+    client.register(_load_metadata(name="provider-xw"))
+    entry = client.fetch("provider-xw")
+    # Fixture default project.type is "data".
+    assert entry.project_type == "data"
+
+
+def test_catalog_entry_description_property(client: CatalogClient) -> None:
+    def set_desc(d: dict[str, Any]) -> None:
+        d["metadata"]["description"] = "a useful project"
+
+    client.register(_load_metadata(name="provider-xw", mutate=set_desc))
+    entry = client.fetch("provider-xw")
+    assert entry.description == "a useful project"
+
+
+def test_catalog_entry_repo_url_property(client: CatalogClient) -> None:
+    def set_url(d: dict[str, Any]) -> None:
+        d["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+
+    client.register(_load_metadata(name="provider-xw", mutate=set_url))
+    entry = client.fetch("provider-xw")
+    assert entry.repo_url == "https://github.com/example-org/provider-xw"

@@ -99,6 +99,33 @@ class RegistrationStatus:
 class CatalogEntry(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    @property
+    def name(self) -> str:
+        return self._nested("project", "name")
+
+    @property
+    def project_type(self) -> str:
+        return self._nested("project", "type")
+
+    @property
+    def description(self) -> str:
+        return self._nested("metadata", "description")
+
+    @property
+    def repo_url(self) -> str:
+        return self._nested("repository", "github_url")
+
+    def _nested(self, *keys: str) -> str:
+        """Walk the dumped tree by keys; return ''  on any missing/non-str."""
+        cur: Any = self.model_dump()
+        for k in keys:
+            if not isinstance(cur, dict):
+                return ""
+            cur = cur.get(k)
+            if cur is None:
+                return ""
+        return cur if isinstance(cur, str) else ""
+
 
 # ---------------------------------------------------------------------------
 # CatalogClient interface (Protocol — structural typing)

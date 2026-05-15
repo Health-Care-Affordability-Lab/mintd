@@ -39,7 +39,13 @@ from .data import (
     bump_import,
     import_product,
 )
-from .enclave import AppendOnlyViolation, EnclaveManifest, enclave_bump
+from .enclave import (
+    AlreadyApproved,
+    AppendOnlyViolation,
+    EnclaveManifest,
+    enclave_add,
+    enclave_bump,
+)
 from .imports import scan_imports
 from .model import Metadata
 from .pending_registrations import PendingRegistrations
@@ -145,6 +151,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--manifest", type=Path, default=Path("enclave_manifest.yaml")
     )
     p_elist.set_defaults(_handler=_handle_enclave_list)
+
+    p_eadd = p_enclave_sub.add_parser("add", help="Subscribe to a producer")
+    p_eadd.add_argument("repo")
+    p_eadd.add_argument("--pin")
+    _eadd_mutex = p_eadd.add_mutually_exclusive_group()
+    _eadd_mutex.add_argument("--source-path", dest="source_path")
+    _eadd_mutex.add_argument("--all", action="store_true", dest="all_outputs")
+    p_eadd.add_argument(
+        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
+    )
+    p_eadd.set_defaults(_handler=_handle_enclave_add)
 
     p_registry = subs.add_parser("registry", help="Catalog commands")
     p_registry_sub = p_registry.add_subparsers(dest="registry_command")
@@ -291,13 +308,7 @@ def _handle_data_list(args: argparse.Namespace) -> int:
         print("no entries")
         return 0
     for entry in entries:
-        dumped = entry.model_dump()
-        project = dumped.get("project") or {}
-        meta = dumped.get("metadata") or {}
-        name = project.get("name", "<unnamed>")
-        ptype = project.get("type", "?")
-        desc = meta.get("description") or ""
-        print(f"{name} ({ptype}): {desc}")
+        print(f"{entry.name} ({entry.project_type}): {entry.description}")
     return 0
 
 
@@ -358,6 +369,36 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
         print("up to date")
     else:
         print(f"bumped: {result}")
+    return 0
+
+
+def _handle_enclave_add(args: argparse.Namespace) -> int:
+    config = Config.load()
+    client = _resolve_catalog_client(config)
+    try:
+        path = enclave_add(
+            client,
+            manifest_path=args.manifest,
+            name=args.repo,
+            pin=args.pin,
+            source_path=args.source_path,
+            all_=args.all_outputs,
+        )
+    except (
+        CatalogNotFound,
+        AlreadyApproved,
+        ProducerError,
+        MissingPrimaryDataProduct,
+        AppendOnlyViolation,
+        ValueError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    # Re-load to print the just-added entry's resolved pin.
+    manifest = EnclaveManifest.load(path)
+    ap = manifest.approved_products[-1]
+    src = ap.source_path or ("<all>" if ap.all else "<primary>")
+    print(f"subscribed: {ap.repo}@{ap.pin[:7]} (path: {src})")
     return 0
 
 

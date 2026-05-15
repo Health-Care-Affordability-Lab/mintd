@@ -455,3 +455,114 @@ def test_enclave_list_missing_manifest_exits_one(patched_clients, capsys, tmp_pa
     assert rc == 1
     _, err = capsys.readouterr()
     assert "not found" in err
+
+
+# ---------------------------------------------------------------------------
+# Slice 12 — enclave add
+# ---------------------------------------------------------------------------
+
+
+def test_enclave_add_subscribes(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    rc = cli.main(
+        [
+            "enclave", "add", "provider-xw",
+            "--pin", "deadbeefcafe1234567890abcdef0123456789ab",
+            "--manifest", str(manifest),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "subscribed:" in out
+    assert "provider-xw" in out
+
+    from mintd.enclave import EnclaveManifest
+    loaded = EnclaveManifest.load(manifest)
+    assert len(loaded.approved_products) == 1
+    assert loaded.approved_products[0].repo == "provider-xw"
+
+
+def test_enclave_add_duplicate_exits_one(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    cli.main(
+        [
+            "enclave", "add", "provider-xw",
+            "--pin", "a" * 40,
+            "--manifest", str(manifest),
+        ]
+    )
+    capsys.readouterr()  # discard first-add output
+    rc = cli.main(
+        [
+            "enclave", "add", "provider-xw",
+            "--pin", "b" * 40,
+            "--manifest", str(manifest),
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "already in approved_products" in err
+
+
+def test_enclave_add_source_path_and_all_exits_64(
+    patched_clients, tmp_path: Path
+) -> None:
+    """argparse mutex: --source-path and --all conflict → exit 64."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "enclave", "add", "provider-xw",
+                "--pin", "a" * 40,
+                "--source-path", "outputs/x",
+                "--all",
+                "--manifest", str(tmp_path / "enclave_manifest.yaml"),
+            ]
+        )
+    assert exc.value.code == 64
+
+
+def test_enclave_add_missing_repo_url_exits_one(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Catalog entry without `repository.github_url` → ValueError; CLI
+    converts to exit 1 + stderr message rather than propagating a traceback."""
+    client, _ = patched_clients
+    # Register a Metadata variant with an empty github_url. We bypass
+    # Metadata validation by registering a raw CatalogEntry directly into
+    # the InMemoryCatalogClient's internal dict.
+    from mintd.catalog import CatalogEntry
+    bad_entry = CatalogEntry.model_validate(
+        {"project": {"name": "broken-repo", "type": "data"}, "repository": {}}
+    )
+    client._entries["broken-repo"] = bad_entry
+
+    rc = cli.main(
+        [
+            "enclave", "add", "broken-repo",
+            "--pin", "a" * 40,
+            "--manifest", str(tmp_path / "enclave_manifest.yaml"),
+        ]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+    assert "github_url" in err

@@ -41,11 +41,13 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "AlreadyApproved",
     "AppendOnlyViolation",
     "ApprovedProduct",
     "DownloadedItem",
     "EnclaveManifest",
     "TransferredItem",
+    "enclave_add",
     "enclave_bump",
 ]
 
@@ -62,6 +64,19 @@ class AppendOnlyViolation(Exception):
         )
         self.path = path
         self.changed_indices = changed_indices
+
+
+class AlreadyApproved(Exception):
+    """The manifest already contains an `approved_products[]` entry with
+    this repo. `enclave_add` refuses to add a duplicate; the user should
+    `enclave bump` to update an existing subscription's pin."""
+
+    def __init__(self, name: str, manifest_path: Path) -> None:
+        super().__init__(
+            f"{name!r} already in approved_products[] of {manifest_path}"
+        )
+        self.name = name
+        self.manifest_path = manifest_path
 
 
 class ApprovedProduct(BaseModel):
@@ -217,3 +232,62 @@ def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) ->
     """Slice-8 Decision #2α: catalog is canonical for repo identity."""
     entry = client.fetch(ap.repo)
     return _require_repo_url(entry.model_dump(), name=ap.repo)
+
+
+def enclave_add(
+    client: CatalogClient,
+    *,
+    manifest_path: Path,
+    name: str,
+    pin: str | None = None,
+    source_path: str | None = None,
+    all_: bool = False,
+    producer_view_factory: Callable[[str], tuple[ProducerView, str]] | None = None,
+) -> Path:
+    """Subscribe a producer by appending an `ApprovedProduct` to the manifest.
+
+    Validates the producer exists in the catalog (raises `CatalogNotFound`
+    via passthrough). Refuses duplicates (`AlreadyApproved`). Resolves
+    HEAD via `ProducerView.at_head` if `pin` is None. Append-only on
+    `transferred[]` is enforced via `EnclaveManifest.save`.
+
+    Slice-12 ordering rationale: catalog validation first (cheapest;
+    fail-fast on unknown producer); duplicate check next (in-memory walk
+    over `approved_products`); HEAD resolution last (costs a `git
+    ls-remote` round-trip — skip if we'd refuse anyway).
+    """
+    entry = client.fetch(name)
+    repo_url = entry.repo_url
+    if not repo_url:
+        raise ValueError(f"catalog entry {name!r} has no repository.github_url")
+
+    if manifest_path.exists():
+        manifest = EnclaveManifest.load(manifest_path)
+        for ap in manifest.approved_products:
+            if ap.repo == name:
+                raise AlreadyApproved(name, manifest_path)
+    else:
+        manifest = EnclaveManifest(enclave_name=manifest_path.parent.name)
+
+    if pin is None:
+        factory = producer_view_factory or ProducerView.at_head
+        head_view, resolved_pin = factory(repo_url)
+        # If neither --source-path nor --all is set, the bump needs *something*
+        # to subscribe to — fail fast if HEAD has no primary.
+        if source_path is None and not all_:
+            head_view.primary_or_raise()
+    else:
+        resolved_pin = pin
+
+    new_ap = ApprovedProduct(
+        repo=name,
+        registry_entry=f"catalog/data/{name}.yaml",
+        pin=resolved_pin,
+        source_path=source_path,
+        all=all_,
+    )
+    new_manifest = manifest.model_copy(
+        update={"approved_products": [*manifest.approved_products, new_ap]}
+    )
+    new_manifest.save(manifest_path)
+    return manifest_path
