@@ -221,6 +221,33 @@ class ProducerView:
         return cls(repo=repo, pin=pin, metadata=meta)
 
     @classmethod
+    def at_head(
+        cls,
+        repo: str,
+        *,
+        fetcher: Fetcher | None = None,
+        cache_dir: Path | None = None,
+    ) -> tuple["ProducerView", str]:
+        """Resolve HEAD on the remote, fetch metadata at that SHA, validate.
+
+        Returns `(view, resolved_head_sha)`. HEAD itself is not content-
+        addressable, so this method always pays the round-trip cost — the
+        *result* (validated metadata at the resolved SHA) IS cached via
+        the existing `at(repo, sha)` path, keyed by the resolved SHA. The
+        cache is never keyed by the literal string `"HEAD"`.
+        """
+        active_fetcher: Fetcher = fetcher if fetcher is not None else GitArchiveFetcher()
+        try:
+            raw, head_sha = active_fetcher.fetch_metadata_at_head(repo)
+        except FetchError as e:
+            raise ProducerError.from_fetch_error(e) from e
+
+        cache_dir_arg = cache_dir if cache_dir is not None else _default_cache_dir()
+        _ProducerCache(cache_dir_arg).write(repo, head_sha, raw)
+        view = cls.at(repo, head_sha, fetcher=active_fetcher, cache_dir=cache_dir_arg)
+        return view, head_sha
+
+    @classmethod
     def try_at(
         cls,
         repo: str,

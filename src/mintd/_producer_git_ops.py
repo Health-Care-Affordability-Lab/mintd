@@ -7,6 +7,7 @@ Only this module shells out to `git` for producer-side operations (fetching
 
 from __future__ import annotations
 
+import re
 import subprocess
 import tarfile
 import tempfile
@@ -57,6 +58,14 @@ class Fetcher(Protocol):
 
     def fetch_metadata_at(self, repo: str, pin: str) -> bytes: ...
 
+    def fetch_metadata_at_head(self, repo: str) -> tuple[bytes, str]:
+        """Resolve HEAD on the remote, fetch metadata at that SHA, return
+        `(metadata_bytes, resolved_head_sha)`. The SHA is recorded by the
+        consumer (`dvc import --rev <sha>`), so hiding it would force every
+        caller to re-resolve.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Stderr classifiers — substring-based mapping from git error text to typed
@@ -75,6 +84,9 @@ def _classify_metadata_missing(stderr: str) -> bool:
             "does not exist in",
         )
     )
+
+
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _classify_stderr(stderr: str) -> FetchError.Reason | None:
@@ -142,6 +154,11 @@ class GitArchiveFetcher:
             raise FetchError(classified, repo, pin, detail=stderr_text.strip())
 
         return self._fallback_clone(repo, pin)
+
+    def fetch_metadata_at_head(self, repo: str) -> tuple[bytes, str]:
+        head_sha = _git_ls_remote_head(repo, timeout=self.timeout)
+        raw = self.fetch_metadata_at(repo, head_sha)
+        return raw, head_sha
 
     def _fallback_clone(self, repo: str, pin: str) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
@@ -256,6 +273,41 @@ def _run(
         raise FetchError.unreachable(
             repo, pin, detail=f"timeout after {timeout}s ({subcmd})"
         ) from e
+
+
+def _git_ls_remote_head(repo: str, *, timeout: float) -> str:
+    """Resolve the remote's HEAD to a 40-char SHA.
+
+    Uses `git ls-remote --symref <repo> HEAD`. Output is one or two lines:
+    optionally `ref: refs/heads/<name>\\tHEAD` then `<sha>\\tHEAD`. Parse
+    defensively — pick the line whose first whitespace-separated token is a
+    40-char hex SHA. Empty / malformed stdout (empty repo, no HEAD ref)
+    raises `FetchError.pin_missing`.
+    """
+    result = _run(
+        ["git", "ls-remote", "--symref", repo, "HEAD"],
+        timeout=timeout,
+        repo=repo,
+        pin="HEAD",
+        binary_stdout=False,
+    )
+    if result.returncode != 0:
+        stderr_text = result.stderr
+        classified = _classify_stderr(stderr_text)
+        if classified is not None:
+            raise FetchError(classified, repo, "HEAD", detail=stderr_text.strip())
+        raise FetchError.unreachable(repo, "HEAD", detail=stderr_text.strip())
+
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if _SHA_RE.match(parts[0]):
+            return parts[0]
+
+    raise FetchError.pin_missing(
+        repo, "HEAD", detail="no HEAD ref on remote (empty repo?)"
+    )
 
 
 def _git_subcmd(argv: list[str]) -> str:
