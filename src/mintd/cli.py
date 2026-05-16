@@ -136,7 +136,17 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["data", "code", "project", "enclave"],
     )
     p_init.add_argument("name")
-    p_init.add_argument("--path", type=Path, default=Path("."))
+    p_init.add_argument(
+        "--path",
+        type=Path,
+        default=Path("."),
+        help="Parent directory in which to create the project (default: cwd).",
+    )
+    p_init.add_argument(
+        "--use-current-repo",
+        action="store_true",
+        help="Scaffold into --path directly instead of into a new ``{type}_{name}`` subdir.",
+    )
     p_init.set_defaults(_handler=_handle_init)
 
     p_check = subs.add_parser("check", help="Validate a mintd project")
@@ -360,19 +370,28 @@ def _handle_check(args: argparse.Namespace) -> int:
 
 def _handle_init(args: argparse.Namespace) -> int:
     try:
-        init_project(
+        project_path = init_project(
             project_type=args.project_type,
             name=args.name,
             target_dir=args.path,
+            use_current_repo=args.use_current_repo,
         )
     except (InitDestinationExists, InitOpError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    print("created: metadata.json")
-    print("created: .gitignore")
+    # Render paths relative to cwd when possible so the user sees the subdir.
+    try:
+        rel = project_path.resolve().relative_to(Path.cwd().resolve())
+    except ValueError:
+        rel = project_path
+    prefix = "" if str(rel) == "." else f"{rel}/"
+    print(f"created: {prefix}metadata.json")
+    print(f"created: {prefix}.gitignore")
     print("initialized: git")
     if args.project_type in {"data", "code", "project"}:
         print("initialized: dvc")
+    if str(rel) != ".":
+        print(f"Next: cd {rel}")
     return 0
 
 

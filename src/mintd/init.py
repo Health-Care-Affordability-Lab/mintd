@@ -27,27 +27,39 @@ def init_project(
     project_type: Literal["data", "code", "project", "enclave"],
     name: str,
     target_dir: Path,
+    use_current_repo: bool = False,
     ops: InitOps | None = None,
 ) -> Path:
-    """Initialize a fresh mintd project at `target_dir`.
+    """Initialize a fresh mintd project.
 
-    Writes `metadata.json` + `.gitignore`, runs `git init`, and (for
-    non-enclave types) `dvc init`. Returns `target_dir` on success.
+    By default, scaffolds into a new subdirectory ``target_dir/{type}_{name}``
+    (matching legacy ``mintd``'s default). Pass ``use_current_repo=True`` to
+    scaffold into ``target_dir`` directly — useful when retrofitting an
+    existing git repo.
+
+    Writes ``metadata.json`` + ``.gitignore``, runs ``git init`` (unless the
+    project is already a git repo), and for non-enclave types ``dvc init``.
+    Returns the actual project path that was scaffolded into.
     """
-    target_dir.mkdir(parents=True, exist_ok=True)
-    metadata_path = target_dir / "metadata.json"
+    if use_current_repo:
+        project_path = target_dir
+    else:
+        project_path = target_dir / f"{project_type}_{name}"
+
+    project_path.mkdir(parents=True, exist_ok=True)
+    metadata_path = project_path / "metadata.json"
     if metadata_path.exists():
         raise InitDestinationExists(metadata_path)
 
     metadata_path.write_text(_metadata_template(project_type, name) + "\n")
-    (target_dir / ".gitignore").write_text(_GITIGNORE_TEMPLATE)
+    (project_path / ".gitignore").write_text(_GITIGNORE_TEMPLATE)
 
     ops = ops or SubprocessInitOps()
-    ops.git_init(target_dir)
+    ops.git_init(project_path)
     if project_type in _DVC_INIT_TYPES:
-        ops.dvc_init(target_dir)
+        ops.dvc_init(project_path)
 
-    return target_dir
+    return project_path
 
 
 def _metadata_template(

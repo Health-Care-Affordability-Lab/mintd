@@ -783,17 +783,31 @@ def test_init_data_project_happy_path(
 ) -> None:
     rc = cli.main(["init", "data", "my_proj", "--path", str(tmp_path)])
     assert rc == 0
-    assert (tmp_path / "metadata.json").exists()
-    assert (tmp_path / ".gitignore").exists()
+    project_path = tmp_path / "data_my_proj"
+    assert (project_path / "metadata.json").exists()
+    assert (project_path / ".gitignore").exists()
 
     out = capsys.readouterr().out
-    assert "created: metadata.json" in out
-    assert "created: .gitignore" in out
+    assert "metadata.json" in out
+    assert ".gitignore" in out
     assert "initialized: git" in out
     assert "initialized: dvc" in out
 
-    assert patched_init_ops.git_calls == [tmp_path]
-    assert patched_init_ops.dvc_calls == [tmp_path]
+    assert patched_init_ops.git_calls == [project_path]
+    assert patched_init_ops.dvc_calls == [project_path]
+
+
+def test_init_use_current_repo_writes_into_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    rc = cli.main(
+        ["init", "data", "my_proj", "--path", str(tmp_path), "--use-current-repo"]
+    )
+    assert rc == 0
+    assert (tmp_path / "metadata.json").exists()
+    assert not (tmp_path / "data_my_proj").exists()
 
 
 def test_init_enclave_skips_dvc_in_output(
@@ -815,7 +829,10 @@ def test_init_existing_metadata_exits_one(
     capsys: pytest.CaptureFixture[str],
     patched_init_ops,
 ) -> None:
-    (tmp_path / "metadata.json").write_text("{}")
+    # Default scaffold lands in {tmp_path}/data_my_proj/metadata.json; pre-create it.
+    project_path = tmp_path / "data_my_proj"
+    project_path.mkdir()
+    (project_path / "metadata.json").write_text("{}")
     rc = cli.main(["init", "data", "my_proj", "--path", str(tmp_path)])
     assert rc == 1
 
