@@ -25,6 +25,24 @@ class DvcPushCall(NamedTuple):
     jobs: int | None
 
 
+class DvcPullCall(NamedTuple):
+    targets: list[str] | None
+    remote: str | None
+    jobs: int | None
+
+
+class DvcAddCall(NamedTuple):
+    path: Path
+
+
+class DvcStatusCall(NamedTuple):
+    targets: list[str] | None
+
+
+class DvcRemoveCall(NamedTuple):
+    name: str
+
+
 class _FakeDvcOps:
     """Implements `mintd._dvc_ops.DvcOps` structurally."""
 
@@ -32,6 +50,15 @@ class _FakeDvcOps:
         self.calls: list[DvcImportCall] = []
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
+        self.pull_calls: list[DvcPullCall] = []
+        self.pull_raises: Exception | None = None
+        self.add_calls: list[DvcAddCall] = []
+        self.add_raises: Exception | None = None
+        self.status_calls: list[DvcStatusCall] = []
+        self.status_raises: Exception | None = None
+        self.status_result: dict[str, str] = {}
+        self.remove_calls: list[DvcRemoveCall] = []
+        self.remove_raises: Exception | None = None
 
     def import_(
         self,
@@ -67,3 +94,34 @@ class _FakeDvcOps:
         if self.push_raises:
             raise self.push_raises
         self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs))
+
+    def pull(
+        self,
+        *,
+        targets: list[str] | None = None,
+        remote: str | None = None,
+        jobs: int | None = None,
+    ) -> None:
+        if self.pull_raises:
+            raise self.pull_raises
+        self.pull_calls.append(DvcPullCall(targets=targets, remote=remote, jobs=jobs))
+
+    def add(self, path: Path) -> Path:
+        if self.add_raises:
+            raise self.add_raises
+        self.add_calls.append(DvcAddCall(path=path))
+        dvc_file = path.parent / (path.name + ".dvc")
+        dvc_file.parent.mkdir(parents=True, exist_ok=True)
+        dvc_file.write_text("")
+        return dvc_file
+
+    def status(self, targets: list[str] | None = None) -> dict[str, str]:
+        if self.status_raises:
+            raise self.status_raises
+        self.status_calls.append(DvcStatusCall(targets=targets))
+        return self.status_result.copy()
+
+    def remove(self, name: str) -> None:
+        if self.remove_raises:
+            raise self.remove_raises
+        self.remove_calls.append(DvcRemoveCall(name=name))

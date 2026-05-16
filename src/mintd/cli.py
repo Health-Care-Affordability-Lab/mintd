@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from ._config import Config, ConfigError
-from ._dvc_ops import DvcOps, SubprocessDvcOps
+from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from ._init_ops import InitOpError
 from .catalog import (
@@ -40,6 +40,7 @@ from .data import (
     bump_import,
     import_product,
 )
+from .data_ops import data_add, data_pull, data_push, data_remove, data_verify
 from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
 from .enclave import (
     AlreadyApproved,
@@ -153,6 +154,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root"
     )
     p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+
+    p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
+    p_pull.add_argument("targets", nargs="*")
+    p_pull.add_argument("--remote")
+    p_pull.add_argument("--jobs", type=int)
+    p_pull.add_argument("--path", type=Path, default=Path("."))
+    p_pull.set_defaults(_handler=_handle_data_pull)
+
+    p_push = p_data_sub.add_parser("push", help="Push DVC data")
+    p_push.add_argument("targets", nargs="*")
+    p_push.add_argument("--remote")
+    p_push.add_argument("--jobs", type=int)
+    p_push.set_defaults(_handler=_handle_data_push)
+
+    p_add = p_data_sub.add_parser("add", help="Add DVC data")
+    p_add.add_argument("path", type=Path)
+    p_add.set_defaults(_handler=_handle_data_add)
+
+    p_verify = p_data_sub.add_parser("verify", help="Verify DVC data")
+    p_verify.add_argument("targets", nargs="*")
+    p_verify.add_argument("--path", type=Path, default=Path("."))
+    p_verify.set_defaults(_handler=_handle_data_verify)
+
+    p_remove = p_data_sub.add_parser("remove", help="Remove DVC data")
+    p_remove.add_argument("name")
+    p_remove.set_defaults(_handler=_handle_data_remove)
 
     p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
     p_data_list.add_argument("--imported", action="store_true")
@@ -324,6 +351,106 @@ def _handle_init(args: argparse.Namespace) -> int:
     print("initialized: git")
     if args.project_type in {"data", "code", "project"}:
         print("initialized: dvc")
+    return 0
+
+
+def _handle_data_pull(args: argparse.Namespace) -> int:
+    config = Config.load()
+    _, dvc_ops = _resolve_clients(config)
+    try:
+        data_pull(
+            project_path=args.path,
+            targets=args.targets or None,
+            dvc_ops=dvc_ops,
+            fast_sync_ops=None,
+            remote=args.remote,
+            jobs=args.jobs,
+        )
+    except DvcNotInstalled as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except DvcOpError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    targets = ", ".join(args.targets) if args.targets else ""
+    print(f"pulled: {targets}" if targets else "pulled")
+    return 0
+
+
+def _handle_data_push(args: argparse.Namespace) -> int:
+    config = Config.load()
+    _, dvc_ops = _resolve_clients(config)
+    try:
+        data_push(
+            project_path=Path("."),
+            targets=args.targets or None,
+            dvc_ops=dvc_ops,
+            remote=args.remote,
+            jobs=args.jobs,
+        )
+    except DvcNotInstalled as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except DvcOpError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print("pushed")
+    return 0
+
+
+def _handle_data_add(args: argparse.Namespace) -> int:
+    config = Config.load()
+    _, dvc_ops = _resolve_clients(config)
+    try:
+        produced = data_add(args.path, dvc_ops=dvc_ops)
+    except DvcNotInstalled as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except DvcOpError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(str(produced))
+    return 0
+
+
+def _handle_data_verify(args: argparse.Namespace) -> int:
+    config = Config.load()
+    _, dvc_ops = _resolve_clients(config)
+    try:
+        status_map = data_verify(
+            project_path=args.path,
+            targets=args.targets or None,
+            dvc_ops=dvc_ops,
+        )
+    except DvcNotInstalled as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except DvcOpError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if not status_map:
+        print("clean")
+        return 0
+    dirty = False
+    for path, status in sorted(status_map.items()):
+        print(f"{path}: {status}")
+        if status != "clean":
+            dirty = True
+    return 1 if dirty else 0
+
+
+def _handle_data_remove(args: argparse.Namespace) -> int:
+    config = Config.load()
+    _, dvc_ops = _resolve_clients(config)
+    try:
+        data_remove(args.name, dvc_ops=dvc_ops)
+    except DvcNotInstalled as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    except DvcOpError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    print(f"removed: {args.name}")
     return 0
 
 

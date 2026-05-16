@@ -22,6 +22,7 @@ from mintd.catalog import InMemoryCatalogClient
 from mintd.check import CheckFinding
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
+from mintd._dvc_ops import DvcPullError
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -68,9 +69,64 @@ def _register_provider_xw(
     return metadata
 
 
-# ---------------------------------------------------------------------------
-# check
-# ---------------------------------------------------------------------------
+def test_cli_data_pull_calls_data_pull(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    _, dvc_ops = patched_clients
+    rc = cli.main(["data", "pull", "data/raw.csv", "--remote", "origin"])
+    assert rc == 0
+    assert len(dvc_ops.pull_calls) == 1
+    assert dvc_ops.pull_calls[0].targets == ["data/raw.csv"]
+    assert dvc_ops.pull_calls[0].remote == "origin"
+
+
+def test_cli_data_pull_dvc_error_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    _, dvc_ops = patched_clients
+    dvc_ops.pull_raises = DvcPullError("oops")
+    rc = cli.main(["data", "pull"])
+    assert rc == 1
+    assert "oops" in capsys.readouterr().err
+
+
+def test_cli_data_push_calls_data_push(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    _, dvc_ops = patched_clients
+    rc = cli.main(["data", "push"])
+    assert rc == 0
+    assert len(dvc_ops.push_calls) == 1
+
+
+def test_cli_data_add_prints_dvc_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    path = tmp_path / "raw.csv"
+    path.write_text("data")
+    rc = cli.main(["data", "add", str(path)])
+    assert rc == 0
+    assert "raw.csv.dvc" in capsys.readouterr().out
+
+
+def test_cli_data_verify_dirty_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    _, dvc_ops = patched_clients
+    dvc_ops.status_result = {"a.csv": "dirty"}
+    rc = cli.main(["data", "verify"])
+    assert rc == 1
+    assert "a.csv: dirty" in capsys.readouterr().out
 
 
 def test_check_clean_project_exits_zero(
