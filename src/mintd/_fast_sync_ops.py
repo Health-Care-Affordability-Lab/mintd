@@ -6,12 +6,14 @@ Coupled to DVC cache layout (3.66.x).
 import configparser
 import dataclasses
 import hashlib
+import json
 import logging
 import os
 import random
 import subprocess
 import time
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -56,6 +58,14 @@ def _dvc_version_ok() -> bool:
 
 
 @dataclass(frozen=True)
+class DvcFileEntry:
+    md5: str
+    relpath: str
+    size: int = 0
+    version_id: str | None = None
+
+
+@dataclass(frozen=True)
 class DvcOut:
     target: str
     path: str
@@ -63,6 +73,7 @@ class DvcOut:
     is_dir: bool
     version_id: str | None = None
     is_files_format: bool = False
+    files: list[DvcFileEntry] | None = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +108,16 @@ def _extract_version_id(out_dict: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_version_id_from_file_entry(entry: dict[str, Any], remote_name: str) -> str | None:
+    cloud = entry.get("cloud")
+    if not isinstance(cloud, dict):
+        return None
+    remote_block = cloud.get(remote_name)
+    if isinstance(remote_block, dict) and "version_id" in remote_block:
+        return str(remote_block["version_id"])
+    return None
+
+
 def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     """Parse a .dvc file into DvcOut entries.
 
@@ -121,6 +142,17 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
         if not has_md5 and not has_files:
             continue
         md5 = str(out.get("md5", ""))
+        files_list: list[DvcFileEntry] | None = None
+        if has_files:
+            files_list = [
+                DvcFileEntry(
+                    md5=str(fe.get("md5", "")),
+                    relpath=str(fe.get("relpath", "")),
+                    size=int(fe.get("size", 0) or 0),
+                    version_id=_extract_version_id_from_file_entry(fe, remote_name),
+                )
+                for fe in out["files"]
+            ]
         outs.append(DvcOut(
             target="",
             path=str(out.get("path", "")),
@@ -128,6 +160,7 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
             is_dir=md5.endswith(".dir"),
             version_id=_extract_version_id(out),
             is_files_format=has_files and not has_md5,
+            files=files_list,
         ))
     return outs
 
@@ -147,11 +180,8 @@ def is_cached(cache_dir: Path, md5: str) -> bool:
 def classify_targets(project_path: Path, targets: list[str], remote_name: str) -> tuple[list[DvcOut], list[str], list[str]]:
     """Resolve each user-supplied target to a list of single-file DvcOut entries.
 
-    Slice 18 fast-sync handles single-file (md5-keyed) targets only. Targets
-    whose .dvc has a directory entry (md5 ending in ``.dir``) or a
-    files-format inline ``files:`` list are routed to ``fallback`` so vanilla
-    ``dvc pull`` materializes them correctly. Slice 19 will port the dir/
-    files-format paths once the single-file path is proven in production.
+    Each user target's outs are appended to ``all_outs`` regardless of shape;
+    the orchestrator's per-out loop dispatches on ``is_dir`` / ``is_files_format``.
     Hash-missing entries (entries declaring a hash type but no value) are
     surfaced in ``hash_missing`` and the orchestrator merges them into
     ``fallback`` so they never silently mark as synced.
@@ -168,13 +198,6 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
                 hash_missing.append(target)
             else:
                 fallback.append(target)
-            continue
-
-        # Any directory-shaped entry on this target → fallback the whole target.
-        # Mixing partial-fast-sync and partial-fallback within a single .dvc file
-        # is the recipe for the partial-checkout invariant bug. Keep it simple.
-        if any(out.is_dir or out.is_files_format for out in outs):
-            fallback.append(target)
             continue
 
         for out in outs:
@@ -281,6 +304,51 @@ def verify_download(cache_path: Path, expected_md5: str) -> VerifyResult:
         return VerifyResult(ok=False, expected=expected_md5, actual="")
 
 
+def is_dir_fully_cached(cache_dir: Path, entries: list[DvcFileEntry]) -> bool:
+    return all(is_cached(cache_dir, e.md5) for e in entries)
+
+
+def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
+    """Write a synthetic .dir manifest into the local cache.
+
+    Byte-exact match against real DVC's output: sorted by relpath,
+    ``[{"md5": ..., "relpath": ...}]`` only (no size or other fields),
+    ``json.dumps(..., sort_keys=True)`` with otherwise-default kwargs
+    (``separators=(", ", ": ")``, ``ensure_ascii=True``, no trailing
+    newline). ``sort_keys=True`` is a defensive measure — Python preserves
+    dict insertion order so the bytes happen to match without it, but a
+    future refactor that adds a field or reorders keys would silently
+    diverge.
+
+    **Cache filename convention:** the manifest lives at
+    ``.dvc/cache/files/md5/XX/YYYY.dir`` (with the literal ``.dir`` suffix
+    on the filename). This matches DVC's own layout
+    (``dvc_data.hashfile.db.local.LocalHashFileDB.oid_to_path``); any
+    deviation breaks `dvc checkout`'s cache lookup. Returns ``{md5}.dir``.
+    """
+    sorted_entries = sorted(entries, key=lambda e: e.relpath)
+    payload = [{"md5": e.md5, "relpath": e.relpath} for e in sorted_entries]
+    serialized = json.dumps(payload, sort_keys=True).encode()
+    manifest_md5 = hashlib.md5(serialized, usedforsecurity=False).hexdigest()
+    full_md5 = f"{manifest_md5}.dir"
+    manifest_path = cache_path_for(cache_dir, full_md5)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+    tmp_path.write_bytes(serialized)
+    fd = os.open(str(tmp_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    tmp_path.rename(manifest_path)
+    parent_fd = os.open(str(manifest_path.parent), os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
+    return full_md5
+
+
 def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md5: str, version_id: str | None = None) -> bool:
     """Download an object to the DVC cache atomically.
 
@@ -332,10 +400,140 @@ def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md
     return False
 
 
-# Slice 19 candidates: fetch_dir_manifest, ensure_dir_manifest,
-# fetch_dir_contents, fetch_files_dir_contents — port from legacy
-# mintd/utils/fast_sync.py once the single-file path is proven in production.
-# Until then, classify_targets routes dir-shaped entries to fallback.
+def fetch_dir_manifest(
+    s3: Any, bucket: str, prefix: str, dir_md5: str, cache_dir: Path
+) -> list[DvcFileEntry] | None:
+    """Fetch a .dir manifest from S3 to local cache; return parsed entries.
+
+    DVC stores manifests at ``prefix/files/md5/XX/YYYY.dir`` on S3 and
+    ``.dvc/cache/files/md5/XX/YYYY.dir`` locally — the ``.dir`` suffix
+    survives in the filename. ``raw_md5`` (without the suffix) is used
+    only for the md5 verify, since that's the actual md5 of the manifest
+    bytes; the cache/S3 paths use ``full_md5``.
+    """
+    full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
+    raw_md5 = full_md5[:-4]
+    key = s3_key_for(prefix, full_md5)
+    cache_path = cache_path_for(cache_dir, full_md5)
+    try:
+        fetch_to_cache(s3, bucket, key, cache_path, raw_md5, version_id=None)
+    except Exception as exc:
+        logger.warning("fast-sync: dir manifest fetch failed for %s: %s", full_md5, exc)
+        cache_path.unlink(missing_ok=True)
+        return None
+    try:
+        payload = json.loads(cache_path.read_bytes())
+    except Exception as exc:
+        logger.warning("fast-sync: dir manifest JSON parse failed for %s: %s", full_md5, exc)
+        cache_path.unlink(missing_ok=True)
+        return None
+    if not isinstance(payload, list):
+        cache_path.unlink(missing_ok=True)
+        return None
+    return [
+        DvcFileEntry(
+            md5=str(e.get("md5", "")),
+            relpath=str(e.get("relpath", "")),
+            size=int(e.get("size", 0) or 0),
+            version_id=None,
+        )
+        for e in payload
+    ]
+
+
+
+def fetch_dir_contents(
+    s3: Any, bucket: str, prefix: str, entries: list[DvcFileEntry],
+    cache_dir: Path, jobs: int,
+) -> list[str]:
+    """Concurrent download of md5-keyed-dir constituents.
+
+    Deduplicates entries by md5 before submitting to the thread pool:
+    ``fetch_to_cache`` uses a static ``.tmp`` sibling per cache_path,
+    so two threads downloading entries with the same md5 would race
+    on the same temp file. Any two entries with the same md5 yield the
+    same bytes from S3, so one download serves every duplicate relpath.
+    First-occurrence wins for test determinism.
+    """
+    if not entries:
+        return []
+    failures: list[str] = []
+    unique: dict[str, DvcFileEntry] = {}
+    for e in entries:
+        unique.setdefault(e.md5, e)
+    unique_entries = list(unique.values())
+
+    def _one(entry: DvcFileEntry) -> tuple[str, str | None]:
+        if is_cached(cache_dir, entry.md5):
+            return (entry.relpath, None)
+        try:
+            fetch_to_cache(
+                s3, bucket,
+                s3_key_for(prefix, entry.md5),
+                cache_path_for(cache_dir, entry.md5),
+                entry.md5,
+                None,
+            )
+            return (entry.relpath, None)
+        except Exception as exc:
+            return (entry.relpath, f"{entry.relpath}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        futures = [ex.submit(_one, e) for e in unique_entries]
+        for fut in as_completed(futures):
+            _, err = fut.result()
+            if err:
+                failures.append(err)
+    return failures
+
+
+def fetch_files_dir_contents(
+    s3: Any, bucket: str, prefix: str, out: DvcOut,
+    cache_dir: Path, jobs: int, remote_name: str,
+) -> list[str]:
+    """Concurrent download of files-format dir constituents.
+
+    Like ``fetch_dir_contents`` but with real-path S3 keys and per-file
+    version_ids. md5 dedup applies for the same .tmp-race reason. The
+    *manifest* (written by ``ensure_dir_manifest``) receives the full
+    un-deduped list so ``dvc checkout`` can materialize every relpath.
+    """
+    del remote_name
+    if not out.files:
+        return []
+    failures: list[str] = []
+    unique: dict[str, DvcFileEntry] = {}
+    for e in out.files:
+        unique.setdefault(e.md5, e)
+    unique_entries = list(unique.values())
+
+    def _key(rel: str) -> str:
+        parts = [p for p in (prefix, out.path, rel) if p]
+        return "/".join(parts)
+
+    def _one(entry: DvcFileEntry) -> tuple[str, str | None]:
+        if is_cached(cache_dir, entry.md5):
+            return (entry.relpath, None)
+        try:
+            fetch_to_cache(
+                s3, bucket,
+                _key(entry.relpath),
+                cache_path_for(cache_dir, entry.md5),
+                entry.md5,
+                entry.version_id,
+            )
+            return (entry.relpath, None)
+        except Exception as exc:
+            return (entry.relpath, f"{entry.relpath}: {exc}")
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        futures = [ex.submit(_one, e) for e in unique_entries]
+        for fut in as_completed(futures):
+            _, err = fut.result()
+            if err:
+                failures.append(err)
+    return failures
+
 
 
 def _create_s3_client(remote_cfg: dict[str, str], aws_profile_name: str | None) -> Any:
@@ -416,18 +614,65 @@ class SubprocessFastSyncOps:
         # invoke it directly. Keeping the field for forward compatibility.
         _ = self._progress
 
-        # all_outs only contains single-file targets; dir-shaped entries
-        # routed to fallback in classify_targets.
         for out in all_outs:
             try:
-                if not is_cached(cache_dir, out.md5):
-                    fetch_to_cache(
-                        s3, bucket,
-                        s3_key_for(prefix, out.md5),
-                        cache_path_for(cache_dir, out.md5),
-                        out.md5,
-                        out.version_id,
+                if out.is_files_format:
+                    assert out.files is not None
+                    failures = fetch_files_dir_contents(
+                        s3, bucket, prefix, out, cache_dir, jobs, remote_name
                     )
+                    if failures:
+                        logger.warning(
+                            "fast-sync files-format dir %r had %d failure(s); falling back",
+                            out.target, len(failures),
+                        )
+                        files_dir_failures.extend(failures)
+                        fallback.append(out.target)
+                        continue
+                    ensure_dir_manifest(cache_dir, out.files)
+                elif out.is_dir:
+                    # Local manifest lives at ...XX/YYYY.dir (with suffix).
+                    # raw_md5 is used only when we need the md5-without-suffix
+                    # form; the cache lookup keeps the .dir suffix.
+                    full_md5 = out.md5 if out.md5.endswith(".dir") else f"{out.md5}.dir"
+                    cached_manifest = cache_path_for(cache_dir, full_md5)
+                    entries: list[DvcFileEntry] | None = None
+                    if cached_manifest.exists():
+                        try:
+                            payload = json.loads(cached_manifest.read_bytes())
+                            if isinstance(payload, list):
+                                entries = [
+                                    DvcFileEntry(
+                                        md5=str(e.get("md5", "")),
+                                        relpath=str(e.get("relpath", "")),
+                                        size=int(e.get("size", 0) or 0),
+                                    )
+                                    for e in payload
+                                ]
+                        except Exception:
+                            entries = None
+                    if entries is None:
+                        entries = fetch_dir_manifest(s3, bucket, prefix, out.md5, cache_dir)
+                        if entries is None:
+                            fallback.append(out.target)
+                            continue
+                    if not is_dir_fully_cached(cache_dir, entries):
+                        failures = fetch_dir_contents(
+                            s3, bucket, prefix, entries, cache_dir, jobs
+                        )
+                        if failures:
+                            files_dir_failures.extend(failures)
+                            fallback.append(out.target)
+                            continue
+                else:
+                    if not is_cached(cache_dir, out.md5):
+                        fetch_to_cache(
+                            s3, bucket,
+                            s3_key_for(prefix, out.md5),
+                            cache_path_for(cache_dir, out.md5),
+                            out.md5,
+                            out.version_id,
+                        )
                 synced += 1
             except Exception as exc:
                 logger.warning("fast-sync target %r failed: %s", out.target, exc)
