@@ -45,6 +45,23 @@ class Config(BaseModel):
     def resolved_cache_dir(self) -> Path:
         return self.cache_dir if self.cache_dir is not None else Path.home() / ".cache" / "mintd"
 
+    @property
+    def aws_profile_name(self) -> str | None:
+        """Returns 'mintd' if ~/.aws/credentials has a [mintd] section, else None
+        (= boto3 default credential chain)."""
+        import configparser
+        from pathlib import Path
+
+        cred_path = Path.home() / ".aws" / "credentials"
+        if not cred_path.is_file():
+            return None
+        cp = configparser.ConfigParser()
+        try:
+            cp.read(cred_path)
+        except configparser.Error:
+            return None
+        return "mintd" if cp.has_section("mintd") else None
+
 
 def _default_config_path() -> Path:
     base = os.environ.get("MINTD_CONFIG_DIR")

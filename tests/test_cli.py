@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 
+from mintd.model import FastPullResult
+from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from mintd import cli
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import CheckFinding
@@ -35,7 +37,6 @@ def _stage_dvc_import(tmp_path: Path) -> None:
     (tmp_path / "data" / "imports").mkdir(parents=True, exist_ok=True)
     shutil.copy(STANDALONE_DVC, tmp_path / "data" / "imports" / "cms_based.dvc")
 
-
 @pytest.fixture
 def patched_clients(
     monkeypatch: pytest.MonkeyPatch,
@@ -48,6 +49,11 @@ def patched_clients(
     monkeypatch.setattr(
         "mintd.cli._resolve_catalog_client", lambda cfg: client
     )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_fast_sync_ops", lambda cfg: None
+    )
+    return client, dvc_ops
+
     # Always return defaults; avoid touching the real ~/.config/mintd/.
     monkeypatch.setattr(
         "mintd.cli.Config.load",
@@ -69,17 +75,20 @@ def _register_provider_xw(
     return metadata
 
 
-def test_cli_data_pull_calls_data_pull(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    patched_clients,
+def test_cli_data_pull_uses_fast_sync_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients
 ) -> None:
     _, dvc_ops = patched_clients
-    rc = cli.main(["data", "pull", "data/raw.csv", "--remote", "origin"])
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, fallback_targets=[])
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: fast_fake)
+    rc = cli.main(["data", "pull", "data/raw.csv"])
     assert rc == 0
-    assert len(dvc_ops.pull_calls) == 1
-    assert dvc_ops.pull_calls[0].targets == ["data/raw.csv"]
-    assert dvc_ops.pull_calls[0].remote == "origin"
+    assert len(fast_fake.calls) == 1
+    assert fast_fake.calls[0].targets == ["data/raw.csv"]
+    assert len(dvc_ops.checkout_calls) == 1
+    assert dvc_ops.checkout_calls[0].targets == ["data/raw.csv"]
+    assert dvc_ops.pull_calls == []
 
 
 def test_cli_data_pull_dvc_error_exits_one(

@@ -186,8 +186,24 @@ class Metadata(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Field introspection
+# Fast Sync Models
 # ---------------------------------------------------------------------------
+
+
+class FastPullResult(BaseModel):
+    """Result of a fast-pull attempt.
+
+    Caller pipes `fallback_targets` into `dvc_ops.pull(targets=fallback_targets)`
+    and `synced_targets = set(targets) - set(fallback_targets)` into
+    `dvc_ops.checkout(targets=synced_targets)`. When `fallback_targets` is empty,
+    a single `dvc_ops.checkout(targets=targets)` materializes the worktree.
+    """
+    model_config = ConfigDict(frozen=True)
+    success: bool
+    synced_count: int = 0
+    fallback_targets: list[str] = Field(default_factory=list)
+    reason: str = ""
+    files_dir_failures: list[str] = Field(default_factory=list)
 
 
 def _unwrap_container(tp: Any) -> Any:

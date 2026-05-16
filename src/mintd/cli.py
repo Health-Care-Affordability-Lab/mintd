@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import NoReturn
 
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
+from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from ._init_ops import InitOpError
 from .catalog import (
@@ -67,6 +69,8 @@ from .publish import (
     WorkingTreeDirty,
     publish_project,
 )
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -310,6 +314,24 @@ def _resolve_clients(config: Config) -> tuple[CatalogClient, DvcOps]:
     return client, dvc_ops
 
 
+def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
+    """Build production ``SubprocessFastSyncOps`` from config.
+    Tests monkeypatch this function to inject fakes.
+
+    Probes for ``boto3`` explicitly because ``_fast_sync_ops`` uses
+    module-level optional-import sentinels and imports cleanly even when
+    boto3 is unavailable. Without this probe we'd hand back a fast-sync
+    instance whose first network call would crash.
+    """
+    try:
+        import boto3  # noqa: F401 — availability probe only
+    except ImportError as exc:
+        logger.warning("fast-sync unavailable (boto3 not importable): %s", exc)
+        return None
+    from ._fast_sync_ops import SubprocessFastSyncOps
+    return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
+
+
 def _resolve_git_ops(config: Config) -> RegistryGitOps:
     """Build production ``SubprocessRegistryGitOps`` from config.
     Tests monkeypatch this function to inject fakes.
@@ -357,12 +379,13 @@ def _handle_init(args: argparse.Namespace) -> int:
 def _handle_data_pull(args: argparse.Namespace) -> int:
     config = Config.load()
     _, dvc_ops = _resolve_clients(config)
+    fast_sync_ops = _resolve_fast_sync_ops(config)
     try:
         data_pull(
             project_path=args.path,
             targets=args.targets or None,
             dvc_ops=dvc_ops,
-            fast_sync_ops=None,
+            fast_sync_ops=fast_sync_ops,
             remote=args.remote,
             jobs=args.jobs,
         )

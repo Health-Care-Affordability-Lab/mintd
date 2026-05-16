@@ -43,6 +43,10 @@ class DvcRemoveCall(NamedTuple):
     name: str
 
 
+class DvcCheckoutCall(NamedTuple):
+    targets: list[str] | None
+
+
 class _FakeDvcOps:
     """Implements `mintd._dvc_ops.DvcOps` structurally."""
 
@@ -59,6 +63,8 @@ class _FakeDvcOps:
         self.status_result: dict[str, str] = {}
         self.remove_calls: list[DvcRemoveCall] = []
         self.remove_raises: Exception | None = None
+        self.checkout_calls: list[DvcCheckoutCall] = []
+        self.checkout_raises: Exception | None = None
 
     def import_(
         self,
@@ -125,3 +131,8 @@ class _FakeDvcOps:
         if self.remove_raises:
             raise self.remove_raises
         self.remove_calls.append(DvcRemoveCall(name=name))
+
+    def checkout(self, *, targets: list[str] | None = None) -> None:
+        if self.checkout_raises:
+            raise self.checkout_raises
+        self.checkout_calls.append(DvcCheckoutCall(targets=targets))

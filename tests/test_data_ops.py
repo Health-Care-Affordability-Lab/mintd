@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from mintd._dvc_ops import DvcPullError
+from mintd.model import FastPullResult
 from mintd.data_ops import data_add, data_pull, data_push, data_remove, data_verify
 from tests._fakes.dvc_ops import DvcPullCall, _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
@@ -21,30 +22,49 @@ def test_data_pull_with_targets_passes_them(tmp_path: Path) -> None:
     assert fake.pull_calls[0].targets == ["data/a", "data/b"]
 
 
-def test_data_pull_fast_sync_true_skips_dvc_ops_pull(tmp_path: Path) -> None:
+def test_data_pull_fast_sync_success_runs_dvc_checkout(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
-    fast_fake.result = True
-    data_pull(tmp_path, dvc_ops=fake, fast_sync_ops=fast_fake)
+    fast_fake.result = FastPullResult(success=True, fallback_targets=[])
+    data_pull(tmp_path, targets=["a"], dvc_ops=fake, fast_sync_ops=fast_fake)
     assert fake.pull_calls == []
-    assert len(fast_fake.calls) == 1
+    assert len(fake.checkout_calls) == 1
+    assert fake.checkout_calls[0].targets == ["a"]
 
 
-def test_data_pull_fast_sync_false_falls_back(tmp_path: Path) -> None:
+def test_data_pull_fast_sync_partial_runs_dvc_pull_on_fallback(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
-    fast_fake.result = False
-    data_pull(tmp_path, dvc_ops=fake, fast_sync_ops=fast_fake)
+    # 2 files, 1 success (fast), 1 fallback
+    fast_fake.result = FastPullResult(
+        success=False,
+        synced_count=1,
+        fallback_targets=["data/raw.csv"],
+    )
+    targets = ["data/fast.csv", "data/raw.csv"]
+    data_pull(tmp_path, targets=targets, dvc_ops=fake, fast_sync_ops=fast_fake)
     assert len(fake.pull_calls) == 1
-    assert len(fast_fake.calls) == 1
+    assert fake.pull_calls[0].targets == ["data/raw.csv"]
+    assert len(fake.checkout_calls) == 1
+    assert fake.checkout_calls[0].targets == ["data/fast.csv"]
 
 
 def test_data_pull_fast_sync_raises_falls_back(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     fast_fake.raises = RuntimeError("boom")
-    data_pull(tmp_path, dvc_ops=fake, fast_sync_ops=fast_fake)
+    data_pull(tmp_path, targets=["a"], dvc_ops=fake, fast_sync_ops=fast_fake)
     assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets == ["a"]
+
+
+def test_data_pull_no_targets_skips_fast_sync(tmp_path: Path) -> None:
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    assert len(fast_fake.calls) == 0
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets is None
 
 
 def test_data_push_calls_dvc_ops_push(tmp_path: Path) -> None:
@@ -92,3 +112,32 @@ def test_data_pull_propagates_dvc_pull_error(tmp_path: Path) -> None:
     fake.pull_raises = DvcPullError("nope")
     with pytest.raises(DvcPullError, match="nope"):
         data_pull(tmp_path, dvc_ops=fake)
+
+
+def test_data_pull_all_fell_back_skips_checkout(tmp_path: Path) -> None:
+    """When fast-sync handled nothing, data_pull must NOT call dvc_ops.checkout
+    (otherwise it would try to materialize uncached targets and crash). Only
+    dvc_ops.pull runs, for every target."""
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(
+        success=False, synced_count=0, fallback_targets=["A", "B"]
+    )
+    data_pull(tmp_path, targets=["A", "B"], dvc_ops=fake, fast_sync_ops=fast_fake)
+    assert fake.checkout_calls == []
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets == ["A", "B"]
+
+
+def test_data_pull_partial_pull_failure_still_keeps_synced_checkout(tmp_path: Path) -> None:
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(
+        success=False, synced_count=1, fallback_targets=["B"]
+    )
+    fake.pull_raises = DvcPullError("network")
+    with pytest.raises(DvcPullError, match="network"):
+        data_pull(tmp_path, targets=["A", "B"], dvc_ops=fake, fast_sync_ops=fast_fake)
+    # checkout MUST have been called for the synced target before the pull blew up.
+    assert len(fake.checkout_calls) == 1
+    assert fake.checkout_calls[0].targets == ["A"]

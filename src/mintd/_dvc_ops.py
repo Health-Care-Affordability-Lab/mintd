@@ -38,6 +38,10 @@ class DvcRemoveError(DvcOpError):
     """`dvc remove` exited non-zero."""
 
 
+class DvcCheckoutError(DvcOpError):
+    """`dvc checkout` exited non-zero."""
+
+
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
@@ -92,6 +96,10 @@ class DvcOps(Protocol):
 
     def remove(self, name: str) -> None:
         """Run `dvc remove`."""
+        ...
+
+    def checkout(self, *, targets: list[str] | None = None) -> None:
+        """Run `dvc checkout`."""
         ...
 
 
@@ -277,4 +285,25 @@ class SubprocessDvcOps:
         if result.returncode != 0:
             raise DvcRemoveError(
                 f"dvc remove failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
+
+    def checkout(self, *, targets: list[str] | None = None) -> None:
+        cmd = ["dvc", "checkout"]
+        if targets:
+            cmd.extend(targets)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+        except subprocess.TimeoutExpired as exc:
+            raise DvcCheckoutError(f"dvc checkout timed out after {self._timeout}s") from exc
+        if result.returncode != 0:
+            raise DvcCheckoutError(
+                f"dvc checkout failed (exit {result.returncode}): {result.stderr.strip()}"
             )

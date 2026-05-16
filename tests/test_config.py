@@ -1,8 +1,9 @@
-"""Tests for `mintd._config.Config.load()`."""
+"""Tests for `mintd._config` — slice-1 ``Config.load()`` + slice-18 ``aws_profile_name``."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -49,3 +50,28 @@ def test_env_var_overrides_default_path(
 ) -> None:
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path))
     assert _default_config_path() == tmp_path / "config.yaml"
+
+
+# --- slice 18: aws_profile_name --------------------------------------------
+
+def test_aws_profile_name_mintd_exists(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("[mintd]\naws_access_key_id = 123\n")
+    with patch("pathlib.Path.home", return_value=home):
+        assert Config().aws_profile_name == "mintd"
+
+
+def test_aws_profile_name_only_default_exists(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("[default]\naws_access_key_id = 123\n")
+    with patch("pathlib.Path.home", return_value=home):
+        assert Config().aws_profile_name is None
+
+
+def test_aws_profile_name_no_credentials_file(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    with patch("pathlib.Path.home", return_value=home):
+        assert Config().aws_profile_name is None
