@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.1",
+  "mint": {
+    "version": "{{ mint_version }}",
+    "commit_hash": "{{ mint_hash }}"
+  },
+  "project": {
+    "name": "{{ project_name }}",
+    "type": "code",
+    "full_name": "{{ project_name }}",
+    "created_at": "{{ created_at }}",
+    "created_by": "{{ author }}"
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "description": "{{ description | default('') }}",
+    "tags": {{ tags | default([]) | tojson }},
+    "language": "{{ language }}"{% if with_data %},
+    "data_kind": "{{ data_kind | default('synthetic') }}"{% endif %}
+  },
+{% if with_data %}
+  "storage": {
+    "bucket": "{{ bucket_name }}",
+    "prefix": "{{ storage_prefix }}",
+    "dvc": {
+      "remote_name": "{{ dvc_remote_name }}",
+      "remote_url": "s3://{{ bucket_name }}/{{ storage_prefix }}"
+    },
+    "sync_global": false
+  },
+{% endif %}
+  "ownership": {
+    "team": "{{ team }}",
+    "maintainers": [
+      "{{ author }}"
+    ]
+  },
+  "access_control": {
+    "teams": [
+      {
+        "name": "{{ admin_team }}",
+        "permission": "admin"
+      },
+      {
+        "name": "{{ researcher_team }}",
+        "permission": "read"
+      }
+    ]
+  },
+  "status": {
+    "state": "active",
+    "last_updated": "{{ created_at }}"
+  },
+  "governance": {
+    "classification": "{{ classification }}",
+    "contract_info": "{{ contract_info | default('') }}"
+  },
+  "repository": {
+    "github_url": "https://github.com/{{ registry_org }}/{{ project_name }}",
+    "default_branch": "main",
+    "visibility": "private",
+    "mirror": {
+      "url": "{{ mirror_url | default('') }}",
+      "purpose": "{{ mirror_purpose | default('internal_tooling') }}"
+    }
+  }
+}

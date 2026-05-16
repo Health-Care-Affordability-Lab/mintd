@@ -1,0 +1,36 @@
+# DVC ignore patterns
+# Files and directories to exclude from DVC tracking
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+
+# Documentation builds
+docs/_build/
+
+# Test outputs
+.pytest_cache/
+.coverage*
+
+# Scratch/temporary data directories
+# Large directories tracked as single .dvc entries cause hanging pulls
+temp/
+tmp/
+scratch/

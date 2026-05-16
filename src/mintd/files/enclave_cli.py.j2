@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Cross-platform CLI for {{ full_project_name }} enclave operations.
+
+This script provides a unified entry point for all enclave operations,
+replacing the shell scripts for better Windows compatibility.
+
+Usage:
+    python enclave_cli.py pull [--all] [repo_name]
+    python enclave_cli.py package [--name NAME]
+    python enclave_cli.py verify [transfer_dir]
+    python enclave_cli.py unpack [transfer_file]
+"""
+
+import sys
+import os
+from pathlib import Path
+
+# Add project root to Python path
+PROJECT_ROOT = Path(__file__).parent.parent.absolute()
+sys.path.insert(0, str(PROJECT_ROOT))
+os.chdir(PROJECT_ROOT)
+
+
+def check_dependencies():
+    """Check if required packages are installed."""
+    missing = []
+    try:
+        import yaml
+    except ImportError:
+        missing.append("pyyaml")
+    try:
+        import dvc
+    except ImportError:
+        missing.append("dvc")
+    
+    if missing:
+        print("❌ Required packages not installed. Please run:")
+        print(f"   pip install {' '.join(missing)}")
+        sys.exit(1)
+
+
+def cmd_pull(args):
+    """Pull data from registry."""
+    from src.download import pull_all_repos, pull_single_repo
+    
+    print("🔄 Pulling data for {{ full_project_name }}")
+    print(f"Working directory: {PROJECT_ROOT}")
+    print()
+    print("Starting data download...")
+    
+    if not args or args[0] == "--all":
+        pull_all_repos(verbose=True)
+    else:
+        pull_single_repo(args[0], verbose=True)
+    
+    print()
+    print("✅ Data pull complete.")
+    print("Run 'python enclave_cli.py package' to create transfer package.")
+
+
+def cmd_package(args):
+    """Package data for transfer."""
+    from src.transfer import create_transfer_package
+    
+    name = None
+    if args and args[0] == "--name" and len(args) > 1:
+        name = args[1]
+    
+    print("📦 Creating transfer package for {{ full_project_name }}")
+    print(f"Working directory: {PROJECT_ROOT}")
+    print()
+    
+    package_path = create_transfer_package(name=name)
+    
+    print()
+    print(f"✅ Transfer package created: {package_path}")
+    print("Copy this to your air-gapped enclave and run:")
+    print(f"   python enclave_cli.py unpack {package_path.name}")
+
+
+def cmd_verify(args):
+    """Verify transfer integrity."""
+    from src.transfer import verify_transfer
+    
+    if not args:
+        print("Usage: python enclave_cli.py verify <transfer_dir>")
+        sys.exit(1)
+    
+    transfer_dir = Path(args[0])
+    
+    print("🔍 Verifying transfer integrity")
+    print(f"Transfer directory: {transfer_dir}")
+    print()
+    
+    if verify_transfer(transfer_dir):
+        print("✅ Transfer verification passed!")
+    else:
+        print("❌ Transfer verification failed!")
+        sys.exit(1)
+
+
+def cmd_unpack(args):
+    """Unpack transfer archive."""
+    from src.transfer import unpack_transfer
+    
+    if not args:
+        print("Usage: python enclave_cli.py unpack <transfer_file>")
+        sys.exit(1)
+    
+    transfer_file = Path(args[0])
+    
+    print("📥 Unpacking transfer archive")
+    print(f"Archive: {transfer_file}")
+    print()
+    
+    dest_dir = unpack_transfer(transfer_file)
+    
+    print()
+    print(f"✅ Transfer unpacked to: {dest_dir}")
+    print("Run 'python enclave_cli.py verify <dir>' to verify integrity.")
+
+
+def main():
+    """Main entry point."""
+    if len(sys.argv) < 2:
+        print(__doc__)
+        sys.exit(1)
+    
+    check_dependencies()
+    
+    command = sys.argv[1]
+    args = sys.argv[2:]
+    
+    commands = {
+        "pull": cmd_pull,
+        "package": cmd_package,
+        "verify": cmd_verify,
+        "unpack": cmd_unpack,
+    }
+    
+    if command in commands:
+        try:
+            commands[command](args)
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            sys.exit(1)
+    else:
+        print(f"Unknown command: {command}")
+        print("Available commands: pull, package, verify, unpack")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

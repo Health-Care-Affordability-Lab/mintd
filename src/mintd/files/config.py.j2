@@ -1,0 +1,192 @@
+"""Configuration for {{ project_name }}.
+
+This file centralizes project configuration including paths and random seeds.
+Modify this file to set your base path and other project-specific settings.
+
+Per AEA Data Editor guidelines for reproducible research:
+https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+"""
+
+from pathlib import Path
+
+# =============================================================================
+# BASE PATH CONFIGURATION
+# =============================================================================
+# Set this to your project root directory.
+# All other paths are relative to this base path.
+
+BASE_PATH = Path(__file__).parent.parent  # Default: project root (code/ -> project root)
+
+# =============================================================================
+# RANDOM SEED FOR REPRODUCIBILITY
+# =============================================================================
+# Set a fixed random seed for all stochastic operations.
+# Document this in your README per AEA guidelines.
+
+RANDOM_SEED = 12345
+
+# =============================================================================
+# DERIVED PATHS (do not modify)
+# =============================================================================
+DATA_DIR = BASE_PATH / "data"
+RAW_DIR = DATA_DIR / "raw"
+ANALYSIS_DIR = DATA_DIR / "analysis"
+
+RESULTS_DIR = BASE_PATH / "results"
+FIGURES_DIR = RESULTS_DIR / "figures"
+TABLES_DIR = RESULTS_DIR / "tables"
+ESTIMATES_DIR = RESULTS_DIR / "estimates"
+
+CODE_DIR = BASE_PATH / "code"
+
+
+def get_paths() -> dict:
+    """Return all project paths as a dictionary.
+
+    Returns:
+        Dict with keys: base, data, raw, analysis, results, figures,
+        tables, estimates, code
+    """
+    return {
+        "base": BASE_PATH,
+        "data": DATA_DIR,
+        "raw": RAW_DIR,
+        "analysis": ANALYSIS_DIR,
+        "results": RESULTS_DIR,
+        "figures": FIGURES_DIR,
+        "tables": TABLES_DIR,
+        "estimates": ESTIMATES_DIR,
+        "code": CODE_DIR,
+    }
+
+
+def setup_random_seed():
+    """Set random seeds for reproducibility across common libraries."""
+    import random
+    random.seed(RANDOM_SEED)
+
+    try:
+        import numpy as np
+        np.random.seed(RANDOM_SEED)
+    except ImportError:
+        pass
+
+    try:
+        import torch
+        torch.manual_seed(RANDOM_SEED)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(RANDOM_SEED)
+    except ImportError:
+        pass
+
+
+# =============================================================================
+# LOOKUP FUNCTIONS
+# =============================================================================
+# These functions act as lookup tables for case-specific configurations.
+# Use them to centralize variable definitions, tags, and settings that
+# vary across different analysis cases or specifications.
+
+
+# Define case configurations as dictionaries
+CASE_TAGS = {
+    "baseline": "base",
+    "robustness1": "rob1",
+    "robustness2": "rob2",
+}
+
+CASE_SPECS = {
+    "baseline": {
+        "depvar": "outcome",
+        "controls": ["x1", "x2", "x3"],
+        "fe": ["year", "group"],
+    },
+    "extended": {
+        "depvar": "outcome",
+        "controls": ["x1", "x2", "x3", "x4", "x5"],
+        "fe": ["year", "group", "region"],
+    },
+}
+
+# Pretty names for display in tables/figures
+PRETTY_NAMES = {
+    # Variables
+    "outcome": "Outcome Variable",
+    "x1": "Control 1",
+    "x2": "Control 2",
+    "x3": "Control 3",
+    # Cases/specifications
+    "baseline": "Baseline",
+    "robustness1": "Robustness Check 1",
+    "robustness2": "Robustness Check 2",
+    "extended": "Extended Controls",
+}
+
+
+def case2tag(case: str) -> str:
+    """Lookup table for case-specific tags.
+
+    Args:
+        case: The case name to look up
+
+    Returns:
+        The tag associated with the case, or the case name if not found
+
+    Example:
+        >>> tag = case2tag("baseline")
+        >>> print(tag)  # "base"
+    """
+    tag = CASE_TAGS.get(case, case)
+    print(f"case2tag: looked up '{case}' ; returned tag '{tag}'")
+    return tag
+
+
+def case2vars(case: str) -> dict:
+    """Lookup table for case-specific variable lists.
+
+    Args:
+        case: The case name to look up
+
+    Returns:
+        Dictionary with keys: depvar, controls, fe
+
+    Raises:
+        KeyError: If case is not found in CASE_SPECS
+
+    Example:
+        >>> spec = case2vars("baseline")
+        >>> print(spec["depvar"])  # "outcome"
+        >>> print(spec["controls"])  # ["x1", "x2", "x3"]
+    """
+    if case not in CASE_SPECS:
+        raise KeyError(f"case2vars: unknown case '{case}'")
+
+    spec = CASE_SPECS[case]
+    print(f"case2vars: looked up '{case}'")
+    return spec
+
+
+def pretty_name(name: str) -> str:
+    """Get a display-friendly label for a variable or case name.
+
+    Useful for creating publication-quality tables and figures.
+
+    Args:
+        name: The variable or case name to look up
+
+    Returns:
+        The pretty name if found, otherwise title-cased version of input
+
+    Example:
+        >>> pretty_name("outcome")  # "Outcome Variable"
+        >>> pretty_name("x1")  # "Control 1"
+        >>> pretty_name("unknown_var")  # "Unknown Var"
+    """
+    if name in PRETTY_NAMES:
+        return PRETTY_NAMES[name]
+    # Default: convert underscores to spaces and title case
+    return name.replace("_", " ").title()
+
+
+# Initialize random seed on import
+setup_random_seed()

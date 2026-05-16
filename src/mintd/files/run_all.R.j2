@@ -1,0 +1,103 @@
+#!/usr/bin/env Rscript
+#' Master run script for {{ project_name }}
+#'
+#' This script runs all analysis code in the correct order.
+#' Per AEA Data Editor guidelines for reproducible research:
+#' https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+#'
+#' Usage:
+#'   Rscript run_all.R
+#'   # or in R:
+#'   source("run_all.R")
+#'
+#' Requirements:
+#'   - R {{ language_version | default('4.0+') }}
+#'   - Dependencies listed in renv.lock
+
+# Project root directory
+PROJECT_ROOT <- normalizePath(dirname(sys.frame(1)$ofile), mustWork = FALSE)
+if (is.null(sys.frame(1)$ofile)) {
+  PROJECT_ROOT <- getwd()
+}
+
+CODE_DIR <- file.path(PROJECT_ROOT, "code")
+
+#' Run an R script and return success status
+#'
+#' @param script_path Path to the script to run
+#' @param description Human-readable description
+#' @return TRUE if successful, FALSE otherwise
+run_script <- function(script_path, description) {
+  cat("\n", rep("=", 60), "\n", sep = "")
+  cat("Running:", description, "\n")
+  cat("Script:", script_path, "\n")
+  cat("Time:", format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), "\n")
+  cat(rep("=", 60), "\n", sep = "")
+
+  if (!file.exists(script_path)) {
+    cat("WARNING: Script not found:", script_path, "\n")
+    return(TRUE)  # Skip missing scripts
+  }
+
+  tryCatch({
+    source(script_path, local = new.env())
+    cat("SUCCESS:", description, "completed\n")
+    return(TRUE)
+  }, error = function(e) {
+    cat("ERROR:", e$message, "\n")
+    return(FALSE)
+  })
+}
+
+#' Main function to run all scripts
+main <- function() {
+  cat(rep("=", 60), "\n", sep = "")
+  cat("{{ full_project_name }}\n")
+  cat("Master Run Script\n")
+  cat("Started:", format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), "\n")
+  cat(rep("=", 60), "\n", sep = "")
+
+  # Load configuration
+  config_path <- file.path(CODE_DIR, "00_setup", "config.R")
+  if (file.exists(config_path)) {
+    source(config_path)
+  }
+
+  # Define scripts to run in order
+  scripts <- list(
+    # Data preparation
+    # list(path = file.path(CODE_DIR, "01_data_prep", "prepare_data.R"),
+    #      desc = "Data preparation"),
+
+    # Analysis
+    # list(path = file.path(CODE_DIR, "02_analysis", "main_analysis.R"),
+    #      desc = "Main analysis"),
+
+    # Tables
+    # list(path = file.path(CODE_DIR, "03_tables", "generate_tables.R"),
+    #      desc = "Generate tables"),
+
+    # Figures
+    # list(path = file.path(CODE_DIR, "04_figures", "generate_figures.R"),
+    #      desc = "Generate figures")
+  )
+
+  # Run each script
+  for (script in scripts) {
+    success <- run_script(script$path, script$desc)
+    if (!success) {
+      cat("\nERROR: Pipeline failed at:", script$desc, "\n")
+      quit(status = 1)
+    }
+  }
+
+  cat("\n", rep("=", 60), "\n", sep = "")
+  cat("All scripts completed successfully!\n")
+  cat("Finished:", format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), "\n")
+  cat(rep("=", 60), "\n", sep = "")
+}
+
+# Run main if executed directly
+if (!interactive()) {
+  main()
+}

@@ -1,0 +1,96 @@
+# Citations for {{ project_name }}
+
+This file documents all data sources, software, and references used in this project.
+Per AEA Data Editor guidelines for reproducible research:
+https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+
+## Data Citations
+
+Data citations should follow standard academic citation format and include:
+- Author(s)
+- Year of publication
+- Title
+- Publisher/Repository
+- DOI or permanent URL
+- Date accessed
+
+### Primary Data Sources
+
+<!-- Add your data citations here -->
+
+| Source | Citation |
+|--------|----------|
+| [Data Source 1] | Author(s). (Year). *Title*. Publisher. DOI/URL. Accessed: YYYY-MM-DD. |
+| [Data Source 2] | Author(s). (Year). *Title*. Publisher. DOI/URL. Accessed: YYYY-MM-DD. |
+
+### Administrative Data
+
+<!-- If using administrative or restricted data, document access -->
+
+| Data | Provider | Access Date | IRB/DUA |
+|------|----------|-------------|---------|
+| [Dataset name] | [Provider] | YYYY-MM-DD | [Protocol #] |
+
+## Software Citations
+
+{% if language == 'python' %}
+### Python
+
+Python Software Foundation. ({{ created_at[:4] }}). Python Language Reference, version 3.x.
+Available at https://www.python.org
+
+### Key Packages
+
+| Package | Version | Citation |
+|---------|---------|----------|
+| pandas | X.X.X | McKinney, W. (2010). Data Structures for Statistical Computing in Python. *Proceedings of the 9th Python in Science Conference*. |
+| numpy | X.X.X | Harris, C.R., et al. (2020). Array programming with NumPy. *Nature*, 585, 357-362. |
+| | | |
+
+{% elif language == 'r' %}
+### R
+
+R Core Team ({{ created_at[:4] }}). R: A language and environment for statistical computing.
+R Foundation for Statistical Computing, Vienna, Austria. https://www.R-project.org/
+
+### Key Packages
+
+| Package | Version | Citation |
+|---------|---------|----------|
+| tidyverse | X.X.X | Wickham H, et al. (2019). Welcome to the tidyverse. *JOSS*, 4(43), 1686. |
+| | | |
+
+{% elif language == 'stata' %}
+### Stata
+
+StataCorp. ({{ created_at[:4] }}). Stata Statistical Software: Release XX.
+College Station, TX: StataCorp LLC.
+
+### User-Written Commands
+
+| Command | Author | Citation |
+|---------|--------|----------|
+| | | |
+
+{% endif %}
+
+## References
+
+<!-- Academic papers, reports, and other references cited in your analysis -->
+
+1. [Reference 1]
+2. [Reference 2]
+
+## License
+
+### Data License
+
+[Specify the license for your data, e.g., CC-BY 4.0, restricted access, etc.]
+
+### Code License
+
+[Specify the license for your code, e.g., MIT, BSD-3, etc.]
+
+---
+
+Last updated: {{ created_at }}

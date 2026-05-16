@@ -59,7 +59,7 @@ from .enclave import (
     enclave_verify,
 )
 from .imports import scan_imports
-from .init import InitDestinationExists, init_project
+from .init import InitDestinationExists, InitNameInvalid, init_project
 from .model import Metadata
 from .pending_registrations import PendingRegistrations
 from .producer import MissingPrimaryDataProduct, ProducerError
@@ -146,6 +146,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--use-current-repo",
         action="store_true",
         help="Scaffold into --path directly instead of into a new ``{type}_{name}`` subdir.",
+    )
+    p_init.add_argument(
+        "--lang",
+        choices=["python", "r", "stata"],
+        default="python",
+        help="Primary programming language for scaffold (ignored for enclave type).",
     )
     p_init.set_defaults(_handler=_handle_init)
 
@@ -370,23 +376,28 @@ def _handle_check(args: argparse.Namespace) -> int:
 
 def _handle_init(args: argparse.Namespace) -> int:
     try:
-        project_path = init_project(
+        project_path, written = init_project(
             project_type=args.project_type,
             name=args.name,
             target_dir=args.path,
+            language=args.lang,
             use_current_repo=args.use_current_repo,
         )
-    except (InitDestinationExists, InitOpError) as exc:
+    except (InitDestinationExists, InitNameInvalid, InitOpError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     # Render paths relative to cwd when possible so the user sees the subdir.
+    cwd = Path.cwd().resolve()
     try:
-        rel = project_path.resolve().relative_to(Path.cwd().resolve())
+        rel = project_path.resolve().relative_to(cwd)
     except ValueError:
         rel = project_path
-    prefix = "" if str(rel) == "." else f"{rel}/"
-    print(f"created: {prefix}metadata.json")
-    print(f"created: {prefix}.gitignore")
+    for p in written:
+        try:
+            line = p.resolve().relative_to(cwd)
+        except ValueError:
+            line = p
+        print(f"created: {line}")
     print("initialized: git")
     if args.project_type in {"data", "code", "project"}:
         print("initialized: dvc")

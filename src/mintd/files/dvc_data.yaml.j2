@@ -1,0 +1,80 @@
+vars:
+  - dvc_vars.yaml
+
+stages:
+  ingest:
+    wdir: {{ source_dir }}
+{% if language == "python" %}
+    cmd: ${python_cmd} ingest.py
+{% elif language == "r" %}
+    cmd: ${r_cmd} ingest.R
+{% elif language == "stata" %}
+    cmd: ${stata_cmd} -b do ingest.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - ingest.py
+{% elif language == "r" %}
+      - ingest.R
+{% elif language == "stata" %}
+      - ingest.do
+      - _mintd_utils.do
+{% endif %}
+    outs:
+      - ../data/raw/
+
+  clean:
+    wdir: {{ source_dir }}
+{% if language == "python" %}
+    cmd: ${python_cmd} clean.py
+{% elif language == "r" %}
+    cmd: ${r_cmd} clean.R
+{% elif language == "stata" %}
+    cmd: ${stata_cmd} -b do clean.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - clean.py
+{% elif language == "r" %}
+      - clean.R
+{% elif language == "stata" %}
+      - clean.do
+      - _mintd_utils.do
+{% endif %}
+      - ../data/raw/
+    outs:
+      - ../data/intermediate/
+
+  validate:
+    wdir: {{ source_dir }}
+{% if language == "python" %}
+    cmd: ${python_cmd} validate.py
+{% elif language == "r" %}
+    cmd: ${r_cmd} validate.R
+{% elif language == "stata" %}
+    cmd: ${stata_cmd} -b do validate.do
+{% endif %}
+    deps:
+{% if language == "python" %}
+      - validate.py
+{% elif language == "r" %}
+      - validate.R
+{% elif language == "stata" %}
+      - validate.do
+      - _mintd_utils.do
+{% endif %}
+      - ../data/intermediate/
+    outs:
+      - ../data/final/
+      - ../data/schema_validation_log.txt
+{% if language != "stata" %}      - ../schemas/v1/schema.json
+{% endif %}
+{% if language == "stata" %}
+  schema:
+    wdir: {{ source_dir }}
+    cmd: mintd schema generate --project-dir ..
+    deps:
+      - ../data/final/
+    outs:
+      - ../schemas/v1/schema.json
+{% endif %}

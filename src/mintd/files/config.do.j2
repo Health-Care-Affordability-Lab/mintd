@@ -1,0 +1,177 @@
+* Configuration for {{ project_name }}
+*
+* This file centralizes project configuration including paths and random seeds.
+* Modify this file to set your base path and other project-specific settings.
+*
+* Per AEA Data Editor guidelines for reproducible research:
+* https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+
+* =============================================================================
+* BASE PATH CONFIGURATION
+* =============================================================================
+* Set this to your project root directory.
+* All other paths are relative to this base path.
+
+* Default: one directory up from code/ (project root)
+* Modify this path if your project is located elsewhere.
+global BASE_PATH ".."
+
+* =============================================================================
+* RANDOM SEED FOR REPRODUCIBILITY
+* =============================================================================
+* Set a fixed random seed for all stochastic operations.
+* Document this in your README per AEA guidelines.
+
+global RANDOM_SEED 12345
+set seed $RANDOM_SEED
+
+* =============================================================================
+* DERIVED PATHS (do not modify)
+* =============================================================================
+global DATA_DIR "$BASE_PATH/data"
+global RAW_DIR "$DATA_DIR/raw"
+global ANALYSIS_DIR "$DATA_DIR/analysis"
+
+global RESULTS_DIR "$BASE_PATH/results"
+global FIGURES_DIR "$RESULTS_DIR/figures"
+global TABLES_DIR "$RESULTS_DIR/tables"
+global ESTIMATES_DIR "$RESULTS_DIR/estimates"
+
+global CODE_DIR "$BASE_PATH/code"
+
+* =============================================================================
+* LOOKUP PROGRAMS
+* =============================================================================
+* These programs act as lookup tables for case-specific configurations.
+* Use them to centralize variable definitions, tags, and settings that
+* vary across different analysis cases or specifications.
+*
+* Example usage:
+*   case2tag "volt"
+*   local mytag = r(tag)
+
+cap program drop case2tag
+program define case2tag, rclass
+    * Lookup table for case-specific tags
+    * Returns a tag based on the case name provided
+    *
+    * Usage: case2tag "casename"
+    * Returns: r(tag)
+
+    local lookup `1'
+
+    * Define your case-to-tag mappings here
+    if "`lookup'" == "baseline" {
+        local tag base
+    }
+    else if "`lookup'" == "robustness1" {
+        local tag rob1
+    }
+    else if "`lookup'" == "robustness2" {
+        local tag rob2
+    }
+    else {
+        * Default: use the lookup value as the tag
+        local tag `lookup'
+    }
+
+    display "case2tag: looked up '`lookup'' ; returned tag '`tag''"
+    return local tag `tag'
+end
+
+cap program drop case2vars
+program define case2vars, rclass
+    * Lookup table for case-specific variable lists
+    * Returns variable names based on the case name provided
+    *
+    * Usage: case2vars "casename"
+    * Returns: r(depvar) r(controls) r(fe)
+
+    local lookup `1'
+
+    * Define your case-to-variables mappings here
+    if "`lookup'" == "baseline" {
+        local depvar outcome
+        local controls x1 x2 x3
+        local fe i.year i.group
+    }
+    else if "`lookup'" == "extended" {
+        local depvar outcome
+        local controls x1 x2 x3 x4 x5
+        local fe i.year i.group i.region
+    }
+    else {
+        display as error "case2vars: unknown case '`lookup''"
+        error 198
+    }
+
+    display "case2vars: looked up '`lookup''"
+    return local depvar `depvar'
+    return local controls `controls'
+    return local fe `fe'
+end
+
+cap program drop pretty_name
+program define pretty_name, rclass
+    * Get a display-friendly label for a variable or case name
+    * Useful for creating publication-quality tables and figures
+    *
+    * Usage: pretty_name "varname"
+    * Returns: r(label)
+    *
+    * Example:
+    *   pretty_name "outcome"
+    *   local mylabel = r(label)  // "Outcome Variable"
+
+    local lookup `1'
+
+    * Define your pretty name mappings here
+    * Variables
+    if "`lookup'" == "outcome" {
+        local label "Outcome Variable"
+    }
+    else if "`lookup'" == "x1" {
+        local label "Control 1"
+    }
+    else if "`lookup'" == "x2" {
+        local label "Control 2"
+    }
+    else if "`lookup'" == "x3" {
+        local label "Control 3"
+    }
+    * Cases/specifications
+    else if "`lookup'" == "baseline" {
+        local label "Baseline"
+    }
+    else if "`lookup'" == "robustness1" {
+        local label "Robustness Check 1"
+    }
+    else if "`lookup'" == "robustness2" {
+        local label "Robustness Check 2"
+    }
+    else if "`lookup'" == "extended" {
+        local label "Extended Controls"
+    }
+    else {
+        * Default: convert underscores to spaces and use as-is
+        local label = subinstr("`lookup'", "_", " ", .)
+    }
+
+    return local label `label'
+end
+
+* =============================================================================
+* DISPLAY CONFIGURATION
+* =============================================================================
+display "Configuration loaded"
+display "Base path: $BASE_PATH"
+display "Random seed: $RANDOM_SEED"
+display ""
+display "Data directories:"
+display "  Raw data: $RAW_DIR"
+display "  Analysis data: $ANALYSIS_DIR"
+display ""
+display "Results directories:"
+display "  Figures: $FIGURES_DIR"
+display "  Tables: $TABLES_DIR"
+display "  Estimates: $ESTIMATES_DIR"

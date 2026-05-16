@@ -1,0 +1,164 @@
+#' Data validation for {{ project_name }}
+#'
+#' This script runs quality checks and validation on processed data.
+#' NOTE: This script runs from the code/ directory. Data paths use ../data/
+
+# Import mint utilities (located in same code/ directory)
+source("_mintd_utils.R")
+
+# Load required packages
+library(readr)
+library(jsonlite)
+
+#' Run validation checks on a dataset
+#'
+#' @param df Data frame to validate
+#' @param dataset_name Name of the dataset for logging
+#' @param logger Logger instance
+#' @return List with validation results
+validate_dataset <- function(df, dataset_name, logger) {
+  results <- list(
+    dataset = dataset_name,
+    rows = nrow(df),
+    columns = ncol(df),
+    issues = list(),
+    passed = TRUE
+  )
+
+  # Check for missing values
+  missing_cols <- names(df)[sapply(df, function(x) any(is.na(x)))]
+  if (length(missing_cols) > 0) {
+    missing_counts <- sapply(missing_cols, function(col) sum(is.na(df[[col]])))
+    results$issues <- c(results$issues, list(list(
+      type = "missing_values",
+      columns = as.list(missing_counts)
+    )))
+  }
+
+  # Check for duplicate rows
+  duplicates <- sum(duplicated(df))
+  if (duplicates > 0) {
+    results$issues <- c(results$issues, list(list(
+      type = "duplicate_rows",
+      count = duplicates
+    )))
+  }
+
+  # Count numeric columns
+  numeric_cols <- names(df)[sapply(df, is.numeric)]
+  results$numeric_columns <- length(numeric_cols)
+
+  # Log validation results
+  logger$log("Validation for ", dataset_name, ":")
+  logger$log("  Rows: ", results$rows)
+  logger$log("  Columns: ", results$columns)
+  logger$log("  Numeric columns: ", results$numeric_columns)
+
+  if (length(results$issues) > 0) {
+    results$passed <- FALSE
+    logger$log("  Issues found:")
+    for (issue in results$issues) {
+      if (issue$type == "missing_values") {
+        logger$log("    - Missing values in: ", paste(names(issue$columns), collapse = ", "))
+      } else if (issue$type == "duplicate_rows") {
+        logger$log("    - Found ", issue$count, " duplicate rows")
+      }
+    }
+  } else {
+    logger$log("  [OK] No issues found")
+  }
+
+  return(results)
+}
+
+main <- function() {
+  # Initialize logging (validates directory and creates log file)
+  logger <- ParameterAwareLogger("validate")
+  logger$log("Starting data validation for {{ project_name }}...")
+
+  # Ensure data directories exist (using global paths from _mintd_utils.R)
+  paths <- get_data_paths()
+  lapply(paths, function(d) {
+    if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  })
+
+  logger$log("Directories ready:")
+  logger$log("  Raw data: ", RAW_DIR)
+  logger$log("  Intermediate: ", INTERMEDIATE_DIR)
+  logger$log("  Final data: ", FINAL_DIR)
+
+  # Validate all CSV files in INTERMEDIATE_DIR
+  intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "\\.csv$", full.names = TRUE)
+
+  if (length(intermediate_files) == 0) {
+    logger$log("No CSV files found in INTERMEDIATE_DIR. Run clean.R first.")
+    validation_report <- list(status = "no_files", datasets = list())
+  } else {
+    logger$log("Found ", length(intermediate_files), " CSV files to validate")
+
+    all_results <- list()
+    all_valid <- TRUE
+
+    for (data_file in intermediate_files) {
+      df <- read_csv(data_file, show_col_types = FALSE)
+      results <- validate_dataset(df, basename(data_file), logger)
+      all_results <- c(all_results, list(results))
+      all_valid <- all_valid && results$passed
+    }
+
+    # Summary
+    if (all_valid) {
+      logger$log("[OK] All datasets passed validation")
+    } else {
+      logger$log("[WARN] Some datasets have issues - review above")
+    }
+
+    # Create validation report
+    validation_report <- list(
+      status = ifelse(all_valid, "passed", "issues_found"),
+      timestamp = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+      datasets = all_results
+    )
+  }
+
+  # Save validation report to FINAL_DIR
+  report_file <- file.path(FINAL_DIR, "validation_report.json")
+  write_json(validation_report, report_file, pretty = TRUE, auto_unbox = TRUE)
+  logger$log("Validation report saved to: ", report_file)
+
+  # Generate schema from final data files
+  logger$log("Generating data schema...")
+  schema_dir <- "../schemas/v1"
+  dir.create(schema_dir, recursive = TRUE, showWarnings = FALSE)
+  schema_file <- file.path(schema_dir, "schema.json")
+
+  final_files <- find_data_files(FINAL_DIR, extensions = c("csv", "json", "xlsx", "xls", "rds"))
+  if (length(final_files) > 0) {
+    combined_schema <- list(
+      generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+      files = list()
+    )
+
+    for (data_file in final_files) {
+      tryCatch({
+        file_schema <- generate_data_schema(data_file)
+        combined_schema$files <- c(combined_schema$files, list(file_schema))
+        logger$log("  Generated schema for: ", basename(data_file))
+      }, error = function(e) {
+        logger$log("  Warning: Could not generate schema for ", basename(data_file), ": ", e$message)
+      })
+    }
+
+    write_json(combined_schema, schema_file, pretty = TRUE, auto_unbox = TRUE)
+    logger$log("Schema saved to: ", schema_file)
+  } else {
+    logger$log("No data files found in FINAL_DIR for schema generation")
+  }
+
+  logger$log("Data validation completed successfully.")
+  logger$close()
+}
+
+if (!interactive()) {
+  main()
+}

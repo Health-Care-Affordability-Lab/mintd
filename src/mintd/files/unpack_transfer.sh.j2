@@ -1,0 +1,59 @@
+#!/bin/bash
+# Transfer unpacking script for {{ full_project_name }}
+#
+# Unpacks transfer archives on the secure enclave.
+# Run this after copying transfer files to the enclave.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+# Change to project root directory
+cd "$PROJECT_ROOT"
+
+echo "📂 Unpacking transfer for {{ full_project_name }}"
+echo "Working directory: $PWD"
+echo
+
+# Check arguments
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <transfer-archive.tar.gz>"
+    echo
+    echo "Example: $0 transfers/transfer-2025-01-15.tar.gz"
+    exit 1
+fi
+
+TRANSFER_ARCHIVE="$1"
+
+# Check if archive exists
+if [ ! -f "$TRANSFER_ARCHIVE" ]; then
+    echo "❌ Transfer archive not found: $TRANSFER_ARCHIVE"
+    exit 1
+fi
+
+# Create unpack directory
+UNPACK_DIR="transfer_temp_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$UNPACK_DIR"
+
+echo "Extracting transfer archive..."
+tar -xzf "$TRANSFER_ARCHIVE" -C "$UNPACK_DIR"
+
+echo "Transfer archive extracted to: $UNPACK_DIR"
+echo
+
+# Check for required files
+if [ ! -f "$UNPACK_DIR/_checksums.sha256" ]; then
+    echo "❌ Checksums file not found in transfer archive."
+    rm -rf "$UNPACK_DIR"
+    exit 1
+fi
+
+if [ ! -f "$UNPACK_DIR/_transfer_manifest.yaml" ]; then
+    echo "❌ Transfer manifest not found in transfer archive."
+    rm -rf "$UNPACK_DIR"
+    exit 1
+fi
+
+echo "✅ Transfer archive validated."
+echo "Run './scripts/verify_transfer.sh $UNPACK_DIR' to verify and complete transfer."

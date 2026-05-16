@@ -840,6 +840,20 @@ def test_init_existing_metadata_exits_one(
     assert "error:" in err
 
 
+def test_init_rejects_invalid_lang(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    """argparse `choices=...` should reject an unknown --lang value."""
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["init", "data", "my_proj", "--path", str(tmp_path), "--lang", "ocaml"]
+        )
+    err = capsys.readouterr().err
+    assert "ocaml" in err or "invalid choice" in err
+
+
 # ---------------------------------------------------------------------------
 # Slice 15 — mintd publish
 # ---------------------------------------------------------------------------

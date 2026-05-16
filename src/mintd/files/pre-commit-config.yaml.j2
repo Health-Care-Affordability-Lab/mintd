@@ -1,0 +1,27 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-dvc-sync
+        name: Check DVC pipeline sync
+        entry: scripts/check-dvc-sync.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+        verbose: true
+
+      - id: check-env-lockfiles
+        name: Check environment lockfiles
+        entry: scripts/check-env-lockfiles.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+        verbose: true
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

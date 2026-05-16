@@ -1,0 +1,76 @@
+* Master run script for {{ project_name }}
+*
+* This script runs all analysis code in the correct order.
+* Per AEA Data Editor guidelines for reproducible research:
+* https://aeadataeditor.github.io/aea-de-guidance/preparing-for-data-deposit
+*
+* Usage:
+*   do run_all.do
+*
+* Requirements:
+*   - Stata {{ language_version | default('17+') }} (MP/SE/IC)
+
+clear all
+set more off
+capture log close
+
+* =============================================================================
+* SETUP
+* =============================================================================
+
+* Get project root directory (location of this file)
+local project_root "`c(pwd)'"
+
+* Start master log
+local datetime = string(date("`c(current_date)'", "dmy"), "%tdCCYYNNDD") + "_" + ///
+                 subinstr("`c(current_time)'", ":", "", .)
+log using "`project_root'/logs/run_all_`datetime'.log", replace
+
+display "================================================================================"
+display "{{ full_project_name }}"
+display "Master Run Script"
+display "Started: `c(current_date)' `c(current_time)'"
+display "================================================================================"
+
+* Load configuration
+do "`project_root'/code/00_setup/config.do"
+
+* =============================================================================
+* RUN SCRIPTS IN ORDER
+* =============================================================================
+
+* --- Data Preparation ---
+* display ""
+* display "Running: Data preparation"
+* display "================================================================================"
+* do "`project_root'/code/01_data_prep/prepare_data.do"
+
+* --- Analysis ---
+* display ""
+* display "Running: Main analysis"
+* display "================================================================================"
+* do "`project_root'/code/02_analysis/main_analysis.do"
+
+* --- Tables ---
+* display ""
+* display "Running: Generate tables"
+* display "================================================================================"
+* do "`project_root'/code/03_tables/generate_tables.do"
+
+* --- Figures ---
+* display ""
+* display "Running: Generate figures"
+* display "================================================================================"
+* do "`project_root'/code/04_figures/generate_figures.do"
+
+* =============================================================================
+* COMPLETION
+* =============================================================================
+
+display ""
+display "================================================================================"
+display "All scripts completed successfully!"
+display "Finished: `c(current_date)' `c(current_time)'"
+display "================================================================================"
+
+log close

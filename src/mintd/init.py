@@ -1,18 +1,18 @@
 """Project scaffolding — `mintd init`.
 
-Writes a minimal-valid `metadata.json`, `.gitignore`, and runs git/DVC init.
-The CLI layer is the only caller; this module never touches argparse.
+Renders the legacy `mintd create <type>` file set through the vendored
+Jinja templates in `src/mintd/files/`, runs `git init`, and (for
+non-enclave types) `dvc init`. Returns the project path and the list of
+rendered files so the CLI can print per-file output.
 """
 
 from __future__ import annotations
 
-import getpass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
 from ._init_ops import InitOps, SubprocessInitOps
-from .model import Metadata
+from ._templates import InitNameInvalid, render_scaffold
 
 
 _DVC_INIT_TYPES: frozenset[str] = frozenset({"data", "code", "project"})
@@ -27,19 +27,21 @@ def init_project(
     project_type: Literal["data", "code", "project", "enclave"],
     name: str,
     target_dir: Path,
+    language: Literal["python", "r", "stata"] = "python",
     use_current_repo: bool = False,
     ops: InitOps | None = None,
-) -> Path:
+) -> tuple[Path, list[Path]]:
     """Initialize a fresh mintd project.
 
-    By default, scaffolds into a new subdirectory ``target_dir/{type}_{name}``
-    (matching legacy ``mintd``'s default). Pass ``use_current_repo=True`` to
+    By default, scaffolds into ``target_dir/{project_type}_{name}`` (matching
+    legacy ``mintd create``'s default). Pass ``use_current_repo=True`` to
     scaffold into ``target_dir`` directly — useful when retrofitting an
     existing git repo.
 
-    Writes ``metadata.json`` + ``.gitignore``, runs ``git init`` (unless the
-    project is already a git repo), and for non-enclave types ``dvc init``.
-    Returns the actual project path that was scaffolded into.
+    Renders all language- and type-specific templates from
+    ``src/mintd/files/`` through Jinja, runs ``git init`` (unless the
+    directory is already a git repo), and for non-enclave types runs
+    ``dvc init``. Returns ``(project_path, written_files)``.
     """
     if use_current_repo:
         project_path = target_dir
@@ -51,70 +53,19 @@ def init_project(
     if metadata_path.exists():
         raise InitDestinationExists(metadata_path)
 
-    metadata_path.write_text(_metadata_template(project_type, name) + "\n")
-    (project_path / ".gitignore").write_text(_GITIGNORE_TEMPLATE)
+    written = render_scaffold(
+        project_type=project_type,
+        name=name,
+        language=language,
+        target_dir=project_path,
+    )
 
     ops = ops or SubprocessInitOps()
     ops.git_init(project_path)
     if project_type in _DVC_INIT_TYPES:
         ops.dvc_init(project_path)
 
-    return project_path
+    return project_path, written
 
 
-def _metadata_template(
-    project_type: Literal["data", "code", "project", "enclave"], name: str
-) -> str:
-    """Build a minimal-valid Metadata instance and dump as JSON."""
-    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    user = getpass.getuser()
-    data = {
-        "schema_version": "2.0",
-        "mint": {"version": "0.0.1", "commit_hash": ""},
-        "project": {
-            "type": project_type,
-            "name": name,
-            "full_name": f"{project_type}_{name}",
-            "created_at": now,
-            "created_by": user,
-        },
-        "metadata": {"description": "", "tags": []},
-        "ownership": {"team": "", "maintainers": [user]},
-        "access_control": {"teams": []},
-        "governance": {"classification": "private", "contract_info": ""},
-        "data_products": {"primary": None, "outputs": []},
-        "repository": {
-            "github_url": "",
-            "default_branch": "main",
-            "visibility": "private",
-            "mirror": {"url": "", "purpose": ""},
-        },
-        "status": {
-            "state": "active",
-            "last_updated": now,
-            "last_published_version": "",
-        },
-    }
-    # Round-trip through Metadata to validate the template is correct.
-    return Metadata.model_validate(data).model_dump_json(indent=2)
-
-
-_GITIGNORE_TEMPLATE = """\
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-dist/
-build/
-*.egg-info/
-
-# DVC
-*.tmp
-
-# Editor / OS
-.DS_Store
-*.swp
-.idea/
-.vscode/
-"""
+__all__ = ["init_project", "InitDestinationExists", "InitNameInvalid"]
