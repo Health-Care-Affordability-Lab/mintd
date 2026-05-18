@@ -238,12 +238,15 @@ def _write_file(out_path: Path, template_name: str, context: dict[str, object]) 
     if template_name in _STATIC_FILES:
         # Copy verbatim. Use importlib.resources for installed-package safety.
         from importlib.resources import files as _files
-        out_path.write_text((_files("mintd") / "files" / template_name).read_text())
+        out_path.write_text(
+            (_files("mintd") / "files" / template_name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
         return
     if template_name in _METADATA_TEMPLATES:
-        out_path.write_text(_render_metadata_json(context))
+        out_path.write_text(_render_metadata_json(context), encoding="utf-8")
         return
-    out_path.write_text(render_template(template_name, context))
+    out_path.write_text(render_template(template_name, context), encoding="utf-8")
 
 
 def render_scaffold(

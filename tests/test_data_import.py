@@ -30,7 +30,7 @@ def _register(
     name: str = "provider_xw",
     mutate: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = name
     data["repository"]["github_url"] = f"https://github.com/example-org/{name}"
     if mutate is not None:
@@ -115,7 +115,7 @@ def _producer_bytes(
     primary: str | None = "outputs/at_rev.parquet",
     outputs: list[dict[str, Any]] | None = None,
 ) -> bytes:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["data_products"]["primary"] = primary
     if outputs is not None:
         data["data_products"]["outputs"] = outputs

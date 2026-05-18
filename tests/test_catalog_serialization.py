@@ -47,7 +47,7 @@ def test_catalog_entry_includes_storage_when_populated():
     audience-filter drop puts it back. This test would have failed under the
     pre-drop design.
     """
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["storage"] = {
         "provider": "s3",
         "bucket": "my-bucket",
@@ -65,7 +65,7 @@ def test_catalog_entry_includes_data_products_when_populated():
     """data_products is in the catalog. Consumers re-read producer at pin
     for authoritative values, but the catalog carries the latest publish
     state for browse-time display."""
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["data_products"] = {
         "primary": "out.parquet",
         "outputs": [

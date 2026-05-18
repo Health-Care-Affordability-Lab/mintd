@@ -22,6 +22,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from ._atomic import _try_fsync_parent_dir
 from ._config import Config, ConfigError, _default_config_path
 
 
@@ -45,16 +46,12 @@ def _atomic_write_yaml(path: Path, content: str) -> None:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     with open(tmp, "r+") as f:
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(path)
-    parent_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    _try_fsync_parent_dir(path)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +162,7 @@ def apply_set_updates(
     path = _resolve_path(config_path)
     if path.is_file():
         try:
-            data = yaml.safe_load(path.read_text()) or {}
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as e:
             raise ConfigError(f"malformed YAML in {path}: {e}") from e
     else:
@@ -200,7 +197,7 @@ def apply_from_file(
         text = sys.stdin.read()
     else:
         try:
-            text = Path(source).read_text()
+            text = Path(source).read_text(encoding="utf-8")
         except FileNotFoundError as e:
             raise ConfigError(f"--from FILE not found: {source}") from e
     try:
@@ -408,7 +405,7 @@ def apply_migrate_v1(
 ) -> Config:
     """Read a v1 mintd config, translate to v2, validate, write atomically."""
     try:
-        text = Path(source).read_text()
+        text = Path(source).read_text(encoding="utf-8")
     except FileNotFoundError as e:
         raise ConfigError(f"--migrate-v1 source not found: {source}") from e
     try:
@@ -456,7 +453,7 @@ def interactive_setup(
     path = _resolve_path(config_path)
     if path.is_file():
         try:
-            existing = yaml.safe_load(path.read_text()) or {}
+            existing = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as e:
             raise ConfigError(f"malformed YAML in {path}: {e}") from e
         if not isinstance(existing, dict):

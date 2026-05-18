@@ -56,7 +56,7 @@ def _stage_project(
 
 
 def _view_with_primary(primary: str | None) -> ProducerView:
-    meta = Metadata.model_validate_json(MINIMAL.read_text())
+    meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
     meta = meta.model_copy(
         update={
             "data_products": DataProducts(
@@ -386,7 +386,7 @@ def test_bump_default_uses_producer_view_at_head(
 
 
 def _producer_bytes(*, primary: str | None = "outputs/main.parquet") -> bytes:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["data_products"]["primary"] = primary
     return json.dumps(data).encode()
 

@@ -82,7 +82,7 @@ class CatalogCache:
         path = self._find_entry_path(name)
         if path is None:
             return None
-        return deserialize(path.read_text())
+        return deserialize(path.read_text(encoding="utf-8"))
 
     def list_entries(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]:
         """Walk all catalog yaml files, optionally filter by project type."""
@@ -97,7 +97,7 @@ class CatalogCache:
             if not subdir.is_dir():
                 continue
             for path in sorted(subdir.glob("*.yaml")):
-                results.append(deserialize(path.read_text()))
+                results.append(deserialize(path.read_text(encoding="utf-8")))
         return results
 
     # ------------------------------------------------------------------
@@ -115,7 +115,7 @@ class CatalogCache:
         target_dir = self._work_dir / "catalog" / project_type
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / f"{name}.yaml"
-        target.write_text(content)
+        target.write_text(content, encoding="utf-8")
         return target
 
     # ------------------------------------------------------------------

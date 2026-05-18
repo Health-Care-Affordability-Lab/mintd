@@ -480,5 +480,5 @@ def test_stderr_bytes_decoded_safely(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_single_subprocess_call_site() -> None:
-    text = Path("src/mintd/_producer_git_ops.py").read_text()
+    text = Path("src/mintd/_producer_git_ops.py").read_text(encoding="utf-8")
     assert text.count("subprocess.run(") == 1

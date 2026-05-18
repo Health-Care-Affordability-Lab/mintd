@@ -36,7 +36,7 @@ def _valid_bytes(
     outputs: list[dict[str, Any]] | None = None,
     schema_version: str = "2.0",
 ) -> bytes:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["schema_version"] = schema_version
     data["data_products"]["primary"] = primary
     if outputs is not None:

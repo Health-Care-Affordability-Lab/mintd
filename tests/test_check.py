@@ -28,7 +28,7 @@ def _write_metadata(project_dir: Path, mutate=None) -> None:
     If `mutate` is provided, it's called with the parsed dict and may modify
     it in place before the file is written.
     """
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     if mutate is not None:
         mutate(data)
     (project_dir / "metadata.json").write_text(json.dumps(data))
@@ -167,7 +167,7 @@ def _stage_dvc_fixture(tmp_path: Path, src_name: str, dest_name: str) -> None:
 
 
 def _view_with_primary(primary: str | None) -> ProducerView:
-    meta = Metadata.model_validate_json(MINIMAL.read_text())
+    meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
     meta = meta.model_copy(
         update={
             "data_products": DataProducts(
@@ -211,7 +211,7 @@ def test_consumer_section_summarizes_each_dep_without_upgrades(tmp_path: Path):
     
     # Modify the second fixture's repo URL to prevent deduplication
     another_dvc = tmp_path / "data" / "imports" / "another_import.dvc"
-    another_dvc.write_text(another_dvc.read_text().replace("provider-xw", "other"))
+    another_dvc.write_text(another_dvc.read_text(encoding="utf-8").replace("provider-xw", "other"))
 
     findings = check_project(tmp_path)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -359,8 +359,8 @@ def test_upgrades_walk_continues_after_one_error(tmp_path: Path):
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "dep2.dvc")
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "dep3.dvc")
     
-    (tmp_path / "data" / "imports" / "dep2.dvc").write_text((tmp_path / "data" / "imports" / "dep2.dvc").read_text().replace("provider-xw", "other2"))
-    (tmp_path / "data" / "imports" / "dep3.dvc").write_text((tmp_path / "data" / "imports" / "dep3.dvc").read_text().replace("provider-xw", "other3"))
+    (tmp_path / "data" / "imports" / "dep2.dvc").write_text((tmp_path / "data" / "imports" / "dep2.dvc").read_text(encoding="utf-8").replace("provider-xw", "other2"))
+    (tmp_path / "data" / "imports" / "dep3.dvc").write_text((tmp_path / "data" / "imports" / "dep3.dvc").read_text(encoding="utf-8").replace("provider-xw", "other3"))
     
     def factory(repo: str, pin: str):
         if repo == "https://github.com/example-org/other2" and pin != "":
@@ -450,7 +450,7 @@ def _stage_enclave_manifest(tmp_path: Path) -> Path:
 
 def _client_with_provider_xw() -> InMemoryCatalogClient:
     client = InMemoryCatalogClient()
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
     data["repository"]["github_url"] = _PROVIDER_XW_URL

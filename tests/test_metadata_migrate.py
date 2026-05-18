@@ -26,7 +26,7 @@ FIXTURE = Path(__file__).parent / "fixtures" / "metadata_v1_real_world.json"
 
 def test_migrate_real_world_v1_sample() -> None:
     """The lab's actual v1 metadata.json migrates cleanly + validates."""
-    v1 = json.loads(FIXTURE.read_text())
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     v2, _report = migrate_v1_to_v2(v1)
     metadata = Metadata.model_validate(v2)
     assert metadata.schema_version == "2.0"
@@ -135,7 +135,7 @@ def test_migrate_outputs_default_missing_required_fields() -> None:
 def test_migration_report_lists_all_dropped_fields() -> None:
     """The vendored real-world fixture should drop every v1-only field
     enumerated in the spec."""
-    v1 = json.loads(FIXTURE.read_text())
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     _, report = migrate_v1_to_v2(v1)
     for expected in (
         "language",
@@ -155,7 +155,7 @@ def test_migration_report_lists_all_dropped_fields() -> None:
 def test_apply_writes_v2_atomically(tmp_path: Path) -> None:
     shutil.copy(FIXTURE, tmp_path / "metadata.json")
     apply_metadata_migration(tmp_path)
-    written = json.loads((tmp_path / "metadata.json").read_text())
+    written = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
     assert written["schema_version"] == "2.0"
     # Tmp sibling was renamed away cleanly.
     assert not (tmp_path / "metadata.json.tmp").exists()
@@ -165,9 +165,9 @@ def test_apply_writes_v2_atomically(tmp_path: Path) -> None:
 
 def test_apply_dry_run_does_not_write(tmp_path: Path) -> None:
     shutil.copy(FIXTURE, tmp_path / "metadata.json")
-    before = (tmp_path / "metadata.json").read_text()
+    before = (tmp_path / "metadata.json").read_text(encoding="utf-8")
     apply_metadata_migration(tmp_path, dry_run=True)
-    assert (tmp_path / "metadata.json").read_text() == before
+    assert (tmp_path / "metadata.json").read_text(encoding="utf-8") == before
 
 
 def test_apply_idempotent_on_v2_input(tmp_path: Path) -> None:
@@ -186,7 +186,7 @@ def test_apply_missing_file_raises(tmp_path: Path) -> None:
 def test_apply_validation_failure_surfaces_field_path(tmp_path: Path) -> None:
     """A synthetic v1 file with a required v2 sub-field broken raises
     MetadataMigrateError naming the failing field path."""
-    v1 = json.loads(FIXTURE.read_text())
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     # Break a required v2 field: ownership.maintainers must be a list.
     v1["ownership"]["maintainers"] = "not-a-list"
     (tmp_path / "metadata.json").write_text(json.dumps(v1))
@@ -203,10 +203,10 @@ def test_cli_update_metadata_dry_run_preserves_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     shutil.copy(FIXTURE, tmp_path / "metadata.json")
-    before = (tmp_path / "metadata.json").read_text()
+    before = (tmp_path / "metadata.json").read_text(encoding="utf-8")
     rc = cli.main(["update", "metadata", str(tmp_path), "--dry-run"])
     assert rc == 0
-    assert (tmp_path / "metadata.json").read_text() == before
+    assert (tmp_path / "metadata.json").read_text(encoding="utf-8") == before
     out = capsys.readouterr().out
     assert "dry-run" in out
     assert "1.0" in out and "2.0" in out
@@ -239,7 +239,7 @@ def test_cli_update_metadata_json_report(
 def test_cli_update_metadata_validation_failure_exits_two(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    v1 = json.loads(FIXTURE.read_text())
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     v1["ownership"]["maintainers"] = "not-a-list"
     (tmp_path / "metadata.json").write_text(json.dumps(v1))
     rc = cli.main(["update", "metadata", str(tmp_path)])

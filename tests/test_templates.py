@@ -70,7 +70,7 @@ def test_code_renders_metadata_only(tmp_path: Path) -> None:
     assert [p.relative_to(tmp_path).as_posix() for p in written] == ["metadata.json"]
     # Pin the Pydantic bypass: code-type metadata must validate AND carry
     # `project.type == "code"`. Regression coverage for a hardcoded "data".
-    metadata = Metadata.model_validate_json((tmp_path / "metadata.json").read_text())
+    metadata = Metadata.model_validate_json((tmp_path / "metadata.json").read_text(encoding="utf-8"))
     assert metadata.project.type == "code"
     assert metadata.project.name == "foo"
 
@@ -119,7 +119,7 @@ def test_rendered_metadata_round_trips_through_pydantic(tmp_path: Path) -> None:
     render_scaffold(
         project_type="data", name="foo", language="python", target_dir=tmp_path
     )
-    metadata = Metadata.model_validate_json((tmp_path / "metadata.json").read_text())
+    metadata = Metadata.model_validate_json((tmp_path / "metadata.json").read_text(encoding="utf-8"))
     assert metadata.project.name == "foo"
     assert metadata.project.full_name == "data_foo"
     assert metadata.project.type == "data"
@@ -130,7 +130,7 @@ def test_no_unrendered_jinja_markers_in_output(tmp_path: Path) -> None:
         project_type="data", name="foo", language="python", target_dir=tmp_path
     )
     for path in written:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert "{{" not in text, f"unrendered marker in {path.name}: {text!r}"
         assert "{%" not in text, f"unrendered block in {path.name}: {text!r}"
 
@@ -149,7 +149,7 @@ def test_render_scaffold_matrix_no_unrendered_markers(
         project_type=project_type, name="foo", language=language, target_dir=tmp_path
     )
     for path in written:
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         assert "{{" not in text, f"{project_type}/{language}: unrendered marker in {path.name}"
         assert "{%" not in text, f"{project_type}/{language}: unrendered block in {path.name}"
 

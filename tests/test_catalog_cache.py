@@ -51,11 +51,11 @@ def test_ensure_fresh_fetches_when_present(tmp_path: Path, remote_registry: Path
     cache.ensure_fresh()
 
     seed_path = work / "catalog" / "data" / "seed_alpha.yaml"
-    original = seed_path.read_text()
+    original = seed_path.read_text(encoding="utf-8")
     seed_path.write_text("project:\n  name: hacked\n")
 
     cache.ensure_fresh()
-    assert seed_path.read_text() == original, "reset --hard should revert local edits"
+    assert seed_path.read_text(encoding="utf-8") == original, "reset --hard should revert local edits"
 
 
 def test_ensure_fresh_picks_up_remote_change(tmp_path: Path, remote_registry: Path) -> None:
@@ -146,7 +146,7 @@ def test_write_entry_stages_in_working_tree(tmp_path: Path, remote_registry: Pat
     cache.ensure_fresh()
 
     import json
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "fresh_entry"
     m = Metadata.model_validate(data)
     entry = deserialize(serialize(m))

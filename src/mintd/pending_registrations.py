@@ -86,7 +86,7 @@ class PendingRegistrations:
     def _read(self) -> list[PendingRegistration]:
         if not self._path.exists():
             return []
-        raw = json.loads(self._path.read_text())
+        raw = json.loads(self._path.read_text(encoding="utf-8"))
         return [
             PendingRegistration(
                 name=item["name"],
@@ -114,7 +114,7 @@ class PendingRegistrations:
         # Atomic write: tempfile + rename.
         fd, tmp_name = tempfile.mkstemp(dir=self._path.parent, prefix=".mintd_pending.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
             os.replace(tmp_name, self._path)
         except Exception:

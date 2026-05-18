@@ -27,6 +27,7 @@ except ImportError:
     ClientError = Exception  # type: ignore[assignment,misc]
     ProfileNotFound = Exception  # type: ignore[assignment,misc]
 
+from mintd._atomic import _try_fsync_parent_dir
 from mintd.model import FastPullResult
 
 logger = logging.getLogger(__name__)
@@ -340,12 +341,8 @@ def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
         os.fsync(fd)
     finally:
         os.close(fd)
-    tmp_path.rename(manifest_path)
-    parent_fd = os.open(str(manifest_path.parent), os.O_RDONLY)
-    try:
-        os.fsync(parent_fd)
-    finally:
-        os.close(parent_fd)
+    tmp_path.replace(manifest_path)
+    _try_fsync_parent_dir(manifest_path)
     return full_md5
 
 
@@ -384,12 +381,8 @@ def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md
                 os.fsync(fd)
             finally:
                 os.close(fd)
-            tmp_path.rename(cache_path)
-            parent_fd = os.open(str(cache_path.parent), os.O_RDONLY)
-            try:
-                os.fsync(parent_fd)
-            finally:
-                os.close(parent_fd)
+            tmp_path.replace(cache_path)
+            _try_fsync_parent_dir(cache_path)
             return True
         except Exception as e:
             tmp_path.unlink(missing_ok=True)

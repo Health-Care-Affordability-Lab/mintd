@@ -131,7 +131,7 @@ def _dedup(deps: list[DataDependency]) -> list[DataDependency]:
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
-    with path.open() as fh:
+    with path.open(encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict):
         return {}

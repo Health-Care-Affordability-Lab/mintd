@@ -170,7 +170,7 @@ class Metadata(BaseModel):
         if the bytes don't parse as JSON, or pydantic.ValidationError if the
         shape doesn't match the model.
         """
-        data = path.read_text()
+        data = path.read_text(encoding="utf-8")
         return cls.model_validate_json(data)
 
     def to_catalog_entry(self) -> CatalogEntry:

@@ -42,7 +42,7 @@ def test_init_writes_metadata_json(tmp_path: Path) -> None:
     )
     metadata_path = project_path / "metadata.json"
     assert metadata_path.exists()
-    Metadata.model_validate_json(metadata_path.read_text())
+    Metadata.model_validate_json(metadata_path.read_text(encoding="utf-8"))
 
 
 def test_init_writes_gitignore(tmp_path: Path) -> None:
@@ -53,7 +53,7 @@ def test_init_writes_gitignore(tmp_path: Path) -> None:
     gitignore_path = project_path / ".gitignore"
     assert gitignore_path.exists()
     # The vendored .gitignore is the legacy one; just confirm non-empty.
-    assert gitignore_path.read_text().strip()
+    assert gitignore_path.read_text(encoding="utf-8").strip()
 
 
 def test_init_runs_git_init(tmp_path: Path) -> None:
@@ -93,7 +93,7 @@ def test_init_existing_metadata_raises(tmp_path: Path) -> None:
         init_project(
             project_type="data", name="my_proj", target_dir=tmp_path, ops=fake
         )
-    assert metadata_path.read_text() == "{}"
+    assert metadata_path.read_text(encoding="utf-8") == "{}"
     assert fake.git_calls == []
     assert fake.dvc_calls == []
 
@@ -114,7 +114,7 @@ def test_init_metadata_includes_passed_name_and_type(tmp_path: Path) -> None:
         project_type="data", name="my_proj", target_dir=tmp_path, ops=fake
     )
     metadata = Metadata.model_validate_json(
-        (project_path / "metadata.json").read_text()
+        (project_path / "metadata.json").read_text(encoding="utf-8")
     )
     assert metadata.project.name == "my_proj"
     assert metadata.project.type == "data"

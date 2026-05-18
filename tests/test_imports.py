@@ -32,7 +32,7 @@ def test_from_dvc_lock_yields_per_repo_dep() -> None:
     lock_path = FIXTURES / "dvc.lock"
     import yaml
 
-    lock = yaml.safe_load(lock_path.read_text())
+    lock = yaml.safe_load(lock_path.read_text(encoding="utf-8"))
 
     ingest_deps = DataDependency.from_dvc_lock_stage(
         "ingest_external", lock["stages"]["ingest_external"], lock_path
@@ -55,15 +55,15 @@ def test_from_dvc_lock_yields_per_repo_dep() -> None:
 
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
 
 
 def test_scan_imports_walks_both_sources(tmp_path: Path) -> None:
     _write(
         tmp_path / "data" / "imports" / "alpha.dvc",
-        (FIXTURES / "standalone_import.dvc").read_text(),
+        (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
-    _write(tmp_path / "dvc.lock", (FIXTURES / "dvc.lock").read_text())
+    _write(tmp_path / "dvc.lock", (FIXTURES / "dvc.lock").read_text(encoding="utf-8"))
 
     deps = scan_imports(tmp_path)
 
@@ -77,7 +77,7 @@ def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
     # pin 4f7c2a1abcd1234567890abcdef0123456789abc.
     _write(
         tmp_path / "data" / "imports" / "cms.dvc",
-        (FIXTURES / "standalone_import.dvc").read_text(),
+        (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
     # dvc.lock stage referencing the same triple.
     _write(
@@ -102,7 +102,7 @@ def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
 def test_scan_imports_handles_missing_dvc_lock(tmp_path: Path) -> None:
     _write(
         tmp_path / "data" / "imports" / "alpha.dvc",
-        (FIXTURES / "standalone_import.dvc").read_text(),
+        (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
 
     deps = scan_imports(tmp_path)
@@ -118,11 +118,11 @@ def test_scan_imports_handles_no_imports(tmp_path: Path) -> None:
 def test_scan_imports_skips_dvc_add_files(tmp_path: Path) -> None:
     _write(
         tmp_path / "data" / "imports" / "produced.dvc",
-        (FIXTURES / "dvc_add_only.dvc").read_text(),
+        (FIXTURES / "dvc_add_only.dvc").read_text(encoding="utf-8"),
     )
     _write(
         tmp_path / "data" / "imports" / "real.dvc",
-        (FIXTURES / "standalone_import.dvc").read_text(),
+        (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
 
     deps = scan_imports(tmp_path)

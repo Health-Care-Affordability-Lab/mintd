@@ -135,7 +135,7 @@ class EnclaveManifest(BaseModel):
 
     @classmethod
     def load(cls, path: Path) -> "EnclaveManifest":
-        with path.open() as fh:
+        with path.open(encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
         return cls.model_validate(data)
 
@@ -145,7 +145,10 @@ class EnclaveManifest(BaseModel):
             changed = _diff_transferred(existing.transferred, self.transferred)
             if changed:
                 raise AppendOnlyViolation(path, changed)
-        path.write_text(yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False))
+        path.write_text(
+            yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False),
+            encoding="utf-8",
+        )
 
     def apply_pin_bump(self, *, repo: str, new_pin: str) -> "EnclaveManifest":
         for i, ap in enumerate(self.approved_products):
@@ -408,7 +411,7 @@ def _all_already_downloaded(downloaded: list[DownloadedItem], ap: ApprovedProduc
     return any(d.repo == ap.repo and d.output == (ap.source_path or "primary") and d.contract_pin == ap.pin for d in downloaded)
 
 def _read_artifact_pin(dvc_path: Path) -> str:
-    data = yaml.safe_load(dvc_path.read_text())
+    data = yaml.safe_load(dvc_path.read_text(encoding="utf-8"))
     outs = data.get("outs") or []
     if not outs:
         raise ValueError(f"{dvc_path} has no outs[]")
@@ -519,7 +522,8 @@ def enclave_package(
         (tmp / "_transfer_manifest.yaml").write_text(
             yaml.safe_dump(
                 transfer_manifest.model_dump(mode="json"), sort_keys=False
-            )
+            ),
+            encoding="utf-8",
         )
 
         ops = archive_ops or TarGzArchiveOps()
@@ -578,7 +582,7 @@ def enclave_verify(
         )
 
     try:
-        raw = yaml.safe_load(manifest_yaml.read_text()) or {}
+        raw = yaml.safe_load(manifest_yaml.read_text(encoding="utf-8")) or {}
         transfer = TransferManifest.model_validate(raw)
     except (yaml.YAMLError, ValidationError) as e:
         raise InvalidTransferManifest(str(e)) from e

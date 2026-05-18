@@ -65,7 +65,7 @@ def patched_clients(
 def _register_provider_xw(
     client: InMemoryCatalogClient, primary: str = "outputs/main.parquet"
 ) -> Metadata:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
     data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
@@ -381,7 +381,7 @@ def test_registry_update_prints_diff(
     client, _ = patched_clients
     _register_provider_xw(client, primary="outputs/old.parquet")
     # Build a slightly different metadata.json to update with
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
     data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
@@ -456,7 +456,7 @@ def test_data_list_catalog_populated(patched_clients, capsys):
     _register_provider_xw(client)
     
     # Register second
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "other-project"
     data["project"]["full_name"] = "data_other-project"
     data["repository"]["github_url"] = "https://github.com/example-org/other-project"
@@ -492,7 +492,7 @@ def test_data_list_imported_with_type_exits_64(patched_clients):
 
 
 def _register_with_type(client, name: str, ptype: str, description: str) -> None:
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = name
     data["project"]["type"] = ptype
     data["project"]["full_name"] = f"{ptype}_{name}"
@@ -1268,7 +1268,7 @@ def test_cli_config_setup_set_writes_file(
          "--set", "registry_url=https://foo"]
     )
     assert rc == 0
-    assert "registry_url: https://foo" in target.read_text()
+    assert "registry_url: https://foo" in target.read_text(encoding="utf-8")
 
 
 def test_cli_config_validate_invalid_yaml_exits_one(
@@ -1324,4 +1324,4 @@ def test_cli_config_setup_from_stdin(
     monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
     rc = cli.main(["config", "setup", "--path", str(target), "--from", "-"])
     assert rc == 0
-    assert "registry_url: piped" in target.read_text()
+    assert "registry_url: piped" in target.read_text(encoding="utf-8")

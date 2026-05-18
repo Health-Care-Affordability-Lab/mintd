@@ -54,7 +54,7 @@ class Config(BaseModel):
         if not path.is_file():
             return cls()
         try:
-            with path.open() as fh:
+            with path.open(encoding="utf-8") as fh:
                 data = yaml.safe_load(fh) or {}
         except yaml.YAMLError as e:
             raise ConfigError(f"malformed YAML in {path}: {e}") from e

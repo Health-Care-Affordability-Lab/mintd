@@ -52,7 +52,7 @@ def test_apply_set_writes_atomic(tmp_path: Path) -> None:
     p = tmp_path / "cfg.yaml"
     p.write_text("dvc_timeout: 99.0\n")
     cfg = apply_set_updates(p, [("registry_url", "https://foo")])
-    written = yaml.safe_load(p.read_text())
+    written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert written["registry_url"] == "https://foo"
     assert written["dvc_timeout"] == 99.0
     assert cfg.registry_url == "https://foo"
@@ -124,7 +124,7 @@ def test_apply_from_stdin_success_and_tty_guard(
     monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
     cfg = apply_from_file(target, None)
     assert cfg.registry_url == "piped"
-    assert "registry_url: piped" in target.read_text()
+    assert "registry_url: piped" in target.read_text(encoding="utf-8")
 
     # When stdin is a TTY, refuse to block on user input.
     monkeypatch.setattr("sys.stdin", io.StringIO(""))
@@ -333,7 +333,7 @@ def test_interactive_setup_walks_each_field(tmp_path: Path) -> None:
     )
     assert cfg.registry_url == "https://example.com/r.git"
     assert cfg.dvc_timeout == 90.0          # carried over from existing
-    written = yaml.safe_load(p.read_text())
+    written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert written["registry_url"] == "https://example.com/r.git"
 
 
@@ -356,7 +356,7 @@ def test_interactive_setup_strips_v1_keys_from_existing(tmp_path: Path) -> None:
     )
     cfg = interactive_setup(p, prompt_fn=_scripted_prompt())
     assert cfg.registry_url == "https://new.example/r.git"
-    written = yaml.safe_load(p.read_text())
+    written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert "defaults" not in written
     assert "registry" not in written
 
@@ -440,8 +440,8 @@ def test_apply_migrate_v1_writes_translated_config(tmp_path: Path) -> None:
     assert cfg.registry_url == "https://example.com/r.git"
     assert cfg.registry_org == "lab"
     assert cfg.storage_endpoint == "https://s3.wasabisys.com"
-    assert "registry:" not in target.read_text()  # v1 shape NOT preserved
-    assert "registry_url: https://example.com/r.git" in target.read_text()
+    assert "registry:" not in target.read_text(encoding="utf-8")  # v1 shape NOT preserved
+    assert "registry_url: https://example.com/r.git" in target.read_text(encoding="utf-8")
 
 
 def test_apply_migrate_v1_missing_file_raises(tmp_path: Path) -> None:

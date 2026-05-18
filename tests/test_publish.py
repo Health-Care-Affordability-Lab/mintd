@@ -17,7 +17,7 @@ class _FakeCatalogClient:
 def _seed_project(tmp_path: Path) -> Path:
     proj = tmp_path / "project"
     proj.mkdir()
-    metadata = json.loads((Path(__file__).parent / "fixtures/metadata_v2_minimal.json").read_text())
+    metadata = json.loads((Path(__file__).parent / "fixtures/metadata_v2_minimal.json").read_text(encoding="utf-8"))
     metadata["mint"]["version"] = "0.1.0"
     (proj / "metadata.json").write_text(json.dumps(metadata))
     subprocess.run(["git", "init", "-b", "main"], cwd=proj, check=True)
@@ -48,7 +48,7 @@ def test_publish_dry_run_returns_diff(tmp_path):
     
     assert result.dry_run
     assert result.version == "0.1.2"
-    assert "0.1.0" in (proj / "metadata.json").read_text()
+    assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
     assert len(dvc.push_calls) == 0
     assert len(git.tag_calls) == 0
     assert len(git.reset_hard_calls) == 0
@@ -65,7 +65,7 @@ def test_publish_increments_patch_version(tmp_path):
     )
     
     assert result.version == "0.1.1"
-    assert "0.1.1" in (proj / "metadata.json").read_text()
+    assert "0.1.1" in (proj / "metadata.json").read_text(encoding="utf-8")
 
 def test_publish_calls_catalog_update_last(tmp_path):
     proj = _seed_project(tmp_path)
@@ -101,7 +101,7 @@ def test_publish_refuses_decreasing_version(tmp_path):
 
 def test_publish_allows_equal_version_for_retry(tmp_path):
     proj = _seed_project(tmp_path)
-    m = json.loads((proj / "metadata.json").read_text())
+    m = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
     m["mint"]["version"] = "0.2.1"
     (proj / "metadata.json").write_text(json.dumps(m))
     subprocess.run(["git", "add", "metadata.json"], cwd=proj, check=True)
@@ -150,14 +150,14 @@ def test_publish_rolls_back_metadata_on_dvc_push_failure(tmp_path):
         )
     
     # Read the file and assert version is 0.1.0 (it should be rolled back)
-    content = (proj / "metadata.json").read_text()
+    content = (proj / "metadata.json").read_text(encoding="utf-8")
     print(f"DEBUG: after rollback failure, version is {content}")
     assert '"version": "0.1.0"' in content
     assert len(git.reset_hard_calls) == 0 # no commit yet
 
 def test_publish_idempotent_retry_does_not_reset_hard_head1(tmp_path):
     proj = _seed_project(tmp_path)
-    m = json.loads((proj / "metadata.json").read_text())
+    m = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
     m["mint"]["version"] = "0.2.1"
     (proj / "metadata.json").write_text(json.dumps(m))
     subprocess.run(["git", "add", "metadata.json"], cwd=proj, check=True)
@@ -211,7 +211,7 @@ def test_publish_skips_dvc_rollback_after_tag_failure(tmp_path):
             git_ops=git,
         )
     
-    assert "0.1.1" in (proj / "metadata.json").read_text()
+    assert "0.1.1" in (proj / "metadata.json").read_text(encoding="utf-8")
     assert "git reset" not in excinfo.value.recovery_hint
 
 
@@ -233,5 +233,5 @@ def test_publish_rolls_back_when_dvc_not_installed(tmp_path):
         )
 
     # File rolled back to the original 0.1.0.
-    content = (proj / "metadata.json").read_text()
+    content = (proj / "metadata.json").read_text(encoding="utf-8")
     assert '"version": "0.1.0"' in content

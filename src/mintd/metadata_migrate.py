@@ -189,7 +189,7 @@ def apply_metadata_migration(
     if not metadata_path.is_file():
         raise FileNotFoundError(f"no metadata.json at {metadata_path}")
 
-    v1_data = json.loads(metadata_path.read_text())
+    v1_data = json.loads(metadata_path.read_text(encoding="utf-8"))
     schema = str(v1_data.get("schema_version", ""))
     if schema.startswith("2."):
         raise MetadataAlreadyV2(

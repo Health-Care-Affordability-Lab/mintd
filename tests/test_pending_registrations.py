@@ -65,7 +65,7 @@ def test_file_has_versioned_schema(tmp_path: Path) -> None:
     from one parser without ambiguity."""
     p = PendingRegistrations(path=tmp_path / ".mintd_pending.json")
     p.add(_make())
-    raw = json.loads((tmp_path / ".mintd_pending.json").read_text())
+    raw = json.loads((tmp_path / ".mintd_pending.json").read_text(encoding="utf-8"))
     assert raw["version"] == 1
     assert isinstance(raw["entries"], list)
 

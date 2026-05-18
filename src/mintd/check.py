@@ -134,7 +134,7 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
             )
         ]
 
-    raw = metadata_path.read_text()
+    raw = metadata_path.read_text(encoding="utf-8")
 
     try:
         json.loads(raw)

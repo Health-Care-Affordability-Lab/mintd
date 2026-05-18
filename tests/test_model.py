@@ -53,7 +53,7 @@ def test_wrong_schema_version_rejected():
     Metadata.model_validate(); assert ValidationError raised.
     """
     
-    data=json.loads((FIXTURES / "metadata_v2_minimal.json").read_text())
+    data=json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
     data["schema_version"] = "1.1"    
     with pytest.raises(ValidationError) as exc:
         Metadata.model_validate(data)
@@ -104,7 +104,7 @@ def test_data_products_outputs_default_empty():
     Code projects often have no published outputs; the model must accept
     this as the natural default, not require an explicit empty list.
     """
-    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text())
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
     del data["data_products"]
 
     m = Metadata.model_validate(data)
@@ -125,7 +125,7 @@ def test_extra_fields_allowed_during_transition():
     Slice 6 will tighten this to extra='forbid'; this test will need to flip
     then. Keeping it now pins the transition contract.
     """
-    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text())
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
     data["something_old"] = "from 1.1, not in the model yet"
 
     m = Metadata.model_validate(data)
@@ -136,7 +136,7 @@ def test_extra_fields_allowed_during_transition():
 def test_project_type_literal_rejects_unknown():
     """project.type is Literal['data','code','project','enclave'] — anything
     else fails validation with the error pinned to project.type."""
-    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text())
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
     data["project"]["type"] = "invalid"
 
     with pytest.raises(ValidationError) as exc:
@@ -164,7 +164,7 @@ def test_all_project_types_have_same_shape(project_type: str):
     every type parses through the same fields. This test would fail the moment
     someone tried to gate a field behind a specific project.type.
     """
-    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text())
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
     data["project"]["type"] = project_type
 
     m = Metadata.model_validate(data)

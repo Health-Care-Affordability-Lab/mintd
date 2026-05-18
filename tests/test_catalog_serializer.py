@@ -24,7 +24,7 @@ def _full_metadata() -> Metadata:
     """Load the minimal fixture and populate storage + data_products so the
     round-trip assertions have content for the formerly-filtered fields.
     """
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["storage"] = {
         "provider": "s3",
         "bucket": "my-bucket",

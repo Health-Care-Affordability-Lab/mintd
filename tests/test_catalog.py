@@ -42,7 +42,7 @@ def _load_metadata(
     """Load the minimal fixture as a Metadata instance, optionally renaming
     project.name and mutating the dict before validation.
     """
-    data = json.loads(MINIMAL.read_text())
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = name
     if mutate is not None:
         mutate(data)

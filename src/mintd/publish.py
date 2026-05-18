@@ -107,7 +107,7 @@ def publish_project(
         )
     
     # Step 1: write metadata.json atomically (if changed)
-    original_metadata_json = metadata_path.read_text()
+    original_metadata_json = metadata_path.read_text(encoding="utf-8")
     if diff:
         _atomic_write_json(metadata_path, new_metadata.model_dump_json(indent=2))
 
@@ -199,18 +199,14 @@ def _atomic_write_json(path: Path, content: str) -> None:
     that's a system-wide flush which can stall on slow filesystems.
     """
     import os
+    from ._atomic import _try_fsync_parent_dir
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content)
+    tmp.write_text(content, encoding="utf-8")
     with open(tmp, "r+") as f:
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(path)
-    # fsync the parent directory so the rename is durable.
-    dir_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    _try_fsync_parent_dir(path)
 
 
 # Public alias so other modules (slice 22's metadata_migrate) can reuse the
