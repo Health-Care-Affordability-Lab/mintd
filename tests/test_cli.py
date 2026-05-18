@@ -1108,3 +1108,87 @@ def test_cli_verify_traversal_attack_exits_one_with_clear_error(
     assert rc == 1
     assert "error:" in err
     assert "evil/../etc" in err
+
+
+# ---------------------------------------------------------------------------
+# Slice 21 — mintd config show / setup / validate
+# ---------------------------------------------------------------------------
+
+
+def test_cli_config_show_prints_yaml(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    p.write_text("registry_url: https://e.com/r.git\n")
+    rc = cli.main(["config", "show", "--path", str(p)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "registry_url: https://e.com/r.git" in out
+
+
+def test_cli_config_setup_set_writes_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "cfg.yaml"
+    rc = cli.main(
+        ["config", "setup", "--path", str(target),
+         "--set", "registry_url=https://foo"]
+    )
+    assert rc == 0
+    assert "registry_url: https://foo" in target.read_text()
+
+
+def test_cli_config_validate_invalid_yaml_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    p.write_text("dvc_timeout: oranges\n")
+    rc = cli.main(["config", "validate", "--path", str(p)])
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "✗ schema" in out
+
+
+def test_cli_config_setup_dry_run_does_not_write(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = tmp_path / "cfg.yaml"
+    rc = cli.main(
+        ["config", "setup", "--path", str(target),
+         "--set", "registry_url=https://x", "--dry-run"]
+    )
+    assert rc == 0
+    assert not target.exists()
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "registry_url: https://x" in out
+
+
+def test_cli_config_setup_set_missing_equals_exits_one(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--set no-equals-value` surfaces parse_set_pair's ConfigError."""
+    p = tmp_path / "cfg.yaml"
+    rc = cli.main(
+        ["config", "setup", "--path", str(p), "--set", "no-equals-here"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "KEY=VALUE" in err
+    assert not p.exists()
+
+
+def test_cli_config_setup_from_stdin(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--from - reads stdin (sentinel translated to None in apply_from_file)."""
+    import io as _io
+    target = tmp_path / "cfg.yaml"
+    monkeypatch.setattr("sys.stdin", _io.StringIO("registry_url: piped\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+    rc = cli.main(["config", "setup", "--path", str(target), "--from", "-"])
+    assert rc == 0
+    assert "registry_url: piped" in target.read_text()

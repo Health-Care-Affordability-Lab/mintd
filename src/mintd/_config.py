@@ -21,10 +21,31 @@ class ConfigError(Exception):
 class Config(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    # CLI-runtime settings.
     registry_url: str | None = None
     cache_dir: Path | None = None
     dvc_timeout: float = 120.0
     git_timeout: float = 30.0
+
+    # User identity — surfaces in generated scaffolds (READMEs, R DESCRIPTION,
+    # citations.md, etc.). Absent → templates render empty strings.
+    author: str | None = None
+    organization: str | None = None
+
+    # Registry conventions — used by the registry PR flow and by scaffold
+    # templates that embed team / org names in metadata.json.
+    registry_org: str | None = None
+    admin_team: str | None = None
+    researcher_team: str | None = None
+
+    # Storage — needed for non-AWS S3 endpoints (Wasabi, MinIO) and for the
+    # fast-sync bucket discovery.
+    storage_endpoint: str | None = None
+    storage_bucket_prefix: str | None = None
+
+    # Toolchain overrides — Windows / Stata variants need this; Unix users
+    # with stata-mp also benefit.
+    stata_executable: str | None = None
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":

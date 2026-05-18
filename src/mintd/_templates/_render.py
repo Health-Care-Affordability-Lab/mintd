@@ -67,6 +67,16 @@ def _current_user() -> str:
         return "unknown"
 
 
+def _detect_platform_os() -> str:
+    import platform as _platform
+    system = _platform.system().lower()
+    if system == "darwin":
+        return "macos"
+    if system == "windows":
+        return "windows"
+    return "linux"
+
+
 def _build_context(
     *,
     project_type: str,
@@ -78,11 +88,29 @@ def _build_context(
         version = importlib.metadata.version("mintd")
     except importlib.metadata.PackageNotFoundError:
         version = "0.0.0"
+    # Load the user's config lazily; slice 21 lets users seed these fields
+    # via `mintd config setup`. Absent fields fall back to safe defaults
+    # — empty strings for cosmetic vars, sensible literals for the rest.
+    # See `notes/V1-PORT-AUDIT.md` for the legacy→v2 mapping.
+    try:
+        from .._config import Config
+        cfg = Config.load()
+    except Exception:
+        cfg = None
+
+    def _cfg(name: str, default: object) -> object:
+        if cfg is None:
+            return default
+        value = getattr(cfg, name, None)
+        return default if value is None else value
+
+    platform_os = _detect_platform_os()
+    command_sep = "&" if platform_os == "windows" else "&&"
+
     # Empty-string defaults for every variable the vendored legacy templates
-    # reference. Variables coming from legacy `mintd create` flags
-    # (governance, storage, team, etc.) are deferred to a follow-up slice;
-    # rendering them as empty strings produces correct stub output the user
-    # can edit. Keys are sorted by source for readability.
+    # reference. Slice-21 absorbs the v1-config fields that users actually
+    # set; the rest stay deferred until a downstream slice surfaces a need.
+    # Keys are grouped by source for readability.
     return {
         # Set by slice-19 init flow.
         "project_name": name,
@@ -96,13 +124,16 @@ def _build_context(
         "created_by": _current_user(),
         "mint_version": version,
         "mint_hash": _get_mint_hash(),
-        "platform_os": "linux",
-        "command_sep": "&&",
-        "stata_executable": "stata",
 
-        # Deferred to legacy-flag-parity slice (--author / --organization).
-        "author": "",
-        "organization": "",
+        # Platform — auto-detected (slice 21). Windows shell scripts not yet
+        # vendored — see notes/V1-PORT-AUDIT.md and the windows-followup memory.
+        "platform_os": platform_os,
+        "command_sep": command_sep,
+        "stata_executable": _cfg("stata_executable", "stata"),
+
+        # Absorbed from v1 config in slice 21.
+        "author": _cfg("author", ""),
+        "organization": _cfg("organization", ""),
 
         # Deferred to governance-flag slice (--public/--contract/--private/...).
         "classification": "private",
@@ -112,22 +143,23 @@ def _build_context(
         "methods": "",
         "data_kind": "",
 
-        # Deferred to team-flag slice (--admin-team / --researcher-team / --team).
+        # Team fields absorbed in slice 21. `team` itself remains deferred —
+        # legacy didn't model a single team key.
         "team": "",
-        "admin_team": "",
-        "researcher_team": "",
+        "admin_team": _cfg("admin_team", ""),
+        "researcher_team": _cfg("researcher_team", ""),
 
-        # Deferred to storage-flag slice (--bucket / storage-init).
-        "bucket_name": "",
-        "storage_endpoint": "",
-        "storage_prefix": "",
+        # Storage fields absorbed in slice 21.
+        "bucket_name": _cfg("storage_bucket_prefix", ""),
+        "storage_endpoint": _cfg("storage_endpoint", ""),
+        "storage_prefix": _cfg("storage_bucket_prefix", ""),
         "storage_provider": "s3",
         "storage_versioning": True,
         "dvc_remote_name": "origin",
 
-        # Deferred to registry-flag slice (--register / registry config).
-        "registry_org": "",
-        "registry_url": "",
+        # Registry fields — registry_url and registry_org both absorbed in slice 21.
+        "registry_org": _cfg("registry_org", ""),
+        "registry_url": _cfg("registry_url", ""),
         "mirror_url": "",
         "mirror_purpose": "",
 
@@ -136,6 +168,20 @@ def _build_context(
         "data_products_primary": "",
         "configurations": [],
     }
+
+
+def _team_entries(context: dict[str, object]) -> list[dict[str, str]]:
+    """Build the `access_control.teams` list from admin_team / researcher_team
+    context values. Empty strings are skipped so the resulting list only
+    contains entries the user actually configured."""
+    entries: list[dict[str, str]] = []
+    admin = str(context.get("admin_team") or "")
+    researcher = str(context.get("researcher_team") or "")
+    if admin:
+        entries.append({"name": admin, "permission": "admin"})
+    if researcher:
+        entries.append({"name": researcher, "permission": "read"})
+    return entries
 
 
 def _render_metadata_json(context: dict[str, object]) -> str:
@@ -163,7 +209,7 @@ def _render_metadata_json(context: dict[str, object]) -> str:
         },
         "metadata": {"description": "", "tags": []},
         "ownership": {"team": "", "maintainers": [created_by]},
-        "access_control": {"teams": []},
+        "access_control": {"teams": _team_entries(context)},
         "governance": {
             "classification": str(context.get("classification") or "private"),
             "contract_info": str(context.get("contract_info") or ""),

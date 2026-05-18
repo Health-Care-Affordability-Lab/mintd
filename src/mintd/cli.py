@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
+from . import config_ops
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
 from ._fast_sync_ops import FastSyncOps
@@ -298,6 +299,46 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish.add_argument("--message", "-m")
     p_publish.add_argument("--path", type=Path, default=Path("."))
     p_publish.set_defaults(_handler=_handle_publish)
+
+    p_config = subs.add_parser("config", help="Inspect, edit, and validate mintd config")
+    p_config_sub = p_config.add_subparsers(dest="config_command")
+
+    p_config_show = p_config_sub.add_parser("show", help="Pretty-print the current config")
+    p_config_show.add_argument("--path", type=Path, default=None)
+    p_config_show.add_argument("--json", action="store_true", dest="json_out")
+    p_config_show.set_defaults(_handler=_handle_config_show)
+
+    p_config_setup = p_config_sub.add_parser(
+        "setup",
+        help="Update config fields (interactive when no flags are given)",
+    )
+    p_config_setup.add_argument("--path", type=Path, default=None)
+    setup_group = p_config_setup.add_mutually_exclusive_group(required=False)
+    setup_group.add_argument(
+        "--set", action="append", dest="set_pairs", metavar="KEY=VALUE",
+        help="Apply KEY=VALUE update; may be passed multiple times.",
+    )
+    setup_group.add_argument(
+        "--from", dest="from_file", type=str, metavar="FILE",
+        help="Read full config from FILE; '-' reads stdin.",
+    )
+    setup_group.add_argument(
+        "--migrate-v1", dest="migrate_v1", type=str, metavar="FILE",
+        help="Read a legacy v1 mintd config FILE and translate to v2.",
+    )
+    p_config_setup.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_config_setup.set_defaults(_handler=_handle_config_setup)
+
+    p_config_validate = p_config_sub.add_parser(
+        "validate", help="Schema + AWS profile + S3 connectivity check"
+    )
+    p_config_validate.add_argument("--path", type=Path, default=None)
+    p_config_validate.add_argument(
+        "--bucket", default=None,
+        help="S3 bucket to test head_bucket against (auto-discovery is slice-22+).",
+    )
+    p_config_validate.add_argument("--json", action="store_true", dest="json_out")
+    p_config_validate.set_defaults(_handler=_handle_config_validate)
 
     return parser
 
@@ -883,6 +924,49 @@ def _handle_publish(args: argparse.Namespace) -> int:
     for change in result.diff:
         print(f"  {change.field_path}: {change.before!r} → {change.after!r}")
     return 0
+
+
+def _handle_config_show(args: argparse.Namespace) -> int:
+    try:
+        config = Config.load(args.path) if args.path is not None else Config.load()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    text = config_ops.render_config(config, json_out=args.json_out)
+    # YAML emits a trailing newline already; JSON does not. Use print's
+    # default newline only when the rendered text doesn't carry one.
+    print(text, end="" if text.endswith("\n") else "\n")
+    return 0
+
+
+def _handle_config_setup(args: argparse.Namespace) -> int:
+    write = not args.dry_run
+    try:
+        if args.from_file is not None:
+            source = None if args.from_file == "-" else args.from_file
+            config = config_ops.apply_from_file(args.path, source, write=write)
+        elif args.migrate_v1 is not None:
+            config = config_ops.apply_migrate_v1(args.path, args.migrate_v1, write=write)
+        elif args.set_pairs:
+            pairs = [config_ops.parse_set_pair(s) for s in args.set_pairs]
+            config = config_ops.apply_set_updates(args.path, pairs, write=write)
+        else:
+            # No flags → interactive walkthrough of every Config field.
+            config = config_ops.interactive_setup(args.path, write=write)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.dry_run:
+        print("# dry-run: would write the following:")
+    print(config_ops.render_config(config), end="")
+    return 0
+
+
+def _handle_config_validate(args: argparse.Namespace) -> int:
+    steps = config_ops.validate_config(args.path, bucket=args.bucket)
+    text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
+    print(text)
+    return exit_code
 
 
 # ---------------------------------------------------------------------------
