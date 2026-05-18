@@ -21,7 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from . import config_ops
+from . import config_ops, metadata_migrate
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
 from ._fast_sync_ops import FastSyncOps
@@ -204,6 +204,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
     p_data_list.add_argument("--imported", action="store_true")
+    p_data_list.add_argument("--json", action="store_true", dest="json_out")
+    p_data_list.add_argument("--detailed", action="store_true", help="Show full descriptions (no truncation).")
+    p_data_list.add_argument("--width", type=int, default=80, help="Description column width (default: 80).")
     p_data_list.add_argument(
         "--type", dest="project_type",
         choices=["data", "code", "project", "enclave"],
@@ -340,6 +343,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p_config_validate.add_argument("--json", action="store_true", dest="json_out")
     p_config_validate.set_defaults(_handler=_handle_config_validate)
 
+    p_update = subs.add_parser("update", help="Migrate v1 metadata/storage to v2")
+    p_update_sub = p_update.add_subparsers(dest="update_command")
+    p_update_meta = p_update_sub.add_parser(
+        "metadata",
+        help="Migrate a v1 metadata.json (schema 1.x) to v2 (schema 2.0)",
+    )
+    p_update_meta.add_argument("path", nargs="?", type=Path, default=Path("."))
+    p_update_meta.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_update_meta.add_argument("--json", action="store_true", dest="json_out")
+    p_update_meta.set_defaults(_handler=_handle_update_metadata, _parser=p_update_meta)
+
     return parser
 
 
@@ -448,12 +462,30 @@ def _handle_init(args: argparse.Namespace) -> int:
 
 
 def _handle_data_pull(args: argparse.Namespace) -> int:
+    # Friendly redirect when run outside a DVC project. Without this probe,
+    # users hit `mintd data pull <name>` from anywhere and get the raw
+    # `dvc pull failed (exit 253): ERROR: you are not inside of a DVC
+    # repository` — they're confusing `pull` (refresh own data) with
+    # `import` (declare and fetch from registry).
+    project_path = args.path.resolve()
+    if not (project_path / ".dvc").is_dir():
+        name_hint = args.targets[0] if args.targets else "<name>"
+        print(
+            f"error: not inside a DVC project (no .dvc/ at {project_path}).\n"
+            f"  mintd data pull operates on the current project's DVC tracking.\n"
+            f"  To fetch '{name_hint}' from the registry into a new project:\n"
+            f"    mintd init data <project-name> "
+            f"&& cd data_<project-name> "
+            f"&& mintd data import {name_hint}",
+            file=sys.stderr,
+        )
+        return 1
     config = Config.load()
     _, dvc_ops = _resolve_clients(config)
     fast_sync_ops = _resolve_fast_sync_ops(config)
     try:
         data_pull(
-            project_path=args.path,
+            project_path=project_path,
             targets=args.targets or None,
             dvc_ops=dvc_ops,
             fast_sync_ops=fast_sync_ops,
@@ -606,6 +638,8 @@ def _handle_data_list(args: argparse.Namespace) -> int:
         args._parser.error("--imported cannot be combined with --type")
 
     if args.imported:
+        # --imported keeps its slice-11 format; --json/--detailed/--width
+        # are silently ignored here (the import view has its own shape).
         deps = scan_imports(Path("."))
         if not deps:
             print("no imports")
@@ -621,9 +655,54 @@ def _handle_data_list(args: argparse.Namespace) -> int:
     if not entries:
         print("no entries")
         return 0
-    for entry in entries:
-        print(f"{entry.name} ({entry.project_type}): {entry.description}")
+    if args.json_out:
+        payload = [
+            {"name": e.name, "project_type": e.project_type, "description": e.description}
+            for e in sorted(entries, key=lambda e: (e.project_type, e.name))
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(_render_catalog_table(entries, detailed=args.detailed, width=args.width))
     return 0
+
+
+_CATALOG_TYPE_ORDER = ("data", "code", "project", "enclave")
+
+
+def _render_catalog_table(entries, *, detailed: bool, width: int) -> str:
+    """Render catalog entries grouped by project_type, ASCII-only.
+
+    Groups appear in the canonical order (data → code → project → enclave →
+    anything else, alphabetical). Within a group, entries sort by name.
+    Descriptions truncate to ``width`` chars (with ``...``) unless
+    ``detailed`` is True. Multi-line descriptions collapse to the first line.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, list] = defaultdict(list)
+    for entry in entries:
+        groups[entry.project_type].append(entry)
+    other = sorted(k for k in groups if k not in _CATALOG_TYPE_ORDER)
+    ordered = [k for k in _CATALOG_TYPE_ORDER if k in groups] + other
+
+    sections: list[str] = []
+    for ptype in ordered:
+        members = sorted(groups[ptype], key=lambda e: e.name)
+        name_col = max(20, max(len(e.name) for e in members))
+        header = f"{ptype} ({len(members)})"
+        underline = ("-" * name_col) + "  " + ("-" * width)
+        rows = [header, f"{'name'.ljust(name_col)}  description", underline]
+        for entry in members:
+            desc = (entry.description or "").splitlines()[0] if entry.description else ""
+            if not desc:
+                rendered = "(no description)"
+            elif not detailed and len(desc) > width:
+                rendered = desc[: max(0, width - 3)] + "..."
+            else:
+                rendered = desc
+            rows.append(f"{entry.name.ljust(name_col)}  {rendered}")
+        sections.append("\n".join(rows))
+    return "\n\n".join(sections)
 
 
 def _handle_enclave_list(args: argparse.Namespace) -> int:
@@ -967,6 +1046,57 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
     text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
     print(text)
     return exit_code
+
+
+def _handle_update_metadata(args: argparse.Namespace) -> int:
+    """Migrate a v1 ``metadata.json`` (schema 1.x) in ``args.path`` to v2.
+
+    Exit codes:
+    - 0 — migrated cleanly (or dry-run preview produced)
+    - 1 — already v2, or file missing
+    - 2 — migration produced a dict that fails v2 validation (user must
+      hand-fix the field path surfaced in the message)
+    """
+    try:
+        report = metadata_migrate.apply_metadata_migration(
+            args.path, dry_run=args.dry_run
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except metadata_migrate.MetadataAlreadyV2 as exc:
+        print(f"already v2: {exc}")
+        return 1
+    except metadata_migrate.MetadataMigrateError as exc:
+        print(
+            f"error: migration produced invalid v2 metadata: {exc}",
+            file=sys.stderr,
+        )
+        return 2
+    if args.json_out:
+        print(
+            json.dumps(
+                {
+                    "moved": report.moved,
+                    "defaulted": report.defaulted,
+                    "dropped": report.dropped,
+                    "schema_before": report.schema_before,
+                    "schema_after": report.schema_after,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.dry_run:
+        print("# dry-run: would apply the following migration")
+    print(f"schema_version: {report.schema_before} → {report.schema_after}")
+    for src, dst in report.moved:
+        print(f"  → {src} → {dst}")
+    for name in report.defaulted:
+        print(f"  + {name} (defaulted)")
+    for name in report.dropped:
+        print(f"  - {name} (dropped)")
+    return 0
 
 
 # ---------------------------------------------------------------------------

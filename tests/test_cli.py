@@ -82,7 +82,10 @@ def test_cli_data_pull_uses_fast_sync_resolver(
     fast_fake = _FakeFastSyncOps()
     fast_fake.result = FastPullResult(success=True, fallback_targets=[])
     monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: fast_fake)
-    rc = cli.main(["data", "pull", "data/raw.csv"])
+    # Slice-22: data pull now refuses to run outside a DVC project; create
+    # the .dvc/ marker so the probe passes.
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main(["data", "pull", "data/raw.csv", "--path", str(tmp_path)])
     assert rc == 0
     assert len(fast_fake.calls) == 1
     assert fast_fake.calls[0].targets == ["data/raw.csv"]
@@ -98,7 +101,8 @@ def test_cli_data_pull_dvc_error_exits_one(
 ) -> None:
     _, dvc_ops = patched_clients
     dvc_ops.pull_raises = DvcPullError("oops")
-    rc = cli.main(["data", "pull"])
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 1
     assert "oops" in capsys.readouterr().err
 
@@ -482,6 +486,135 @@ def test_data_list_imported_with_type_exits_64(patched_clients):
     with pytest.raises(SystemExit) as exc:
         cli.main(["data", "list", "--imported", "--type", "data"])
     assert exc.value.code == 64
+
+
+# Slice 22: data list grouped + truncated + --json -------------------------
+
+
+def _register_with_type(client, name: str, ptype: str, description: str) -> None:
+    data = json.loads(MINIMAL.read_text())
+    data["project"]["name"] = name
+    data["project"]["type"] = ptype
+    data["project"]["full_name"] = f"{ptype}_{name}"
+    data["repository"]["github_url"] = f"https://github.com/example-org/{name}"
+    data["metadata"]["description"] = description
+    client.register(Metadata.model_validate(data))
+
+
+def test_cli_data_list_groups_by_type(patched_clients, capsys):
+    client, _ = patched_clients
+    _register_with_type(client, "alpha", "data", "Alpha description")
+    _register_with_type(client, "tooling", "code", "Code utility")
+    cli.main(["data", "list"])
+    out, _ = capsys.readouterr()
+    assert "data (1)" in out
+    assert "code (1)" in out
+    assert "alpha" in out
+    assert "tooling" in out
+
+
+def test_cli_data_list_canonical_order_data_before_code(patched_clients, capsys):
+    """Pin the canonical type order (data, code, project, enclave). A
+    refactor that switched to alphabetical sort would put `code` first."""
+    client, _ = patched_clients
+    _register_with_type(client, "alpha", "data", "Alpha")
+    _register_with_type(client, "tooling", "code", "Code utility")
+    cli.main(["data", "list"])
+    out, _ = capsys.readouterr()
+    assert out.index("data (1)") < out.index("code (1)")
+
+
+def test_cli_data_list_no_description_placeholder(patched_clients, capsys):
+    """Entries with an empty description render the `(no description)`
+    placeholder, not an empty cell."""
+    client, _ = patched_clients
+    _register_with_type(client, "empty-desc", "data", "")
+    cli.main(["data", "list"])
+    out = capsys.readouterr().out
+    assert "(no description)" in out
+
+
+def test_cli_data_list_custom_width_truncates(patched_clients, capsys):
+    """`--width N` overrides the default 80-char truncation threshold."""
+    client, _ = patched_clients
+    desc = "X" * 60
+    _register_with_type(client, "wide", "data", desc)
+    cli.main(["data", "list", "--width", "20"])
+    out = capsys.readouterr().out
+    assert "..." in out
+    # 20-char limit means description column is well shorter than 60.
+    rendered_line = next(line for line in out.splitlines() if "wide" in line)
+    desc_part = rendered_line.split("wide", 1)[1].strip()
+    assert len(desc_part) <= 25  # 20 chars + "..." margin
+
+
+def test_cli_data_list_truncates_long_descriptions(patched_clients, capsys):
+    client, _ = patched_clients
+    long_desc = "X" * 500
+    _register_with_type(client, "wide", "data", long_desc)
+    cli.main(["data", "list"])
+    out, _ = capsys.readouterr()
+    assert "..." in out
+    assert long_desc not in out
+
+
+def test_cli_data_list_detailed_skips_truncation(patched_clients, capsys):
+    client, _ = patched_clients
+    long_desc = "Y" * 500
+    _register_with_type(client, "wide", "data", long_desc)
+    cli.main(["data", "list", "--detailed"])
+    out, _ = capsys.readouterr()
+    assert long_desc in out
+
+
+def test_cli_data_list_json_emits_structured_output(patched_clients, capsys):
+    client, _ = patched_clients
+    _register_with_type(client, "alpha", "data", "Alpha desc")
+    _register_with_type(client, "tooling", "code", "Code util")
+    cli.main(["data", "list", "--json"])
+    out, _ = capsys.readouterr()
+    payload = json.loads(out)
+    assert isinstance(payload, list)
+    assert all({"name", "project_type", "description"} <= set(e) for e in payload)
+    # Sorted by (project_type, name); code < data alphabetically.
+    assert [e["name"] for e in payload] == ["tooling", "alpha"]
+
+
+def test_cli_data_list_json_does_not_truncate(patched_clients, capsys):
+    client, _ = patched_clients
+    long_desc = "Z" * 500
+    _register_with_type(client, "wide", "data", long_desc)
+    cli.main(["data", "list", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["description"] == long_desc
+
+
+# Slice 22: data pull friendly DVC-repo probe ------------------------------
+
+
+def test_cli_data_pull_no_dvc_project_friendly_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    rc = cli.main(["data", "pull", "dol-form5500", "--path", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "data import" in err
+    assert "dol-form5500" in err
+    assert str(tmp_path.resolve()) in err
+
+
+def test_cli_data_pull_in_dvc_project_proceeds(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    (tmp_path / ".dvc").mkdir()
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: None)
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "not inside a DVC project" not in err
 
 def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
     manifest_path = tmp_path / "enclave_manifest.yaml"

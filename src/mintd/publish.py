@@ -213,5 +213,11 @@ def _atomic_write_json(path: Path, content: str) -> None:
         os.close(dir_fd)
 
 
+# Public alias so other modules (slice 22's metadata_migrate) can reuse the
+# atomic write without duplicating the fsync ceremony. Existing slice-15
+# callsites still import the private name.
+atomic_write_json = _atomic_write_json
+
+
 def _compute_diff(old: Metadata, new: Metadata) -> list[FieldChange]:
     return _dict_diff(old.model_dump(), new.model_dump())
