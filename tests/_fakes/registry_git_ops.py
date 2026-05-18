@@ -48,6 +48,14 @@ class ResetHardCall:
 
 
 @dataclass
+class CloneCall:
+    url: str
+    dest: Path
+    shallow: bool
+    branch: str | None
+
+
+@dataclass
 class _FakeRegistryGitOps:
     """Real local-git + stubbed gh. See module docstring."""
 
@@ -55,6 +63,7 @@ class _FakeRegistryGitOps:
     _next_pr: int = 100
     tag_calls: list[FakeTag] = field(default_factory=list)
     reset_hard_calls: list[ResetHardCall] = field(default_factory=list)
+    clone_calls: list[CloneCall] = field(default_factory=list)
     tag_raises: Exception | None = None
     commit_all_raises: Exception | None = None
     force_dirty: bool = False
@@ -63,8 +72,20 @@ class _FakeRegistryGitOps:
     # git (real)
     # ------------------------------------------------------------------
 
-    def clone(self, url: str, dest: Path) -> None:
-        self._git(["clone", url, str(dest)], cwd=None)
+    def clone(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        shallow: bool = True,
+        branch: str | None = None,
+    ) -> None:
+        self.clone_calls.append(CloneCall(url, Path(dest), shallow, branch))
+        argv: list[str] = ["clone"]
+        if branch:
+            argv.extend(["--branch", branch])
+        argv.extend([url, str(dest)])
+        self._git(argv, cwd=None)
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)

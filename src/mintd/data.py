@@ -11,15 +11,19 @@ and overwrite the consumer's `.dvc` file with the new pin.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from ._dvc_ops import DvcOps
+from ._fast_sync_ops import FastSyncOps
+from ._registry_git_ops import GitOpError, RegistryGitOps
 from .catalog import CatalogClient
 from .check import CheckFinding, check_project
+from .data_ops import data_pull
 from .imports import DataDependency, NotAnImportError
-from .producer import MissingPrimaryDataProduct, ProducerView
+from .producer import MissingPrimaryDataProduct, ProducerError, ProducerView
 
 __all__ = [
     "BumpBlocked",
@@ -27,7 +31,9 @@ __all__ = [
     "ImportNotFound",
     "MissingPrimaryDataProduct",
     "PrimaryRemovedAtHead",
+    "ProducerError",
     "bump_import",
+    "clone_and_pull_product",
     "import_product",
 ]
 
@@ -141,6 +147,107 @@ def _require_repo_url(entry: dict[str, Any], *, name: str) -> str:
     if not url:
         raise ValueError(f"catalog entry {name!r} has no repository.github_url")
     return url
+
+
+_NAME_FORBIDDEN = ("/", "\\", "..")
+
+
+def _validate_clone_name(name: str) -> None:
+    if not name or name in {".", ".."} or any(s in name for s in _NAME_FORBIDDEN):
+        raise ValueError(f"invalid product name: {name!r}")
+
+
+def _resolve_clone_dest(
+    entry: dict[str, Any], *, name: str, dest: Path | None
+) -> Path:
+    if dest is not None:
+        return dest
+    project_type = (entry.get("project") or {}).get("type") or "data"
+    base = name
+    for prefix in ("data_", "prj_"):
+        if base.startswith(prefix):
+            base = base[len(prefix):]
+            break
+    return Path.cwd() / f"{project_type}_{base}"
+
+
+def clone_and_pull_product(
+    client: CatalogClient,
+    dvc_ops: DvcOps,
+    registry_git_ops: RegistryGitOps,
+    fast_sync_ops: FastSyncOps | None,
+    *,
+    name: str,
+    dest: Path | None = None,
+    rev: str | None = None,
+    pull_all: bool = False,
+    jobs: int | None = None,
+) -> Path:
+    """Clone a published data product into a working directory + dvc pull it.
+
+    Looks up `name` in the registry, full-clones the producer repo to
+    `./<type>_<name>/` (or `dest` if provided), then `dvc pull`s the
+    primary data product (or all outputs with `pull_all=True`).
+
+    Raises:
+        ValueError: invalid `name` (path-traversal characters).
+        CatalogNotFound: `name` not in registry.
+        ImportDestinationExists: dest exists and is non-empty.
+        ProducerError: clone failed (UNREACHABLE).
+        MissingPrimaryDataProduct: no primary set and `pull_all=False`.
+        DvcOpError: dvc pull failed after clone.
+    """
+    _validate_clone_name(name)
+    entry = client.fetch(name)
+    dumped = entry.model_dump()
+    repo_url = _require_repo_url(dumped, name=name)
+    resolved_dest = _resolve_clone_dest(dumped, name=name, dest=dest).resolve()
+    if resolved_dest.exists() and any(resolved_dest.iterdir()):
+        raise ImportDestinationExists(
+            f"destination {resolved_dest} exists and is non-empty"
+        )
+
+    try:
+        registry_git_ops.clone(
+            repo_url, resolved_dest, shallow=False, branch=rev,
+        )
+    except GitOpError as exc:
+        raise ProducerError.unreachable(
+            repo=repo_url,
+            pin=rev or "HEAD",
+            detail=(
+                f"clone to {resolved_dest} failed; "
+                f"partial clone left in place: {exc}"
+            ),
+        ) from exc
+
+    if pull_all:
+        targets: list[str] | None = None
+    else:
+        primary = (dumped.get("data_products") or {}).get("primary")
+        if not primary:
+            raise MissingPrimaryDataProduct(
+                f"catalog entry {name!r} has no data_products.primary; "
+                f"pass --all to pull all outputs"
+            )
+        targets = [primary]
+
+    # SubprocessDvcOps' subprocess.run calls don't pass cwd=, so they
+    # inherit os.getcwd(). chdir into the clone before invoking data_pull
+    # and restore on return (success OR failure).
+    prev_cwd = Path.cwd()
+    os.chdir(resolved_dest)
+    try:
+        data_pull(
+            project_path=resolved_dest,
+            targets=targets,
+            dvc_ops=dvc_ops,
+            fast_sync_ops=fast_sync_ops,
+            jobs=jobs,
+        )
+    finally:
+        os.chdir(prev_cwd)
+    return resolved_dest
 
 
 def bump_import(

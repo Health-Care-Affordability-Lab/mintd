@@ -83,7 +83,14 @@ class RegistryGitOps(Protocol):
       - Not maintain hidden state outside the filesystem under `repo_dir`.
     """
 
-    def clone(self, url: str, dest: Path) -> None: ...
+    def clone(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        shallow: bool = True,
+        branch: str | None = None,
+    ) -> None: ...
     def fetch(self, repo_dir: Path) -> None: ...
     def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
@@ -122,8 +129,21 @@ class SubprocessRegistryGitOps:
     # git
     # ------------------------------------------------------------------
 
-    def clone(self, url: str, dest: Path) -> None:
-        self._git(["clone", "--depth=1", url, str(dest)], cwd=None)
+    def clone(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        shallow: bool = True,
+        branch: str | None = None,
+    ) -> None:
+        argv: list[str] = ["clone"]
+        if shallow:
+            argv.append("--depth=1")
+        if branch:
+            argv.extend(["--branch", branch])
+        argv.extend([url, str(dest)])
+        self._git(argv, cwd=None)
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)

@@ -41,6 +41,7 @@ from .data import (
     ImportNotFound,
     PrimaryRemovedAtHead,
     bump_import,
+    clone_and_pull_product,
     import_product,
 )
 from .data_ops import data_add, data_pull, data_push, data_remove, data_verify
@@ -182,6 +183,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pull.add_argument("--jobs", type=int)
     p_pull.add_argument("--path", type=Path, default=Path("."))
     p_pull.set_defaults(_handler=_handle_data_pull)
+
+    p_clone = p_data_sub.add_parser(
+        "clone",
+        help="Clone a published data product (registry lookup + git clone + dvc pull)",
+    )
+    p_clone.add_argument("name", help="Registered data product name")
+    p_clone.add_argument(
+        "--dest", type=Path,
+        help="Destination path (default: ./<type>_<name>)",
+    )
+    p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
+    p_clone.add_argument(
+        "--all", dest="pull_all", action="store_true",
+        help="Pull all tracked outputs, not just the primary",
+    )
+    p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_clone.set_defaults(_handler=_handle_data_clone)
 
     p_push = p_data_sub.add_parser("push", help="Push DVC data")
     p_push.add_argument("targets", nargs="*")
@@ -472,11 +490,8 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
         name_hint = args.targets[0] if args.targets else "<name>"
         print(
             f"error: not inside a DVC project (no .dvc/ at {project_path}).\n"
-            f"  mintd data pull operates on the current project's DVC tracking.\n"
-            f"  To fetch '{name_hint}' from the registry into a new project:\n"
-            f"    mintd init data <project-name> "
-            f"&& cd data_<project-name> "
-            f"&& mintd data import {name_hint}",
+            f"  mintd data pull operates on the current project's tracked data.\n"
+            f"  To grab a published product: mintd data clone {name_hint}",
             file=sys.stderr,
         )
         return 1
@@ -577,6 +592,39 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"removed: {args.name}")
+    return 0
+
+
+def _handle_data_clone(args: argparse.Namespace) -> int:
+    config = Config.load()
+    client, dvc_ops = _resolve_clients(config)
+    registry_git_ops = _resolve_git_ops(config)
+    fast_sync_ops = _resolve_fast_sync_ops(config)
+    try:
+        dest = clone_and_pull_product(
+            client, dvc_ops, registry_git_ops, fast_sync_ops,
+            name=args.name,
+            dest=args.dest,
+            rev=args.rev,
+            pull_all=args.pull_all,
+            jobs=args.jobs,
+        )
+    except (
+        CatalogNotFound,
+        MissingPrimaryDataProduct,
+        ImportDestinationExists,
+        ProducerError,
+        ValueError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except DvcNotInstalled as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except DvcOpError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"cloned: {dest}")
     return 0
 
 

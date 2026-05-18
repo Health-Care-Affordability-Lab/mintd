@@ -598,7 +598,7 @@ def test_cli_data_pull_no_dvc_project_friendly_error(
     rc = cli.main(["data", "pull", "dol-form5500", "--path", str(tmp_path)])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "data import" in err
+    assert "mintd data clone" in err
     assert "dol-form5500" in err
     assert str(tmp_path.resolve()) in err
 
@@ -615,6 +615,90 @@ def test_cli_data_pull_in_dvc_project_proceeds(
     assert rc == 0
     err = capsys.readouterr().err
     assert "not inside a DVC project" not in err
+
+
+# Slice 24: mintd data clone -----------------------------------------------
+
+
+def test_cli_data_clone_invokes_clone_and_pull_product(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    received: dict[str, object] = {}
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        received.update(kwargs)
+        return Path("/tmp/sentinel")
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_git_ops", lambda cfg: object()
+    )
+
+    rc = cli.main([
+        "data", "clone", "provider-xw",
+        "--dest", "/tmp/x",
+        "--rev", "v1.2",
+        "--all",
+        "--jobs", "4",
+    ])
+
+    assert rc == 0
+    assert received["name"] == "provider-xw"
+    assert received["dest"] == Path("/tmp/x")
+    assert received["rev"] == "v1.2"
+    assert received["pull_all"] is True
+    assert received["jobs"] == 4
+    out = capsys.readouterr().out
+    assert "cloned: /tmp/sentinel" in out
+
+
+def test_cli_data_clone_returns_one_on_catalog_not_found(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    def _raise(*a, **kw):
+        from mintd.catalog import CatalogNotFound
+        raise CatalogNotFound("provider-xw")
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_git_ops", lambda cfg: object()
+    )
+
+    rc = cli.main(["data", "clone", "provider-xw"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "provider-xw" in err
+
+
+def test_cli_data_clone_returns_one_on_producer_error(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    from mintd.producer import ProducerError
+
+    def _raise(*a, **kw):
+        raise ProducerError.unreachable(
+            repo="https://x",
+            pin="HEAD",
+            detail="clone to /tmp/y failed; partial clone left in place: boom",
+        )
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_git_ops", lambda cfg: object()
+    )
+
+    rc = cli.main(["data", "clone", "provider-xw"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "boom" in err
+    assert "/tmp/y" in err
 
 def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
     manifest_path = tmp_path / "enclave_manifest.yaml"
