@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._dvc_ops import DvcOps
 from ._fast_sync_ops import FastSyncOps
@@ -24,6 +24,9 @@ from .check import CheckFinding, check_project
 from .data_ops import data_pull
 from .imports import DataDependency, NotAnImportError
 from .producer import MissingPrimaryDataProduct, ProducerError, ProducerView
+
+if TYPE_CHECKING:
+    from ._console import Reporter
 
 __all__ = [
     "BumpBlocked",
@@ -182,6 +185,7 @@ def clone_and_pull_product(
     rev: str | None = None,
     primary_only: bool = False,
     jobs: int | None = None,
+    reporter: "Reporter | None" = None,
 ) -> Path:
     """Clone a published data product into a working directory + dvc pull it.
 
@@ -246,6 +250,7 @@ def clone_and_pull_product(
             dvc_ops=dvc_ops,
             fast_sync_ops=fast_sync_ops,
             jobs=jobs,
+            reporter=reporter,
         )
     finally:
         os.chdir(prev_cwd)

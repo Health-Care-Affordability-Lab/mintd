@@ -548,6 +548,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             fast_sync_ops=fast_sync_ops,
             remote=args.remote,
             jobs=args.jobs,
+            reporter=args._reporter,
         )
     except DvcNotInstalled as e:
         print(f"error: {e}", file=sys.stderr)
@@ -666,6 +667,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
                 rev=args.rev,
                 primary_only=args.primary_only,
                 jobs=args.jobs,
+                reporter=reporter,
             )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")

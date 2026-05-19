@@ -25,6 +25,7 @@ from mintd._fast_sync_ops import (
     cache_path_for,
     check_bucket_versioning,
     classify_targets,
+    discover_all_outs,
     ensure_dir_manifest,
     fetch_dir_contents,
     fetch_dir_manifest,
@@ -789,3 +790,34 @@ def test_fetch_files_dir_contents_dedups_by_md5(s3_versioned, tmp_path: Path) ->
         failures = fetch_files_dir_contents(s3, bucket, "", out, cache_dir, 8, "origin")
     assert failures == []
     assert mock.call_count == 2
+
+
+# ---------- slice 26: discover_all_outs ---------------------------------
+
+
+def test_discover_all_outs_walks_repo(tmp_path: Path) -> None:
+    """Recursive walk emits all .dvc files relative to project_path,
+    sorted lexicographically."""
+    (tmp_path / "a.dvc").write_text("outs:\n", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.dvc").write_text("outs:\n", encoding="utf-8")
+    (tmp_path / "sub" / "deep").mkdir()
+    (tmp_path / "sub" / "deep" / "c.dvc").write_text("outs:\n", encoding="utf-8")
+
+    assert discover_all_outs(tmp_path) == ["a.dvc", "sub/b.dvc", "sub/deep/c.dvc"]
+
+
+def test_discover_all_outs_excludes_dvc_internals_and_lock(tmp_path: Path) -> None:
+    """``.dvc/`` directory (DVC internals) and the top-level ``dvc.lock``
+    pipeline file are not data pointers; both must be excluded."""
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "lock").write_text("internals", encoding="utf-8")
+    (tmp_path / ".dvc" / "foo.dvc").write_text("internals", encoding="utf-8")
+    (tmp_path / "dvc.lock").write_text("pipeline lock", encoding="utf-8")
+    (tmp_path / "something.dvc").write_text("outs:\n", encoding="utf-8")
+
+    assert discover_all_outs(tmp_path) == ["something.dvc"]
+
+
+def test_discover_all_outs_handles_empty_repo(tmp_path: Path) -> None:
+    assert discover_all_outs(tmp_path) == []

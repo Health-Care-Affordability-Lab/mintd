@@ -325,3 +325,35 @@ def test_clone_and_pull_product_restores_cwd_on_dvc_failure(
         )
 
     assert Path.cwd() == tmp_path  # restored even on failure
+
+
+# ---------- slice 26: reporter threaded through to data_pull -----------
+
+
+def test_clone_and_pull_product_forwards_reporter_to_data_pull(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 26: clone_and_pull_product accepts an optional ``reporter``
+    kwarg and forwards it to ``data_pull``. Production users get the
+    progress bar; tests can pass None and skip it."""
+    from mintd._console import Reporter
+
+    received: dict[str, object] = {}
+
+    def _spy_data_pull(**kwargs):
+        received.update(kwargs)
+
+    monkeypatch.setattr("mintd.data.data_pull", _spy_data_pull)
+    monkeypatch.chdir(tmp_path)
+
+    client = InMemoryCatalogClient()
+    _register(client)
+    reporter = Reporter(json_mode=False, no_color=True)
+
+    clone_and_pull_product(
+        client, _FakeDvcOps(), _NoopCloneGitOps(), None,
+        name="provider-xw",
+        reporter=reporter,
+    )
+
+    assert received.get("reporter") is reporter

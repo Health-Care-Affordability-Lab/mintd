@@ -58,11 +58,46 @@ def test_data_pull_fast_sync_raises_falls_back(tmp_path: Path) -> None:
     assert fake.pull_calls[0].targets == ["a"]
 
 
-def test_data_pull_no_targets_skips_fast_sync(tmp_path: Path) -> None:
+def test_data_pull_no_targets_discovers_and_routes_through_fast_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 26: when targets=None, data_pull discovers .dvc files and
+    routes through fast-sync (was: skipped fast-sync, hit DVC cache-write
+    bug for version_aware buckets)."""
+    monkeypatch.setattr(
+        "mintd.data_ops.discover_all_outs",
+        lambda _p: ["a.dvc", "b.dvc"],
+    )
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
-    assert len(fast_fake.calls) == 0
+    # Fast-sync invoked with the discovered targets.
+    assert len(fast_fake.calls) == 1
+    assert fast_fake.calls[0].targets == ["a.dvc", "b.dvc"]
+    # Default fast-fake returns success=False, fallback_targets=[] —
+    # meaning no fallback dvc pull and no checkout to do.
+    assert fake.pull_calls == []
+
+
+def test_data_pull_no_targets_empty_repo_returns_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Empty discovery → no fast-sync, no dvc pull, just log + return."""
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    assert fast_fake.calls == []
+    assert fake.pull_calls == []
+
+
+def test_data_pull_no_targets_no_fast_sync_falls_through_to_dvc_pull(
+    tmp_path: Path,
+) -> None:
+    """When fast_sync_ops is None, route directly to dvc pull (unchanged
+    behavior for the no-fast-sync case)."""
+    fake = _FakeDvcOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=None)
     assert len(fake.pull_calls) == 1
     assert fake.pull_calls[0].targets is None
 
@@ -141,3 +176,78 @@ def test_data_pull_partial_pull_failure_still_keeps_synced_checkout(tmp_path: Pa
     # checkout MUST have been called for the synced target before the pull blew up.
     assert len(fake.checkout_calls) == 1
     assert fake.checkout_calls[0].targets == ["A"]
+
+
+def test_data_pull_pull_all_calls_dvc_pull_for_dvc_yaml_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 26 P0 fix: when targets=None (pull-all) AND a dvc.yaml exists,
+    fall back to ``dvc pull`` (no targets) AFTER fast-sync handles the
+    .dvc files. discover_all_outs deliberately doesn't enumerate
+    dvc.yaml pipeline stages, so without this catch they'd be silently
+    dropped."""
+    monkeypatch.setattr(
+        "mintd.data_ops.discover_all_outs",
+        lambda _p: ["a.dvc"],
+    )
+    (tmp_path / "dvc.yaml").write_text("stages:\n  foo:\n    cmd: x\n", encoding="utf-8")
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    # Fast-sync runs on the discovered .dvc list...
+    assert fast_fake.calls[0].targets == ["a.dvc"]
+    # ...and dvc pull (no targets) ALSO runs to catch dvc.yaml stages.
+    pull_calls_without_targets = [c for c in fake.pull_calls if c.targets is None]
+    assert len(pull_calls_without_targets) == 1
+
+
+def test_data_pull_pull_all_skips_dvc_yaml_catch_when_no_dvc_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No dvc.yaml present → no catch-all dvc pull. Avoids re-pulling
+    everything that fast-sync already handled."""
+    monkeypatch.setattr(
+        "mintd.data_ops.discover_all_outs",
+        lambda _p: ["a.dvc"],
+    )
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    # No dvc.yaml → no extra catch-all dvc pull.
+    pull_calls_without_targets = [c for c in fake.pull_calls if c.targets is None]
+    assert pull_calls_without_targets == []
+
+
+def test_data_pull_pull_all_with_only_dvc_yaml_no_dot_dvc_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repo with only dvc.yaml pipeline stages (no .dvc files): fast-sync
+    has nothing to do; the catch-all dvc pull still runs."""
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+    (tmp_path / "dvc.yaml").write_text("stages: {}\n", encoding="utf-8")
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    # No fast-sync call (nothing to sync).
+    assert fast_fake.calls == []
+    # But the catch-all dvc pull runs.
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets is None
+
+
+def test_data_pull_fast_sync_raises_pull_all_falls_back_to_dvc_pull_no_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When pull-all was requested and fast-sync raises, the fallback
+    dvc pull MUST use targets=None (not the discovered .dvc list) so
+    dvc.yaml pipeline stages are also pulled."""
+    monkeypatch.setattr(
+        "mintd.data_ops.discover_all_outs",
+        lambda _p: ["a.dvc", "b.dvc"],
+    )
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.raises = RuntimeError("boom")
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets is None  # not ["a.dvc", "b.dvc"]

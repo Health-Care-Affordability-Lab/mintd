@@ -75,6 +75,7 @@ class DvcOut:
     version_id: str | None = None
     is_files_format: bool = False
     files: list[DvcFileEntry] | None = None
+    size: int = 0  # aggregate bytes for the out (sum across files for dirs); used by Reporter.progress
 
 
 @dataclass(frozen=True)
@@ -162,8 +163,38 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
             version_id=_extract_version_id(out),
             is_files_format=has_files and not has_md5,
             files=files_list,
+            size=int(out.get("size", 0) or 0),
         ))
     return outs
+
+
+def discover_all_outs(project_path: Path) -> list[str]:
+    """Walk project_path recursively for ``*.dvc`` files; return paths
+    relative to project_path, sorted lexicographically.
+
+    Excludes the ``.dvc/`` internals directory (DVC metadata, not data
+    pointers) and ``dvc.lock`` (pipeline lockfile). Mirrors v1's
+    ``discover_dvc_targets`` (mintd/utils/dvc_guards.py) for the .dvc-file
+    half; pipeline-stage names from ``dvc.yaml`` are NOT included because
+    fast-sync's ``classify_targets`` cannot consume them — such targets
+    fall through to ``dvc pull`` as the normal fallback path.
+
+    Used by ``data_pull`` when ``targets is None`` to route through
+    fast-sync (boto3 → cache) instead of straight to ``dvc pull``, which
+    hits a cache-write bug in DVC 3.66.1 on version_aware buckets.
+    """
+    results: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(project_path, followlinks=False):
+        # Prune .dvc/ internals in-place so os.walk doesn't descend.
+        if ".dvc" in dirnames:
+            dirnames.remove(".dvc")
+        for name in filenames:
+            if not name.endswith(".dvc") or name == "dvc.lock":
+                continue
+            abs_path = Path(dirpath) / name
+            rel = abs_path.relative_to(project_path)
+            results.append(rel.as_posix())
+    return sorted(results)
 
 
 def cache_path_for(cache_dir: Path, md5: str) -> Path:
@@ -557,12 +588,23 @@ class SubprocessFastSyncOps:
         self,
         *,
         jobs: int = 8,
-        progress: Callable[[DvcOut, bool], None] | None = None,
+        progress: Callable[[int], None] | None = None,
         aws_profile_name: str | None = None,
     ) -> None:
+        # ``progress`` signature widened slice 26: was Callable[[DvcOut, bool], None]
+        # (reserved at slice 18, never wired), now Callable[[int], None] — an
+        # advance(n_bytes) callable invoked per completed DvcOut by try_fast_pull.
+        # Used by Reporter.progress for the user-visible "X MB / Y MB" bar.
         self._default_jobs = jobs
         self._progress = progress
         self._aws_profile_name = aws_profile_name
+
+    def set_progress(self, progress: Callable[[int], None] | None) -> None:
+        """Install an ``advance(n_bytes)`` callback for subsequent
+        ``try_fast_pull`` invocations. Pass ``None`` to disable. Idempotent.
+        Per-out advance fires once per completed ``DvcOut`` (network OR
+        cache-hit) with the out's declared aggregate size."""
+        self._progress = progress
 
     def try_fast_pull(
         self,
@@ -602,10 +644,6 @@ class SubprocessFastSyncOps:
         cache_dir = project_path / _DEFAULT_DVC_CACHE_REL
         synced = 0
         files_dir_failures: list[str] = []
-        # Progress callback is reserved for slice 19's dir/files-format paths
-        # (`self._progress`); slice 18's single-file orchestrator doesn't
-        # invoke it directly. Keeping the field for forward compatibility.
-        _ = self._progress
 
         for out in all_outs:
             try:
@@ -666,6 +704,15 @@ class SubprocessFastSyncOps:
                             out.md5,
                             out.version_id,
                         )
+                # Slice 26: advance the user-facing progress bar by this
+                # out's aggregate size. Wrap in try/except so a UI bug never
+                # aborts the pull. Fires for both network and cache-hit so
+                # the bar advances correctly on re-runs against a warm cache.
+                if self._progress is not None:
+                    try:
+                        self._progress(out.size)
+                    except Exception:
+                        pass
                 synced += 1
             except Exception as exc:
                 logger.warning("fast-sync target %r failed: %s", out.target, exc)

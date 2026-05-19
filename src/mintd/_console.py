@@ -1,7 +1,16 @@
-from typing import Any, Callable, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Iterator, Optional
 import sys
 import logging
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 from rich.status import Status
 
 class Reporter:
@@ -133,6 +142,55 @@ class Reporter:
             self._active_status.update(f"{self._status_base}  {complete_tick}")
         else:
             self._active_status.update(complete_tick)
+
+    @contextmanager
+    def progress(self, total: int, *, desc: str) -> Iterator[Callable[[int], None]]:
+        """Determinate progress bar via ``rich.Progress``. Yields an
+        ``advance(n_bytes)`` callable.
+
+        Suspends the active spinner (``self._active_status``) for the
+        duration so the bar and the spinner don't fight for the terminal
+        line; resumes the spinner on exit.
+
+        Returns a nullcontext-style no-op (yielding a callable that does
+        nothing) when ``json_mode``, quiet mode (``level < 1``), or
+        ``total <= 0`` (empty/no-data repo).
+
+        Single-active per Reporter — nesting is not supported (no current
+        caller nests; would corrupt ``_active_status`` tracking)."""
+        if self.json_mode or self.level < 1 or total <= 0:
+            yield lambda _n: None
+            return
+        had_status = self._active_status is not None
+        base = self._status_base
+        if had_status and self._active_status is not None:
+            self._active_status.stop()
+            self._active_status = None
+        prog = Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=self._stderr,
+            transient=True,  # bar erased on exit; scrollback stays clean
+        )
+        task_id = prog.add_task(desc, total=total)
+
+        def advance(n: int) -> None:
+            prog.update(task_id, advance=n)
+
+        try:
+            with prog:
+                yield advance
+        finally:
+            if had_status:
+                # Reset the chunk buffer (matches status() entry behavior)
+                # so any in-flight tail from pre-progress doesn't bleed in.
+                self._stderr_buf = ""
+                self._status_base = base
+                self._active_status = self._stderr.status(base)
+                self._active_status.start()
 
     def install_log_bridge(self) -> None:
         lg = logging.getLogger("mintd")
