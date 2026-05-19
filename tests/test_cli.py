@@ -192,7 +192,7 @@ def test_check_json_flag_emits_one_line_per_finding(
         CheckFinding(severity="warning", section="consumer", message="x", kind="drift"),
     ]
     monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: findings)
-    rc = cli.main(["check", str(tmp_path), "--json"])
+    rc = cli.main(["--json", "check", str(tmp_path)])
     out = capsys.readouterr().out.strip().splitlines()
     assert rc == 0
     assert len(out) == 2
@@ -572,7 +572,7 @@ def test_cli_data_list_json_emits_structured_output(patched_clients, capsys):
     client, _ = patched_clients
     _register_with_type(client, "alpha", "data", "Alpha desc")
     _register_with_type(client, "tooling", "code", "Code util")
-    cli.main(["data", "list", "--json"])
+    cli.main(["--json", "data", "list"])
     out, _ = capsys.readouterr()
     payload = json.loads(out)
     assert isinstance(payload, list)
@@ -585,7 +585,7 @@ def test_cli_data_list_json_does_not_truncate(patched_clients, capsys):
     client, _ = patched_clients
     long_desc = "Z" * 500
     _register_with_type(client, "wide", "data", long_desc)
-    cli.main(["data", "list", "--json"])
+    cli.main(["--json", "data", "list"])
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["description"] == long_desc
 

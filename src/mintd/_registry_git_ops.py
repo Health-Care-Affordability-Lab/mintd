@@ -125,15 +125,17 @@ class SubprocessRegistryGitOps:
     def __init__(
         self,
         *,
-        timeout: float = 30.0,
         timeouts: Any = None,
         reporter: Any = None,
     ) -> None:
-        # Slice 25: prefer the structured Timeouts object when present; fall
-        # back to the legacy single-timeout for callers that haven't migrated.
-        self._timeout = timeout
         self._timeouts = timeouts
         self._reporter = reporter
+
+    @property
+    def _fast_timeout(self) -> float | None:
+        """Wall-clock cap for fast git/gh ops (fetch, commit, tag, gh pr list).
+        Falls back to a sensible 30s when no Timeouts is supplied."""
+        return self._timeouts.fast if self._timeouts is not None else 30.0
 
     # ------------------------------------------------------------------
     # git
@@ -253,7 +255,7 @@ class SubprocessRegistryGitOps:
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                timeout=self._fast_timeout,
                 check=True,
             )
         except FileNotFoundError as e:
@@ -270,7 +272,7 @@ class SubprocessRegistryGitOps:
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                timeout=self._fast_timeout,
                 check=True,
             )
         except FileNotFoundError as e:

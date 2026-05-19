@@ -85,18 +85,17 @@ def _add_global_output_flags(parser: argparse.ArgumentParser) -> None:
                         help="Increase verbosity (-v: info, -vv: debug, -vvv: trace)")
     parser.add_argument("-q", "--quiet", action="count", default=0,
                         help="Reduce verbosity (-q: errors only)")
-    parser.add_argument("--json", dest="_global_json", action="store_true",
+    parser.add_argument("--json", dest="json_out", action="store_true",
                         help="Emit structured JSON to stdout (read-side commands)")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable color output (also respects NO_COLOR env)")
 
 
 def _build_reporter(args: argparse.Namespace) -> Reporter:
-    json_mode = getattr(args, "_global_json", False) or getattr(args, "json_out", False)
     return Reporter(
         verbose=args.verbose,
         quiet=args.quiet,
-        json_mode=json_mode,
+        json_mode=args.json_out,
         no_color=args.no_color or bool(os.environ.get("NO_COLOR")),
     )
 
@@ -194,7 +193,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p_check = subs.add_parser("check", help="Validate a mintd project")
     p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
     p_check.add_argument("--upgrades", action="store_true")
-    p_check.add_argument("--json", action="store_true", dest="json_out")
     p_check.set_defaults(_handler=_handle_check)
 
     p_data = subs.add_parser("data", help="Data commands")
@@ -233,8 +231,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pull all tracked outputs, not just the primary",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
-    p_clone.add_argument("--json", action="store_true", dest="json_out",
-                         help="Emit structured JSON to stdout")
     p_clone.add_argument("--timeout", type=float, default=None,
                          help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
     p_clone.set_defaults(_handler=_handle_data_clone)
@@ -266,8 +262,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--type", dest="project_type",
         choices=["data", "code", "project", "enclave"],
     )
-    p_data_list.add_argument("--json", action="store_true", dest="json_out",
-                             help="Emit structured JSON to stdout")
     p_data_list.set_defaults(_handler=_handle_data_list, _parser=p_data_list)
 
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
@@ -365,7 +359,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_config_show = p_config_sub.add_parser("show", help="Pretty-print the current config")
     p_config_show.add_argument("--path", type=Path, default=None)
-    p_config_show.add_argument("--json", action="store_true", dest="json_out")
     p_config_show.set_defaults(_handler=_handle_config_show)
 
     p_config_setup = p_config_sub.add_parser(
@@ -397,7 +390,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--bucket", default=None,
         help="S3 bucket to test head_bucket against (auto-discovery is slice-22+).",
     )
-    p_config_validate.add_argument("--json", action="store_true", dest="json_out")
     p_config_validate.set_defaults(_handler=_handle_config_validate)
 
     p_update = subs.add_parser("update", help="Migrate v1 metadata/storage to v2")
@@ -408,7 +400,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_update_meta.add_argument("path", nargs="?", type=Path, default=Path("."))
     p_update_meta.add_argument("--dry-run", action="store_true", dest="dry_run")
-    p_update_meta.add_argument("--json", action="store_true", dest="json_out")
     p_update_meta.set_defaults(_handler=_handle_update_metadata, _parser=p_update_meta)
 
     return parser

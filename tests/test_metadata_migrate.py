@@ -226,7 +226,7 @@ def test_cli_update_metadata_json_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     shutil.copy(FIXTURE, tmp_path / "metadata.json")
-    rc = cli.main(["update", "metadata", str(tmp_path), "--dry-run", "--json"])
+    rc = cli.main(["--json", "update", "metadata", str(tmp_path), "--dry-run"])
     assert rc == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema_before"] == "1.0"
