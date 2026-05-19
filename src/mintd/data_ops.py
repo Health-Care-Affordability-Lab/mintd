@@ -141,17 +141,38 @@ def data_pull(
 
 
 def _default_dvc_remote(project_path: Path) -> str | None:
+    """Pick the dvc remote name for the project.
+
+    Order:
+      1. ``[core] remote = <name>`` if present (DVC's standard default).
+      2. The single ``[remote "..."]`` section if there's exactly one
+         (covers freshly-cloned data products: their .dvc/config typically
+         declares one remote per product and no [core] default).
+      3. None — caller defaults to "origin".
+    """
     import configparser
+    import re
     config_file = project_path / ".dvc" / "config"
     if not config_file.is_file():
         return None
     cp = configparser.ConfigParser()
     try:
         cp.read(config_file)
-        if cp.has_section("core") and cp.has_option("core", "remote"):
-            return cp.get("core", "remote")
     except configparser.Error:
-        pass
+        return None
+    if cp.has_section("core") and cp.has_option("core", "remote"):
+        return cp.get("core", "remote")
+    # Fallback: extract remote names from section headers. DVC has shipped
+    # three formats: 'remote "name"' (single-quoted, the modern default),
+    # 'remote "name"' (double-quoted only), 'remote name' (unquoted).
+    # Same probes as get_remote_config in _fast_sync_ops.py.
+    remote_names: list[str] = []
+    for section in cp.sections():
+        m = re.fullmatch(r"""'?remote\s+"?(?P<name>[^"']+)"?'?""", section)
+        if m:
+            remote_names.append(m.group("name"))
+    if len(remote_names) == 1:
+        return remote_names[0]
     return None
 
 
