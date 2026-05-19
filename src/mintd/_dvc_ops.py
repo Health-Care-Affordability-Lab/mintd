@@ -5,9 +5,12 @@ Only this module shells out to `dvc`. Mirrors `_registry_git_ops.py` for git/gh.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
+
+from ._config import Timeouts
+from ._console import Reporter
+from ._subprocess import run_streaming
 
 
 class DvcOpError(Exception):
@@ -106,8 +109,9 @@ class DvcOps(Protocol):
 class SubprocessDvcOps:
     """Production: shells out to `dvc` commands."""
 
-    def __init__(self, *, timeout: float = 120.0) -> None:
-        self._timeout = timeout
+    def __init__(self, *, timeouts: Timeouts, reporter: Optional[Reporter] = None) -> None:
+        self._timeouts = timeouts
+        self._reporter = reporter
 
     def import_(
         self,
@@ -125,18 +129,12 @@ class SubprocessDvcOps:
             cmd.append("--force")
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
 
-        if result.returncode != 0:
-            stderr = result.stderr or ""
+        if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
             if "Does not exist" in stderr or "Unable to find" in stderr:
                 raise DvcImportPathNotFound(
                     f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"
@@ -146,7 +144,7 @@ class SubprocessDvcOps:
                     f"destination for '{dest}.dvc' already exists; pass force=True"
                 )
             raise DvcOpError(
-                f"dvc import failed (exit {result.returncode}): {stderr.strip()}"
+                f"dvc import failed (exit {r.returncode}): {stderr.strip()}"
             )
 
         return dest.parent / (dest.name + ".dvc")
@@ -158,21 +156,12 @@ class SubprocessDvcOps:
         if jobs:
             cmd.extend(["--jobs", str(jobs)])
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            # Wrap timeout as DvcPushError so publish_project's rollback fires.
-            raise DvcPushError(f"dvc push timed out after {self._timeout}s") from exc
-        if result.returncode != 0:
+        if r.returncode != 0:
             raise DvcPushError(
-                f"dvc push failed (exit {result.returncode}): {result.stderr.strip()}"
+                f"dvc push failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
             )
 
     def pull(
@@ -190,39 +179,23 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            raise DvcPullError(f"dvc pull timed out after {self._timeout}s") from exc
-        if result.returncode != 0:
+        if r.returncode != 0:
             raise DvcPullError(
-                f"dvc pull failed (exit {result.returncode}): {result.stderr.strip()}"
+                f"dvc pull failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
             )
 
     def add(self, path: Path) -> Path:
         cmd = ["dvc", "add", str(path)]
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            raise DvcAddError(f"dvc add timed out after {self._timeout}s") from exc
-        if result.returncode != 0:
+        if r.returncode != 0:
             raise DvcAddError(
-                f"dvc add failed (exit {result.returncode}): {result.stderr.strip()}"
+                f"dvc add failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
             )
         return path.parent / (path.name + ".dvc")
 
@@ -233,21 +206,16 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, json_mode=True)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            raise DvcStatusError(f"dvc status timed out after {self._timeout}s") from exc
 
-        # DVC versions differ: clean repos may print "{}" or empty stdout. Treat
-        # whitespace-only stdout as clean rather than letting JSONDecodeError fire.
-        stdout = result.stdout.strip()
+        if r.returncode != 0:
+            raise DvcStatusError(
+                f"dvc status failed (exit {r.returncode}): "
+                f"{''.join(r.stderr_lines).strip()}"
+            )
+        stdout = "".join(r.stdout_lines).strip()
         if not stdout:
             return {}
         try:
@@ -255,14 +223,11 @@ class SubprocessDvcOps:
         except json.JSONDecodeError as exc:
             raise DvcStatusError(f"dvc status failed to parse json: {exc}") from exc
 
-        # DVC's JSON output for status is {path: status_string_or_list}
-        # Normalize:
         status_map = {}
         for path, status in data.items():
             if isinstance(status, list):
                 status_map[path] = status[0]
             elif isinstance(status, dict):
-                # fallback for nested status
                 status_map[path] = next(iter(status.values()))
             else:
                 status_map[path] = status
@@ -271,20 +236,12 @@ class SubprocessDvcOps:
     def remove(self, name: str) -> None:
         cmd = ["dvc", "remove", name]
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            raise DvcRemoveError(f"dvc remove timed out after {self._timeout}s") from exc
-        if result.returncode != 0:
+        if r.returncode != 0:
             raise DvcRemoveError(
-                f"dvc remove failed (exit {result.returncode}): {result.stderr.strip()}"
+                f"dvc remove failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
             )
 
     def checkout(self, *, targets: list[str] | None = None) -> None:
@@ -292,18 +249,10 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
-        except subprocess.TimeoutExpired as exc:
-            raise DvcCheckoutError(f"dvc checkout timed out after {self._timeout}s") from exc
-        if result.returncode != 0:
+        if r.returncode != 0:
             raise DvcCheckoutError(
-                f"dvc checkout failed (exit {result.returncode}): {result.stderr.strip()}"
+                f"dvc checkout failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
             )

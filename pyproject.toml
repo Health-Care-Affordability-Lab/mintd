@@ -39,7 +39,18 @@ markers = [
 ]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 
 [project.scripts]
 mintd = "mintd.cli:main"
+
+[tool.ruff.lint]
+select = ["E", "F", "T201"]
+ignore = ["E501"]  # line-length is informational; ruff format enforces real limits
+
+[tool.ruff.lint.per-file-ignores]
+"src/mintd/_console.py" = ["T201"]
+"src/mintd/cli.py" = ["T201"]
+"src/mintd/config_ops.py" = ["T201"]
+"src/mintd/files/**" = ["T201", "E501", "F401", "F811"]
+"tests/**" = ["T201", "E501"]

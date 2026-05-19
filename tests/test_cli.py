@@ -43,21 +43,19 @@ def patched_clients(
 ) -> tuple[InMemoryCatalogClient, _FakeDvcOps]:
     client = InMemoryCatalogClient()
     dvc_ops = _FakeDvcOps()
-    monkeypatch.setattr(
-        "mintd.cli._resolve_clients", lambda cfg: (client, dvc_ops)
-    )
-    monkeypatch.setattr(
-        "mintd.cli._resolve_catalog_client", lambda cfg: client
-    )
-    monkeypatch.setattr(
-        "mintd.cli._resolve_fast_sync_ops", lambda cfg: None
-    )
-    return client, dvc_ops
-
     # Always return defaults; avoid touching the real ~/.config/mintd/.
     monkeypatch.setattr(
         "mintd.cli.Config.load",
         classmethod(lambda cls, path=None: cls()),
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_clients", lambda cfg, **_: (client, dvc_ops)
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_catalog_client", lambda cfg, **_: client
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None
     )
     return client, dvc_ops
 
@@ -482,10 +480,13 @@ def test_data_list_imported_populated(patched_clients, capsys, tmp_path, monkeyp
     assert "provider-xw" in out
     assert "4f7c2a1" in out
 
-def test_data_list_imported_with_type_exits_64(patched_clients):
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["data", "list", "--imported", "--type", "data"])
-    assert exc.value.code == 64
+def test_data_list_imported_with_type_exits_64(patched_clients, capsys):
+    # Slice 25: handler now uses reporter.error + return 2 (architectural
+    # consistency) instead of argparse's SystemExit(64) for arg-combo errors.
+    rc = cli.main(["data", "list", "--imported", "--type", "data"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--imported" in err and "--type" in err
 
 
 # Slice 22: data list grouped + truncated + --json -------------------------
@@ -610,7 +611,7 @@ def test_cli_data_pull_in_dvc_project_proceeds(
     patched_clients,
 ) -> None:
     (tmp_path / ".dvc").mkdir()
-    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: None)
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None)
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 0
     err = capsys.readouterr().err
@@ -634,7 +635,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
     monkeypatch.setattr(
-        "mintd.cli._resolve_git_ops", lambda cfg: object()
+        "mintd.cli._resolve_git_ops", lambda cfg, **_: object()
     )
 
     rc = cli.main([
@@ -651,8 +652,9 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     assert received["rev"] == "v1.2"
     assert received["pull_all"] is True
     assert received["jobs"] == 4
-    out = capsys.readouterr().out
-    assert "cloned: /tmp/sentinel" in out
+    captured = capsys.readouterr()
+    # Slice 25: success line is chatter → stderr; result payload → stdout.
+    assert "cloned: /tmp/sentinel" in captured.err
 
 
 def test_cli_data_clone_returns_one_on_catalog_not_found(
@@ -666,7 +668,7 @@ def test_cli_data_clone_returns_one_on_catalog_not_found(
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
     monkeypatch.setattr(
-        "mintd.cli._resolve_git_ops", lambda cfg: object()
+        "mintd.cli._resolve_git_ops", lambda cfg, **_: object()
     )
 
     rc = cli.main(["data", "clone", "provider-xw"])
@@ -691,7 +693,7 @@ def test_cli_data_clone_returns_one_on_producer_error(
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
     monkeypatch.setattr(
-        "mintd.cli._resolve_git_ops", lambda cfg: object()
+        "mintd.cli._resolve_git_ops", lambda cfg, **_: object()
     )
 
     rc = cli.main(["data", "clone", "provider-xw"])
@@ -1080,7 +1082,7 @@ def test_init_rejects_invalid_lang(
 def patched_git_ops(monkeypatch: pytest.MonkeyPatch):
     from tests._fakes.registry_git_ops import _FakeRegistryGitOps
     fake = _FakeRegistryGitOps()
-    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg: fake)
+    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: fake)
     return fake
 
 

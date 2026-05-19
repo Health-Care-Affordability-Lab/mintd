@@ -34,15 +34,18 @@ def test_render_config_yaml_omits_none() -> None:
     out = render_config(cfg)
     assert "cache_dir" not in out
     assert out.startswith("registry_url: x")
-    # Non-None fields keep their defaults.
-    assert "dvc_timeout: 120.0" in out
+    # Non-None nested defaults still rendered.
+    assert "timeouts:" in out
+    assert "fast: 30.0" in out
 
 
 def test_render_config_json() -> None:
     cfg = Config(registry_url="x")
     out = render_config(cfg, json_out=True)
     data = _json.loads(out)
-    assert data == {"registry_url": "x", "dvc_timeout": 120.0, "git_timeout": 30.0}
+    assert data["registry_url"] == "x"
+    # render_config uses exclude_none; transfer=None is omitted.
+    assert data["timeouts"] == {"fast": 30.0}
 
 
 # --- setup --set (4) ------------------------------------------------------
@@ -50,13 +53,13 @@ def test_render_config_json() -> None:
 
 def test_apply_set_writes_atomic(tmp_path: Path) -> None:
     p = tmp_path / "cfg.yaml"
-    p.write_text("dvc_timeout: 99.0\n")
+    p.write_text("author: someone\n")
     cfg = apply_set_updates(p, [("registry_url", "https://foo")])
     written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert written["registry_url"] == "https://foo"
-    assert written["dvc_timeout"] == 99.0
+    assert written["author"] == "someone"
     assert cfg.registry_url == "https://foo"
-    assert cfg.dvc_timeout == 99.0
+    assert cfg.author == "someone"
     # Tmp file removed after atomic rename.
     assert not (tmp_path / "cfg.yaml.tmp").exists()
 
@@ -64,7 +67,9 @@ def test_apply_set_writes_atomic(tmp_path: Path) -> None:
 def test_apply_set_validates_types(tmp_path: Path) -> None:
     p = tmp_path / "cfg.yaml"
     with pytest.raises(ConfigError):
-        apply_set_updates(p, [("dvc_timeout", "oranges")])
+        # author is str|None; non-string types like a list would fail —
+        # but parse_set_pair returns strings, so use unknown_key for type-class failure.
+        apply_set_updates(p, [("totally_bogus_field", "x")])
 
 
 def test_apply_set_rejects_unknown_key(tmp_path: Path) -> None:
@@ -81,12 +86,12 @@ def test_apply_set_multiple_pairs_including_url(tmp_path: Path) -> None:
         [
             ("registry_url", "https://example.com/r.git"),
             ("cache_dir", "/tmp/c"),
-            ("dvc_timeout", "60"),
+            ("author", "alice"),
         ],
     )
     assert cfg.registry_url == "https://example.com/r.git"
     assert cfg.cache_dir == Path("/tmp/c")
-    assert cfg.dvc_timeout == 60.0
+    assert cfg.author == "alice"
 
     # Empty value clears an optional field.
     cfg2 = apply_set_updates(p, [("registry_url", "")])
@@ -98,12 +103,12 @@ def test_apply_set_multiple_pairs_including_url(tmp_path: Path) -> None:
 
 def test_apply_from_file_replaces_wholesale(tmp_path: Path) -> None:
     target = tmp_path / "cfg.yaml"
-    target.write_text("dvc_timeout: 99.0\nregistry_url: old\n")
+    target.write_text("author: someone\nregistry_url: old\n")
     source = tmp_path / "new.yaml"
     source.write_text("registry_url: new\n")
     cfg = apply_from_file(target, str(source))
-    # `dvc_timeout` reverts to default — wholesale replace, not merge.
-    assert cfg.dvc_timeout == 120.0
+    # `author` reverts to default (None) — wholesale replace, not merge.
+    assert cfg.author is None
     assert cfg.registry_url == "new"
 
 
@@ -138,7 +143,7 @@ def test_apply_from_stdin_success_and_tty_guard(
 
 def test_validate_schema_only_when_config_invalid(tmp_path: Path) -> None:
     p = tmp_path / "bad.yaml"
-    p.write_text("dvc_timeout: oranges\n")
+    p.write_text("timeouts:\n  fast: oranges\n")
     steps = validate_config(p)
     assert [s.name for s in steps] == ["schema", "aws_profile", "s3"]
     assert steps[0].status == "fail"
@@ -232,7 +237,7 @@ def test_apply_set_dry_run_still_validates(tmp_path: Path) -> None:
     """--dry-run with invalid input still raises before any write attempt."""
     p = tmp_path / "cfg.yaml"
     with pytest.raises(ConfigError):
-        apply_set_updates(p, [("dvc_timeout", "oranges")], write=False)
+        apply_set_updates(p, [("unknown_field_xyz", "oranges")], write=False)
     assert not p.exists()
 
 
@@ -325,14 +330,14 @@ def test_interactive_setup_walks_each_field(tmp_path: Path) -> None:
     """The wizard prompts for every Config field in order; empty input keeps
     the current value; a typed value updates it."""
     p = tmp_path / "cfg.yaml"
-    p.write_text("dvc_timeout: 90.0\n")
+    p.write_text("author: existing-author\n")
 
     cfg = interactive_setup(
         p,
         prompt_fn=_scripted_prompt("https://example.com/r.git"),
     )
     assert cfg.registry_url == "https://example.com/r.git"
-    assert cfg.dvc_timeout == 90.0          # carried over from existing
+    assert cfg.author == "existing-author"          # carried over from existing
     written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert written["registry_url"] == "https://example.com/r.git"
 
@@ -416,10 +421,10 @@ def test_migrate_v1_to_v2_full_mapping() -> None:
 
 def test_migrate_v1_already_v2_fields_pass_through() -> None:
     """If the source already has v2-shaped keys, preserve them (don't drop)."""
-    v1 = {"registry_url": "https://new", "dvc_timeout": 60.0}
+    v1 = {"registry_url": "https://new", "author": "alice"}
     assert migrate_v1_to_v2(v1) == {
         "registry_url": "https://new",
-        "dvc_timeout": 60.0,
+        "author": "alice",
     }
 
 

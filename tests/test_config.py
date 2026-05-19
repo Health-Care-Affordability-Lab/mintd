@@ -16,14 +16,15 @@ def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
     cfg = Config.load(tmp_path / "missing.yaml")
     assert cfg.registry_url is None
     assert cfg.cache_dir is None
-    assert cfg.dvc_timeout == 120.0
+    assert cfg.timeouts.fast == 30.0
+    assert cfg.timeouts.transfer is None
 
 
 def test_load_valid_yaml() -> None:
     cfg = Config.load(FIXTURE)
     assert cfg.registry_url == "https://example.com/registry.git"
     assert cfg.cache_dir == Path("/tmp/mintd-test-cache")
-    assert cfg.dvc_timeout == 60.0
+    assert cfg.timeouts.fast == 60.0
 
 
 def test_load_malformed_yaml_raises_config_error(tmp_path: Path) -> None:
@@ -35,9 +36,19 @@ def test_load_malformed_yaml_raises_config_error(tmp_path: Path) -> None:
 
 def test_load_invalid_schema_raises_config_error(tmp_path: Path) -> None:
     bad = tmp_path / "bad.yaml"
-    bad.write_text('dvc_timeout: "not a number"\n')
+    bad.write_text('timeouts:\n  fast: "not a number"\n')
     with pytest.raises(ConfigError):
         Config.load(bad)
+
+
+def test_legacy_dvc_timeout_key_raises_clear_error(tmp_path: Path) -> None:
+    """Slice 25: dvc_timeout/git_timeout hard-removed; clear error points users
+    at the new timeouts: block."""
+    legacy = tmp_path / "legacy.yaml"
+    legacy.write_text("dvc_timeout: 120.0\n")
+    with pytest.raises(ConfigError) as exc:
+        Config.load(legacy)
+    assert "timeouts" in str(exc.value).lower()
 
 
 def test_resolved_cache_dir_defaults_when_none() -> None:

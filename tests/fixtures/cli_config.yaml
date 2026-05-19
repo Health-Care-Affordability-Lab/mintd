@@ -1,3 +1,5 @@
 registry_url: https://example.com/registry.git
 cache_dir: /tmp/mintd-test-cache
-dvc_timeout: 60.0
+timeouts:
+  fast: 60.0
+  transfer: null

@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +122,18 @@ class SubprocessRegistryGitOps:
     diagnostics (in errors) and parsing (for `gh pr list`).
     """
 
-    def __init__(self, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        timeout: float = 30.0,
+        timeouts: Any = None,
+        reporter: Any = None,
+    ) -> None:
+        # Slice 25: prefer the structured Timeouts object when present; fall
+        # back to the legacy single-timeout for callers that haven't migrated.
         self._timeout = timeout
+        self._timeouts = timeouts
+        self._reporter = reporter
 
     # ------------------------------------------------------------------
     # git
@@ -137,13 +147,38 @@ class SubprocessRegistryGitOps:
         shallow: bool = True,
         branch: str | None = None,
     ) -> None:
-        argv: list[str] = ["clone"]
+        # Slice 25: clone uses run_streaming (long-running; users need
+        # live --progress feedback). Other git verbs (fetch/commit/tag/...)
+        # stay on subprocess.run via self._git — they're fast.
+        from ._subprocess import run_streaming
+
+        argv: list[str] = [
+            "git",
+            "-c", "http.lowSpeedLimit=1000",
+            "-c", "http.lowSpeedTime=300",
+            "clone", "--progress",
+        ]
         if shallow:
             argv.append("--depth=1")
         if branch:
             argv.extend(["--branch", branch])
         argv.extend([url, str(dest)])
-        self._git(argv, cwd=None)
+
+        # Pick wall_timeout from the structured Timeouts object if present;
+        # WallTimeoutExceeded propagates unwrapped per slice 25 spec.
+        wall_timeout = (
+            self._timeouts.transfer if self._timeouts is not None else None
+        )
+        try:
+            r = run_streaming(
+                argv,
+                wall_timeout=wall_timeout,
+                reporter=self._reporter,
+            )
+        except FileNotFoundError as e:
+            raise GitOpError(argv, "git not installed") from e
+        if r.returncode != 0:
+            raise GitOpError(argv, "".join(r.stderr_lines) or "")
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)

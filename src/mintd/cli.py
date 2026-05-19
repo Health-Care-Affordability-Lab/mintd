@@ -16,16 +16,21 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 from . import config_ops, metadata_migrate
+from ._console import Reporter
 from ._config import Config, ConfigError
 from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
+from ._subprocess import WallTimeoutExceeded
+from ._registry_git_ops import GitOpError
 from ._fast_sync_ops import FastSyncOps
-from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
+from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps  # noqa: F401
 from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
@@ -75,6 +80,27 @@ from .publish import (
 logger = logging.getLogger(__name__)
 
 
+def _add_global_output_flags(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-v", "--verbose", action="count", default=0,
+                        help="Increase verbosity (-v: info, -vv: debug, -vvv: trace)")
+    parser.add_argument("-q", "--quiet", action="count", default=0,
+                        help="Reduce verbosity (-q: errors only)")
+    parser.add_argument("--json", dest="_global_json", action="store_true",
+                        help="Emit structured JSON to stdout (read-side commands)")
+    parser.add_argument("--no-color", action="store_true",
+                        help="Disable color output (also respects NO_COLOR env)")
+
+
+def _build_reporter(args: argparse.Namespace) -> Reporter:
+    json_mode = getattr(args, "_global_json", False) or getattr(args, "json_out", False)
+    return Reporter(
+        verbose=args.verbose,
+        quiet=args.quiet,
+        json_mode=json_mode,
+        no_color=args.no_color or bool(os.environ.get("NO_COLOR")),
+    )
+
+
 
 # Unicode prefixes assume UTF-8 stdout. Modern terminals and CI runners
 # default to UTF-8; if a non-UTF-8 locale ever surfaces, swap to ASCII
@@ -107,15 +133,22 @@ class _MintdArgumentParser(argparse.ArgumentParser):
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    args._reporter = _build_reporter(args)
+    args._reporter.install_log_bridge()
     handler = getattr(args, "_handler", None)
     if handler is None:
         parser.print_help()
         return 0
     try:
         return handler(args)
+    except KeyboardInterrupt:
+        args._reporter.error("interrupted by user")
+        return 130
     except ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
+        args._reporter.error(str(e))
         return 1
+    finally:
+        args._reporter.uninstall_log_bridge()
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="mintd",
         description="mintd: Lightweight data product framework for research labs",
     )
+    _add_global_output_flags(parser)
     parser.add_argument("--version", action="version", version="%(prog)s 0.0.1")
     subs = parser.add_subparsers(dest="command")
 
@@ -199,6 +233,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pull all tracked outputs, not just the primary",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_clone.add_argument("--json", action="store_true", dest="json_out",
+                         help="Emit structured JSON to stdout")
+    p_clone.add_argument("--timeout", type=float, default=None,
+                         help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
     p_clone.set_defaults(_handler=_handle_data_clone)
 
     p_push = p_data_sub.add_parser("push", help="Push DVC data")
@@ -222,13 +260,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
     p_data_list.add_argument("--imported", action="store_true")
-    p_data_list.add_argument("--json", action="store_true", dest="json_out")
     p_data_list.add_argument("--detailed", action="store_true", help="Show full descriptions (no truncation).")
     p_data_list.add_argument("--width", type=int, default=80, help="Description column width (default: 80).")
     p_data_list.add_argument(
         "--type", dest="project_type",
         choices=["data", "code", "project", "enclave"],
     )
+    p_data_list.add_argument("--json", action="store_true", dest="json_out",
+                             help="Emit structured JSON to stdout")
     p_data_list.set_defaults(_handler=_handle_data_list, _parser=p_data_list)
 
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
@@ -394,12 +433,12 @@ def _resolve_catalog_client(config: Config) -> CatalogClient:
     )
 
 
-def _resolve_clients(config: Config) -> tuple[CatalogClient, DvcOps]:
+def _resolve_clients(config: Config, reporter: Optional[Reporter] = None) -> tuple[CatalogClient, DvcOps]:
     """Build production ``GitCatalogClient`` + ``SubprocessDvcOps`` from
     config. Tests monkeypatch this function to inject fakes.
     """
     client = _resolve_catalog_client(config)
-    dvc_ops: DvcOps = SubprocessDvcOps(timeout=config.dvc_timeout)
+    dvc_ops: DvcOps = SubprocessDvcOps(timeouts=config.timeouts, reporter=reporter)
     return client, dvc_ops
 
 
@@ -421,11 +460,11 @@ def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
     return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
 
 
-def _resolve_git_ops(config: Config) -> RegistryGitOps:
+def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> RegistryGitOps:
     """Build production ``SubprocessRegistryGitOps`` from config.
     Tests monkeypatch this function to inject fakes.
     """
-    return SubprocessRegistryGitOps(timeout=config.git_timeout)
+    return SubprocessRegistryGitOps(timeouts=config.timeouts, reporter=reporter)
 
 
 # ---------------------------------------------------------------------------
@@ -596,36 +635,115 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
 
 
 def _handle_data_clone(args: argparse.Namespace) -> int:
+    reporter = args._reporter
+    t0 = time.monotonic()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config)
-    registry_git_ops = _resolve_git_ops(config)
+    if args.timeout is None:
+        effective_timeouts = config.timeouts
+    else:
+        override = None if args.timeout == 0 else args.timeout
+        effective_timeouts = config.timeouts.model_copy(update={"transfer": override})
+    
+    client = _resolve_catalog_client(config)
+    dvc_ops = SubprocessDvcOps(timeouts=effective_timeouts, reporter=reporter)
+    registry_git_ops = SubprocessRegistryGitOps(timeouts=effective_timeouts, reporter=reporter)
     fast_sync_ops = _resolve_fast_sync_ops(config)
+    
+    reporter.debug(f"resolved registry_url={config.registry_url}")
     try:
-        dest = clone_and_pull_product(
-            client, dvc_ops, registry_git_ops, fast_sync_ops,
-            name=args.name,
-            dest=args.dest,
-            rev=args.rev,
-            pull_all=args.pull_all,
-            jobs=args.jobs,
-        )
-    except (
-        CatalogNotFound,
-        MissingPrimaryDataProduct,
-        ImportDestinationExists,
-        ProducerError,
-        ValueError,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        with reporter.status(f"Cloning {args.name}..."):
+            dest = clone_and_pull_product(
+                client, dvc_ops, registry_git_ops, fast_sync_ops,
+                name=args.name,
+                dest=args.dest,
+                rev=args.rev,
+                pull_all=args.pull_all,
+                jobs=args.jobs,
+            )
+    except CatalogNotFound as exc:
+        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
+        return 1
+    except MissingPrimaryDataProduct as exc:
+        reporter.error(str(exc), hint="pass --all to pull every output, or --path <path> to pick one")
+        return 1
+    except ImportDestinationExists as exc:
+        reporter.error(str(exc), hint="pass --dest <path> or remove the existing directory")
         return 1
     except DvcNotInstalled as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc), hint="pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
-    except DvcOpError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except ProducerError as exc:
+        reporter.error(str(exc), hint="check git auth (gh auth status / ssh -T git@github.com)")
         return 1
-    print(f"cloned: {dest}")
+    except GitOpError as exc:
+        reporter.error(str(exc), hint="check git auth (gh auth status / ssh -T git@github.com)")
+        return 1
+    except WallTimeoutExceeded as exc:
+        reporter.error(f"command exceeded wall timeout of {exc.seconds}s")
+        return 1
+    except (DvcOpError, ValueError) as exc:
+        reporter.error(str(exc))
+        return 1
+    
+    elapsed = time.monotonic() - t0
+    primary = _read_primary_from_clone(dest)
+    files, total_bytes = _measure_clone_result(dest)
+    payload = {
+        "dest": str(dest),
+        "primary": primary,
+        "elapsed_s": round(elapsed, 2),
+        "files": files,
+        "bytes": total_bytes,
+    }
+    reporter.result(payload, pretty=_pretty_data_clone)
+    reporter.success(f"cloned: {dest}", elapsed_s=elapsed)
     return 0
+
+
+def _read_primary_from_clone(dest: Path) -> str | None:
+    """Best-effort read of data_products.primary from the cloned metadata.json.
+    Returns None if the file is missing or unreadable (e.g., in tests where
+    `clone_and_pull_product` is stubbed and `dest` doesn't exist on disk).
+    """
+    try:
+        meta = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
+        primary = meta.get("data_products", {}).get("primary")
+        return primary if isinstance(primary, str) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _measure_clone_result(dest: Path) -> tuple[int, int]:
+    """Sum file count and total bytes under dest, skipping the .git tree.
+    Returns (0, 0) if dest is unreadable (e.g., test stub)."""
+    files = 0
+    total = 0
+    try:
+        for p in dest.rglob("*"):
+            if not p.is_file():
+                continue
+            # Skip .git internals — they're clone metadata, not data product.
+            if ".git" in p.relative_to(dest).parts:
+                continue
+            files += 1
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return files, total
+
+
+def _pretty_data_clone(payload: dict) -> str:
+    """Render the clone-result summary footer."""
+    lines = []
+    if payload.get("primary"):
+        size_mb = payload["bytes"] / (1024 * 1024)
+        lines.append(
+            f"  primary: {payload['primary']}  ({payload['files']} files, {size_mb:.1f} MB)"
+        )
+    return "\n".join(lines) if lines else ""
 
 
 def _handle_data_import(args: argparse.Namespace) -> int:
@@ -682,36 +800,49 @@ def _handle_data_import(args: argparse.Namespace) -> int:
 
 
 def _handle_data_list(args: argparse.Namespace) -> int:
+    reporter = args._reporter
     if args.imported and args.project_type is not None:
-        args._parser.error("--imported cannot be combined with --type")
+        reporter.error("--imported cannot be combined with --type")
+        return 2
 
     if args.imported:
-        # --imported keeps its slice-11 format; --json/--detailed/--width
-        # are silently ignored here (the import view has its own shape).
         deps = scan_imports(Path("."))
-        if not deps:
-            print("no imports")
-            return 0
-        for dep in deps:
-            print(f"{dep.local_path} ← {dep.producer_repo}@{dep.contract_pin[:7]} ({dep.output_path})")
+        payload = [
+            {"local_path": str(d.local_path),
+             "producer_repo": d.producer_repo,
+             "contract_pin": d.contract_pin,
+             "output_path": d.output_path}
+            for d in deps
+        ]
+        pretty = (lambda _p: "no imports") if not deps else _pretty_imports
+        reporter.result(payload, pretty=pretty)
         return 0
 
     config = Config.load()
     client = _resolve_catalog_client(config)
     filter_ = CatalogFilter(project_type=args.project_type) if args.project_type else None
     entries = client.list(filter_)
+    catalog_payload: list[dict[str, object]] = [
+        {"name": e.name, "project_type": e.project_type,
+         "description": (e.description or None)}
+        for e in sorted(entries, key=lambda e: (e.project_type, e.name))
+    ]
+    # For pretty mode, use the slice-22 grouped table (grouped by project_type
+    # with the canonical data → code → project → enclave order, name-column
+    # truncation, "(no description)" placeholder for empty descriptions).
     if not entries:
-        print("no entries")
-        return 0
-    if args.json_out:
-        payload = [
-            {"name": e.name, "project_type": e.project_type, "description": e.description}
-            for e in sorted(entries, key=lambda e: (e.project_type, e.name))
-        ]
-        print(json.dumps(payload, indent=2))
-        return 0
-    print(_render_catalog_table(entries, detailed=args.detailed, width=args.width))
+        pretty_text = "no entries"
+    else:
+        pretty_text = _render_catalog_table(entries, detailed=args.detailed, width=args.width)
+    reporter.result(catalog_payload, pretty=lambda _p: pretty_text)
     return 0
+
+
+def _pretty_imports(payload: list[dict]) -> str:
+    lines = []
+    for d in payload:
+        lines.append(f"{d['local_path']} ← {d['producer_repo']}@{d['contract_pin'][:7]} ({d['output_path']})")
+    return "\n".join(lines)
 
 
 _CATALOG_TYPE_ORDER = ("data", "code", "project", "enclave")

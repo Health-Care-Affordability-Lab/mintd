@@ -11,21 +11,26 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class ConfigError(Exception):
     """Malformed YAML or Pydantic-validation failure while loading config."""
 
 
-class Config(BaseModel):
+class Timeouts(BaseModel):
     model_config = ConfigDict(frozen=True)
+    fast: float | None = 30.0
+    transfer: float | None = None
+
+
+class Config(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     # CLI-runtime settings.
     registry_url: str | None = None
     cache_dir: Path | None = None
-    dvc_timeout: float = 120.0
-    git_timeout: float = 30.0
+    timeouts: Timeouts = Field(default_factory=Timeouts)
 
     # User identity — surfaces in generated scaffolds (READMEs, R DESCRIPTION,
     # citations.md, etc.). Absent → templates render empty strings.
@@ -61,7 +66,9 @@ class Config(BaseModel):
         try:
             return cls.model_validate(data)
         except ValidationError as e:
-            raise ConfigError(f"invalid config in {path}: {e}") from e
+            raise ConfigError(
+                f"invalid config in {path} (see notes/CONFIG.md for the new timeouts: block): {e}"
+            ) from e
 
     def resolved_cache_dir(self) -> Path:
         return self.cache_dir if self.cache_dir is not None else Path.home() / ".cache" / "mintd"
