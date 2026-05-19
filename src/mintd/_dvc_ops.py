@@ -109,9 +109,28 @@ class DvcOps(Protocol):
 class SubprocessDvcOps:
     """Production: shells out to `dvc` commands."""
 
-    def __init__(self, *, timeouts: Timeouts, reporter: Optional[Reporter] = None) -> None:
+    def __init__(
+        self,
+        *,
+        timeouts: Timeouts,
+        reporter: Optional[Reporter] = None,
+        aws_profile_name: Optional[str] = None,
+    ) -> None:
         self._timeouts = timeouts
         self._reporter = reporter
+        self._aws_profile_name = aws_profile_name
+
+    def _env(self) -> Optional[dict[str, str]]:
+        """Subprocess env with AWS_PROFILE injected so dvc's boto3 picks
+        up mintd's [mintd] credentials (no [default] profile is required
+        in ~/.aws/credentials).  None means inherit parent env unchanged.
+        """
+        if not self._aws_profile_name:
+            return None
+        import os
+        env = dict(os.environ)
+        env["AWS_PROFILE"] = self._aws_profile_name
+        return env
 
     def import_(
         self,
@@ -129,7 +148,7 @@ class SubprocessDvcOps:
             cmd.append("--force")
 
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
 
@@ -156,7 +175,7 @@ class SubprocessDvcOps:
         if jobs:
             cmd.extend(["--jobs", str(jobs)])
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if r.returncode != 0:
@@ -179,7 +198,7 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if r.returncode != 0:
@@ -190,7 +209,7 @@ class SubprocessDvcOps:
     def add(self, path: Path) -> Path:
         cmd = ["dvc", "add", str(path)]
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if r.returncode != 0:
@@ -206,7 +225,7 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, json_mode=True)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, json_mode=True, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
 
@@ -236,7 +255,7 @@ class SubprocessDvcOps:
     def remove(self, name: str) -> None:
         cmd = ["dvc", "remove", name]
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if r.returncode != 0:
@@ -249,7 +268,7 @@ class SubprocessDvcOps:
         if targets:
             cmd.extend(targets)
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter)
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if r.returncode != 0:

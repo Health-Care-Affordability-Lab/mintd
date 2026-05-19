@@ -437,7 +437,11 @@ def _resolve_clients(config: Config, reporter: Optional[Reporter] = None) -> tup
     config. Tests monkeypatch this function to inject fakes.
     """
     client = _resolve_catalog_client(config)
-    dvc_ops: DvcOps = SubprocessDvcOps(timeouts=config.timeouts, reporter=reporter)
+    dvc_ops: DvcOps = SubprocessDvcOps(
+        timeouts=config.timeouts,
+        reporter=reporter,
+        aws_profile_name=config.aws_profile_name,
+    )
     return client, dvc_ops
 
 
@@ -644,7 +648,11 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         effective_timeouts = config.timeouts.model_copy(update={"transfer": override})
     
     client = _resolve_catalog_client(config)
-    dvc_ops = SubprocessDvcOps(timeouts=effective_timeouts, reporter=reporter)
+    dvc_ops = SubprocessDvcOps(
+        timeouts=effective_timeouts,
+        reporter=reporter,
+        aws_profile_name=config.aws_profile_name,
+    )
     registry_git_ops = SubprocessRegistryGitOps(timeouts=effective_timeouts, reporter=reporter)
     fast_sync_ops = _resolve_fast_sync_ops(config)
     
