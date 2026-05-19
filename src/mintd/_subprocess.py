@@ -35,10 +35,9 @@ def run_streaming(
     stderr_lines: List[str] = []
     
     def _default_stdout(line: str) -> None:
-        # Always capture into stdout_lines so callers (e.g. SubprocessDvcOps.status)
-        # can parse the output even in json_mode. json_mode only suppresses
-        # FORWARDING stdout to the terminal — not capture.
-        stdout_lines.append(line.rstrip("\n"))
+        # Reader hands us complete \n-terminated lines (post-\r-tick cleanup).
+        # json_mode suppresses the forward to terminal so JSON consumers
+        # don't see child output on stdout; line capture still happens.
         if json_mode:
             return
         if reporter is not None:
@@ -48,7 +47,6 @@ def run_streaming(
             sys.stdout.flush()
 
     def _default_stderr(line: str) -> None:
-        stderr_lines.append(line.rstrip("\n"))
         if reporter is not None:
             reporter.passthrough_stderr(line)
         else:
@@ -68,16 +66,54 @@ def run_streaming(
         cwd=cwd,
         env=env,
     )
+    # Subprocess.Popen's default TextIOWrapper uses universal-newline mode
+    # (newline=None), which translates every \r and \r\n into \n BEFORE our
+    # reader sees the chunks. git/dvc progress uses \r to overwrite the
+    # same line on a TTY — losing the \r makes every tick look like a
+    # completed line and produces a wall of scrollback output. Re-wrap the
+    # underlying buffered streams with newline="" so \r is preserved as-is.
+    # Skip the re-wrap on test fakes whose stdout/stderr aren't real
+    # TextIOWrapper instances (no .detach()).
+    import io
+    if proc.stdout is not None and hasattr(proc.stdout, "detach"):
+        proc.stdout = io.TextIOWrapper(
+            proc.stdout.detach(), encoding="utf-8", newline="", line_buffering=True,
+        )
+    if proc.stderr is not None and hasattr(proc.stderr, "detach"):
+        proc.stderr = io.TextIOWrapper(
+            proc.stderr.detach(), encoding="utf-8", newline="", line_buffering=True,
+        )
 
     last_line_at = [clock()]
 
-    def _reader(stream, callback):
-        for line in stream:
+    def _reader(stream, forward, captured_lines):
+        """Read chunks. Forward each chunk RAW to ``forward`` (so live
+        \\r-based progress ticks reach the spinner update path with
+        sub-second latency). Separately accumulate \\n-terminated, post-
+        \\r-cleaned lines into ``captured_lines`` for caller-side parsing
+        (StreamResult.stdout_lines / stderr_lines)."""
+        line_buf = ""
+        while True:
+            try:
+                chunk = stream.read(256)
+            except ValueError:
+                break  # stream closed
+            if not chunk:
+                if line_buf:
+                    captured_lines.append(line_buf.rstrip("\r\n"))
+                break
             last_line_at[0] = clock()
-            callback(line)
+            # Capture path: line-by-line, post-\r-clean.
+            line_buf += chunk
+            while "\n" in line_buf:
+                line, _, line_buf = line_buf.partition("\n")
+                display = line[line.rfind("\r") + 1:] if "\r" in line else line
+                captured_lines.append(display)
+            # Display path: raw chunk to the forwarder.
+            forward(chunk)
 
-    t1 = threading.Thread(target=_reader, args=(proc.stdout, cb_stdout), daemon=True)
-    t2 = threading.Thread(target=_reader, args=(proc.stderr, cb_stderr), daemon=True)
+    t1 = threading.Thread(target=_reader, args=(proc.stdout, cb_stdout, stdout_lines), daemon=True)
+    t2 = threading.Thread(target=_reader, args=(proc.stderr, cb_stderr, stderr_lines), daemon=True)
     t1.start()
     t2.start()
 

@@ -149,9 +149,11 @@ class SubprocessRegistryGitOps:
         shallow: bool = True,
         branch: str | None = None,
     ) -> None:
-        # Slice 25: clone uses run_streaming (long-running; users need
-        # live --progress feedback). Other git verbs (fetch/commit/tag/...)
-        # stay on subprocess.run via self._git — they're fast.
+        # Slice 25: clone uses run_streaming so git's --progress output
+        # reaches the terminal live. run_streaming reads chunks (not lines)
+        # so \r-based progress overwrites correctly in place — single
+        # updating line per phase, not a wall of text.
+        # http.lowSpeedTime gives git its own dead-transfer abort.
         from ._subprocess import run_streaming
 
         argv: list[str] = [

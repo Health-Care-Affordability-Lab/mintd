@@ -227,8 +227,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
     p_clone.add_argument(
-        "--all", dest="pull_all", action="store_true",
-        help="Pull all tracked outputs, not just the primary",
+        "--primary", dest="primary_only", action="store_true",
+        help="Pull only the primary data product (default: pull every tracked output)",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
@@ -648,14 +648,14 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
                 name=args.name,
                 dest=args.dest,
                 rev=args.rev,
-                pull_all=args.pull_all,
+                primary_only=args.primary_only,
                 jobs=args.jobs,
             )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")
         return 1
     except MissingPrimaryDataProduct as exc:
-        reporter.error(str(exc), hint="pass --all to pull every output, or --path <path> to pick one")
+        reporter.error(str(exc), hint="drop --primary to pull every tracked output")
         return 1
     except ImportDestinationExists as exc:
         reporter.error(str(exc), hint="pass --dest <path> or remove the existing directory")

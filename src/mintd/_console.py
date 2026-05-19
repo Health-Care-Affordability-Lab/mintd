@@ -12,11 +12,20 @@ class Reporter:
         self._stderr = Console(file=sys.stderr, no_color=no_color, force_terminal=None)
         self._stdout = Console(file=sys.stdout, no_color=no_color, force_terminal=None)
         self._active_status: Optional[Status] = None
+        self._status_base: str = ""
+        # Per-stream byte buffer for chunk-boundary safety: subprocess
+        # output arrives in 256-byte chunks that may split a \r-terminated
+        # progress tick in half. Without buffering, the spinner would
+        # display the partial start of the next tick ("Updating files:"
+        # instead of "Updating files: 23% (700/3090)"). We coalesce chunks
+        # until we see a \r or \n boundary.
+        self._stderr_buf: str = ""
 
     def status(self, msg: str) -> Any:  # rich.Status or nullcontext
         if self.json_mode or self.level < 1:
             from contextlib import nullcontext
             return nullcontext()
+        self._status_base = msg
         self._active_status = self._stderr.status(msg)
         return self._active_status
 
@@ -64,11 +73,62 @@ class Reporter:
         if self.level >= 3 and not self.json_mode:
             self._stderr.print(f"trace: {msg}")
 
-    def passthrough_stdout(self, line: str) -> None:
-        self._stdout.print(line, end="", soft_wrap=True, highlight=False, markup=False)
+    def passthrough_stdout(self, chunk: str) -> None:
+        # Stdout from streamed subprocesses is rare and usually structured
+        # (e.g. dvc status --json). Route plain through the stdout console.
+        if not chunk or self.json_mode:
+            return
+        self._stdout.print(chunk, end="", soft_wrap=True, highlight=False, markup=False)
 
-    def passthrough_stderr(self, line: str) -> None:
-        self._stderr.print(line, end="", soft_wrap=True, highlight=False, markup=False)
+    def passthrough_stderr(self, chunk: str) -> None:
+        """Route a raw stderr chunk from a child subprocess.
+
+        Accumulates chunks into ``self._stderr_buf`` so we never display
+        a partial tick whose tail is still in the next chunk:
+
+        1. Drain complete \\n-terminated lines: for each, drop the
+           \\r-overwritten history and print only the post-last-\\r final
+           state to scrollback. (str.splitlines splits on \\r too, which
+           is why we split("\\n") explicitly.)
+        2. After draining, the buffer holds only the in-flight (no-\\n)
+           tail. Update the spinner with the LAST COMPLETE tick — that's
+           the text between the second-to-last and the last \\r. Text
+           after the last \\r is partial; it sits in the buffer until the
+           next chunk closes it with another \\r or \\n.
+
+        Net UX: spinner reflects a complete, intelligible tick at every
+        update (no truncated "Updating files:" without the count) and
+        scrollback has one final-state line per phase."""
+        if not chunk or self.json_mode:
+            return
+        self._stderr_buf += chunk
+        # Drain complete \n-terminated lines first.
+        while "\n" in self._stderr_buf:
+            line, _, self._stderr_buf = self._stderr_buf.partition("\n")
+            visible = line[line.rfind("\r") + 1:] if "\r" in line else line
+            visible = visible.rstrip()
+            if visible:
+                self._stderr.print(visible)
+        # Now buffer has the in-flight tail (no \n). Find the last
+        # complete tick — text between the second-to-last \r and the last
+        # \r. Anything after the last \r is partial and stays buffered.
+        if self._active_status is None or "\r" not in self._stderr_buf:
+            return
+        last_r = self._stderr_buf.rfind("\r")
+        before_last_r = self._stderr_buf[:last_r]
+        if "\r" in before_last_r:
+            second_last_r = before_last_r.rfind("\r")
+            complete_tick = before_last_r[second_last_r + 1:]
+        else:
+            # Only one \r in buffer — text before it is a complete tick.
+            complete_tick = before_last_r
+        complete_tick = complete_tick.rstrip()
+        if not complete_tick:
+            return
+        if self._status_base:
+            self._active_status.update(f"{self._status_base}  {complete_tick}")
+        else:
+            self._active_status.update(complete_tick)
 
     def install_log_bridge(self) -> None:
         lg = logging.getLogger("mintd")

@@ -642,7 +642,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
         "data", "clone", "provider-xw",
         "--dest", "/tmp/x",
         "--rev", "v1.2",
-        "--all",
+        "--primary",
         "--jobs", "4",
     ])
 
@@ -650,7 +650,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     assert received["name"] == "provider-xw"
     assert received["dest"] == Path("/tmp/x")
     assert received["rev"] == "v1.2"
-    assert received["pull_all"] is True
+    assert received["primary_only"] is True
     assert received["jobs"] == 4
     captured = capsys.readouterr()
     # Slice 25: success line is chatter → stderr; result payload → stdout.

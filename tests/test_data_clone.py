@@ -83,7 +83,8 @@ def test_clone_and_pull_product_happy_path(
     assert git.clone_calls[0].branch is None
     assert git.clone_calls[0].url == "https://github.com/example-org/provider-xw"
     assert len(dvc.pull_calls) == 1
-    assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
+    # Default now pulls everything (targets=None); --primary narrows to primary path.
+    assert dvc.pull_calls[0].targets is None
 
 
 def test_clone_and_pull_product_with_explicit_dest(
@@ -120,9 +121,10 @@ def test_clone_and_pull_product_with_rev(
     assert git.clone_calls[0].branch == "v1.2"
 
 
-def test_clone_and_pull_product_with_pull_all(
+def test_clone_and_pull_product_default_pulls_all_outputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Default (no flags) pulls every tracked output — dvc pull with targets=None."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client)
@@ -130,10 +132,27 @@ def test_clone_and_pull_product_with_pull_all(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", pull_all=True,
+        client, dvc, git, None, name="provider-xw",
     )
 
     assert dvc.pull_calls[0].targets is None
+
+
+def test_clone_and_pull_product_with_primary_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``primary_only=True`` narrows the dvc pull to the primary path."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", primary_only=True,
+    )
+
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
 
 
 def test_clone_and_pull_product_refuses_existing_nonempty_dest(
@@ -159,6 +178,7 @@ def test_clone_and_pull_product_refuses_existing_nonempty_dest(
 def test_clone_and_pull_product_raises_when_no_primary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``primary_only=True`` on an entry with no primary raises clearly."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
 
@@ -170,7 +190,7 @@ def test_clone_and_pull_product_raises_when_no_primary(
     with pytest.raises(MissingPrimaryDataProduct):
         clone_and_pull_product(
             client, _FakeDvcOps(), _NoopCloneGitOps(), None,
-            name="provider-xw",
+            name="provider-xw", primary_only=True,
         )
 
 

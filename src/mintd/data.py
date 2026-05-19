@@ -180,21 +180,23 @@ def clone_and_pull_product(
     name: str,
     dest: Path | None = None,
     rev: str | None = None,
-    pull_all: bool = False,
+    primary_only: bool = False,
     jobs: int | None = None,
 ) -> Path:
     """Clone a published data product into a working directory + dvc pull it.
 
     Looks up `name` in the registry, full-clones the producer repo to
-    `./<type>_<name>/` (or `dest` if provided), then `dvc pull`s the
-    primary data product (or all outputs with `pull_all=True`).
+    `./<type>_<name>/` (or `dest` if provided), then `dvc pull`s every
+    tracked output by default. Pass ``primary_only=True`` to pull only
+    `data_products.primary` (useful when the full product is multi-TB
+    but the user only needs the headline output).
 
     Raises:
         ValueError: invalid `name` (path-traversal characters).
         CatalogNotFound: `name` not in registry.
         ImportDestinationExists: dest exists and is non-empty.
         ProducerError: clone failed (UNREACHABLE).
-        MissingPrimaryDataProduct: no primary set and `pull_all=False`.
+        MissingPrimaryDataProduct: `primary_only=True` and no primary set.
         DvcOpError: dvc pull failed after clone.
     """
     _validate_clone_name(name)
@@ -221,16 +223,16 @@ def clone_and_pull_product(
             ),
         ) from exc
 
-    if pull_all:
-        targets: list[str] | None = None
-    else:
+    if primary_only:
         primary = (dumped.get("data_products") or {}).get("primary")
         if not primary:
             raise MissingPrimaryDataProduct(
                 f"catalog entry {name!r} has no data_products.primary; "
-                f"pass --all to pull all outputs"
+                f"drop --primary to pull all tracked outputs"
             )
-        targets = [primary]
+        targets: list[str] | None = [primary]
+    else:
+        targets = None
 
     # SubprocessDvcOps' subprocess.run calls don't pass cwd=, so they
     # inherit os.getcwd(). chdir into the clone before invoking data_pull
