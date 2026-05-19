@@ -122,14 +122,19 @@ class SubprocessDvcOps:
 
     def _env(self) -> Optional[dict[str, str]]:
         """Subprocess env with AWS_PROFILE injected so dvc's boto3 picks
-        up mintd's [mintd] credentials (no [default] profile is required
-        in ~/.aws/credentials).  None means inherit parent env unchanged.
+        up mintd's [mintd] credentials (no [default] profile required in
+        ~/.aws/credentials). None means inherit parent env unchanged.
+
+        Uses ``setdefault`` so an already-exported ``AWS_PROFILE``
+        (per-invocation override, SSO session manager like aws-vault) wins
+        over mintd's auto-detected default. Standard AWS precedence chain
+        is preserved.
         """
         if not self._aws_profile_name:
             return None
         import os
         env = dict(os.environ)
-        env["AWS_PROFILE"] = self._aws_profile_name
+        env.setdefault("AWS_PROFILE", self._aws_profile_name)
         return env
 
     def import_(
