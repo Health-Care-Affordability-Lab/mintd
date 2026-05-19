@@ -143,6 +143,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         args._reporter.error("interrupted by user")
         return 130
+    except WallTimeoutExceeded as e:
+        # Catches the fast-tier default (30s on dvc status / git fetch /
+        # etc.) and any user-configured timeouts.transfer that fires from
+        # handlers that don't catch the exception themselves (data pull /
+        # push / add / verify / remove / import / publish). data clone
+        # catches it locally for a richer message.
+        args._reporter.error(str(e))
+        return 1
     except ConfigError as e:
         args._reporter.error(str(e))
         return 1

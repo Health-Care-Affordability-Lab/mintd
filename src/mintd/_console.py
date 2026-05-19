@@ -25,6 +25,10 @@ class Reporter:
         if self.json_mode or self.level < 1:
             from contextlib import nullcontext
             return nullcontext()
+        # Clear any residual partial from the previous subprocess (rare,
+        # but possible if a child exited mid-tick or reader thread was
+        # slow to drain). Prevents cross-block bleed into the new spinner.
+        self._stderr_buf = ""
         self._status_base = msg
         self._active_status = self._stderr.status(msg)
         return self._active_status
