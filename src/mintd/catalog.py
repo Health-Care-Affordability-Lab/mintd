@@ -16,6 +16,7 @@ with an advisory tier (PRODUCER_CONTRACT fields + `last_synced_at`).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,22 @@ from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
     from .model import Metadata
+
+
+def _pr_url(registry_repo_url: str, pr_number: int) -> str | None:
+    """Build a github.com PR URL from a registry repo URL + PR number.
+
+    Returns None when the registry URL isn't a recognizable GitHub
+    repo (e.g. a file:// path in tests, or a self-hosted host).
+    """
+    m = re.search(
+        r"(?:github\.com[:/])([^/]+)/([^/.]+)(?:\.git)?/?$",
+        registry_repo_url,
+    )
+    if not m:
+        return None
+    org, repo = m.group(1), m.group(2)
+    return f"https://github.com/{org}/{repo}/pull/{pr_number}"
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +72,8 @@ class FieldChange:
 class RegisterResult:
     name: str
     dry_run: bool
+    pr_number: int | None = None
+    pr_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +81,8 @@ class UpdateResult:
     name: str
     changes: list[FieldChange]
     dry_run: bool
+    pr_number: int | None = None
+    pr_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -314,7 +335,11 @@ class GitCatalogClient:
             pr_body=f"Catalog entry for `{name}`.",
         )
         self._record_pending(name=name, pr_number=pr, kind="register")
-        return RegisterResult(name=name, dry_run=False)
+        return RegisterResult(
+            name=name, dry_run=False,
+            pr_number=pr,
+            pr_url=_pr_url(self._registry_repo_url, pr),
+        )
 
     def update(self, metadata: "Metadata", *, dry_run: bool = False) -> UpdateResult:
         from ._catalog_serializer import deserialize, serialize
@@ -344,7 +369,11 @@ class GitCatalogClient:
             pr_body=f"Update for catalog entry `{name}`.",
         )
         self._record_pending(name=name, pr_number=pr, kind="update")
-        return UpdateResult(name=name, changes=changes, dry_run=False)
+        return UpdateResult(
+            name=name, changes=changes, dry_run=False,
+            pr_number=pr,
+            pr_url=_pr_url(self._registry_repo_url, pr),
+        )
 
     # ------------------------------------------------------------------
     # status
@@ -386,6 +415,7 @@ class GitCatalogClient:
             self._work_dir,
             title=pr_title,
             body=pr_body,
+            head=branch,
         )
 
     def _record_pending(

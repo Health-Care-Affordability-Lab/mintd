@@ -94,8 +94,16 @@ class _FakeRegistryGitOps:
         self.reset_hard_calls.append(ResetHardCall(repo_dir, ref))
         self._git(["reset", "--hard", ref], cwd=repo_dir)
 
+    def checkout(self, repo_dir: Path, ref: str, *, force: bool = False) -> None:
+        args = ["checkout"]
+        if force:
+            args.append("-f")
+        args.append(ref)
+        self._git(args, cwd=repo_dir)
+
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None:
-        self._git(["checkout", "-b", branch], cwd=repo_dir)
+        # Mirrors production: -B force-creates-or-resets so retries work.
+        self._git(["checkout", "-B", branch], cwd=repo_dir)
 
     def commit_all(self, repo_dir: Path, message: str) -> None:
         if self.commit_all_raises:
@@ -124,9 +132,15 @@ class _FakeRegistryGitOps:
     # gh (stubbed)
     # ------------------------------------------------------------------
 
-    def open_pr(self, repo_dir: Path, *, title: str, body: str, base: str = "main") -> int:
-        # Branch is the currently checked-out one.
-        branch = self._git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir).strip()
+    def open_pr(
+        self, repo_dir: Path, *, title: str, body: str,
+        base: str = "main", head: str | None = None,
+    ) -> int:
+        # If caller passed head explicitly (slice-30+ fix), trust it.
+        # Otherwise fall back to the currently checked-out branch.
+        branch = head or self._git(
+            ["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir,
+        ).strip()
         if branch in self.open_prs:
             from mintd._registry_git_ops import PRConflictError
             raise PRConflictError(branch=branch, existing_pr=self.open_prs[branch].number)

@@ -93,6 +93,7 @@ class RegistryGitOps(Protocol):
     ) -> None: ...
     def fetch(self, repo_dir: Path) -> None: ...
     def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
+    def checkout(self, repo_dir: Path, ref: str, *, force: bool = False) -> None: ...
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
@@ -105,6 +106,7 @@ class RegistryGitOps(Protocol):
         title: str,
         body: str,
         base: str = "main",
+        head: str | None = None,
     ) -> int: ...
     def pr_exists_for_branch(self, repo_dir: Path, branch: str) -> int | None: ...
 
@@ -190,8 +192,19 @@ class SubprocessRegistryGitOps:
     def reset_hard(self, repo_dir: Path, ref: str) -> None:
         self._git(["reset", "--hard", ref], cwd=repo_dir)
 
+    def checkout(self, repo_dir: Path, ref: str, *, force: bool = False) -> None:
+        args = ["checkout"]
+        if force:
+            args.append("-f")
+        args.append(ref)
+        self._git(args, cwd=repo_dir)
+
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None:
-        self._git(["checkout", "-b", branch], cwd=repo_dir)
+        # Use ``-B`` (force-create-or-reset) so retries from a stuck
+        # ``register/<name>`` state don't crash with "branch already
+        # exists". Safe because the caller has just reset to a clean
+        # origin/main baseline.
+        self._git(["checkout", "-B", branch], cwd=repo_dir)
 
     def commit_all(self, repo_dir: Path, message: str) -> None:
         self._git(["add", "-A"], cwd=repo_dir)
@@ -223,11 +236,18 @@ class SubprocessRegistryGitOps:
         title: str,
         body: str,
         base: str = "main",
+        head: str | None = None,
     ) -> int:
-        result = self._gh(
-            ["pr", "create", "--title", title, "--body", body, "--base", base],
-            cwd=repo_dir,
-        )
+        # Pass ``--head <branch>`` explicitly when known. gh CLI's
+        # auto-detect uses the current branch's upstream tracking, which
+        # can be missing (e.g. when push -u set tracking but a different
+        # remote is what gh resolves the repo to). Surfacing head
+        # explicitly removes the ambiguity that caused the
+        # "must first push the current branch" error.
+        args = ["pr", "create", "--title", title, "--body", body, "--base", base]
+        if head is not None:
+            args.extend(["--head", head])
+        result = self._gh(args, cwd=repo_dir)
         # `gh pr create` prints the PR URL on success. Extract the trailing integer.
         url = result.strip().splitlines()[-1]
         try:

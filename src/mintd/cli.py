@@ -1123,40 +1123,60 @@ def _handle_enclave_verify(args: argparse.Namespace) -> int:
 
 
 def _handle_registry_register(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
         metadata = Metadata.from_json_file(args.path / "metadata.json")
     except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         return 1
-    try:
-        result = client.register(metadata)
-    except CatalogAlreadyExists as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
-    print(f"registered: {result.name} (dry_run={result.dry_run})")
+    with reporter.status("Registering project with the catalog…"):
+        try:
+            result = client.register(metadata)
+        except CatalogAlreadyExists as exc:
+            reporter.error(str(exc))
+            return 1
+    if result.dry_run:
+        reporter.info(f"Would register {result.name!r} (dry-run; no PR opened).")
+        return 0
+    if result.pr_url:
+        reporter.success(f"Registration PR created: {result.pr_url}")
+    elif result.pr_number is not None:
+        reporter.success(f"Registration PR #{result.pr_number} created.")
+    else:
+        reporter.success(f"Registered {result.name!r}.")
+    reporter.info("The PR will be reviewed and merged by registry administrators.")
     return 0
 
 
 def _handle_registry_update(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
         metadata = Metadata.from_json_file(args.path / "metadata.json")
     except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         return 1
-    try:
-        result = client.update(metadata, dry_run=args.dry_run)
-    except CatalogNotFound as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    with reporter.status("Updating catalog entry…"):
+        try:
+            result = client.update(metadata, dry_run=args.dry_run)
+        except CatalogNotFound as exc:
+            reporter.error(str(exc))
+            return 1
     if not result.changes:
-        print(f"no changes (dry_run={result.dry_run})")
+        reporter.info("No changes to publish." + (" (dry-run)" if result.dry_run else ""))
         return 0
     for change in result.changes:
-        print(f"{change.field_path}: {change.before!r} → {change.after!r}")
+        reporter.info(f"{change.field_path}: {change.before!r} → {change.after!r}")
+    if result.dry_run:
+        reporter.info("Dry-run: no PR opened.")
+        return 0
+    if result.pr_url:
+        reporter.success(f"Update PR created: {result.pr_url}")
+    elif result.pr_number is not None:
+        reporter.success(f"Update PR #{result.pr_number} created.")
     return 0
 
 

@@ -61,11 +61,32 @@ class CatalogCache:
     # ------------------------------------------------------------------
 
     def ensure_fresh(self) -> None:
-        """Clone if absent, otherwise fetch + reset --hard origin/main."""
+        """Clone if absent, otherwise checkout main + fetch + reset.
+
+        Switching to main BEFORE ``reset --hard`` is load-bearing: if a
+        prior ``register``/``update`` left us on a ``register/<name>``
+        branch (e.g. because ``gh pr create`` failed AFTER commit + push,
+        or the user Ctrl-C'd mid-flow), ``reset --hard origin/main`` on
+        that branch silently corrupts it — rewrites the branch to point
+        at main's HEAD with no upstream. Subsequent retries then crash
+        in ``checkout_new_branch`` ("branch already exists") OR succeed
+        but push a branch that's identical to main (PR creation fails
+        with "no commits between").
+
+        Fix: always reset on main. Stale ``register/<name>`` branches
+        are left in place — the ``-B`` flag in ``checkout_new_branch``
+        force-resets them on next register, and the orchestrator
+        cleans them up on success.
+        """
         if not (self._work_dir / ".git").exists():
             self._work_dir.parent.mkdir(parents=True, exist_ok=True)
             self._git_ops.clone(self._registry_url, self._work_dir)
             return
+        # ``-f``: discard any working-tree changes (e.g. an in-progress
+        # write_entry / .mintd_pending.json that wasn't committed before
+        # a failure). The cache is mintd-owned scratch; nothing under it
+        # is user data, so force-discarding is safe.
+        self._git_ops.checkout(self._work_dir, "main", force=True)
         self._git_ops.fetch(self._work_dir)
         self._git_ops.reset_hard(self._work_dir, "origin/main")
 

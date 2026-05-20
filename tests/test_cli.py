@@ -366,9 +366,11 @@ def test_registry_register_prints_result(
 ) -> None:
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
     rc = cli.main(["registry", "register", str(tmp_path)])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out_combined = captured.out + captured.err  # Reporter writes to stderr
     assert rc == 0
-    assert "registered:" in out
+    # Slice 30 polish: human-readable success line + PR URL when known.
+    assert "Registration PR" in out_combined or "Registered" in out_combined
 
 
 def test_registry_update_prints_diff(
@@ -386,9 +388,10 @@ def test_registry_update_prints_diff(
     data["data_products"]["primary"] = "outputs/new.parquet"
     (tmp_path / "metadata.json").write_text(json.dumps(data))
     rc = cli.main(["registry", "update", str(tmp_path)])
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    out_combined = captured.out + captured.err  # Reporter writes to stderr
     assert rc == 0
-    assert "→" in out
+    assert "→" in out_combined
 
 
 def test_registry_sync_prints_count(
