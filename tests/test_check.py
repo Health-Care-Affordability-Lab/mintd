@@ -634,3 +634,61 @@ def test_consumer_manifest_catalog_unresolved_finding_has_catalog_unresolved_kin
 
     assert len(consumer_findings) == 1
     assert consumer_findings[0].kind == "catalog_unresolved"
+
+
+# ---------------------------------------------------------------------------
+# Slice 30 — storage drift detection
+# ---------------------------------------------------------------------------
+
+def test_check_emits_bucket_empty_finding(tmp_path: Path):
+    """Producer with bucket="" and a populated .dvc/config emits one
+    BUCKET_EMPTY error whose hint names the bucket from .dvc/config."""
+    def _add_empty_bucket(d):
+        d["storage"] = {
+            "provider": "s3",
+            "bucket": "",
+            "prefix": "lab/p/",
+            "endpoint": "",
+            "versioning": True,
+            "dvc": {"remote_name": "p"},
+        }
+    _write_metadata(tmp_path, _add_empty_bucket)
+    dvc_cfg = tmp_path / ".dvc" / "config"
+    dvc_cfg.parent.mkdir(parents=True, exist_ok=True)
+    dvc_cfg.write_text(
+        "[core]\n    remote = p\n"
+        '[remote "p"]\n    url = s3://cooper-globus/lab/p/\n'
+    )
+
+    findings = check_project(tmp_path)
+    storage_findings = [f for f in findings if f.kind and f.kind.startswith("storage_")]
+    assert len(storage_findings) == 1
+    assert storage_findings[0].kind == "storage_bucket_empty"
+    assert storage_findings[0].severity == "error"
+    assert storage_findings[0].hint is not None
+    assert "cooper-globus" in storage_findings[0].hint
+
+
+def test_check_no_storage_finding_on_healthy(tmp_path: Path):
+    """Producer with matching metadata.storage + .dvc/config emits no
+    storage-section findings (INITIALIZED)."""
+    def _add_healthy_storage(d):
+        d["storage"] = {
+            "provider": "s3",
+            "bucket": "cooper-globus",
+            "prefix": "lab/p/",
+            "endpoint": "",
+            "versioning": True,
+            "dvc": {"remote_name": "p"},
+        }
+    _write_metadata(tmp_path, _add_healthy_storage)
+    dvc_cfg = tmp_path / ".dvc" / "config"
+    dvc_cfg.parent.mkdir(parents=True, exist_ok=True)
+    dvc_cfg.write_text(
+        "[core]\n    remote = p\n"
+        '[remote "p"]\n    url = s3://cooper-globus/lab/p/\n'
+    )
+
+    findings = check_project(tmp_path)
+    storage_findings = [f for f in findings if f.kind and f.kind.startswith("storage_")]
+    assert storage_findings == []

@@ -36,7 +36,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 from pydantic import ValidationError
@@ -76,7 +76,15 @@ class CheckFinding:
         "metadata_invalid",
         "invalid_manifest",
         "catalog_unresolved",
+        "storage_fresh",
+        "storage_initialized",
+        "storage_partial_meta_only",
+        "storage_partial_dvc_only",
+        "storage_name_mismatch",
+        "storage_url_mismatch",
+        "storage_bucket_empty",
     ] | None = None
+    hint: str | None = None  # NEW: actionable repair suggestion
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +131,8 @@ def check_project(
 
 def _producer_findings(project_path: Path) -> list[CheckFinding]:
     """Producer-section checks: everything derivable from metadata.json alone."""
+    from ._storage_state import StorageState, inspect_storage, repair_hint
+
     metadata_path = project_path / "metadata.json"
 
     if not metadata_path.is_file():
@@ -131,6 +141,7 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                 severity="error",
                 section="producer",
                 message=f"metadata.json not found at {metadata_path}",
+                kind="metadata_missing",
             )
         ]
 
@@ -144,23 +155,50 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                 severity="error",
                 section="producer",
                 message=f"malformed JSON in metadata.json: {e.msg} (line {e.lineno}, col {e.colno})",
+                kind="metadata_invalid",
             )
         ]
+
+    findings: list[CheckFinding] = []
 
     try:
         Metadata.model_validate_json(raw)
     except ValidationError as e:
-        return [
+        findings.extend(
             CheckFinding(
                 severity="error",
                 section="producer",
                 message=err["msg"],
                 field_path=".".join(str(p) for p in err["loc"]) or None,
+                kind="metadata_invalid",
             )
             for err in e.errors()
-        ]
+        )
 
-    return []
+    # Slice 30: storage drift detection. Runs even when Pydantic validation
+    # failed above — drift is independent of metadata-schema validity.
+    inspection = inspect_storage(project_path)
+    if inspection.state not in (StorageState.FRESH, StorageState.INITIALIZED):
+        kind_map: dict[StorageState, Any] = {
+            StorageState.PARTIAL_META_ONLY: "storage_partial_meta_only",
+            StorageState.PARTIAL_DVC_ONLY: "storage_partial_dvc_only",
+            StorageState.NAME_MISMATCH: "storage_name_mismatch",
+            StorageState.URL_MISMATCH: "storage_url_mismatch",
+            StorageState.BUCKET_EMPTY: "storage_bucket_empty",
+        }
+        findings.append(
+            CheckFinding(
+                severity="error",
+                section="producer",
+                message=f"storage drift detected: {inspection.state.value}",
+                field_path="storage",
+                source=metadata_path,
+                kind=kind_map[inspection.state],
+                hint=repair_hint(inspection),
+            )
+        )
+
+    return findings
 
 
 def _consumer_findings(

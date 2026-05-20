@@ -490,6 +490,37 @@ def _handle_check(args: argparse.Namespace) -> int:
 
 
 def _handle_init(args: argparse.Namespace) -> int:
+    from ._config import Config
+    from ._console import Reporter
+    from ._init_ops import InitNonInteractive
+    from .init import (
+        _prompt_classification,
+    )
+
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    # Slice 30 P1 (reviewer-flagged): enclave projects don't use DVC storage
+    # wiring and must not require a TTY. Skip the classification prompt.
+    classification: str | None = None
+    slug: str | None = None
+    if args.project_type != "enclave":
+        try:
+            classification, slug = _prompt_classification(reporter=reporter)
+        except InitNonInteractive as exc:
+            reporter.error(str(exc))
+            return 1
+
+    try:
+        config = Config.load()
+    except Exception:
+        config = Config()  # type: ignore[call-arg]
+    bucket = config.storage_bucket_prefix
+    endpoint = config.storage_endpoint
+    # Slice 30: write the AWS profile into .dvc/config so consumers
+    # running raw `dvc pull` (outside mintd) pick up the right
+    # credentials. Config.aws_profile_name returns "mintd" iff
+    # ~/.aws/credentials has a [mintd] section; otherwise None.
+    profile = config.aws_profile_name
+
     try:
         project_path, written = init_project(
             project_type=args.project_type,
@@ -497,9 +528,14 @@ def _handle_init(args: argparse.Namespace) -> int:
             target_dir=args.path,
             language=args.lang,
             use_current_repo=args.use_current_repo,
+            classification=classification,
+            slug=slug,
+            bucket=bucket,
+            endpoint=endpoint,
+            profile=profile,
         )
     except (InitDestinationExists, InitNameInvalid, InitOpError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         return 1
     # Render paths relative to cwd when possible so the user sees the subdir.
     cwd = Path.cwd().resolve()
@@ -1308,6 +1344,7 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
                         "field_path": f.field_path,
                         "source": str(f.source) if f.source else None,
                         "kind": f.kind,
+                        "hint": f.hint,
                     }
                 )
             )
@@ -1316,6 +1353,8 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
             prefix = _resolve_prefix(f.kind)
             loc = f.source if f.source else "<project>"
             print(f"{prefix} [{f.severity}] {loc}: {f.message}")
+            if f.hint:
+                print(f"    💡 {f.hint}")
     return 1 if any(f.severity == "error" for f in findings) else 0
 
 

@@ -377,6 +377,63 @@ def test_interactive_setup_abort_raises_config_error(tmp_path: Path) -> None:
     assert not p.exists()
 
 
+def test_interactive_setup_captures_aws_credentials_when_mintd_missing(
+    tmp_path: Path,
+) -> None:
+    """Slice 30: when ~/.aws/credentials lacks [mintd], the wizard
+    offers to capture access keys and writes them to the (test-isolated)
+    credentials file with mode 0600."""
+    import configparser
+    import os
+    import stat
+    p = tmp_path / "cfg.yaml"
+    creds = tmp_path / "aws-credentials"  # known not to have [mintd]
+
+    # Scripted: empties for the 11 Config fields, then "y" to accept the
+    # credential prompt, then access key, then secret. Pad with extra
+    # empties so the scripted iterator can't undershoot if Config
+    # gains fields later.
+    import itertools
+    config_field_count = 11
+    answers = ([""] * config_field_count) + ["y", "AKIA0001", "secret-1"]
+    seq = itertools.chain(iter(answers), itertools.repeat(""))
+
+    def prompt(_msg: str) -> str:
+        return next(seq)
+
+    interactive_setup(
+        p,
+        prompt_fn=prompt,
+        aws_credentials_path=creds,
+    )
+    assert creds.is_file()
+    assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600
+    cp = configparser.ConfigParser()
+    cp.read(creds)
+    assert cp.get("mintd", "aws_access_key_id") == "AKIA0001"
+    assert cp.get("mintd", "aws_secret_access_key") == "secret-1"
+
+
+def test_interactive_setup_skips_aws_when_mintd_already_present(
+    tmp_path: Path,
+) -> None:
+    """If [mintd] already exists, the wizard doesn't re-prompt or rewrite."""
+    p = tmp_path / "cfg.yaml"
+    creds = tmp_path / "aws-credentials"
+    creds.write_text(
+        "[mintd]\naws_access_key_id = EXISTING\naws_secret_access_key = sk-existing\n"
+    )
+    interactive_setup(
+        p,
+        prompt_fn=_scripted_prompt(),
+        aws_credentials_path=creds,
+    )
+    # Untouched
+    body = creds.read_text()
+    assert "EXISTING" in body
+    assert "sk-existing" in body
+
+
 # --- v1 → v2 migration -----------------------------------------------------
 
 

@@ -442,6 +442,8 @@ def interactive_setup(
     *,
     write: bool = True,
     prompt_fn=input,
+    secret_prompt_fn=None,
+    aws_credentials_path: Path | None = None,
 ) -> Config:
     """Walk the user through each Config field; return the validated result.
 
@@ -449,7 +451,33 @@ def interactive_setup(
     when no prior value exists). Atomic-writes the result unless
     ``write=False``. Aborts cleanly on ``KeyboardInterrupt`` / EOF by
     re-raising as ``ConfigError`` (caught by the CLI handler).
+
+    Slice 30: if ``~/.aws/credentials`` doesn't already have a ``[mintd]``
+    section, offer to capture S3 access keys and write them. The actual
+    write is guarded by ``write=True`` (same flag that gates the
+    config.yaml write). ``secret_prompt_fn`` defaults to ``getpass.getpass``
+    so secrets don't echo; tests inject a deterministic callable.
+    ``aws_credentials_path`` overrides ``~/.aws/credentials`` for tests.
     """
+    import getpass
+
+    from ._aws_credentials import (
+        CredentialsWriteError,
+        default_credentials_path,
+        has_profile,
+        write_profile,
+    )
+
+    if secret_prompt_fn is None:
+        # When prompt_fn was injected (tests, headless), default the
+        # secret prompt to the same scripted callable so we don't fall
+        # through to getpass.getpass — which would hang the test runner
+        # waiting on tty input.
+        if prompt_fn is input:
+            secret_prompt_fn = getpass.getpass
+        else:
+            secret_prompt_fn = prompt_fn
+
     path = _resolve_path(config_path)
     if path.is_file():
         try:
@@ -483,6 +511,38 @@ def interactive_setup(
     config = _validate_data(data)
     if write:
         _atomic_write_yaml(path, render_config(config))
+
+    # Slice 30: optionally capture AWS credentials into ~/.aws/credentials.
+    # Decoupled from config.yaml because the keys go to a different file
+    # (security-sensitive, mode 0600) and the prompt is opt-in.
+    creds_path = aws_credentials_path or default_credentials_path()
+    if write and not has_profile("mintd", credentials_path=creds_path):
+        print()
+        print("AWS profile [mintd] not found in ~/.aws/credentials.")
+        print("DVC needs S3 access keys to push/pull data. Set them up now?")
+        try:
+            answer = prompt_fn("  Configure [mintd] profile now? [Y/n]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError) as e:
+            raise ConfigError("interactive setup aborted") from e
+        if answer in ("", "y", "yes"):
+            try:
+                access_key = prompt_fn("  AWS access key ID: ").strip()
+                secret_key = secret_prompt_fn("  AWS secret access key (hidden): ").strip()
+            except (KeyboardInterrupt, EOFError) as e:
+                raise ConfigError("interactive setup aborted") from e
+            if not access_key or not secret_key:
+                print("  (skipped — access key or secret was empty)")
+            else:
+                try:
+                    write_profile(
+                        access_key, secret_key,
+                        profile_name="mintd",
+                        credentials_path=creds_path,
+                    )
+                except CredentialsWriteError as e:
+                    raise ConfigError(str(e)) from e
+                print(f"  wrote [mintd] section to {creds_path} (mode 0600)")
+
     return config
 
 

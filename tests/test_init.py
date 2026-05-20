@@ -141,3 +141,253 @@ def test_init_invalid_name_raises(tmp_path: Path) -> None:
         init_project(
             project_type="data", name="-bad", target_dir=tmp_path, ops=fake
         )
+
+
+# ---------------------------------------------------------------------------
+# Slice 30 — init redesign: classification + storage block + remote add
+# ---------------------------------------------------------------------------
+
+def _read_metadata(project_path: Path) -> Metadata:
+    return Metadata.model_validate_json(
+        (project_path / "metadata.json").read_text(encoding="utf-8")
+    )
+
+
+def test_init_project_writes_full_storage_block(tmp_path: Path) -> None:
+    """labonly init writes a complete Storage with all six required fields."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="https://s3.wasabisys.com",
+        ops=fake,
+    )
+    m = _read_metadata(project_path)
+    assert m.storage is not None
+    assert m.storage.provider == "s3"
+    assert m.storage.bucket == "cooper-globus"
+    assert m.storage.prefix == "lab/data_foo/"
+    assert m.storage.endpoint == "https://s3.wasabisys.com"
+    assert m.storage.versioning is True
+    assert m.storage.dvc.remote_name == "data_foo"
+
+
+def test_init_project_calls_dvc_remote_add(tmp_path: Path) -> None:
+    fake = _FakeInitOps()
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+        ops=fake,
+    )
+    assert len(fake.remote_add_calls) == 1
+    call = fake.remote_add_calls[0]
+    assert call["name"] == "data_foo"
+    assert call["url"] == "s3://cooper-globus/lab/data_foo/"
+    assert call["default"] is True
+    # No profile passed -> None recorded (matches default-credential-chain
+    # case where ~/.aws/credentials lacks a [mintd] section).
+    assert call["profile"] is None
+
+
+def test_init_project_threads_aws_profile_into_remote_add(tmp_path: Path) -> None:
+    """Slice 30: profile threads through so consumers running raw
+    `dvc pull` (outside mintd) pick up the right credentials."""
+    fake = _FakeInitOps()
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+        profile="mintd",
+        ops=fake,
+    )
+    assert fake.remote_add_calls[0]["profile"] == "mintd"
+
+
+def test_init_project_licensed_uses_slug_at_bucket_root(tmp_path: Path) -> None:
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data",
+        name="optumtest",
+        target_dir=tmp_path,
+        classification="licensed",
+        slug="optum",
+        bucket="cooper-globus",
+        endpoint="",
+        ops=fake,
+    )
+    m = _read_metadata(project_path)
+    assert m.storage is not None
+    assert m.storage.prefix == "optum/data_optumtest/"
+    assert fake.remote_add_calls[0]["url"] == "s3://cooper-globus/optum/data_optumtest/"
+
+
+def test_init_project_rollback_on_remote_add_failure(tmp_path: Path) -> None:
+    """If dvc_remote_add raises, .dvc/ is removed and the exception
+    re-raises. metadata.json is intentionally left in place."""
+    from mintd._init_ops import InitOpError
+    fake = _FakeInitOps(fail_on={"dvc_remote_add"})
+    with pytest.raises(InitOpError, match="dvc_remote_add"):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            classification="labonly",
+            bucket="cooper-globus",
+            endpoint="",
+            ops=fake,
+        )
+    assert not (tmp_path / "data_foo" / ".dvc").exists()
+    # metadata.json left in place — rerunning init re-applies the patch
+    assert (tmp_path / "data_foo" / "metadata.json").exists()
+
+
+def test_init_project_requires_bucket_when_classification_set(tmp_path: Path) -> None:
+    from mintd._init_ops import InitOpError
+    fake = _FakeInitOps()
+    with pytest.raises(InitOpError, match="bucket not configured"):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            classification="labonly",
+            bucket=None,
+            ops=fake,
+        )
+
+
+def test_init_project_legacy_path_unchanged_when_classification_none(tmp_path: Path) -> None:
+    """Backward compat: omitting classification skips storage wiring
+    entirely (existing tests rely on this)."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+    )
+    m = _read_metadata(project_path)
+    assert m.storage is None
+    assert fake.remote_add_calls == []
+
+
+def test_init_project_patches_storage_even_when_template_emits_partial_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive raw-dict pop (round-2 P0 fix): if a template ever emits
+    a partial storage placeholder, init_project's patch survives by
+    popping ``storage`` from the raw dict before Pydantic validation.
+
+    Wraps the real render_scaffold and inject a partial storage block
+    after — simulates a future template regression without hand-crafting
+    a full Metadata fixture.
+    """
+    import json
+    from mintd import init as init_mod
+    fake = _FakeInitOps()
+    real_render = init_mod.render_scaffold
+
+    def _wrap_with_poison(*, project_type, name, language, target_dir):
+        written = real_render(
+            project_type=project_type, name=name,
+            language=language, target_dir=target_dir,
+        )
+        meta_path = target_dir / "metadata.json"
+        raw = json.loads(meta_path.read_text())
+        raw["storage"] = {"bucket": ""}  # partial placeholder; missing required fields
+        meta_path.write_text(json.dumps(raw))
+        return written
+
+    monkeypatch.setattr("mintd.init.render_scaffold", _wrap_with_poison)
+
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+        ops=fake,
+    )
+    m = _read_metadata(project_path)
+    assert m.storage is not None
+    assert m.storage.bucket == "cooper-globus"
+    assert m.storage.prefix == "lab/data_foo/"
+
+
+# ---------------------------------------------------------------------------
+# Slice 30 — _prompt_classification (interactive prompt)
+# ---------------------------------------------------------------------------
+
+def test_prompt_classification_non_tty_raises() -> None:
+    from mintd._console import Reporter
+    from mintd._init_ops import InitNonInteractive
+    from mintd.init import _prompt_classification
+    with pytest.raises(InitNonInteractive):
+        _prompt_classification(
+            reporter=Reporter(),
+            prompt_fn=lambda _: "1",
+            isatty_fn=lambda: False,
+        )
+
+
+def test_prompt_classification_labonly_no_slug() -> None:
+    from mintd._console import Reporter
+    from mintd.init import _prompt_classification
+    tier, slug = _prompt_classification(
+        reporter=Reporter(),
+        prompt_fn=lambda _: "1",
+        isatty_fn=lambda: True,
+    )
+    assert tier == "labonly"
+    assert slug is None
+
+
+def test_prompt_classification_licensed_prompts_for_slug() -> None:
+    from mintd._console import Reporter
+    from mintd.init import _prompt_classification
+    inputs = iter(["3", "optum"])
+    tier, slug = _prompt_classification(
+        reporter=Reporter(),
+        prompt_fn=lambda _: next(inputs),
+        isatty_fn=lambda: True,
+    )
+    assert tier == "licensed"
+    assert slug == "optum"
+
+
+def test_init_then_inspect_returns_initialized(tmp_path: Path) -> None:
+    """Integration: a freshly init'd project classifies as INITIALIZED.
+
+    NOTE: _FakeInitOps doesn't actually write .dvc/config (the real
+    SubprocessInitOps does via subprocess), so we simulate it post-hoc
+    so inspect_storage has both sides to compare.
+    """
+    from mintd._storage_state import StorageState, inspect_storage
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+        ops=fake,
+    )
+    # Simulate what SubprocessInitOps.dvc_remote_add would write to disk
+    dvc_cfg = project_path / ".dvc" / "config"
+    dvc_cfg.parent.mkdir(parents=True, exist_ok=True)
+    dvc_cfg.write_text(
+        "[core]\n    remote = data_foo\n"
+        '[remote "data_foo"]\n    url = s3://cooper-globus/lab/data_foo/\n'
+    )
+    assert inspect_storage(project_path).state == StorageState.INITIALIZED

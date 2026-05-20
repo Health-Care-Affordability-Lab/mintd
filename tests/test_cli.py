@@ -990,8 +990,23 @@ def test_enclave_pull_nothing_to_pull_message(
 @pytest.fixture
 def patched_init_ops(monkeypatch: pytest.MonkeyPatch):
     from tests._fakes.init_ops import _FakeInitOps
+    from mintd._config import Config
     fake = _FakeInitOps()
     monkeypatch.setattr("mintd.init.SubprocessInitOps", lambda *a, **k: fake)
+    # Slice 30: CLI init now prompts for classification (interactive-only)
+    # and reads bucket/endpoint from ~/.mintd/config.yaml. Tests don't
+    # have a TTY or a guaranteed config file; stub both deterministically.
+    monkeypatch.setattr(
+        "mintd.init._prompt_classification",
+        lambda *, reporter, prompt_fn=None, isatty_fn=None: ("labonly", None),
+    )
+    monkeypatch.setattr(
+        "mintd._config.Config.load",
+        classmethod(lambda cls, path=None: Config(
+            storage_bucket_prefix="cooper-globus",
+            storage_endpoint="",
+        )),
+    )
     return fake
 
 
