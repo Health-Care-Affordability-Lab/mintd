@@ -88,6 +88,11 @@ class DvcOut:
     # The path of the .dvc file this out was parsed from. Required for
     # path-based key reconstruction; None on synthetic DvcOuts (tests).
     dvc_file: Path | None = None
+    # Slice 29: True when the parent .dvc has any deps[].repo block,
+    # i.e. the file was produced by `dvc import`. The data lives in the
+    # source repo's bucket — not this consumer repo's — so fast-sync
+    # cannot serve it and routes the target straight to `dvc pull`.
+    is_import: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,15 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     outs = []
     if not isinstance(data, dict) or "outs" not in data:
         return []
+    # Slice 29: `dvc import` produces a .dvc with `deps[].repo` blocks
+    # pointing at the source repo. The data lives in that source repo's
+    # bucket, not this one — fast-sync cannot serve it. Detect once per
+    # file; stamp every out so classify_targets can short-circuit.
+    deps = data.get("deps") or []
+    is_import = any(
+        isinstance(d, dict) and isinstance(d.get("repo"), dict)
+        for d in deps
+    )
     for out in data["outs"]:
         has_md5 = bool(out.get("md5"))
         has_files = "files" in out
@@ -209,6 +223,7 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
             size=int(out.get("size", 0) or 0),
             is_path_based=_is_path_based_entry(out, remote_name),
             dvc_file=dvc_path,
+            is_import=is_import,
         ))
     return outs
 
@@ -275,6 +290,21 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
                 hash_missing.append(target)
             else:
                 fallback.append(target)
+            continue
+
+        # Slice 29: `dvc import` files (deps[].repo) have data in the
+        # source repo's bucket; fast-sync cannot serve them. Route to
+        # fallback before any S3 client / spot-check / manifest-fetch.
+        # `is_import` is a per-file flag (deps applies to the whole
+        # .dvc), so we add `target` to fallback exactly once and break.
+        # A mixed import+non-import .dvc would over-route the file —
+        # perf regression at worst, never a correctness loss.
+        if outs[0].is_import:
+            logger.info(
+                "fast-sync: skipping %r — dvc-import (data lives in source repo)",
+                target,
+            )
+            fallback.append(target)
             continue
 
         for out in outs:

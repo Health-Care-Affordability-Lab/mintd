@@ -88,6 +88,33 @@ def _write_dvc_file_md5(
     (tmp_path / f"{name}.dvc").write_text(body)
 
 
+def _write_dvc_file_import(
+    tmp_path: Path, name: str, md5_dir: str,
+    *, source_url: str = "https://example.com/source.git",
+    rev_lock: str = "deadbeefcafebabe",
+) -> Path:
+    """Write a .dvc file matching the shape `dvc import` produces:
+    ``frozen: true`` + ``deps[].repo.{url, rev_lock}`` + dir-suffixed md5.
+    Mirrors the lab's `data/imports/<product>/final.dvc` shape (cms-ipps).
+    """
+    body = (
+        "frozen: true\n"
+        "deps:\n"
+        f"  - path: {Path(name).name}\n"
+        "    repo:\n"
+        f"      url: {source_url}\n"
+        f"      rev_lock: {rev_lock}\n"
+        "outs:\n"
+        f"  - path: {Path(name).name}\n"
+        f"    md5: {md5_dir}\n"
+        "    hash: md5\n"
+    )
+    p = tmp_path / f"{name}.dvc"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    return p
+
+
 def _write_dvc_file_path_based(
     tmp_path: Path, name: str, md5: str, version_id: str, *, remote: str = "origin",
 ) -> Path:
@@ -183,6 +210,53 @@ def test_parse_dvc_outs_extracts_version_id_from_cloud(tmp_path: Path) -> None:
         "    cloud:\n      origin:\n        version_id: vid-2\n"
     )
     assert parse_dvc_outs(f, "origin")[0].version_id == "vid-2"
+
+
+# ---------- slice 29: dvc-import detection ---------------------------
+
+def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None:
+    """Real lab shape (cms-ipps `data/imports/cms-impactfiles/final.dvc`):
+    frozen + deps[].repo + dir-suffixed md5. Detection is at the file
+    level — every out parsed from the file inherits is_import=True."""
+    p = _write_dvc_file_import(tmp_path, "imported", "deadbeef.dir")
+    outs = parse_dvc_outs(p, "origin")
+    assert len(outs) == 1
+    assert outs[0].is_import is True
+    # `.dir` suffix still classifies as a dir at parse time; classify_targets
+    # short-circuits BEFORE the orchestrator's dir branch would run.
+    assert outs[0].is_dir is True
+
+
+def test_parse_dvc_outs_frozen_without_repo_is_not_import(tmp_path: Path) -> None:
+    """Pins the discriminator: `frozen: true` alone is NOT an import.
+    Frozen pipeline stages have their data in this repo's bucket and
+    must still go through fast-sync."""
+    f = tmp_path / "frozen_stage.dvc"
+    f.write_text(
+        "frozen: true\n"
+        "deps:\n"
+        "  - path: input.csv\n"
+        "outs:\n"
+        "  - path: output.csv\n"
+        "    md5: cafe\n"
+    )
+    outs = parse_dvc_outs(f, "origin")
+    assert outs[0].is_import is False
+
+
+def test_parse_dvc_outs_deps_without_repo_is_not_import(tmp_path: Path) -> None:
+    """Pipeline stages with regular deps (no repo:) are not imports."""
+    f = tmp_path / "stage.dvc"
+    f.write_text(
+        "deps:\n"
+        "  - path: input.csv\n"
+        "  - path: script.py\n"
+        "outs:\n"
+        "  - path: out.csv\n"
+        "    md5: face\n"
+    )
+    outs = parse_dvc_outs(f, "origin")
+    assert outs[0].is_import is False
 
 
 # ---------- cache (2) ----------
@@ -533,6 +607,31 @@ def test_classify_targets_hash_missing_routes_to_hash_missing(tmp_path: Path) ->
     all_outs, fallback, missing = classify_targets(tmp_path, ["data/x"], "origin")
     assert all_outs == []
     assert missing == ["data/x"]
+
+
+def test_classify_targets_routes_imports_to_fallback(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Slice 29 contract: dvc-import .dvc files (deps[].repo) route to
+    fallback BEFORE any S3 client is constructed. Surfaces as one INFO
+    log per import. The user-supplied target string is preserved
+    verbatim (slice-18 P0 invariant)."""
+    import logging
+    _write_dvc_file_md5(tmp_path, "data/regular", "cafe")
+    _write_dvc_file_import(tmp_path, "data/imported", "deadbeef.dir")
+    with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
+        all_outs, fallback, missing = classify_targets(
+            tmp_path, ["data/regular", "data/imported"], "origin",
+        )
+    assert [o.target for o in all_outs] == ["data/regular"]
+    assert fallback == ["data/imported"]
+    assert missing == []
+    skip_records = [
+        r for r in caplog.records
+        if "skipping" in r.message and "dvc-import" in r.message
+    ]
+    assert len(skip_records) == 1
+    assert "data/imported" in skip_records[0].message
 
 
 # ---------- orchestrator (6) ----------
