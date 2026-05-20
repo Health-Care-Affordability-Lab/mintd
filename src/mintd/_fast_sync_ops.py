@@ -64,6 +64,10 @@ class DvcFileEntry:
     relpath: str
     size: int = 0
     version_id: str | None = None
+    # Slice 27: True when the entry's version_id lives ONLY under cloud[]
+    # (DVC's version_aware mode). The S3 key is then the file's real path,
+    # not files/md5/XX/YYYY. See _is_path_based_file_entry.
+    is_path_based: bool = False
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,14 @@ class DvcOut:
     is_files_format: bool = False
     files: list[DvcFileEntry] | None = None
     size: int = 0  # aggregate bytes for the out (sum across files for dirs); used by Reporter.progress
+    # Slice 27: True when the out's version_id lives ONLY under cloud[]
+    # (DVC's version_aware mode). The S3 key is the .dvc file's parent
+    # directory (relative to project_path) joined with out.path, not
+    # files/md5/XX/YYYY. See _is_path_based_entry + s3_key_for_out.
+    is_path_based: bool = False
+    # The path of the .dvc file this out was parsed from. Required for
+    # path-based key reconstruction; None on synthetic DvcOuts (tests).
+    dvc_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +132,36 @@ def _extract_version_id_from_file_entry(entry: dict[str, Any], remote_name: str)
     return None
 
 
+def _is_path_based_entry(entry: dict[str, Any], remote_name: str | None = None) -> bool:
+    """True iff the entry's version_id comes ONLY from cloud[] metadata —
+    meaning the S3 object is keyed by its file path (DVC's version_aware
+    mode). False when a top-level version_id is present.
+
+    Mirrors v1 ``mintd/utils/fast_sync.py:_is_path_based_entry``.
+    Mixed entries (both top-level AND cloud-nested ``version_id``) are
+    treated md5-keyed: top-level wins (v1 contract).
+    """
+    if entry.get("version_id"):
+        return False
+    cloud = entry.get("cloud") or {}
+    if remote_name and isinstance(cloud.get(remote_name), dict):
+        return bool(cloud[remote_name].get("version_id"))
+    return any(
+        isinstance(v, dict) and v.get("version_id")
+        for v in cloud.values()
+    )
+
+
+def _is_path_based_file_entry(entry: dict[str, Any], remote_name: str | None = None) -> bool:
+    """Parallel to ``_is_path_based_entry`` for files-format file entries.
+
+    Today the rule is identical; the alias exists so call sites don't lie
+    about which kind of dict they're inspecting and so we can diverge later
+    without touching callers.
+    """
+    return _is_path_based_entry(entry, remote_name)
+
+
 def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     """Parse a .dvc file into DvcOut entries.
 
@@ -152,6 +194,7 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
                     relpath=str(fe.get("relpath", "")),
                     size=int(fe.get("size", 0) or 0),
                     version_id=_extract_version_id_from_file_entry(fe, remote_name),
+                    is_path_based=_is_path_based_file_entry(fe, remote_name),
                 )
                 for fe in out["files"]
             ]
@@ -164,6 +207,8 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
             is_files_format=has_files and not has_md5,
             files=files_list,
             size=int(out.get("size", 0) or 0),
+            is_path_based=_is_path_based_entry(out, remote_name),
+            dvc_file=dvc_path,
         ))
     return outs
 
@@ -271,7 +316,7 @@ def parse_s3_url(url: str) -> tuple[str, str]:
         raise ValueError(f"not an s3 url: {url}")
     parts = url[5:].split("/", 1)
     bucket = parts[0]
-    prefix = parts[1] if len(parts) > 1 else ""
+    prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
     return bucket, prefix
 
 
@@ -281,7 +326,25 @@ def s3_key_for(prefix: str, md5: str) -> str:
     return "/".join(parts)
 
 
-def s3_key_for_out(prefix: str, out: DvcOut) -> str:
+def s3_key_for_out(prefix: str, out: DvcOut, project_path: Path) -> str:
+    """S3 object key for ``out``.
+
+    Slice 27: branches on ``out.is_path_based``:
+      - Path-based (version_aware): ``<prefix>/<dvc_file.parent_rel>/<out.path>``.
+        ``dvc_file.parent_rel`` is ``Path(".")`` when the .dvc file sits at
+        the project root, in which case the rel-dir segment is omitted.
+      - Md5-keyed: ``<prefix>/files/md5/XX/YYYY`` (delegates to ``s3_key_for``).
+
+    Raises ``ValueError`` when ``is_path_based=True`` and ``dvc_file is None``
+    (synthetic out misuse); the orchestrator's per-out try/except routes
+    such outs to the dvc-pull fallback.
+    """
+    if out.is_path_based:
+        if out.dvc_file is None:
+            raise ValueError(f"path-based DvcOut {out.path!r} missing dvc_file")
+        rel_dir = out.dvc_file.parent.relative_to(project_path)
+        rel = out.path if rel_dir == Path(".") else f"{rel_dir.as_posix()}/{out.path}"
+        return f"{prefix}/{rel}" if prefix else rel
     return s3_key_for(prefix, out.md5)
 
 
@@ -299,13 +362,18 @@ def spot_check_versions(s3: Any, bucket: str, prefix: str, outs: list[DvcOut], p
     Returns False on the first mismatch or NoSuchKey. Outs without a
     ``version_id`` (md5-keyed, content-addressed) are skipped — there's
     nothing to check, the md5 verify post-download is the safety net.
+
+    Slice 27: uses ``s3_key_for_out`` so path-based (version_aware) outs
+    are HEAD'd at their real file path, not at ``files/md5/...``.
     """
-    del project_path  # unused; reserved for future relative-key construction
     to_check = random.sample(outs, min(n, len(outs)))
     for out in to_check:
         if not out.version_id:
             continue
-        key = s3_key_for(prefix, out.md5)
+        try:
+            key = s3_key_for_out(prefix, out, project_path)
+        except ValueError:
+            return False
         try:
             resp = s3.head_object(Bucket=bucket, Key=key, VersionId=out.version_id)
             if resp.get("VersionId") != out.version_id:
@@ -377,7 +445,12 @@ def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
     return full_md5
 
 
-def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md5: str, version_id: str | None = None) -> bool:
+def fetch_to_cache(
+    s3: Any, bucket: str, key: str, cache_path: Path, expected_md5: str,
+    version_id: str | None = None,
+    *,
+    progress: Callable[[int], None] | None = None,
+) -> bool:
     """Download an object to the DVC cache atomically.
 
     Sequence: download to ``cache_path.tmp`` → md5 verify → fsync the tmp file →
@@ -387,6 +460,12 @@ def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md
 
     ``version_id`` is passed via ``ExtraArgs={"VersionId": ...}`` — boto3's
     ``download_file`` does not accept ``VersionId`` as a top-level kwarg.
+
+    ``progress``, if provided, is passed as boto3's ``Callback=`` — invoked per
+    transferred chunk with ``bytes_delta: int`` (default 8 MB chunks; may be
+    smaller on the final chunk or for individual multipart parts). MUST be
+    thread-safe — boto3's transfer manager runs multipart parts on its own
+    internal pool.
     """
     tmp_path = cache_path.with_suffix(".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -400,6 +479,8 @@ def fetch_to_cache(s3: Any, bucket: str, key: str, cache_path: Path, expected_md
             kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
             if extra_args is not None:
                 kwargs["ExtraArgs"] = extra_args
+            if progress is not None:
+                kwargs["Callback"] = progress
             s3.download_file(Filename=str(tmp_path), **kwargs)
 
             vr = verify_download(tmp_path, expected_md5)
@@ -469,6 +550,8 @@ def fetch_dir_manifest(
 def fetch_dir_contents(
     s3: Any, bucket: str, prefix: str, entries: list[DvcFileEntry],
     cache_dir: Path, jobs: int,
+    *,
+    progress: Callable[[int], None] | None = None,
 ) -> list[str]:
     """Concurrent download of md5-keyed-dir constituents.
 
@@ -478,6 +561,11 @@ def fetch_dir_contents(
     on the same temp file. Any two entries with the same md5 yield the
     same bytes from S3, so one download serves every duplicate relpath.
     First-occurrence wins for test determinism.
+
+    ``progress``, if provided, fires (a) per-chunk via boto3's Callback during
+    each entry's download (from boto3's transfer threads) and (b) once per
+    cache-hit with ``entry.size``. MUST be thread-safe — fetches run in a
+    ThreadPoolExecutor.
     """
     if not entries:
         return []
@@ -487,8 +575,24 @@ def fetch_dir_contents(
         unique.setdefault(e.md5, e)
     unique_entries = list(unique.values())
 
+    # Slice 28: progress total = sum(out.size) which counts duplicate-content
+    # entries by all their relpaths. Fire advance for each duplicate that
+    # dedup dropped so the bar reaches 100% on dirs with repeated content.
+    if progress is not None:
+        for e in entries:
+            if e.md5 in unique and unique[e.md5] is not e:
+                try:
+                    progress(e.size)
+                except Exception:
+                    pass
+
     def _one(entry: DvcFileEntry) -> tuple[str, str | None]:
         if is_cached(cache_dir, entry.md5):
+            if progress is not None:
+                try:
+                    progress(entry.size)
+                except Exception:
+                    pass
             return (entry.relpath, None)
         try:
             fetch_to_cache(
@@ -497,6 +601,7 @@ def fetch_dir_contents(
                 cache_path_for(cache_dir, entry.md5),
                 entry.md5,
                 None,
+                progress=progress,
             )
             return (entry.relpath, None)
         except Exception as exc:
@@ -514,6 +619,9 @@ def fetch_dir_contents(
 def fetch_files_dir_contents(
     s3: Any, bucket: str, prefix: str, out: DvcOut,
     cache_dir: Path, jobs: int, remote_name: str,
+    *,
+    project_path: Path,
+    progress: Callable[[int], None] | None = None,
 ) -> list[str]:
     """Concurrent download of files-format dir constituents.
 
@@ -521,6 +629,18 @@ def fetch_files_dir_contents(
     version_ids. md5 dedup applies for the same .tmp-race reason. The
     *manifest* (written by ``ensure_dir_manifest``) receives the full
     un-deduped list so ``dvc checkout`` can materialize every relpath.
+
+    Slice 27: branches per ``entry.is_path_based``. The non-path-based
+    branch preserves pre-slice-27 behavior: ``<prefix>/<out.path>/<relpath>``.
+    The path-based branch reconstructs ``<prefix>/<dvc_file.parent_rel>/<out.path>/<relpath>``
+    so files-format dirs in nested .dvc files (e.g. ``data/raw/x.dvc``)
+    fetch from the correct S3 location. ``project_path`` is required to
+    compute ``dvc_file.parent_rel`` for path-based entries.
+
+    Slice 28: ``progress``, if provided, fires (a) per-chunk via boto3's
+    Callback during each entry's download and (b) once per cache-hit with
+    ``entry.size``. MUST be thread-safe (ThreadPoolExecutor + boto3 transfer
+    threads).
     """
     del remote_name
     if not out.files:
@@ -531,20 +651,48 @@ def fetch_files_dir_contents(
         unique.setdefault(e.md5, e)
     unique_entries = list(unique.values())
 
-    def _key(rel: str) -> str:
-        parts = [p for p in (prefix, out.path, rel) if p]
+    # Slice 28: see fetch_dir_contents — fire advance for dedup-dropped
+    # entries so the bar reaches 100% when out.files has duplicate md5s.
+    if progress is not None:
+        for e in out.files:
+            if e.md5 in unique and unique[e.md5] is not e:
+                try:
+                    progress(e.size)
+                except Exception:
+                    pass
+
+    def _key(entry: DvcFileEntry) -> str:
+        if entry.is_path_based:
+            if out.dvc_file is None:
+                raise ValueError(
+                    f"path-based DvcFileEntry under {out.path!r} missing parent dvc_file"
+                )
+            rel_dir = out.dvc_file.parent.relative_to(project_path)
+            base = out.path if rel_dir == Path(".") else f"{rel_dir.as_posix()}/{out.path}"
+            parts = [p for p in (prefix, base, entry.relpath) if p]
+        else:
+            # Preserve pre-slice-27 behaviour for non-path-based files-format
+            # entries: prefix/out.path/<entry.relpath>. Existing tests at
+            # tests/test_fast_sync.py:564, :767 pin this shape.
+            parts = [p for p in (prefix, out.path, entry.relpath) if p]
         return "/".join(parts)
 
     def _one(entry: DvcFileEntry) -> tuple[str, str | None]:
         if is_cached(cache_dir, entry.md5):
+            if progress is not None:
+                try:
+                    progress(entry.size)
+                except Exception:
+                    pass
             return (entry.relpath, None)
         try:
             fetch_to_cache(
                 s3, bucket,
-                _key(entry.relpath),
+                _key(entry),
                 cache_path_for(cache_dir, entry.md5),
                 entry.md5,
                 entry.version_id,
+                progress=progress,
             )
             return (entry.relpath, None)
         except Exception as exc:
@@ -591,10 +739,11 @@ class SubprocessFastSyncOps:
         progress: Callable[[int], None] | None = None,
         aws_profile_name: str | None = None,
     ) -> None:
-        # ``progress`` signature widened slice 26: was Callable[[DvcOut, bool], None]
-        # (reserved at slice 18, never wired), now Callable[[int], None] — an
-        # advance(n_bytes) callable invoked per completed DvcOut by try_fast_pull.
-        # Used by Reporter.progress for the user-visible "X MB / Y MB" bar.
+        # Progress callback: ``Callable[[int], None]`` invoked with bytes_delta.
+        # Fires per-chunk during S3 transfers (via boto3's ``Callback=`` on
+        # ``download_file``) AND once per cache-hit / dir-fully-cached path with
+        # the out's / entry's declared size. See ``set_progress`` for the
+        # thread-safety + retry contract.
         self._default_jobs = jobs
         self._progress = progress
         self._aws_profile_name = aws_profile_name
@@ -602,8 +751,25 @@ class SubprocessFastSyncOps:
     def set_progress(self, progress: Callable[[int], None] | None) -> None:
         """Install an ``advance(n_bytes)`` callback for subsequent
         ``try_fast_pull`` invocations. Pass ``None`` to disable. Idempotent.
-        Per-out advance fires once per completed ``DvcOut`` (network OR
-        cache-hit) with the out's declared aggregate size."""
+
+        The callback fires from boto3's per-chunk ``Callback`` during S3
+        transfers (default 8 MB chunks; may be smaller for the final chunk
+        or for individual multipart parts) AND once per cache-hit with the
+        fully-cached out's / entry's declared size, AND once per
+        dir-fully-cached short-circuit with the dir's aggregate size.
+
+        Thread-safety: ``fetch_{dir,files_dir}_contents`` submit per-entry
+        work to a ``ThreadPoolExecutor``, and boto3's transfer manager runs
+        multipart parts on its own internal pool. The callback therefore
+        runs on worker threads. ``rich.Progress.update`` is thread-safe and
+        satisfies this contract; custom callables must be thread-safe too.
+
+        On retry: ``fetch_to_cache`` retries up to 4 times on retryable S3
+        errors. Bytes from a failed attempt are NOT rolled back from the
+        advance total; the bar may visually lap past 100% within a single
+        out across retries. This is intentional — the bar reflects
+        bytes-on-the-wire, not bytes-committed.
+        """
         self._progress = progress
 
     def try_fast_pull(
@@ -645,12 +811,26 @@ class SubprocessFastSyncOps:
         synced = 0
         files_dir_failures: list[str] = []
 
+        def _advance(n: int) -> None:
+            # Slice 28: piecewise progress accounting. Fires from boto3's
+            # Callback during transfers (per-chunk), from cache-hit branches
+            # below, and from the dir-fully-cached short-circuit. Bound to
+            # ``self._progress`` at call time so set_progress(None) mid-loop
+            # still disables it. Bare except keeps UI bugs from aborting pulls.
+            if self._progress is not None:
+                try:
+                    self._progress(n)
+                except Exception:
+                    pass
+
         for out in all_outs:
             try:
                 if out.is_files_format:
                     assert out.files is not None
                     failures = fetch_files_dir_contents(
-                        s3, bucket, prefix, out, cache_dir, jobs, remote_name
+                        s3, bucket, prefix, out, cache_dir, jobs, remote_name,
+                        project_path=project_path,
+                        progress=_advance,
                     )
                     if failures:
                         logger.warning(
@@ -689,30 +869,31 @@ class SubprocessFastSyncOps:
                             continue
                     if not is_dir_fully_cached(cache_dir, entries):
                         failures = fetch_dir_contents(
-                            s3, bucket, prefix, entries, cache_dir, jobs
+                            s3, bucket, prefix, entries, cache_dir, jobs,
+                            progress=_advance,
                         )
                         if failures:
                             files_dir_failures.extend(failures)
                             fallback.append(out.target)
                             continue
+                    else:
+                        # Dir already fully cached — fetch_dir_contents short-
+                        # circuited above, so per-entry advance never fired.
+                        # Fire the aggregate here so the bar still progresses
+                        # on warm-cache re-runs.
+                        _advance(out.size)
                 else:
-                    if not is_cached(cache_dir, out.md5):
+                    if is_cached(cache_dir, out.md5):
+                        _advance(out.size)
+                    else:
                         fetch_to_cache(
                             s3, bucket,
-                            s3_key_for(prefix, out.md5),
+                            s3_key_for_out(prefix, out, project_path),
                             cache_path_for(cache_dir, out.md5),
                             out.md5,
                             out.version_id,
+                            progress=_advance,
                         )
-                # Slice 26: advance the user-facing progress bar by this
-                # out's aggregate size. Wrap in try/except so a UI bug never
-                # aborts the pull. Fires for both network and cache-hit so
-                # the bar advances correctly on re-runs against a warm cache.
-                if self._progress is not None:
-                    try:
-                        self._progress(out.size)
-                    except Exception:
-                        pass
                 synced += 1
             except Exception as exc:
                 logger.warning("fast-sync target %r failed: %s", out.target, exc)

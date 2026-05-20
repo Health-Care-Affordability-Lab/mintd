@@ -36,6 +36,7 @@ from mintd._fast_sync_ops import (
     parse_dvc_outs,
     parse_s3_url,
     s3_key_for,
+    s3_key_for_out,
     spot_check_versions,
     DvcFileEntry,
     DvcOut,
@@ -76,12 +77,37 @@ def _put_dir_manifest(s3, bucket, prefix, entries) -> str:
     return full_md5
 
 
-def _write_dvc_file_md5(tmp_path: Path, name: str, md5: str, version_id: str | None = None) -> None:
-    body = f"outs:\n  - path: {name}\n    md5: {md5}\n    size: 0\n"
+def _write_dvc_file_md5(
+    tmp_path: Path, name: str, md5: str, version_id: str | None = None,
+    *, size: int = 0,
+) -> None:
+    body = f"outs:\n  - path: {name}\n    md5: {md5}\n    size: {size}\n"
     if version_id:
         body += f"    version_id: {version_id}\n"
     (tmp_path / f"{name}.dvc").parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / f"{name}.dvc").write_text(body)
+
+
+def _write_dvc_file_path_based(
+    tmp_path: Path, name: str, md5: str, version_id: str, *, remote: str = "origin",
+) -> Path:
+    """Write a path-based (version_aware) .dvc file: version_id lives
+    ONLY under cloud[<remote>], NOT at the top level. Mirrors the lab's
+    actual catalog shape.
+    """
+    body = (
+        f"outs:\n"
+        f"  - path: {Path(name).name}\n"
+        f"    md5: {md5}\n"
+        f"    size: 0\n"
+        f"    cloud:\n"
+        f"      {remote}:\n"
+        f"        version_id: {version_id}\n"
+    )
+    p = tmp_path / f"{name}.dvc"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body)
+    return p
 
 
 def _write_dvc_config(tmp_path: Path, bucket: str, prefix: str = "") -> None:
@@ -184,6 +210,15 @@ def test_parse_s3_url_rejects_non_s3() -> None:
         parse_s3_url("https://example.com/foo")
 
 
+def test_parse_s3_url_strips_trailing_slash() -> None:
+    """Lab's .dvc/config writes URLs with a trailing slash
+    (``s3://bucket/lab/data_x/``). Without stripping, every downstream
+    key gets a double slash and S3 returns 404 — surfaced during
+    slice-27 path-based smoke against cms-ipps-reimbursement."""
+    assert parse_s3_url("s3://b/lab/data_x/") == ("b", "lab/data_x")
+    assert parse_s3_url("s3://b/") == ("b", "")
+
+
 def test_get_remote_config_quoted_section(tmp_path: Path) -> None:
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True)
@@ -274,6 +309,174 @@ def test_fetch_to_cache_non_retryable_propagates(s3_versioned, tmp_path: Path) -
     # No such key — boto3 raises ClientError with NoSuchKey (404), non-retryable.
     with pytest.raises(ClientError):
         fetch_to_cache(s3, bucket, "files/md5/de/adbeef", cp, "deadbeef")
+
+
+# ---------- slice 28: byte-granular progress ----------
+
+def test_fetch_to_cache_threads_progress_callback_to_boto3(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """``progress`` MUST be passed through as boto3's ``Callback=``."""
+    s3, bucket = s3_versioned
+    body = b"payload"
+    md5 = _md5_of(body)
+    key = f"files/md5/{md5[:2]}/{md5[2:]}"
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
+
+    def advance(_n: int) -> None:
+        pass
+
+    with patch.object(s3, "download_file", wraps=s3.download_file) as mock_dl:
+        assert fetch_to_cache(s3, bucket, key, cp, md5, progress=advance) is True
+    assert mock_dl.call_args.kwargs.get("Callback") is advance
+
+
+def test_fetch_to_cache_omits_callback_when_progress_none(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """``Callback=None`` would crash boto3 (it calls ``Callback(bytes)``).
+    The kwarg must be ABSENT, not None, when progress is None or unset."""
+    s3, bucket = s3_versioned
+    body = b"payload"
+    md5 = _md5_of(body)
+    key = f"files/md5/{md5[:2]}/{md5[2:]}"
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
+    with patch.object(s3, "download_file", wraps=s3.download_file) as mock_dl:
+        assert fetch_to_cache(s3, bucket, key, cp, md5) is True
+    assert "Callback" not in mock_dl.call_args.kwargs
+    # And the explicit-None form also must not pass Callback.
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+    cp2 = cache_path_for(tmp_path / ".dvc" / "cache2", md5)
+    with patch.object(s3, "download_file", wraps=s3.download_file) as mock_dl2:
+        assert fetch_to_cache(s3, bucket, key, cp2, md5, progress=None) is True
+    assert "Callback" not in mock_dl2.call_args.kwargs
+
+
+def test_fetch_dir_contents_progress_per_entry(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """Per-entry advance: each entry's bytes flow through ``progress``;
+    callback fires from worker threads → use a Lock."""
+    import threading
+    from mintd._fast_sync_ops import fetch_dir_contents as _fetch_dir
+
+    s3, bucket = s3_versioned
+    bodies = [b"a" * 5, b"b" * 7, b"c" * 11]
+    entries = []
+    for body in bodies:
+        md5 = _md5_of(body)
+        s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
+        entries.append(DvcFileEntry(md5=md5, relpath=f"f_{md5[:4]}", size=len(body)))
+
+    lock = threading.Lock()
+    calls: list[int] = []
+    def advance(n: int) -> None:
+        with lock:
+            calls.append(n)
+
+    cache_dir = tmp_path / ".dvc" / "cache"
+    failures = _fetch_dir(s3, bucket, "", entries, cache_dir, 4, progress=advance)
+    assert failures == []
+    assert sum(calls) == 5 + 7 + 11
+    # Each tiny body produces at least one Callback fire → ≥ 3 calls.
+    assert len(calls) >= 3
+
+
+def test_fetch_dir_contents_progress_counts_duplicate_entries(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """Reviewer P1 regression: dedup-by-md5 drops duplicate entries
+    from the download set, but the progress bar's total is sum(out.size)
+    which counts every relpath (including duplicates). Without firing
+    advance for the dedup-dropped entries, dirs with duplicate-content
+    files would undershoot the bar."""
+    import threading
+    from mintd._fast_sync_ops import fetch_dir_contents as _fetch_dir
+
+    s3, bucket = s3_versioned
+    body = b"shared content"
+    md5 = _md5_of(body)
+    s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
+    # Three entries with the SAME md5 (3 relpaths sharing one content).
+    entries = [
+        DvcFileEntry(md5=md5, relpath=f"copy_{i}", size=len(body))
+        for i in range(3)
+    ]
+    lock = threading.Lock()
+    calls: list[int] = []
+    def advance(n: int) -> None:
+        with lock:
+            calls.append(n)
+
+    cache_dir = tmp_path / ".dvc" / "cache"
+    failures = _fetch_dir(s3, bucket, "", entries, cache_dir, 4, progress=advance)
+    assert failures == []
+    # Bar should advance by the full aggregate (3 × len(body)), not just
+    # the one actually-downloaded copy.
+    assert sum(calls) == 3 * len(body)
+
+
+def test_try_fast_pull_advance_fires_per_chunk_during_download(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """Single-file network branch: advance fires multiple times (boto3's
+    transfer manager invokes Callback per chunk) and the sum equals the
+    out's size — proving the bar is byte-granular, not per-out lump."""
+    s3, bucket = s3_versioned
+    # 16 MB body → at least 2 chunks at boto3's 8 MB default.
+    body = b"x" * (16 * 1024 * 1024)
+    md5 = _md5_of(body)
+    key = f"files/md5/{md5[:2]}/{md5[2:]}"
+    s3.put_object(Bucket=bucket, Key=key, Body=body)
+
+    _write_dvc_config(tmp_path, bucket)
+    _write_dvc_file_md5(tmp_path, "big", md5, size=len(body))
+
+    calls: list[int] = []
+    ops = SubprocessFastSyncOps()
+    ops.set_progress(calls.append)
+
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3):
+        result = ops.try_fast_pull(
+            project_path=tmp_path, targets=["big"], remote_name="origin"
+        )
+    assert result.success is True
+    assert sum(calls) == len(body)
+    # Per-chunk: more than one Callback fire on a 16 MB body.
+    assert len(calls) > 1
+
+
+def test_try_fast_pull_advance_fires_once_on_single_file_cache_hit(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """Cache-hit fast-path must explicitly fire ``advance(out.size)`` —
+    boto3 isn't called, so without the explicit fire the bar would stall
+    on warm-cache re-runs."""
+    s3, bucket = s3_versioned
+    body = b"cached body"
+    md5 = _md5_of(body)
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
+    cp.parent.mkdir(parents=True, exist_ok=True)
+    cp.write_bytes(body)  # pre-populate cache → is_cached returns True
+
+    _write_dvc_config(tmp_path, bucket)
+    _write_dvc_file_md5(tmp_path, "warm", md5, size=len(body))
+
+    calls: list[int] = []
+    ops = SubprocessFastSyncOps()
+    ops.set_progress(calls.append)
+
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3), \
+         patch.object(s3, "download_file", wraps=s3.download_file) as mock_dl:
+        result = ops.try_fast_pull(
+            project_path=tmp_path, targets=["warm"], remote_name="origin"
+        )
+    assert result.success is True
+    assert mock_dl.call_count == 0  # no network
+    # Exactly one advance — the explicit cache-hit fire — with body size.
+    assert calls == [len(body)]
 
 
 # ---------- DVC version canary (2) ----------
@@ -570,7 +773,7 @@ def test_fetch_files_dir_uses_real_paths(s3_versioned, tmp_path: Path) -> None:
     )
     s3.put_object(Bucket=bucket, Key="data/f/a.csv", Body=b"content")
     with patch.object(s3, 'download_file', wraps=s3.download_file) as mock:
-        fetch_files_dir_contents(s3, bucket, "", out, tmp_path / "cache", 1, "origin")
+        fetch_files_dir_contents(s3, bucket, "", out, tmp_path / "cache", 1, "origin", project_path=tmp_path)
         assert mock.call_args[1]['Key'] == 'data/f/a.csv'
 
 
@@ -787,7 +990,7 @@ def test_fetch_files_dir_contents_dedups_by_md5(s3_versioned, tmp_path: Path) ->
     )
     cache_dir = tmp_path / ".dvc" / "cache"
     with patch.object(s3, "download_file", wraps=s3.download_file) as mock:
-        failures = fetch_files_dir_contents(s3, bucket, "", out, cache_dir, 8, "origin")
+        failures = fetch_files_dir_contents(s3, bucket, "", out, cache_dir, 8, "origin", project_path=tmp_path)
     assert failures == []
     assert mock.call_count == 2
 
@@ -821,3 +1024,230 @@ def test_discover_all_outs_excludes_dvc_internals_and_lock(tmp_path: Path) -> No
 
 def test_discover_all_outs_handles_empty_repo(tmp_path: Path) -> None:
     assert discover_all_outs(tmp_path) == []
+
+
+# ---------- slice 27: path-based (version_aware) mode ------------------
+
+
+def test_parse_dvc_outs_detects_path_based_from_cloud_nested_version_id(tmp_path: Path) -> None:
+    """Lab's actual .dvc shape: version_id ONLY under cloud[remote]; no top-level."""
+    dvc_path = _write_dvc_file_path_based(tmp_path, "data/raw/foo", "abc", "vid-1")
+    outs = parse_dvc_outs(dvc_path, "origin")
+    assert len(outs) == 1
+    assert outs[0].is_path_based is True
+    assert outs[0].dvc_file == dvc_path
+    assert outs[0].version_id == "vid-1"
+
+
+def test_parse_dvc_outs_md5_keyed_when_top_level_version_id(tmp_path: Path) -> None:
+    """Top-level version_id → content-addressable (md5-keyed) mode."""
+    _write_dvc_file_md5(tmp_path, "a", "abc", version_id="vid-top")
+    outs = parse_dvc_outs(tmp_path / "a.dvc", "origin")
+    assert outs[0].is_path_based is False
+
+
+def test_parse_dvc_outs_mixed_top_and_cloud_prefers_top(tmp_path: Path) -> None:
+    """Top-level wins (v1 contract); entry treated as md5-keyed."""
+    body = (
+        "outs:\n"
+        "  - path: x\n"
+        "    md5: abc\n"
+        "    size: 0\n"
+        "    version_id: vid-top\n"
+        "    cloud:\n"
+        "      origin:\n"
+        "        version_id: vid-cloud\n"
+    )
+    (tmp_path / "x.dvc").write_text(body)
+    outs = parse_dvc_outs(tmp_path / "x.dvc", "origin")
+    assert outs[0].is_path_based is False
+    assert outs[0].version_id == "vid-top"
+
+
+def test_parse_dvc_outs_files_format_per_entry_path_based_flag(tmp_path: Path) -> None:
+    """Each file entry's path_based flag computed independently."""
+    body = (
+        "outs:\n"
+        "  - path: dir\n"
+        "    files:\n"
+        "      - md5: aa\n"
+        "        relpath: a\n"
+        "        cloud:\n"
+        "          origin:\n"
+        "            version_id: vid-a\n"
+        "      - md5: bb\n"
+        "        relpath: b\n"
+        "        version_id: vid-b-top\n"  # top-level → md5-keyed at entry level
+    )
+    (tmp_path / "dir.dvc").write_text(body)
+    outs = parse_dvc_outs(tmp_path / "dir.dvc", "origin")
+    assert outs[0].is_files_format is True
+    assert outs[0].files is not None
+    files = outs[0].files
+    assert files[0].is_path_based is True
+    assert files[1].is_path_based is False
+
+
+def test_s3_key_for_out_path_based_root_level(tmp_path: Path) -> None:
+    """Project-root .dvc file → key is <prefix>/<out.path> (no nested dir)."""
+    out = DvcOut(
+        target="x", path="foo.parquet", md5="abc", is_dir=False,
+        version_id="vid", is_path_based=True, dvc_file=tmp_path / "foo.parquet.dvc",
+    )
+    assert s3_key_for_out("lab/data_x", out, tmp_path) == "lab/data_x/foo.parquet"
+
+
+def test_s3_key_for_out_path_based_nested_dvc_file(tmp_path: Path) -> None:
+    """Nested .dvc → key includes the parent dir relative to project."""
+    out = DvcOut(
+        target="x", path="foo.parquet", md5="abc", is_dir=False,
+        version_id="vid", is_path_based=True,
+        dvc_file=tmp_path / "data/raw/foo.parquet.dvc",
+    )
+    assert s3_key_for_out("lab/data_x", out, tmp_path) == "lab/data_x/data/raw/foo.parquet"
+
+
+def test_s3_key_for_out_path_based_empty_prefix(tmp_path: Path) -> None:
+    out = DvcOut(
+        target="x", path="foo.parquet", md5="abc", is_dir=False,
+        version_id="vid", is_path_based=True, dvc_file=tmp_path / "foo.parquet.dvc",
+    )
+    assert s3_key_for_out("", out, tmp_path) == "foo.parquet"
+
+
+def test_s3_key_for_out_md5_keyed_falls_back_to_files_md5(tmp_path: Path) -> None:
+    """Non-path-based out preserves the pre-slice-27 content-addressable key."""
+    out = DvcOut(target="x", path="x", md5="abcdef", is_dir=False)
+    assert s3_key_for_out("lab/data_x", out, tmp_path) == "lab/data_x/files/md5/ab/cdef"
+
+
+def test_s3_key_for_out_raises_when_path_based_missing_dvc_file(tmp_path: Path) -> None:
+    out = DvcOut(
+        target="x", path="foo", md5="abc", is_dir=False,
+        version_id="vid", is_path_based=True, dvc_file=None,
+    )
+    with pytest.raises(ValueError, match="missing dvc_file"):
+        s3_key_for_out("lab", out, tmp_path)
+
+
+def test_spot_check_versions_uses_path_for_path_based(s3_versioned, tmp_path: Path) -> None:
+    """spot_check HEADs the path-based key, not files/md5/..."""
+    s3, bucket = s3_versioned
+    body = b"hello"
+    md5 = _md5_of(body)
+    resp = s3.put_object(Bucket=bucket, Key="lab/data/foo.parquet", Body=body)
+    version_id = resp["VersionId"]
+    out = DvcOut(
+        target="x", path="foo.parquet", md5=md5, is_dir=False,
+        version_id=version_id, is_path_based=True,
+        dvc_file=tmp_path / "data/foo.parquet.dvc",
+    )
+    assert spot_check_versions(s3, bucket, "lab", [out], tmp_path) is True
+
+
+def test_fetch_files_dir_contents_branches_on_entry_is_path_based(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """A single files-format dir with mixed-mode entries routes each to
+    its own key shape: path-based → <prefix>/<dvc_dir>/<out.path>/<rel>;
+    non-path-based → <prefix>/<out.path>/<rel>."""
+    import hashlib as _h
+    from mintd._fast_sync_ops import fetch_files_dir_contents
+
+    s3, bucket = s3_versioned
+    a_body = b"path-based entry"
+    b_body = b"md5-keyed entry"
+    a_md5 = _h.md5(a_body, usedforsecurity=False).hexdigest()
+    b_md5 = _h.md5(b_body, usedforsecurity=False).hexdigest()
+    # Path-based entry lives at the .dvc's nested dir
+    s3.put_object(Bucket=bucket, Key="data/raw/d/a", Body=a_body)
+    # Non-path-based entry lives at the prefix/out.path layout (preserved)
+    s3.put_object(Bucket=bucket, Key="d/b", Body=b_body)
+
+    out = DvcOut(
+        target="data/raw/d", path="d", md5="", is_dir=True,
+        is_files_format=True,
+        dvc_file=tmp_path / "data/raw/d.dvc",
+        files=[
+            DvcFileEntry(md5=a_md5, relpath="a", is_path_based=True),
+            DvcFileEntry(md5=b_md5, relpath="b", is_path_based=False),
+        ],
+    )
+    cache_dir = tmp_path / ".dvc" / "cache"
+    failures = fetch_files_dir_contents(
+        s3, bucket, "", out, cache_dir, 4, "origin", project_path=tmp_path,
+    )
+    assert failures == []
+    # Both files cached at md5 paths
+    assert (cache_dir / "files" / "md5" / a_md5[:2] / a_md5[2:]).exists()
+    assert (cache_dir / "files" / "md5" / b_md5[:2] / b_md5[2:]).exists()
+
+
+def test_try_fast_pull_path_based_files_format_dir_nested(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """End-to-end integration smoke for slice 27.
+
+    Layout mirrors the lab's real catalog: a files-format dir whose
+    .dvc file lives in a nested directory, with each file entry carrying
+    a path-based ``cloud.<remote>.version_id`` (no top-level md5 keying
+    in S3). The S3 objects live at the literal repo path, not at
+    ``files/md5/...``. try_fast_pull must:
+      - detect path-based mode per-entry
+      - fetch each entry from ``<prefix>/<dvc_dir>/<out.path>/<rel>``
+      - still synthesize the .dir manifest at the canonical md5 cache path
+      - report success
+    """
+    s3, bucket = s3_versioned
+    (tmp_path / "data" / "raw").mkdir(parents=True)
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text(f'[remote "origin"]\nurl = s3://{bucket}\n')
+
+    a_body = b"alpha"
+    b_body = b"beta-beta"
+    a_md5 = _md5_of(a_body)
+    b_md5 = _md5_of(b_body)
+
+    # Upload to path-based keys (no md5 prefix, no files/md5 indirection).
+    resp_a = s3.put_object(Bucket=bucket, Key="data/raw/dir/a.parquet", Body=a_body)
+    resp_b = s3.put_object(Bucket=bucket, Key="data/raw/dir/b.parquet", Body=b_body)
+
+    (tmp_path / "data" / "raw" / "dir.dvc").write_text(
+        f"outs:\n"
+        f"  - path: dir\n"
+        f"    files:\n"
+        f"      - relpath: a.parquet\n"
+        f"        md5: {a_md5}\n"
+        f"        size: {len(a_body)}\n"
+        f"        cloud:\n"
+        f"          origin:\n"
+        f"            version_id: {resp_a['VersionId']}\n"
+        f"      - relpath: b.parquet\n"
+        f"        md5: {b_md5}\n"
+        f"        size: {len(b_body)}\n"
+        f"        cloud:\n"
+        f"          origin:\n"
+        f"            version_id: {resp_b['VersionId']}\n"
+    )
+
+    result = SubprocessFastSyncOps().try_fast_pull(
+        project_path=tmp_path, targets=["data/raw/dir"], remote_name="origin"
+    )
+
+    assert result.success is True, result.fallback_targets
+    assert result.synced_count == 1
+
+    # Constituents land in the standard md5-keyed cache layout regardless of
+    # how they were fetched — DVC checkout reads from there.
+    assert (tmp_path / ".dvc" / "cache" / "files" / "md5" / a_md5[:2] / a_md5[2:]).read_bytes() == a_body
+    assert (tmp_path / ".dvc" / "cache" / "files" / "md5" / b_md5[:2] / b_md5[2:]).read_bytes() == b_body
+
+    # Synthetic .dir manifest written at canonical cache path.
+    expected_bytes = _manifest_bytes(
+        [DvcFileEntry(a_md5, "a.parquet"), DvcFileEntry(b_md5, "b.parquet")]
+    )
+    expected_md5 = hashlib.md5(expected_bytes, usedforsecurity=False).hexdigest()
+    assert (
+        tmp_path / ".dvc" / "cache" / "files" / "md5"
+        / expected_md5[:2] / f"{expected_md5[2:]}.dir"
+    ).exists()
