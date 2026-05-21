@@ -43,6 +43,9 @@ See [`vocab.md`](vocab.md) for the long version.
 
 ### One-liner (recommended)
 
+Prerequisite: an SSH key on your GitHub account that has access to this
+repo (`ssh -T git@github.com` should greet you).
+
 macOS / Linux:
 
 ```bash
@@ -56,10 +59,15 @@ irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/main
 ```
 
 Both scripts install `uv` if missing, run `uv tool install
-git+https://github.com/Health-Care-Affordability-Lab/mintdv2.git` (isolated
-venv, `mintd` on PATH), then layer `cffi + reflink` into the tool venv so
-DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin to a branch
-with `bash -s -- --branch <name>` or `-Branch <name>`.
+git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git`
+(isolated venv, `mintd` on PATH), then layer `cffi + reflink` into the
+tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
+to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
+
+> While the repo is private, the `curl … | bash` fetch step itself only
+> works if you already cloned the repo locally and ran `bash install.sh`,
+> or if you have a `gh` token wired into `git`. Anonymous fetch of
+> `raw.githubusercontent.com/.../install.sh` will 404 on a private repo.
 
 ### Manual install
 
@@ -68,7 +76,7 @@ with `bash -s -- --branch <name>` or `-Branch <name>`.
 curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
 # irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
-uv tool install git+https://github.com/Health-Care-Affordability-Lab/mintdv2.git
+uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git
 ```
 
 Or `pipx install git+…` / `pip install --user git+…` if you prefer.

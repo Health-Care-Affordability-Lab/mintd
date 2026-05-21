@@ -8,7 +8,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/<branch>/install.sh | bash -s -- --branch <branch>
 set -euo pipefail
 
-REPO="https://github.com/Health-Care-Affordability-Lab/mintdv2.git"
+REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git"
 BRANCH=""
 
 while [[ $# -gt 0 ]]; do

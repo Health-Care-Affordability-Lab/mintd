@@ -10,7 +10,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "https://github.com/Health-Care-Affordability-Lab/mintdv2.git"
+$Repo = "ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git"
 
 # Ensure uv is installed
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
