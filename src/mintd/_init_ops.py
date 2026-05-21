@@ -102,7 +102,10 @@ class SubprocessInitOps:
         ``dvc remote modify <name> endpointurl <endpoint>`` and/or
         ``dvc remote modify <name> profile <profile>`` when set, so
         consumers running raw ``dvc pull`` (outside mintd) get the right
-        AWS profile from the boto3 chain.
+        AWS profile from the boto3 chain. Always concludes with
+        ``dvc remote modify <name> version_aware true`` so the S3 key is
+        the file's real path (mintd's mental model; matches what
+        ``metadata.storage.versioning = True`` already declares).
         """
         cmd = ["dvc", "remote", "add"]
         if default:
@@ -143,3 +146,15 @@ class SubprocessInitOps:
             )
             if result.returncode != 0:
                 raise InitOpError(f"dvc remote modify profile failed: {result.stderr.strip()}")
+        result = subprocess.run(
+            ["dvc", "remote", "modify", name, "version_aware", "true"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            timeout=self._timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise InitOpError(
+                f"dvc remote modify version_aware failed: {result.stderr.strip()}"
+            )

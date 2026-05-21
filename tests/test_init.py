@@ -427,3 +427,115 @@ def test_subprocess_dvc_init_sets_cache_type_fallback(
         "dvc", "config", "cache.type",
         "reflink,hardlink,symlink,copy",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Slice 33 — version_aware default on every dvc_remote_add
+# ---------------------------------------------------------------------------
+
+
+def test_dvc_remote_add_issues_version_aware_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every `dvc remote add` mintd performs must be immediately followed
+    by `dvc remote modify <name> version_aware true`, unconditional —
+    regardless of whether endpoint/profile are set. Path-based S3 keys
+    are mintd's mental model (matches what fast-sync, data_ops, and
+    `data ls` already assume), and `metadata.storage.versioning = True`
+    is already declared producer-side."""
+    import subprocess
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    SubprocessInitOps().dvc_remote_add(
+        tmp_path,
+        name="data_x",
+        url="s3://b/k/",
+        default=True,
+        endpoint=None,
+        profile=None,
+    )
+
+    assert calls[0] == ["dvc", "remote", "add", "-d", "data_x", "s3://b/k/"]
+    assert ["dvc", "remote", "modify", "data_x", "version_aware", "true"] in calls
+
+
+def test_dvc_remote_add_version_aware_fires_after_endpoint_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With endpoint + profile set, the call order is: add, modify
+    endpointurl, modify profile, modify version_aware. Version_aware is
+    last and unconditional."""
+    import subprocess
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    SubprocessInitOps().dvc_remote_add(
+        tmp_path,
+        name="data_y",
+        url="s3://b/k/",
+        default=True,
+        endpoint="https://s3.example",
+        profile="mintd",
+    )
+
+    assert calls == [
+        ["dvc", "remote", "add", "-d", "data_y", "s3://b/k/"],
+        ["dvc", "remote", "modify", "data_y", "endpointurl", "https://s3.example"],
+        ["dvc", "remote", "modify", "data_y", "profile", "mintd"],
+        ["dvc", "remote", "modify", "data_y", "version_aware", "true"],
+    ]
+
+
+def test_dvc_remote_add_version_aware_failure_raises_init_op_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `dvc remote modify <name> version_aware true` exits nonzero,
+    `dvc_remote_add` raises `InitOpError` with the stderr included so the
+    caller's rollback path (init.py:172-177 rmtree of .dvc/) fires."""
+    import subprocess
+    from mintd._init_ops import InitOpError, SubprocessInitOps
+
+    def fake_run(argv, **kwargs):
+        class _R:
+            stdout = ""
+            stderr = ""
+            returncode = 0
+        r = _R()
+        if list(argv[:3]) == ["dvc", "remote", "modify"] and "version_aware" in argv:
+            r.returncode = 1
+            r.stderr = "boom"
+        return r
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(InitOpError, match="version_aware"):
+        SubprocessInitOps().dvc_remote_add(
+            tmp_path,
+            name="data_z",
+            url="s3://b/k/",
+            default=True,
+            endpoint=None,
+            profile=None,
+        )
