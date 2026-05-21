@@ -27,3 +27,18 @@ jobs:
         run: mypy src/mintd
       - name: Test
         run: pytest -q
+      - name: Smoke install
+        # Verifies the INSTALLED mintd binary launches on every matrix
+        # entry. Test suite covers logic; smoke covers the binary +
+        # subcommand-import surface. Enclave init is used because slice
+        # 30 makes data/code/project types prompt interactively — CI
+        # is non-TTY and would error with InitNonInteractive. Enclave
+        # skips the prompt entirely.
+        run: |
+          mintd --version
+          mintd --help
+          mintd init --help
+          mintd check --help
+          mintd publish --help
+          mintd data --help
+          mintd init enclave ci-smoke --path "${{ runner.temp }}"
