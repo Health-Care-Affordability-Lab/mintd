@@ -50,6 +50,12 @@ from .data import (
     import_product,
 )
 from .data_ops import data_add, data_pull, data_push, data_remove, data_verify
+from ._s3_listing_ops import (
+    BucketAccessError,
+    BucketNotFound,
+    S3ListingResult,
+    list_product_objects,
+)
 from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
 from .enclave import (
     AlreadyApproved,
@@ -273,6 +279,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_data_list.set_defaults(_handler=_handle_data_list, _parser=p_data_list)
 
+    p_data_ls = p_data_sub.add_parser(
+        "ls",
+        help="List S3 objects inside a registered product's bucket",
+    )
+    p_data_ls.add_argument("name", help="Registered data product name")
+    p_data_ls.add_argument("sub_path", nargs="?", default=None,
+                           help="Subdirectory inside the product prefix (e.g. data/final/)")
+    p_data_ls.add_argument("--shallow", dest="recursive", action="store_false",
+                           help="List one level only (default: recursive tree, truncated when long)")
+    p_data_ls.add_argument("--no-truncate", dest="no_truncate", action="store_true",
+                           help="Render every row (default: truncate output past 50 files; --json never truncates)")
+    p_data_ls.add_argument("--versions", dest="versions", action="store_true",
+                           help="Show per-key version count (version_aware buckets only)")
+    p_data_ls.set_defaults(_handler=_handle_data_ls, _parser=p_data_ls, recursive=True)
+
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
     p_enclave_sub = p_enclave.add_subparsers(dest="enclave_command")
     p_ebump = p_enclave_sub.add_parser("bump", help="Bump approved_products[].pin")
@@ -463,6 +484,21 @@ def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
         return None
     from ._fast_sync_ops import SubprocessFastSyncOps
     return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
+
+
+def _resolve_s3_listing_ops(config: Config):
+    """Return the listing callable; tests monkeypatch this seam.
+
+    Probes boto3 like _resolve_fast_sync_ops. Returns None when boto3
+    isn't importable so the handler can emit a clean "boto3 unavailable"
+    error instead of crashing on the first network call.
+    """
+    try:
+        import boto3  # noqa: F401
+    except ImportError as exc:
+        logger.warning("data ls unavailable (boto3 not importable): %s", exc)
+        return None
+    return list_product_objects
 
 
 def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> RegistryGitOps:
@@ -674,6 +710,187 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
         return 1
     print(f"removed: {args.name}")
     return 0
+
+
+def _handle_data_ls(args: argparse.Namespace) -> int:
+    reporter = args._reporter
+    config = Config.load()
+    client = _resolve_catalog_client(config)
+    listing_fn = _resolve_s3_listing_ops(config)
+    if listing_fn is None:
+        reporter.error("boto3 not installed", hint="pip install 'boto3' (see notes/INSTALL.md)")
+        return 2
+
+    try:
+        entry = client.fetch(args.name)
+    except CatalogNotFound as exc:
+        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
+        return 1
+
+    dumped = entry.model_dump()
+    storage = dumped.get("storage") or {}
+    bucket = storage.get("bucket") or ""
+    prefix = storage.get("prefix") or ""
+    endpoint = storage.get("endpoint") or ""
+    versioning = bool(storage.get("versioning"))
+
+    if not bucket or not endpoint:
+        reporter.error(
+            f"catalog entry {args.name!r} has no usable storage block",
+            hint="ask the producer to publish; see 'mintd check' on their repo",
+        )
+        return 1
+
+    if not versioning:
+        msg = "Not supported for md5-keyed remotes; clone the repo and read .dvc files."
+        if args.json_out:
+            reporter.result({"unsupported": msg, "bucket": bucket, "prefix": prefix})
+        else:
+            reporter.result(None, pretty=lambda _p: msg)
+        return 1
+
+    try:
+        result = listing_fn(
+            bucket=bucket, prefix=prefix, endpoint=endpoint,
+            sub_path=args.sub_path,
+            recursive=args.recursive,
+            include_versions=args.versions,
+            aws_profile_name=config.aws_profile_name,
+        )
+    except ValueError as exc:
+        reporter.error(str(exc))
+        return 2
+    except BucketNotFound as exc:
+        reporter.error(str(exc), hint="check storage.bucket / storage.endpoint in the producer's metadata.json")
+        return 1
+    except BucketAccessError as exc:
+        reporter.error(str(exc), hint="check AWS credentials (aws configure list / aws_profile_name)")
+        return 1
+
+    payload = _data_ls_payload(args.name, result, include_versions=args.versions)
+    no_truncate = getattr(args, "no_truncate", False)
+    reporter.result(
+        payload,
+        pretty=lambda p: _pretty_data_ls(
+            p, name=args.name, versions=args.versions, no_truncate=no_truncate,
+        ),
+    )
+    return 0
+
+def _data_ls_payload(name: str, result: S3ListingResult, *, include_versions: bool) -> dict:
+    objects = [
+        {
+            "key": o.key,
+            "size": o.size,
+            "last_modified": o.last_modified.isoformat(timespec="seconds") if o.last_modified else None,
+            "version_count": o.version_count,
+            "is_dir": o.is_dir,
+        }
+        for o in result.objects
+    ]
+    files = [o for o in result.objects if not o.is_dir]
+    dirs = [o for o in result.objects if o.is_dir]
+    payload: dict = {
+        "name": name,
+        "bucket": result.bucket,
+        "prefix": result.prefix,
+        "endpoint": result.endpoint,
+        "objects": objects,
+        # Counts and totals reflect FILES only (slice-31 review P1).
+        "total_bytes": sum(o.size for o in files),
+        "file_count": len(files),
+        "dir_count": len(dirs),
+    }
+    # Slice-31 review P1a: hint must point at a file, not a directory.
+    # Slice-31 review P1b: keys are relative to sub_path; prepend it so the
+    # hint command works from the project root (where `mintd data pull`
+    # expects paths).
+    first_file = next((o for o in result.objects if not o.is_dir), None)
+    if first_file is not None:
+        sub = result.truncated_to_prefix or ""
+        sub = sub.strip("/") + "/" if sub.strip("/") else ""
+        full_key = sub + first_file.key
+        payload["hint"] = f"mintd data pull {name} {full_key}"
+    return payload
+
+def _human_bytes(n: int) -> str:
+    if n == 0:
+        return "0 B"
+    size: float = float(n)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if size < 1024:
+            return f"{size:.1f} {unit}".replace(".0", "")
+        size /= 1024
+    return f"{size:.1f} PB"
+
+_DATA_LS_ROW_CAP = 50
+
+
+def _pretty_data_ls(
+    payload: dict, *, name: str, versions: bool, no_truncate: bool = False,
+) -> str:
+    lines = [f"s3://{payload['bucket']}/{payload['prefix']}"]
+    if not payload["objects"]:
+        lines.append("(no objects)")
+        return "\n".join(lines)
+
+    rows = payload["objects"]
+    total_rows = len(rows)
+    truncated = False
+    if not no_truncate and total_rows > _DATA_LS_ROW_CAP:
+        rows = rows[:_DATA_LS_ROW_CAP]
+        truncated = True
+
+    table = []
+    header = "  %-60s %10s   %-20s"
+    if versions:
+        header += "   %-8s"
+    row_fmt = "  %-60s %10s   %-20s"
+    if versions:
+        row_fmt += "   %8d"
+
+    header_cols = ["key", "size", "modified"]
+    if versions:
+        header_cols.append("versions")
+    table.append(header % tuple(header_cols))
+
+    for o in rows:
+        # Slice-31 review P1: CommonPrefixes keys ALREADY end in `/`;
+        # don't add another or we render `data//`.
+        key = o["key"]
+        size = _human_bytes(o["size"]) if not o["is_dir"] else "-"
+        modified = o["last_modified"] or "-"
+        args_row = [key, size, modified]
+        if versions:
+            args_row.append(o["version_count"])
+        table.append(row_fmt % tuple(args_row))
+
+    if truncated:
+        remaining = total_rows - _DATA_LS_ROW_CAP
+        table.append(
+            f"  ... and {remaining} more (use --no-truncate or --json for full listing)"
+        )
+
+    lines.extend(table)
+
+    if truncated:
+        summary_parts = [
+            f"{_DATA_LS_ROW_CAP} of {payload['file_count']} file(s) shown, "
+            f"{_human_bytes(payload['total_bytes'])} total"
+        ]
+    else:
+        summary_parts = [
+            f"{payload['file_count']} file(s), {_human_bytes(payload['total_bytes'])} total"
+        ]
+    if payload.get("dir_count"):
+        summary_parts.append(f"{payload['dir_count']} subdir(s)")
+    lines.append("\n" + ", ".join(summary_parts) + ".")
+
+    if "hint" in payload:
+        # Use the payload's pre-computed hint (already targets the first
+        # FILE, not a directory — slice-31 review P1).
+        lines.append(f"\n💡 Download a single file:\n   {payload['hint']}")
+    return "\n".join(lines)
 
 
 def _handle_data_clone(args: argparse.Namespace) -> int:
