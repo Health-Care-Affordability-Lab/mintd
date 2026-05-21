@@ -67,6 +67,7 @@ class _FakeRegistryGitOps:
     tag_raises: Exception | None = None
     commit_all_raises: Exception | None = None
     force_dirty: bool = False
+    current_commit_value: str = "abcdef0"
 
     # ------------------------------------------------------------------
     # git (real)
@@ -127,6 +128,9 @@ class _FakeRegistryGitOps:
             return False
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
+
+    def current_commit(self, work_dir: Path) -> str:
+        return self.current_commit_value
 
     # ------------------------------------------------------------------
     # gh (stubbed)

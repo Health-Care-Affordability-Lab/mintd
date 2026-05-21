@@ -30,7 +30,7 @@ def test_minimal_fixture_parses():
       - Metadata.from_json_file returns a Metadata instance.
       - schema_version is "2.0".
       - project.type is one of the four literals.
-      - data_products.outputs defaults to empty list if absent.
+      - data_products.primary + outputs are publish-valid (slice 32).
       - storage is None (optional).
     """
     m = Metadata.from_json_file(FIXTURES / "metadata_v2_minimal.json")
@@ -38,7 +38,11 @@ def test_minimal_fixture_parses():
     assert isinstance(m, Metadata)
     assert m.schema_version == "2.0"
     assert m.project.type in {"data", "code", "project", "enclave"}
-    assert m.data_products.outputs == []
+    # Slice 32: fixture now ships with a publish-valid data_products
+    # block so test_check_clean_file_returns_empty keeps passing.
+    assert m.data_products.primary == "data/final/"
+    assert len(m.data_products.outputs) == 1
+    assert m.data_products.outputs[0].path == "data/final/"
     assert m.storage is None
 
 

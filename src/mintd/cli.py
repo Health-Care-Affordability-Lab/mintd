@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, Optional
 
@@ -73,8 +73,9 @@ from .producer import MissingPrimaryDataProduct, ProducerError
 from .publish import (
     PublishBlocked,
     PublishError,
+    PublishNonInteractive,
+    PublishPreview,
     WorkingTreeDirty,
-    publish_project,
 )
 
 logger = logging.getLogger(__name__)
@@ -358,6 +359,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_publish = subs.add_parser("publish", help="Publish a new version of this project")
     p_publish.add_argument("version", nargs="?")
     p_publish.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_publish.add_argument("--yes", "-y", action="store_true", dest="assume_yes", help="Skip the interactive preview confirmation. Required when stdin is not a TTY.")
     p_publish.add_argument("--message", "-m")
     p_publish.add_argument("--path", type=Path, default=Path("."))
     p_publish.set_defaults(_handler=_handle_publish)
@@ -1212,41 +1214,101 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
 
 
 def _handle_publish(args: argparse.Namespace) -> int:
+    from .publish import prepare_publish, _apply_publish
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client, dvc_ops = _resolve_clients(config)
     git_ops = _resolve_git_ops(config)
     try:
-        result = publish_project(
+        preview = prepare_publish(
             project_path=args.path,
             version=args.version,
             dry_run=args.dry_run,
             client=client,
-            dvc_ops=dvc_ops,
             git_ops=git_ops,
-            message=args.message,
         )
     except PublishBlocked as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         for f in exc.findings[:5]:
-            print(f"  [{f.severity}] {f.source or '<project>'}: {f.message}", file=sys.stderr)
+            src = f.source or "<project>"
+            reporter.info(f"  [{f.severity}] {src}: {f.message}")
+            if f.hint:
+                reporter.info(f"    💡 {f.hint}")
         if len(exc.findings) > 5:
-            print(f"  ... and {len(exc.findings) - 5} more", file=sys.stderr)
+            reporter.info(f"  ... and {len(exc.findings) - 5} more")
         return 1
     except WorkingTreeDirty as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        if exc.recovery_hint:
-            print(f"note: {exc.recovery_hint}", file=sys.stderr)
+        reporter.error(str(exc), hint=exc.recovery_hint or None)
         return 1
     except PublishError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        if exc.recovery_hint:
-            print(f"note: {exc.recovery_hint}", file=sys.stderr)
+        reporter.error(str(exc), hint=exc.recovery_hint or None)
         return 1
-    # Success rendering.
-    print(f"version: {result.version}" + (" (dry-run)" if result.dry_run else ""))
-    for change in result.diff:
-        print(f"  {change.field_path}: {change.before!r} → {change.after!r}")
+
+    _render_publish_preview(reporter, preview)
+
+    if args.dry_run:
+        reporter.info("(dry-run: no side effects)")
+        return 0
+    if not args.assume_yes:
+        try:
+            ok = _prompt_publish_confirm(reporter)
+        except PublishNonInteractive as exc:
+            reporter.error(str(exc), hint="re-run with --yes to skip the interactive preview.")
+            return 1
+        if not ok:
+            reporter.info("publish cancelled.")
+            return 0
+
+    with reporter.status(f"Publishing v{preview.new_version}…"):
+        try:
+            result = _apply_publish(
+                preview,
+                project_path=args.path,
+                client=client,
+                dvc_ops=dvc_ops,
+                git_ops=git_ops,
+                message=args.message,
+            )
+        except (WorkingTreeDirty, PublishError) as exc:
+            reporter.error(str(exc), hint=exc.recovery_hint or None)
+            return 1
+    reporter.success(f"Published v{result.version}.")
     return 0
+
+
+def _render_publish_preview(reporter: Reporter, preview: PublishPreview) -> None:
+    reporter.info(f"About to publish {preview.project_name} @ v{preview.current_version} → v{preview.new_version}")
+    reporter.info("")
+    reporter.info(f"Working tree:    {preview.working_tree_commit} ({'clean' if preview.working_tree_clean else 'DIRTY'})")
+    reporter.info(f"Primary output:  {preview.primary_path}")
+    reporter.info("Outputs:")
+    for out in preview.outputs:
+        prefix = "[primary]" if out.path == preview.primary_path else " - "
+        reporter.info(f"  {prefix} {out.path} {' - ' + out.description if out.description else ''}")
+    
+    catalog_diff_msg = (
+        f"{len(preview.catalog_diff)} field(s) changed" if not preview.first_publish 
+        else "first publish — no prior catalog entry"
+    )
+    reporter.info(f"Catalog diff:    {catalog_diff_msg}")
+    for change in preview.catalog_diff:
+        reporter.info(f"  - {change.field_path}: {change.before!r} → {change.after!r}")
+    reporter.info("")
+
+
+def _prompt_publish_confirm(
+    reporter: Reporter, 
+    prompt_fn: Callable[[str], str] = input, 
+    isatty_fn: Callable[[], bool] = sys.stdin.isatty
+) -> bool:
+    if not isatty_fn():
+        raise PublishNonInteractive("publish is interactive without --yes")
+    
+    try:
+        resp = prompt_fn("Continue? [y/N]: ").strip().lower()
+        return resp in ("y", "yes")
+    except EOFError:
+        return False
 
 
 def _handle_config_show(args: argparse.Namespace) -> int:

@@ -83,6 +83,8 @@ class CheckFinding:
         "storage_name_mismatch",
         "storage_url_mismatch",
         "storage_bucket_empty",
+        "data_products_primary_missing",
+        "data_products_primary_mismatch",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
 
@@ -160,9 +162,10 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
         ]
 
     findings: list[CheckFinding] = []
+    meta: Metadata | None = None
 
     try:
-        Metadata.model_validate_json(raw)
+        meta = Metadata.model_validate_json(raw)
     except ValidationError as e:
         findings.extend(
             CheckFinding(
@@ -198,7 +201,44 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
             )
         )
 
+    if meta:
+        findings.extend(_check_data_products_primary(meta, metadata_path))
+
     return findings
+
+
+def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
+    findings: list[CheckFinding] = []
+    primary = meta.data_products.primary
+    if not primary:
+        findings.append(
+            CheckFinding(
+                severity="error",
+                section="producer",
+                message="data_products.primary is not set",
+                field_path="data_products.primary",
+                source=metadata_path,
+                kind="data_products_primary_missing",
+                hint="set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). Consumers can't import this product without it.",
+            )
+        )
+    else:
+        output_paths = [o.path for o in meta.data_products.outputs]
+        if primary not in output_paths:
+            hint = f"available outputs: {', '.join(output_paths) or '(none)'}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
+            findings.append(
+                CheckFinding(
+                    severity="error",
+                    section="producer",
+                    message=f"data_products.primary={primary!r} does not match any outputs[].path",
+                    field_path="data_products.primary",
+                    source=metadata_path,
+                    kind="data_products_primary_mismatch",
+                    hint=hint,
+                )
+            )
+    return findings
+
 
 
 def _consumer_findings(

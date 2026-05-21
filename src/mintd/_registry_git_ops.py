@@ -99,6 +99,7 @@ class RegistryGitOps(Protocol):
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
     def tag(self, work_dir: Path, name: str, message: str) -> None: ...
     def is_working_tree_clean(self, work_dir: Path) -> bool: ...
+    def current_commit(self, work_dir: Path) -> str: ...
     def open_pr(
         self,
         repo_dir: Path,
@@ -224,6 +225,9 @@ class SubprocessRegistryGitOps:
     def is_working_tree_clean(self, work_dir: Path) -> bool:
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
+
+    def current_commit(self, work_dir: Path) -> str:
+        return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
 
     # ------------------------------------------------------------------
     # gh

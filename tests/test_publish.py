@@ -12,7 +12,20 @@ from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
 class _FakeCatalogClient:
+    """Minimal fake; slice-32 publish flow calls fetch() for the catalog
+    diff. Default returns CatalogNotFound so dry-run / new-project tests
+    treat it as first-publish (no catalog diff)."""
+
+    def __init__(self, entries: dict | None = None) -> None:
+        self._entries = entries or {}
+
     def update(self, metadata): pass
+
+    def fetch(self, name):
+        from mintd.catalog import CatalogNotFound
+        if name not in self._entries:
+            raise CatalogNotFound(name)
+        return self._entries[name]
 
 def _seed_project(tmp_path: Path) -> Path:
     proj = tmp_path / "project"
@@ -235,3 +248,80 @@ def test_publish_rolls_back_when_dvc_not_installed(tmp_path):
     # File rolled back to the original 0.1.0.
     content = (proj / "metadata.json").read_text(encoding="utf-8")
     assert '"version": "0.1.0"' in content
+
+
+# ---------------------------------------------------------------------------
+# Slice 32 — preview gate + data_products validation
+# ---------------------------------------------------------------------------
+
+def test_publish_dry_run_returns_preview_no_side_effects(tmp_path):
+    """Slice 32: dry-run returns a fully-populated PublishPreview and
+    does NOT push, commit, or tag."""
+    proj = _seed_project(tmp_path)
+    git = _FakeRegistryGitOps()
+    git.current_commit_value = "abc1234"
+    dvc = _FakeDvcOps()
+    result = publish_project(
+        project_path=proj,
+        version="0.1.1",
+        client=_FakeCatalogClient(),
+        dvc_ops=dvc,
+        git_ops=git,
+        dry_run=True,
+    )
+    assert result.preview is not None
+    assert result.preview.new_version == "0.1.1"
+    assert result.preview.current_version == "0.1.0"
+    assert result.preview.working_tree_commit == "abc1234"
+    assert result.preview.new_metadata.mint.version == "0.1.1"
+    # No side effects under dry-run.
+    assert len(dvc.push_calls) == 0
+    assert len(git.tag_calls) == 0
+
+
+def test_publish_blocked_when_primary_missing(tmp_path, monkeypatch):
+    """Slice 32: data_products.primary unset -> PublishBlocked via
+    check_project. Locally override the autouse mock_check_project."""
+    from mintd.check import CheckFinding
+    from mintd.publish import PublishBlocked
+    proj = _seed_project(tmp_path)
+    monkeypatch.setattr(
+        "mintd.publish.check_project",
+        lambda *a, **kw: [
+            CheckFinding(
+                severity="error",
+                section="producer",
+                message="data_products.primary is not set",
+                kind="data_products_primary_missing",
+            )
+        ],
+    )
+    with pytest.raises(PublishBlocked):
+        publish_project(
+            project_path=proj,
+            client=_FakeCatalogClient(),
+            dvc_ops=_FakeDvcOps(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+
+def test_prepare_publish_uses_project_name_not_full_name_for_catalog_fetch(tmp_path):
+    """Slice 32 reviewer P1: catalog fetch key is project.name (not
+    project.full_name). Verify by registering under name only — a
+    full_name lookup would miss and silently mislabel as first_publish."""
+    from mintd.publish import prepare_publish
+    from mintd.model import Metadata
+    proj = _seed_project(tmp_path)
+    meta = Metadata.from_json_file(proj / "metadata.json")
+    fake_entries = {meta.project.name: meta.to_catalog_entry()}
+    client = _FakeCatalogClient(entries=fake_entries)
+    preview = prepare_publish(
+        project_path=proj,
+        version=None,
+        dry_run=True,
+        client=client,
+        git_ops=_FakeRegistryGitOps(),
+    )
+    # name lookup hits the registered entry → NOT first_publish.
+    assert preview.first_publish is False
+    assert preview.project_name == meta.project.name

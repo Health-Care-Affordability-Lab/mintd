@@ -29,8 +29,15 @@
     "contract_info": ""
   },
   "data_products": {
-    "primary": null,
-    "outputs": []
+    "primary": "data/final/",
+    "outputs": [
+      {
+        "path": "data/final/",
+        "description": "Cleaned analysis-ready dataset",
+        "primary": true,
+        "last_published": ""
+      }
+    ]
   },
   "repository": {
     "github_url": "https://github.com/test-org/data_test_project",

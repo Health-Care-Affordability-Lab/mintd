@@ -692,3 +692,45 @@ def test_check_no_storage_finding_on_healthy(tmp_path: Path):
     findings = check_project(tmp_path)
     storage_findings = [f for f in findings if f.kind and f.kind.startswith("storage_")]
     assert storage_findings == []
+
+
+# ---------------------------------------------------------------------------
+# Slice 32 — data_products.primary validation
+# ---------------------------------------------------------------------------
+
+def test_check_emits_primary_missing_when_data_products_empty(tmp_path: Path):
+    """Slice 32: producer-blocking error when data_products.primary is unset."""
+    def _clear(d):
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _clear)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert len(dp) == 1
+    assert dp[0].kind == "data_products_primary_missing"
+    assert dp[0].severity == "error"
+    assert dp[0].field_path == "data_products.primary"
+    assert dp[0].hint is not None
+    assert "outputs[]" in dp[0].hint
+
+
+def test_check_emits_primary_mismatch_when_primary_not_in_outputs(tmp_path: Path):
+    def _mismatch(d):
+        d["data_products"] = {
+            "primary": "data/final/",
+            "outputs": [{"path": "data/other/", "description": "", "primary": False, "last_published": ""}],
+        }
+    _write_metadata(tmp_path, _mismatch)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert len(dp) == 1
+    assert dp[0].kind == "data_products_primary_mismatch"
+    assert dp[0].hint is not None
+    assert "data/other/" in dp[0].hint
+
+
+def test_check_no_data_products_finding_when_primary_matches_output(tmp_path: Path):
+    """Fixture defaults to publish-valid (slice 32); confirm zero findings."""
+    _write_metadata(tmp_path, None)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert dp == []

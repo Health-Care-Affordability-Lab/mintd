@@ -237,8 +237,13 @@ def test_import_product_rev_with_path_passes_through(tmp_path: Path) -> None:
 
 
 def test_import_product_missing_primary_raises(tmp_path: Path) -> None:
+    # Slice 32 fixture switched to publish-valid (with primary); clear
+    # it explicitly here so this test exercises the missing-primary path.
+    def _clear_primary(d):
+        d["data_products"]["primary"] = None
+        d["data_products"]["outputs"] = []
     client = InMemoryCatalogClient()
-    _register(client)  # no primary, no outputs
+    _register(client, mutate=_clear_primary)
     fake = _FakeDvcOps()
 
     with pytest.raises(MissingPrimaryDataProduct):

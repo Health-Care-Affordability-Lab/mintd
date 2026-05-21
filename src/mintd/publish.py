@@ -11,9 +11,9 @@ from pathlib import Path
 
 from ._dvc_ops import DvcOpError, DvcOps
 from ._registry_git_ops import GitOpError, GitTagAlreadyExists, RegistryGitOps
-from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff
+from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
 from .check import check_project
-from .model import Metadata
+from .model import DataProductOutput, Metadata
 
 
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -28,6 +28,17 @@ class PublishError(Exception):
         super().__init__(message)
 
 
+class PublishNonInteractive(PublishError):
+    """Slice 32: publish needs a TTY (or --yes) for the interactive
+    preview confirmation gate."""
+
+
+class PublishBlocked(PublishError):
+    def __init__(self, findings):
+        self.findings = findings
+        super().__init__(f"{len(findings)} error finding(s) block publish")
+
+
 class InvalidCurrentVersion(PublishError):
     pass
 
@@ -38,12 +49,6 @@ class VersionNotIncreasing(PublishError):
 
 class WorkingTreeDirty(PublishError):
     pass
-
-
-class PublishBlocked(PublishError):
-    def __init__(self, findings):
-        self.findings = findings
-        super().__init__(f"{len(findings)} error finding(s) block publish")
 
 
 class DvcPushFailed(PublishError):
@@ -59,6 +64,23 @@ class CatalogUpdateFailed(PublishError):
 
 
 @dataclass(frozen=True)
+class PublishPreview:
+    project_name: str
+    current_version: str
+    new_version: str
+    working_tree_commit: str
+    working_tree_clean: bool
+    primary_path: str
+    outputs: list[DataProductOutput]
+    local_diff: list[FieldChange]
+    catalog_diff: list[FieldChange]
+    first_publish: bool
+    # Slice 32 (reviewer P1): `_apply_publish` reads new_metadata from
+    # here verbatim — no recomputation drift between prepare and apply.
+    new_metadata: Metadata = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True)
 class PublishResult:
     version: str
     dry_run: bool
@@ -66,77 +88,113 @@ class PublishResult:
     pushed: bool
     tagged: bool
     catalog_updated: bool
+    preview: PublishPreview | None = None
 
 
-def publish_project(
+def prepare_publish(
     *,
     project_path: Path,
-    version: str | None = None,
-    dry_run: bool = False,
+    version: str | None,
+    dry_run: bool,
     client: CatalogClient,
-    dvc_ops: DvcOps,
     git_ops: RegistryGitOps,
-    message: str | None = None,
-) -> PublishResult:
+) -> PublishPreview:
     metadata_path = project_path / "metadata.json"
-    
-    # Pre-flight check
     findings = check_project(project_path, upgrades=False)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         raise PublishBlocked(error_findings)
-    
+
     current = Metadata.from_json_file(metadata_path)
     new_version = _resolve_version(current.mint.version, version)
     
-    # Working-tree gate
-    if not dry_run and not git_ops.is_working_tree_clean(project_path):
+    clean = git_ops.is_working_tree_clean(project_path)
+    if not dry_run and not clean:
         raise WorkingTreeDirty(
             f"working tree at {project_path} has uncommitted changes",
             recovery_hint="Commit or stash your changes before publishing.",
         )
     
+    commit = git_ops.current_commit(project_path)
+    
     new_metadata = current.model_copy(deep=True)
     new_metadata.mint.version = new_version
-    diff = _compute_diff(current, new_metadata)
+    local_diff = _compute_diff(current, new_metadata)
     
-    if dry_run:
-        return PublishResult(
-            version=new_version, dry_run=True, diff=diff,
-            pushed=False, tagged=False, catalog_updated=False,
-        )
-    
-    # Step 1: write metadata.json atomically (if changed)
+    catalog_diff: list[FieldChange] = []
+    first_publish = False
+    # Slice 32 (reviewer P1): use project.name (not full_name) — that's
+    # the catalog key. full_name would always trigger CatalogNotFound
+    # and silently mislabel every publish as first-publish. AttributeError
+    # falls through to first_publish for narrow test fakes that don't
+    # implement the full Protocol.
+    try:
+        existing = client.fetch(current.project.name)
+        catalog_diff = _diff_entries(existing, new_metadata.to_catalog_entry())
+    except (CatalogNotFound, AttributeError):
+        first_publish = True
+
+    return PublishPreview(
+        project_name=current.project.name,
+        current_version=current.mint.version,
+        new_version=new_version,
+        working_tree_commit=commit,
+        working_tree_clean=clean,
+        primary_path=current.data_products.primary or "",
+        outputs=list(current.data_products.outputs),
+        local_diff=local_diff,
+        catalog_diff=catalog_diff,
+        first_publish=first_publish,
+        new_metadata=new_metadata,
+    )
+
+
+def _apply_publish(
+    preview: PublishPreview,
+    *,
+    project_path: Path,
+    client: CatalogClient,
+    dvc_ops: DvcOps,
+    git_ops: RegistryGitOps,
+    message: str | None,
+) -> PublishResult:
+    # Slice 32 (reviewer P1): pull new_metadata from the preview, NOT
+    # recompute from disk. prepare_publish is the single source of
+    # truth; recomputing here re-introduces the drift the plan called
+    # out (e.g. mint.version diverges if disk changed between phases).
+    metadata_path = project_path / "metadata.json"
+    new_metadata = preview.new_metadata
     original_metadata_json = metadata_path.read_text(encoding="utf-8")
-    if diff:
+
+    # Step 1: write metadata.json atomically — ONLY when there's a real
+    # content change. A same-version idempotent retry has local_diff==[]
+    # and the atomic write would otherwise dirty the working tree with
+    # byte-identical-but-different-formatted JSON.
+    if preview.local_diff:
         _atomic_write_json(metadata_path, new_metadata.model_dump_json(indent=2))
 
-    # Step 2: dvc push. Catch DvcOpError (parent of DvcPushError + DvcNotInstalled)
-    # so both subprocess timeouts AND missing-binary failures trigger the rollback.
+    # Step 2: dvc push
     try:
         dvc_ops.push()
     except DvcOpError as exc:
-        if diff:
-            # Atomic restore to exactly original
-            _atomic_write_json(metadata_path, original_metadata_json)
+        _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
             f"dvc push failed: {exc}",
             recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
         ) from exc
     
-    # Step 3: commit the bump (only if dvc push succeeded)
-    if diff:
+    # Step 3: commit the bump (only when there's a real content change —
+    # retries at the same version stay idempotent w.r.t. git history).
+    if preview.local_diff:
         try:
-            git_ops.commit_all(project_path, message or f"chore: bump mint.version to {new_version}")
+            git_ops.commit_all(project_path, message or f"chore: bump mint.version to {preview.new_version}")
         except GitOpError as exc:
-            # If commit fails, we've already pushed artifacts but metadata is dirty.
-            # Restore to original state
             _atomic_write_json(metadata_path, original_metadata_json)
             git_ops.reset_hard(project_path, "HEAD")
             raise PublishError(f"failed to commit metadata bump: {exc}") from exc
     
     # Step 4: git tag
-    tag_name = f"v{new_version}"
+    tag_name = f"v{preview.new_version}"
     try:
         git_ops.tag(project_path, tag_name, message or f"mintd publish {tag_name}")
     except (GitOpError, GitTagAlreadyExists) as exc:
@@ -145,7 +203,7 @@ def publish_project(
             pushed=True,
             recovery_hint=(
                 f"metadata.json is committed and DVC artifacts are pushed; tag {tag_name} was not created.\n"
-                f"To retry: rerun `mintd publish {new_version}` (idempotent).\n"
+                f"To retry: rerun `mintd publish {preview.new_version}` (idempotent).\n"
                 f"If the tag already exists, delete it first with `git tag -d {tag_name}` then retry."
             ),
         ) from exc
@@ -161,8 +219,42 @@ def publish_project(
         ) from exc
     
     return PublishResult(
-        version=new_version, dry_run=False, diff=diff,
-        pushed=True, tagged=True, catalog_updated=True,
+        version=preview.new_version, dry_run=False, diff=preview.local_diff,
+        pushed=True, tagged=True, catalog_updated=True, preview=preview,
+    )
+
+
+def publish_project(
+    *,
+    project_path: Path,
+    version: str | None = None,
+    dry_run: bool = False,
+    client: CatalogClient,
+    dvc_ops: DvcOps,
+    git_ops: RegistryGitOps,
+    message: str | None = None,
+) -> PublishResult:
+    preview = prepare_publish(
+        project_path=project_path,
+        version=version,
+        dry_run=dry_run,
+        client=client,
+        git_ops=git_ops,
+    )
+    
+    if dry_run:
+        return PublishResult(
+            version=preview.new_version, dry_run=True, diff=preview.local_diff,
+            pushed=False, tagged=False, catalog_updated=False, preview=preview,
+        )
+        
+    return _apply_publish(
+        preview,
+        project_path=project_path,
+        client=client,
+        dvc_ops=dvc_ops,
+        git_ops=git_ops,
+        message=message,
     )
 
 

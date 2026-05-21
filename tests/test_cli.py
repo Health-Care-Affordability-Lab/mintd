@@ -1122,15 +1122,17 @@ def test_cli_publish_dry_run_renders_diff(
 ) -> None:
     client, _ = patched_clients
     metadata = _register_provider_xw(client)
+    metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
 
     rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
 
-    out = capsys.readouterr().out
+    # --dry-run writes preview to stderr
+    err = capsys.readouterr().err
     assert rc == 0
-    assert "→" in out
-
+    assert "About to publish" in err
+    assert "Primary output:" in err
 
 def test_cli_publish_blocked_by_check_errors_exits_one(
     tmp_path: Path,
@@ -1156,6 +1158,8 @@ def test_cli_publish_full_flow_calls_each_op(
 ) -> None:
     client, dvc_ops = patched_clients
     metadata = _register_provider_xw(client)
+    # Ensure it's publish-valid
+    metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
     # Stage the metadata so the working tree is clean.
@@ -1166,7 +1170,7 @@ def test_cli_publish_full_flow_calls_each_op(
         cwd=tmp_path, check=True,
     )
 
-    rc = cli.main(["publish", "--path", str(tmp_path)])
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
 
     assert rc == 0
     # dvc push called
@@ -1429,3 +1433,60 @@ def test_cli_config_setup_from_stdin(
     rc = cli.main(["config", "setup", "--path", str(target), "--from", "-"])
     assert rc == 0
     assert "registry_url: piped" in target.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Slice 32 — publish preview gate + --yes
+# ---------------------------------------------------------------------------
+
+def test_cli_publish_yes_flag_skips_prompt(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 32: --yes bypasses the interactive preview prompt."""
+    client, _ = patched_clients
+    metadata = _register_provider_xw(client)
+    metadata.data_products.primary = "data/final/"
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+    subprocess.run(["git", "add", "metadata.json"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "-q", "-m", "add metadata"],
+        cwd=tmp_path, check=True,
+    )
+    # input() should NOT be called.
+    def _explode(_prompt):
+        raise AssertionError("input() called despite --yes")
+    monkeypatch.setattr("builtins.input", _explode)
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
+    assert rc == 0
+
+
+def test_cli_publish_non_tty_without_yes_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slice 32: non-TTY without --yes exits 1 with an actionable hint."""
+    client, _ = patched_clients
+    metadata = _register_provider_xw(client)
+    metadata.data_products.primary = "data/final/"
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+    subprocess.run(["git", "add", "metadata.json"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "-q", "-m", "add metadata"],
+        cwd=tmp_path, check=True,
+    )
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False, raising=False)
+    rc = cli.main(["publish", "--path", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "--yes" in err or "interactive" in err.lower()
