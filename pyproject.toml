@@ -2,7 +2,7 @@
 name = "mintd"
 version = "0.0.1"
 description = "Lightweight data product framework for research labs"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pydantic ~= 2.12",
     "pyyaml ~= 6.0",
@@ -19,6 +19,7 @@ dev = [
     "types-PyYAML",
     "moto[s3] ~= 5.0",
     "types-boto3",
+    "dvc ~= 3.66.0",
 ]
 
 [build-system]
