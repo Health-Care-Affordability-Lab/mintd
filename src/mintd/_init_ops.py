@@ -71,6 +71,25 @@ class SubprocessInitOps:
             raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
         if result.returncode != 0:
             raise InitOpError(f"dvc init failed: {result.stderr.strip()}")
+        # Slice 30 polish: set the cache.type fallback chain so checkout
+        # uses reflink/hardlink/symlink before falling back to copy. DVC
+        # defaults are filesystem-dependent — on Linux ext4 with no
+        # explicit config the fallback is `copy`, which duplicates the
+        # bytes from .dvc/cache into the working tree on every pull
+        # (slow + 2x disk usage). Written to .dvc/config (per-project,
+        # no --local/--global) so consumers cloning the repo inherit it.
+        result = subprocess.run(
+            ["dvc", "config", "cache.type", "reflink,hardlink,symlink,copy"],
+            cwd=target_dir,
+            capture_output=True,
+            text=True,
+            timeout=self._timeout,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise InitOpError(
+                f"dvc config cache.type failed: {result.stderr.strip()}"
+            )
 
     def dvc_remote_add(
         self, target_dir: Path, *,

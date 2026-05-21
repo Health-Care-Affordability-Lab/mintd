@@ -391,3 +391,39 @@ def test_init_then_inspect_returns_initialized(tmp_path: Path) -> None:
         '[remote "data_foo"]\n    url = s3://cooper-globus/lab/data_foo/\n'
     )
     assert inspect_storage(project_path).state == StorageState.INITIALIZED
+
+
+# ---------------------------------------------------------------------------
+# Slice 30 polish — SubprocessInitOps.dvc_init configures cache.type
+# ---------------------------------------------------------------------------
+
+def test_subprocess_dvc_init_sets_cache_type_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The production InitOps must follow `dvc init` with
+    `dvc config cache.type reflink,hardlink,symlink,copy` so freshly-
+    init'd projects don't fall back to slow copy mode on Linux ext4.
+    Per-project scope (no --local / --global) so consumers cloning the
+    repo inherit the setting."""
+    import subprocess
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    SubprocessInitOps().dvc_init(tmp_path)
+
+    assert calls[0] == ["dvc", "init"]
+    assert calls[1] == [
+        "dvc", "config", "cache.type",
+        "reflink,hardlink,symlink,copy",
+    ]
