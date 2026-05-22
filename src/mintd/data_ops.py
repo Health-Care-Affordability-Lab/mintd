@@ -32,6 +32,7 @@ def data_pull(
     fast_sync_ops: FastSyncOps | None = None,
     remote: str | None = None,
     jobs: int | None = None,
+    extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
 ) -> None:
     """Pull dvc-tracked data via fast-sync (boto3 → cache) when available;
@@ -105,7 +106,7 @@ def data_pull(
         if fast_sync_failed:
             dvc_ops.pull(
                 targets=None if pull_all_requested else targets,
-                remote=remote, jobs=jobs,
+                remote=remote, jobs=jobs, extra_args=extra_dvc_args,
             )
             return
 
@@ -116,6 +117,11 @@ def data_pull(
                 len(result.fallback_targets),
                 result.reason,
             )
+            if extra_dvc_args and result.synced_count:
+                logger.debug(
+                    "fast-sync handled %d target(s); --dvc-arg ignored for those",
+                    result.synced_count,
+                )
             fallback_set = set(result.fallback_targets)
             synced_targets = [t for t in targets if t not in fallback_set] if targets else []
 
@@ -123,7 +129,10 @@ def data_pull(
                 dvc_ops.checkout(targets=synced_targets)
 
             if result.fallback_targets:
-                dvc_ops.pull(targets=result.fallback_targets, remote=remote, jobs=jobs)
+                dvc_ops.pull(
+                    targets=result.fallback_targets,
+                    remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+                )
 
         # When the user requested pull-all and the project has a dvc.yaml,
         # do a final `dvc pull` with no targets to catch pipeline-stage
@@ -134,10 +143,14 @@ def data_pull(
         # `dvc pull` with no args, just gated on user intent.
         if pull_all_requested and (project_path / "dvc.yaml").is_file():
             logger.info("dvc.yaml present; running dvc pull to catch pipeline-stage outputs")
-            dvc_ops.pull(targets=None, remote=remote, jobs=jobs)
+            dvc_ops.pull(
+                targets=None, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+            )
         return
 
-    dvc_ops.pull(targets=targets, remote=remote, jobs=jobs)
+    dvc_ops.pull(
+        targets=targets, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+    )
 
 
 def _default_dvc_remote(project_path: Path) -> str | None:

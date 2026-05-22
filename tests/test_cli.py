@@ -105,6 +105,31 @@ def test_cli_data_pull_dvc_error_exits_one(
     assert "oops" in capsys.readouterr().err
 
 
+def test_cli_data_pull_threads_dvc_args(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """Repeated `--dvc-arg` tokens reach `dvc_ops.pull(extra_args=...)`.
+    Duplicate `--jobs` (one mintd-typed, one in `--dvc-arg`) survives end-
+    to-end as literal pass-through; mintd does not dedupe."""
+    _, dvc_ops = patched_clients
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main([
+        "data", "pull", "data/raw.csv",
+        "--path", str(tmp_path),
+        "--jobs", "4",
+        "--dvc-arg=--verbose",
+        "--dvc-arg=--jobs",
+        "--dvc-arg=16",
+    ])
+    assert rc == 0
+    assert len(dvc_ops.pull_calls) == 1
+    call = dvc_ops.pull_calls[0]
+    assert call.jobs == 4
+    assert call.extra_args == ["--verbose", "--jobs", "16"]
+
+
 def test_cli_data_push_calls_data_push(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -223,6 +248,24 @@ def test_data_import_writes_dvc_file(
     assert rc == 0
     assert len(dvc_ops.calls) == 1
     assert dvc_ops.calls[0].path == "outputs/main.parquet"
+
+
+def test_cli_data_import_threads_dvc_args(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """`--dvc-arg` lands on every recorded `dvc_ops.import_(extra_args=...)`
+    call on the non-bump path."""
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+    rc = cli.main([
+        "data", "import", "provider-xw",
+        "--dest-root", str(tmp_path),
+        "--dvc-arg=--verbose",
+    ])
+    assert rc == 0
+    assert len(dvc_ops.calls) == 1
+    assert dvc_ops.calls[0].extra_args == ["--verbose"]
 
 
 def test_data_import_unknown_name_exits_one(
@@ -658,6 +701,30 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     captured = capsys.readouterr()
     # Slice 25: success line is chatter → stderr; result payload → stdout.
     assert "cloned: /tmp/sentinel" in captured.err
+
+
+def test_cli_data_clone_threads_dvc_args(
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """`--dvc-arg` reaches `clone_and_pull_product(extra_dvc_args=...)`."""
+    received: dict[str, object] = {}
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        received.update(kwargs)
+        return Path("/tmp/sentinel")
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
+
+    rc = cli.main([
+        "data", "clone", "provider-xw",
+        "--dest", "/tmp/x",
+        "--dvc-arg=--verbose",
+        "--dvc-arg=-v",
+    ])
+    assert rc == 0
+    assert received["extra_dvc_args"] == ["--verbose", "-v"]
 
 
 def test_cli_data_clone_returns_one_on_catalog_not_found(

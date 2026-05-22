@@ -18,6 +18,7 @@ class DvcImportCall(NamedTuple):
     dest: Path
     rev: str | None
     force: bool
+    extra_args: list[str] | None = None
 
 
 class DvcPushCall(NamedTuple):
@@ -29,6 +30,7 @@ class DvcPullCall(NamedTuple):
     targets: list[str] | None
     remote: str | None
     jobs: int | None
+    extra_args: list[str] | None = None
 
 
 class DvcAddCall(NamedTuple):
@@ -74,9 +76,13 @@ class _FakeDvcOps:
         dest: Path,
         rev: str | None = None,
         force: bool = False,
+        extra_args: list[str] | None = None,
     ) -> Path:
         self.calls.append(
-            DvcImportCall(repo_url=repo_url, path=path, dest=dest, rev=rev, force=force)
+            DvcImportCall(
+                repo_url=repo_url, path=path, dest=dest, rev=rev, force=force,
+                extra_args=extra_args,
+            )
         )
         dvc_file = dest.parent / (dest.name + ".dvc")
         dvc_file.parent.mkdir(parents=True, exist_ok=True)
@@ -107,10 +113,15 @@ class _FakeDvcOps:
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         if self.pull_raises:
             raise self.pull_raises
-        self.pull_calls.append(DvcPullCall(targets=targets, remote=remote, jobs=jobs))
+        self.pull_calls.append(
+            DvcPullCall(
+                targets=targets, remote=remote, jobs=jobs, extra_args=extra_args,
+            )
+        )
 
     def add(self, path: Path) -> Path:
         if self.add_raises:

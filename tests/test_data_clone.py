@@ -277,12 +277,14 @@ class _CwdRecordingDvcOps(_FakeDvcOps):
 
     def pull(
         self,
+        *,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         self.pull_cwds.append(Path.cwd())
-        super().pull(targets=targets, remote=remote, jobs=jobs)
+        super().pull(targets=targets, remote=remote, jobs=jobs, extra_args=extra_args)
 
 
 def test_clone_and_pull_product_runs_dvc_inside_clone_dest(
@@ -304,9 +306,11 @@ def test_clone_and_pull_product_runs_dvc_inside_clone_dest(
 class _DvcPullErrorOps(_FakeDvcOps):
     def pull(
         self,
+        *,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         raise DvcOpError("boom")
 

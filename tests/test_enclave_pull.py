@@ -12,7 +12,7 @@ class _Client:
 class _FakeDvcOps:
     def __init__(self):
         self.calls = []
-    def import_(self, repo_url, path, dest, rev, force):
+    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
         self.calls.append((repo_url, path, dest, rev, force))
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text("dummy-data")  # Add this: create the file

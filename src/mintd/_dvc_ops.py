@@ -71,6 +71,7 @@ class DvcOps(Protocol):
         dest: Path,
         rev: str | None = None,
         force: bool = False,
+        extra_args: list[str] | None = None,
     ) -> Path:
         """Run `dvc import` and return the path of the produced `.dvc` file."""
         ...
@@ -85,6 +86,7 @@ class DvcOps(Protocol):
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         """Run `dvc pull`."""
         ...
@@ -145,12 +147,15 @@ class SubprocessDvcOps:
         dest: Path,
         rev: str | None = None,
         force: bool = False,
+        extra_args: list[str] | None = None,
     ) -> Path:
         cmd: list[str] = ["dvc", "import", repo_url, path, "-o", str(dest)]
         if rev:
             cmd.extend(["--rev", rev])
         if force:
             cmd.append("--force")
+        if extra_args:
+            cmd.extend(extra_args)
 
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
@@ -194,12 +199,15 @@ class SubprocessDvcOps:
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        extra_args: list[str] | None = None,
     ) -> None:
         cmd = ["dvc", "pull"]
         if remote:
             cmd.extend(["--remote", remote])
         if jobs:
             cmd.extend(["--jobs", str(jobs)])
+        if extra_args:
+            cmd.extend(extra_args)
         if targets:
             cmd.extend(targets)
         try:

@@ -222,6 +222,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_import.add_argument(
         "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root"
     )
+    p_import.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
     p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
 
     p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
@@ -229,6 +235,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_pull.add_argument("--remote")
     p_pull.add_argument("--jobs", type=int)
     p_pull.add_argument("--path", type=Path, default=Path("."))
+    p_pull.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
     p_pull.set_defaults(_handler=_handle_data_pull)
 
     p_clone = p_data_sub.add_parser(
@@ -248,6 +260,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
                          help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
+    p_clone.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
     p_clone.set_defaults(_handler=_handle_data_clone)
 
     p_push = p_data_sub.add_parser("push", help="Push DVC data")
@@ -622,6 +640,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             fast_sync_ops=fast_sync_ops,
             remote=args.remote,
             jobs=args.jobs,
+            extra_dvc_args=args.dvc_args or None,
             reporter=args._reporter,
         )
     except DvcNotInstalled as e:
@@ -922,6 +941,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
                 rev=args.rev,
                 primary_only=args.primary_only,
                 jobs=args.jobs,
+                extra_dvc_args=args.dvc_args or None,
                 reporter=reporter,
             )
     except CatalogNotFound as exc:
@@ -1047,6 +1067,7 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             rev=args.rev,
             all_outputs=args.all_outputs,
             force=args.force,
+            extra_dvc_args=args.dvc_args or None,
         )
     except (
         CatalogNotFound,

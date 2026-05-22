@@ -85,6 +85,7 @@ def import_product(
     rev: str | None = None,
     all_outputs: bool = False,
     force: bool = False,
+    extra_dvc_args: list[str] | None = None,
     producer_view_factory: Callable[[str, str], ProducerView] | None = None,
 ) -> list[Path]:
     """Catalog-driven `dvc import`. Returns the list of `.dvc` files written."""
@@ -115,6 +116,7 @@ def import_product(
                 dest=dest,
                 rev=rev,
                 force=force,
+                extra_args=extra_dvc_args,
             )
         )
     return produced
@@ -185,6 +187,7 @@ def clone_and_pull_product(
     rev: str | None = None,
     primary_only: bool = False,
     jobs: int | None = None,
+    extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
 ) -> Path:
     """Clone a published data product into a working directory + dvc pull it.
@@ -250,6 +253,7 @@ def clone_and_pull_product(
             dvc_ops=dvc_ops,
             fast_sync_ops=fast_sync_ops,
             jobs=jobs,
+            extra_dvc_args=extra_dvc_args,
             reporter=reporter,
         )
     finally:

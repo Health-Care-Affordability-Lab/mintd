@@ -67,3 +67,96 @@ def test_fake_handles_file_paths_with_suffix(tmp_path: Path) -> None:
 
     # Real `dvc import` writes <dest>.dvc, not <stem>.dvc.
     assert produced == tmp_path / "main.parquet.dvc"
+
+
+# ---------------------------------------------------------------------------
+# Slice 34 — `extra_args` pass-through on SubprocessDvcOps.pull / .import_
+# ---------------------------------------------------------------------------
+
+
+def _stub_run_streaming(captured: list[list[str]]):
+    """Return a fake `run_streaming` that records argv and returns success."""
+    class _R:
+        returncode = 0
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+    def _fake(cmd, **kwargs):
+        captured.append(list(cmd))
+        return _R()
+
+    return _fake
+
+
+def test_subprocess_pull_appends_extra_args_after_typed_flags(
+    monkeypatch,
+) -> None:
+    """`extra_args` items land between the typed `--remote`/`--jobs`
+    block and the positional targets — readable argv shape and matches
+    DVC's flag-anywhere acceptance."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_run_streaming(captured))
+
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.pull(
+        targets=["data/foo"],
+        remote="X",
+        jobs=4,
+        extra_args=["--verbose"],
+    )
+
+    assert captured == [
+        ["dvc", "pull", "--remote", "X", "--jobs", "4", "--verbose", "data/foo"],
+    ]
+
+
+def test_subprocess_pull_extra_args_none_keeps_legacy_argv(
+    monkeypatch,
+) -> None:
+    """Backward compat: with `extra_args=None` (the default), argv is
+    byte-for-byte the pre-slice-34 shape."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_run_streaming(captured))
+
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.pull(targets=["data/foo"], remote="X", jobs=4)
+
+    assert captured == [
+        ["dvc", "pull", "--remote", "X", "--jobs", "4", "data/foo"],
+    ]
+
+
+def test_subprocess_import_appends_extra_args_after_typed_flags(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """`dvc import` argv ends with the extra_args block, after the
+    `--rev`/`--force` typed flags."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_run_streaming(captured))
+
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    dest = tmp_path / "out"
+    ops.import_(
+        repo_url="https://example/x",
+        path="data/y",
+        dest=dest,
+        rev="abc",
+        force=True,
+        extra_args=["--verbose"],
+    )
+
+    assert captured == [
+        [
+            "dvc", "import", "https://example/x", "data/y",
+            "-o", str(dest), "--rev", "abc", "--force", "--verbose",
+        ],
+    ]
