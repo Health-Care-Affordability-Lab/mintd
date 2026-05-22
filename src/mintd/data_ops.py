@@ -114,6 +114,7 @@ def data_pull(
                             remote_name=remote_name,
                             jobs=jobs or 8,
                             pipeline_outs=pipeline_outs,
+                            reporter=reporter,
                         )
                     except Exception as exc:
                         logger.warning("fast-sync raised; falling back to full dvc pull: %s", exc)

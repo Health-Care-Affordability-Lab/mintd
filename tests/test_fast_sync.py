@@ -494,6 +494,46 @@ def test_fetch_dir_contents_progress_counts_duplicate_entries(
     assert sum(calls) == 3 * len(body)
 
 
+def test_try_fast_pull_updates_per_out_description(
+    s3_versioned, tmp_path: Path,
+) -> None:
+    """Pattern D: reporter.update_progress_desc fires once per output in the
+    per-out loop, with `(i/n)` suffixes in order. Lets the user see which
+    file is downloading during the multi-minute fetch instead of a static
+    spinner."""
+    s3, bucket = s3_versioned
+    bodies = [b"a" * 1024, b"b" * 2048, b"c" * 4096]
+    md5s = [_md5_of(b) for b in bodies]
+    for body, md5 in zip(bodies, md5s):
+        key = f"files/md5/{md5[:2]}/{md5[2:]}"
+        s3.put_object(Bucket=bucket, Key=key, Body=body)
+
+    _write_dvc_config(tmp_path, bucket)
+    for name, body, md5 in zip(["a", "b", "c"], bodies, md5s):
+        _write_dvc_file_md5(tmp_path, name, md5, size=len(body))
+
+    class _RecordingReporter:
+        def __init__(self) -> None:
+            self.labels: list[str] = []
+
+        def update_progress_desc(self, msg: str) -> None:
+            self.labels.append(msg)
+
+    rep = _RecordingReporter()
+    ops = SubprocessFastSyncOps()
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3):
+        result = ops.try_fast_pull(
+            project_path=tmp_path, targets=["a", "b", "c"],
+            remote_name="origin", reporter=rep,  # type: ignore[arg-type]
+        )
+
+    assert result.success is True
+    assert len(rep.labels) == 3
+    assert "(1/3)" in rep.labels[0]
+    assert "(2/3)" in rep.labels[1]
+    assert "(3/3)" in rep.labels[2]
+
+
 def test_try_fast_pull_advance_fires_per_chunk_during_download(
     s3_versioned, tmp_path: Path
 ) -> None:

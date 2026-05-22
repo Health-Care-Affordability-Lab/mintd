@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 import yaml
 
@@ -29,6 +29,9 @@ except ImportError:
 
 from mintd._atomic import _try_fsync_parent_dir
 from mintd.model import FastPullResult
+
+if TYPE_CHECKING:
+    from mintd._console import Reporter
 
 logger = logging.getLogger(__name__)
 
@@ -891,6 +894,7 @@ class FastSyncOps(Protocol):
         remote_name: str,
         jobs: int = 8,
         pipeline_outs: list[DvcOut] | None = None,
+        reporter: Optional["Reporter"] = None,
     ) -> FastPullResult: ...
 
 
@@ -943,6 +947,7 @@ class SubprocessFastSyncOps:
         remote_name: str,
         jobs: int = 8,
         pipeline_outs: list[DvcOut] | None = None,
+        reporter: Optional["Reporter"] = None,
     ) -> FastPullResult:
         def _all_target_ids() -> list[str]:
             """Every target identifier this call is responsible for routing
@@ -998,7 +1003,10 @@ class SubprocessFastSyncOps:
                 except Exception:
                     pass
 
-        for out in all_outs:
+        for i, out in enumerate(all_outs, start=1):
+            if reporter is not None:
+                target = out.target if len(out.target) <= 50 else out.target[:47] + "..."
+                reporter.update_progress_desc(f"Pulling {target} ({i}/{len(all_outs)})...")
             try:
                 if out.is_files_format:
                     assert out.files is not None

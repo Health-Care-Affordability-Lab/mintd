@@ -217,9 +217,15 @@ def clone_and_pull_product(
         )
 
     try:
-        registry_git_ops.clone(
-            repo_url, resolved_dest, shallow=False, branch=rev,
-        )
+        if reporter is not None:
+            with reporter.status(f"Cloning {name} repository..."):
+                registry_git_ops.clone(
+                    repo_url, resolved_dest, shallow=False, branch=rev,
+                )
+        else:
+            registry_git_ops.clone(
+                repo_url, resolved_dest, shallow=False, branch=rev,
+            )
     except GitOpError as exc:
         raise ProducerError.unreachable(
             repo=repo_url,

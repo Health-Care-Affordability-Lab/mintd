@@ -7,6 +7,7 @@ from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
+    TaskID,
     TextColumn,
     TimeRemainingColumn,
     TransferSpeedColumn,
@@ -21,6 +22,8 @@ class Reporter:
         self._stderr = Console(file=sys.stderr, no_color=no_color, force_terminal=None)
         self._stdout = Console(file=sys.stdout, no_color=no_color, force_terminal=None)
         self._active_status: Optional[Status] = None
+        self._active_progress: Optional[Progress] = None
+        self._progress_task_id: Optional[TaskID] = None
         self._status_base: str = ""
         # Per-stream byte buffer for chunk-boundary safety: subprocess
         # output arrives in 256-byte chunks that may split a \r-terminated
@@ -30,7 +33,7 @@ class Reporter:
         # until we see a \r or \n boundary.
         self._stderr_buf: str = ""
 
-    def status(self, msg: str) -> Any:  # rich.Status or nullcontext
+    def status(self, msg: str) -> Any:  # context manager
         if self.json_mode or self.level < 1:
             from contextlib import nullcontext
             return nullcontext()
@@ -39,8 +42,46 @@ class Reporter:
         # slow to drain). Prevents cross-block bleed into the new spinner.
         self._stderr_buf = ""
         self._status_base = msg
-        self._active_status = self._stderr.status(msg)
-        return self._active_status
+        rich_status = self._stderr.status(msg)
+        self._active_status = rich_status
+        # Wrap rich.Status in a context manager that ALSO resets
+        # ``self._active_status`` on exit. Without the reset, a later
+        # ``reporter.progress(...)`` block sees a stale ``_active_status``
+        # reference, treats the (already-stopped) spinner as "active",
+        # and re-opens it on progress exit — leaving the old label
+        # stuck on screen during subsequent subprocess phases.
+        outer_self = self
+
+        class _StatusCM:
+            def __enter__(self) -> Any:
+                rich_status.__enter__()
+                return rich_status
+
+            def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+                try:
+                    rich_status.__exit__(exc_type, exc, tb)
+                finally:
+                    outer_self._active_status = None
+                    outer_self._status_base = ""
+
+        return _StatusCM()
+
+    def update_status(self, msg: str) -> None:
+        """Refresh the active status spinner's label. No-op when status is a
+        nullcontext (json_mode / quiet level). Used to phase a multi-step
+        operation under one outer ``with reporter.status(...)`` block."""
+        if self.json_mode or self._active_status is None:
+            return
+        self._status_base = msg
+        self._active_status.update(msg)
+
+    def update_progress_desc(self, msg: str) -> None:
+        """Update the active progress widget's description prefix. No-op when
+        no progress is active (e.g. json_mode). Lets the fast-sync loop surface
+        per-output progress like 'Pulling data/final/carrier.parquet (3/9)...'."""
+        if self.json_mode or self._active_progress is None or self._progress_task_id is None:
+            return
+        self._active_progress.update(self._progress_task_id, description=msg)
 
     def info(self, msg: str) -> None:
         if self.level >= 1 and not self.json_mode:
@@ -176,6 +217,8 @@ class Reporter:
             transient=True,  # bar erased on exit; scrollback stays clean
         )
         task_id = prog.add_task(desc, total=total)
+        self._active_progress = prog
+        self._progress_task_id = task_id
 
         def advance(n: int) -> None:
             prog.update(task_id, advance=n)
@@ -184,6 +227,8 @@ class Reporter:
             with prog:
                 yield advance
         finally:
+            self._active_progress = None
+            self._progress_task_id = None
             if had_status:
                 # Reset the chunk buffer (matches status() entry behavior)
                 # so any in-flight tail from pre-progress doesn't bleed in.

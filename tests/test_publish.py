@@ -19,7 +19,7 @@ class _FakeCatalogClient:
     def __init__(self, entries: dict | None = None) -> None:
         self._entries = entries or {}
 
-    def update(self, metadata): pass
+    def update(self, metadata, *, dry_run=False, reporter=None): pass
 
     def fetch(self, name):
         from mintd.catalog import CatalogNotFound
@@ -87,7 +87,7 @@ def test_publish_calls_catalog_update_last(tmp_path):
     order = []
     
     class _OrderedClient:
-        def update(self, meta): order.append("update")
+        def update(self, meta, *, dry_run=False, reporter=None): order.append("update")
     
     dvc.push = lambda *a, **k: order.append("push")
     git.tag = lambda *a, **k: order.append("tag")
@@ -452,3 +452,43 @@ def test_prepare_publish_uses_project_name_not_full_name_for_catalog_fetch(tmp_p
     # name lookup hits the registered entry → NOT first_publish.
     assert preview.first_publish is False
     assert preview.project_name == meta.project.name
+
+
+# ---------------------------------------------------------------------------
+# Slice 36 — Pattern C: phase relabeling in _apply_publish
+# ---------------------------------------------------------------------------
+
+
+class _RecordingReporter:
+    def __init__(self) -> None:
+        self.labels: list[str] = []
+
+    def update_status(self, msg: str) -> None:
+        self.labels.append(msg)
+
+
+def test_apply_publish_updates_status_between_phases(tmp_path):
+    """All five phase labels appear in order when local_diff is non-empty."""
+    from mintd.publish import _apply_publish, prepare_publish
+    proj = _seed_project(tmp_path)
+    dvc = _FakeDvcOps()
+    git = _FakeRegistryGitOps()
+    client = _FakeCatalogClient()
+    preview = prepare_publish(
+        project_path=proj, version="0.1.1", dry_run=False,
+        client=client, git_ops=git,
+    )
+    rep = _RecordingReporter()
+    _apply_publish(
+        preview,
+        project_path=proj, client=client, dvc_ops=dvc, git_ops=git,
+        message=None,
+        reporter=rep,  # type: ignore[arg-type]
+    )
+    assert rep.labels == [
+        "Writing metadata.json...",
+        "Pushing data to DVC...",
+        "Committing version bump...",
+        "Tagging release...",
+        "Updating catalog entry...",
+    ]

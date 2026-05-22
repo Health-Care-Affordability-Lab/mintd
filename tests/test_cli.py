@@ -20,7 +20,7 @@ import pytest
 from mintd.model import FastPullResult
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from mintd import cli
-from mintd.catalog import InMemoryCatalogClient
+from mintd.catalog import CatalogAlreadyExists, CatalogNotFound, InMemoryCatalogClient
 from mintd.check import CheckFinding
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
@@ -445,6 +445,165 @@ def test_registry_sync_prints_count(
     out = capsys.readouterr().out
     assert rc == 0
     assert "synced (0 entries)" in out
+
+
+# ---------------------------------------------------------------------------
+# Slice 36 — Pattern A/B/D
+# ---------------------------------------------------------------------------
+
+
+def _write_v1_metadata(tmp_path: Path) -> None:
+    """Write a metadata.json with schema_version '1.1' to tmp_path."""
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"schema_version": "1.1", "project": {"name": "x"}}),
+        encoding="utf-8",
+    )
+
+
+def test_cli_registry_update_v1_schema_emits_migrate_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """v1 metadata.json → exit 1, hint contains `mintd update metadata`, no Traceback."""
+    _write_v1_metadata(tmp_path)
+    rc = cli.main(["registry", "update", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "mintd update metadata" in err
+    assert "Traceback" not in err
+
+
+def test_cli_registry_register_v1_schema_emits_migrate_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    _write_v1_metadata(tmp_path)
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "mintd update metadata" in err
+    assert "Traceback" not in err
+
+
+def test_cli_registry_update_v2_validation_error_renders_clean(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """A v2-shaped file with a missing required field → exit 1 with
+    'N field error(s)' and the mintd check hint; no Traceback."""
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"schema_version": "2.0", "project": {"name": "x"}}),
+        encoding="utf-8",
+    )
+    rc = cli.main(["registry", "update", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "field error" in err
+    assert "mintd check" in err
+    assert "Traceback" not in err
+
+
+def test_cli_registry_register_v2_validation_error_renders_clean(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    (tmp_path / "metadata.json").write_text(
+        json.dumps({"schema_version": "2.0", "project": {"name": "x"}}),
+        encoding="utf-8",
+    )
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "field error" in err
+    assert "mintd check" in err
+    assert "Traceback" not in err
+
+
+def test_cli_registry_update_catalog_not_found_includes_register_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """`registry update` on an unregistered project → exit 1 + register hint."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+
+    def _raise(*a: Any, **kw: Any) -> None:
+        raise CatalogNotFound("never-registered")
+
+    monkeypatch.setattr(client, "update", _raise)
+
+    rc = cli.main(["registry", "update", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "mintd registry register" in err
+
+
+def test_cli_registry_register_catalog_already_exists_includes_update_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """`registry register` on already-registered project → exit 1 + update hint."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+
+    def _raise(*a: Any, **kw: Any) -> None:
+        raise CatalogAlreadyExists("already-here")
+
+    monkeypatch.setattr(client, "register", _raise)
+    monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: [])
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "mintd registry update" in err
+
+
+def test_cli_registry_register_blocks_on_check_project_errors(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """Pattern A's check gate: if check_project returns an error finding,
+    register exits 1 and client.register is NEVER called."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+    err_finding = CheckFinding(
+        severity="error",
+        section="producer",
+        message="storage.bucket is empty",
+        kind="storage_bucket_empty",
+        hint="set storage.bucket in metadata.json",
+    )
+    monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: [err_finding])
+
+    def must_not_call(*a: Any, **kw: Any) -> None:
+        pytest.fail("client.register must not be called when check fails")
+
+    monkeypatch.setattr(client, "register", must_not_call)
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    capsys.readouterr()
+    assert rc == 1
+
+
+def test_cli_registry_register_passes_through_when_check_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: [])
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    assert rc == 0
 
 
 def test_registry_status_no_name_works_without_registry_url(

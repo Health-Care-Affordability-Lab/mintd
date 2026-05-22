@@ -20,11 +20,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 if TYPE_CHECKING:
+    from ._console import Reporter
     from .model import Metadata
 
 
@@ -157,8 +158,14 @@ class CatalogClient(Protocol):
     `GitCatalogClient` both implement it — no inheritance, just shape.
     """
 
-    def register(self, metadata: Metadata, *, dry_run: bool = False) -> RegisterResult: ...
-    def update(self, metadata: Metadata, *, dry_run: bool = False) -> UpdateResult: ...
+    def register(
+        self, metadata: Metadata, *, dry_run: bool = False,
+        reporter: Optional["Reporter"] = None,
+    ) -> RegisterResult: ...
+    def update(
+        self, metadata: Metadata, *, dry_run: bool = False,
+        reporter: Optional["Reporter"] = None,
+    ) -> UpdateResult: ...
     def fetch(self, name: str) -> CatalogEntry: ...
     def list(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]: ...
     def status(self, name: str) -> RegistrationStatus: ...
@@ -184,7 +191,7 @@ class InMemoryCatalogClient:
     def __init__(self) -> None:
         self._entries: dict[str, CatalogEntry] = {}
 
-    def register(self, metadata: Metadata, *, dry_run: bool = False) -> RegisterResult:
+    def register(self, metadata: Metadata, *, dry_run: bool = False, reporter: Optional["Reporter"] = None) -> RegisterResult:
         name = metadata.project.name
         if name in self._entries:
             raise CatalogAlreadyExists(name)
@@ -193,13 +200,12 @@ class InMemoryCatalogClient:
             self._entries[name] = entry
         return RegisterResult(name=name, dry_run=dry_run)
 
-    def update(self, metadata: Metadata, *, dry_run: bool = False) -> UpdateResult:
+    def update(self, metadata: Metadata, *, dry_run: bool = False, reporter: Optional["Reporter"] = None) -> UpdateResult:
         name = metadata.project.name
         if name not in self._entries:
             raise CatalogNotFound(name)
         new_entry = metadata.to_catalog_entry()
-        old_entry = self._entries[name]
-        changes = _diff_entries(old_entry, new_entry)
+        changes = _diff_entries(self._entries[name], new_entry)
         if not dry_run:
             self._entries[name] = new_entry
         return UpdateResult(name=name, changes=changes, dry_run=dry_run)
@@ -306,7 +312,7 @@ class GitCatalogClient:
     # Writes
     # ------------------------------------------------------------------
 
-    def register(self, metadata: "Metadata", *, dry_run: bool = False) -> RegisterResult:
+    def register(self, metadata: "Metadata", *, dry_run: bool = False, reporter: Optional["Reporter"] = None) -> RegisterResult:
         from ._catalog_serializer import deserialize, serialize
 
         self._cache.ensure_fresh()
@@ -333,6 +339,7 @@ class GitCatalogClient:
             commit_message=f"Register {name}",
             pr_title=f"Register {name}",
             pr_body=f"Catalog entry for `{name}`.",
+            reporter=reporter,
         )
         self._record_pending(name=name, pr_number=pr, kind="register")
         return RegisterResult(
@@ -341,7 +348,7 @@ class GitCatalogClient:
             pr_url=_pr_url(self._registry_repo_url, pr),
         )
 
-    def update(self, metadata: "Metadata", *, dry_run: bool = False) -> UpdateResult:
+    def update(self, metadata: "Metadata", *, dry_run: bool = False, reporter: Optional["Reporter"] = None) -> UpdateResult:
         from ._catalog_serializer import deserialize, serialize
 
         self._cache.ensure_fresh()
@@ -373,6 +380,7 @@ class GitCatalogClient:
             commit_message=f"Update {name}",
             pr_title=f"Update {name}",
             pr_body=f"Update for catalog entry `{name}`.",
+            reporter=reporter,
         )
         self._record_pending(name=name, pr_number=pr, kind="update")
         return UpdateResult(
@@ -412,11 +420,20 @@ class GitCatalogClient:
         commit_message: str,
         pr_title: str,
         pr_body: str,
+        reporter: Optional["Reporter"] = None,
     ) -> int:
         self._git_ops.checkout_new_branch(self._work_dir, branch)
+        if reporter:
+            reporter.update_status("Writing catalog entry...")
         self._cache.write_entry(entry, content)
+        if reporter:
+            reporter.update_status("Committing to registry...")
         self._git_ops.commit_all(self._work_dir, commit_message)
+        if reporter:
+            reporter.update_status("Pushing to registry...")
         self._git_ops.push_branch(self._work_dir, branch)
+        if reporter:
+            reporter.update_status("Opening PR...")
         return self._git_ops.open_pr(
             self._work_dir,
             title=pr_title,

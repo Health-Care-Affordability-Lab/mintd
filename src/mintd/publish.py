@@ -9,12 +9,16 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
 from ._dvc_ops import DvcOpError, DvcOps
 from ._registry_git_ops import GitOpError, GitTagAlreadyExists, RegistryGitOps
 from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
 from .check import check_project
 from .model import DataProductOutput, Metadata
+
+if TYPE_CHECKING:
+    from ._console import Reporter
 
 
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -167,6 +171,7 @@ def _apply_publish(
     dvc_ops: DvcOps,
     git_ops: RegistryGitOps,
     message: str | None,
+    reporter: Optional["Reporter"] = None,
 ) -> PublishResult:
     # Slice 32 (reviewer P1): pull new_metadata from the preview, NOT
     # recompute from disk. prepare_publish is the single source of
@@ -181,9 +186,13 @@ def _apply_publish(
     # and the atomic write would otherwise dirty the working tree with
     # byte-identical-but-different-formatted JSON.
     if preview.local_diff:
+        if reporter is not None:
+            reporter.update_status("Writing metadata.json...")
         _atomic_write_json(metadata_path, new_metadata.model_dump_json(indent=2))
 
     # Step 2: dvc push
+    if reporter is not None:
+        reporter.update_status("Pushing data to DVC...")
     try:
         dvc_ops.push()
     except DvcOpError as exc:
@@ -192,18 +201,22 @@ def _apply_publish(
             f"dvc push failed: {exc}",
             recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
         ) from exc
-    
+
     # Step 3: commit the bump (only when there's a real content change —
     # retries at the same version stay idempotent w.r.t. git history).
     if preview.local_diff:
+        if reporter is not None:
+            reporter.update_status("Committing version bump...")
         try:
             git_ops.commit_all(project_path, message or f"chore: bump mint.version to {preview.new_version}")
         except GitOpError as exc:
             _atomic_write_json(metadata_path, original_metadata_json)
             git_ops.reset_hard(project_path, "HEAD")
             raise PublishError(f"failed to commit metadata bump: {exc}") from exc
-    
+
     # Step 4: git tag
+    if reporter is not None:
+        reporter.update_status("Tagging release...")
     tag_name = f"v{preview.new_version}"
     try:
         git_ops.tag(project_path, tag_name, message or f"mintd publish {tag_name}")
@@ -217,10 +230,12 @@ def _apply_publish(
                 f"If the tag already exists, delete it first with `git tag -d {tag_name}` then retry."
             ),
         ) from exc
-    
+
     # Step 5: catalog update
+    if reporter is not None:
+        reporter.update_status("Updating catalog entry...")
     try:
-        client.update(new_metadata)
+        client.update(new_metadata, reporter=reporter)
     except CatalogNotFound as exc:
         raise CatalogUpdateFailed(
             f"catalog update failed: {exc}",

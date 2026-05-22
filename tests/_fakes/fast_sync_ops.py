@@ -37,6 +37,7 @@ class _FakeFastSyncOps:
         remote_name: str,
         jobs: int = 8,
         pipeline_outs: list[DvcOut] | None = None,
+        reporter: object = None,  # slice 36 Pattern D — accepted, ignored
     ) -> FastPullResult:
         self.calls.append(
             FastPullCall(

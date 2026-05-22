@@ -23,6 +23,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import NoReturn, Optional
 
+from pydantic import ValidationError
+
 from . import config_ops, metadata_migrate
 from ._console import Reporter
 from ._config import Config, ConfigError
@@ -85,6 +87,29 @@ from .publish import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class MetadataSchemaTooOld(Exception):
+    def __init__(self, path: Path, found: str) -> None:
+        super().__init__(f"metadata.json at {path} is schema {found!r}, expected '2.0'")
+        self.path = path
+        self.found = found
+
+
+def _load_metadata_with_schema_hint(path: Path) -> Metadata:
+    """Read metadata.json. Raises ``MetadataSchemaTooOld`` when the file is
+    on the v1 schema (so callers can hint at `mintd update metadata`); the
+    underlying ``pydantic.ValidationError`` otherwise. ``FileNotFoundError``
+    propagates verbatim."""
+    raw = path.read_text(encoding="utf-8")
+    try:
+        peek = json.loads(raw)
+    except json.JSONDecodeError:
+        peek = {}
+    sv = peek.get("schema_version") if isinstance(peek, dict) else None
+    if sv is not None and sv != "2.0":
+        raise MetadataSchemaTooOld(path=path, found=str(sv))
+    return Metadata.model_validate_json(raw)
 
 
 def _add_global_output_flags(parser: argparse.ArgumentParser) -> None:
@@ -933,17 +958,16 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     
     reporter.debug(f"resolved registry_url={config.registry_url}")
     try:
-        with reporter.status(f"Cloning {args.name}..."):
-            dest = clone_and_pull_product(
-                client, dvc_ops, registry_git_ops, fast_sync_ops,
-                name=args.name,
-                dest=args.dest,
-                rev=args.rev,
-                primary_only=args.primary_only,
-                jobs=args.jobs,
-                extra_dvc_args=args.dvc_args or None,
-                reporter=reporter,
-            )
+        dest = clone_and_pull_product(
+            client, dvc_ops, registry_git_ops, fast_sync_ops,
+            name=args.name,
+            dest=args.dest,
+            rev=args.rev,
+            primary_only=args.primary_only,
+            jobs=args.jobs,
+            extra_dvc_args=args.dvc_args or None,
+            reporter=reporter,
+        )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")
         return 1
@@ -1367,15 +1391,34 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
-        metadata = Metadata.from_json_file(args.path / "metadata.json")
+        metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
     except FileNotFoundError as exc:
         reporter.error(str(exc))
         return 1
+    except MetadataSchemaTooOld as exc:
+        reporter.error(
+            str(exc),
+            hint="run 'mintd update metadata' to migrate this project to v2",
+        )
+        return 1
+    except ValidationError as exc:
+        reporter.error(
+            f"metadata.json failed v2 schema validation ({len(exc.errors())} field error(s))",
+            hint="run 'mintd check' to see field-level details",
+        )
+        return 1
+    findings = check_project(args.path, upgrades=False)
+    error_findings = [f for f in findings if f.severity == "error"]
+    if error_findings:
+        return _render_findings(error_findings, json_out=False)
     with reporter.status("Registering project with the catalog…"):
         try:
-            result = client.register(metadata)
+            result = client.register(metadata, reporter=reporter)
         except CatalogAlreadyExists as exc:
-            reporter.error(str(exc))
+            reporter.error(
+                f"catalog entry {str(exc)!r} already exists",
+                hint="use 'mintd registry update' to push changes to an existing entry",
+            )
             return 1
     if result.dry_run:
         reporter.info(f"Would register {result.name!r} (dry-run; no PR opened).")
@@ -1395,15 +1438,31 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
-        metadata = Metadata.from_json_file(args.path / "metadata.json")
+        metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
     except FileNotFoundError as exc:
         reporter.error(str(exc))
         return 1
-    with reporter.status("Updating catalog entry…"):
+    except MetadataSchemaTooOld as exc:
+        reporter.error(
+            str(exc),
+            hint="run 'mintd update metadata' to migrate this project to v2",
+        )
+        return 1
+    except ValidationError as exc:
+        reporter.error(
+            f"metadata.json failed v2 schema validation ({len(exc.errors())} field error(s))",
+            hint="run 'mintd check' to see field-level details",
+        )
+        return 1
+    with reporter.status("Updating project registry entry…"):
+
         try:
-            result = client.update(metadata, dry_run=args.dry_run)
+            result = client.update(metadata, dry_run=args.dry_run, reporter=reporter)
         except CatalogNotFound as exc:
-            reporter.error(str(exc))
+            reporter.error(
+                f"catalog entry {str(exc)!r} not found",
+                hint="run 'mintd registry register' first to register this project",
+            )
             return 1
     if not result.changes:
         reporter.info("No changes to publish." + (" (dry-run)" if result.dry_run else ""))
@@ -1506,6 +1565,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
                 dvc_ops=dvc_ops,
                 git_ops=git_ops,
                 message=args.message,
+                reporter=reporter,
             )
         except (WorkingTreeDirty, PublishError) as exc:
             reporter.error(str(exc), hint=exc.recovery_hint or None)

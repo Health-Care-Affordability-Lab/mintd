@@ -326,3 +326,61 @@ def test_catalog_entry_repo_url_property(client: CatalogClient) -> None:
     client.register(_load_metadata(name="provider-xw", mutate=set_url))
     entry = client.fetch("provider-xw")
     assert entry.repo_url == "https://github.com/example-org/provider-xw"
+
+
+# ---------------------------------------------------------------------------
+# Slice 36 — Pattern C: phase relabeling via reporter.update_status
+# ---------------------------------------------------------------------------
+
+
+class _RecordingReporter:
+    """Minimal stub recording every update_status call. Doesn't render
+    anything; just appends labels to .labels in order."""
+
+    def __init__(self) -> None:
+        self.labels: list[str] = []
+
+    def update_status(self, msg: str) -> None:
+        self.labels.append(msg)
+
+
+def test_catalog_register_updates_status_between_phases(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    git_client = GitCatalogClient(
+        registry_repo_url=str(remote_registry_empty),
+        work_dir=tmp_path / "cache",
+        git_ops=_FakeRegistryGitOps(),
+    )
+    rep = _RecordingReporter()
+    git_client.register(_load_metadata(name="proj"), reporter=rep)  # type: ignore[arg-type]
+    assert rep.labels == [
+        "Writing catalog entry...",
+        "Committing to registry...",
+        "Pushing to registry...",
+        "Opening PR...",
+    ]
+
+
+def test_catalog_update_updates_status_between_phases(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    git_client = GitCatalogClient(
+        registry_repo_url=str(remote_registry_empty),
+        work_dir=tmp_path / "cache",
+        git_ops=_FakeRegistryGitOps(),
+    )
+    # First register (without reporter), then update with reporter.
+    git_client.register(_load_metadata(name="proj"))
+
+    def change_desc(data: dict[str, Any]) -> None:
+        data["metadata"]["description"] = "updated"
+
+    rep = _RecordingReporter()
+    git_client.update(_load_metadata(name="proj", mutate=change_desc), reporter=rep)  # type: ignore[arg-type]
+    assert rep.labels == [
+        "Writing catalog entry...",
+        "Committing to registry...",
+        "Pushing to registry...",
+        "Opening PR...",
+    ]
