@@ -338,16 +338,26 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
 def discover_pipeline_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     """Pipeline outs from ``dvc.lock`` that fast-sync can handle.
 
-    Filters ``parse_dvc_lock_outs`` to entries whose top-level
-    ``cloud.<remote>`` block carries a ``version_id``. Outs without one
-    (never pushed, or pushed under a different remote name) route to
-    ``dvc pull`` instead.
+    Accepts two shapes:
+
+    1. Single-file outs whose top-level ``cloud.<remote>`` block carries a
+       ``version_id`` — the straightforward case.
+    2. ``files:``-format directory outs whose per-file entries each carry
+       ``cloud.<remote>.version_id``. Real-world DVC lockfiles don't emit a
+       top-level ``cloud`` block on dir-outs (only per-file ones inside
+       ``files:``), so this branch is what makes pipeline dir-outs reachable
+       in practice. ``fetch_files_dir_contents`` operates on per-file entries
+       and doesn't need the top-level version_id.
+
+    Outs that fit neither shape route to ``dvc pull`` instead.
     """
-    return [
-        out
-        for out in parse_dvc_lock_outs(project_path, remote_name)
-        if out.version_id
-    ]
+    results: list[DvcOut] = []
+    for out in parse_dvc_lock_outs(project_path, remote_name):
+        if out.version_id:
+            results.append(out)
+        elif out.is_files_format and out.files and all(fe.version_id for fe in out.files):
+            results.append(out)
+    return results
 
 
 def discover_all_outs(project_path: Path) -> list[str]:

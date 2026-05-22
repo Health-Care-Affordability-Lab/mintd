@@ -41,10 +41,6 @@ stages:
       - path: ../data/final/subdir/
         md5: ccc82183dd1695aa4cd7e2730ef7ce.dir
         size: 500
-        cloud:
-          test-bucket:
-            etag: ffd2642ed1b6419304f85c85a0378f89-1
-            version_id: 001779413884866418407-anAsWI_7fv-dir
         files:
           - relpath: a.parquet
             md5: 11182183dd1695aa4cd7e2730ef7ce

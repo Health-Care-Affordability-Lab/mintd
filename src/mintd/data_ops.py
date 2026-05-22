@@ -84,7 +84,14 @@ def data_pull(
                 pass
 
         for out in pipeline_outs:
-            total_bytes += out.size
+            # For files-format dir-outs, sum per-file sizes — DVC writes the
+            # top-level `size:` field as the dir manifest's size only, not
+            # the aggregate. Without this, the progress bar's expected total
+            # massively undershoots actual bytes-on-the-wire.
+            if out.is_files_format and out.files:
+                total_bytes += sum(fe.size for fe in out.files)
+            else:
+                total_bytes += out.size
 
         progress_cm = (
             reporter.progress(total_bytes, desc=f"Pulling {project_path.name}")

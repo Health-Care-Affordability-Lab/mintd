@@ -1514,24 +1514,32 @@ def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
     assert len(outs) == 6
     assert len(discover_pipeline_outs(project, "test-bucket")) == 6
 
-    # All paths under data/final/, all version_aware, all with non-empty version_id
+    # All paths under data/final/
     for o in outs:
         assert o.path.startswith("data/final/")
-        assert o.is_path_based is True
-        assert o.version_id
         assert o.md5
 
+    # 5 single-file outs are path-based + have version_ids
+    single_file_outs = [o for o in outs if not o.is_files_format]
+    assert len(single_file_outs) == 5
+    for o in single_file_outs:
+        assert o.is_path_based is True
+        assert o.version_id
+
     # Aggregate size of single-file outs (5 files, ~200 MB total)
-    single_file_size = sum(o.size for o in outs if not o.is_files_format)
+    single_file_size = sum(o.size for o in single_file_outs)
     assert 1.9e8 < single_file_size < 2.1e8
 
-    # Spot check subdir/
+    # Spot check subdir/ — real-world DVC lockfile shape: dir-outs have
+    # only per-file cloud blocks, NO top-level cloud block. The dir-out's
+    # top-level version_id is therefore None, but per-file entries carry
+    # their own version_ids — that's what fetch_files_dir_contents uses.
     subdir = next(o for o in outs if "subdir" in o.path)
     assert subdir.is_files_format is True
     assert subdir.is_dir is True
     assert subdir.files is not None
     assert len(subdir.files) == 2
-    assert subdir.version_id == "001779413884866418407-anAsWI_7fv-dir"
+    assert subdir.version_id is None  # no top-level cloud block (real DVC shape)
     assert subdir.path == "data/final/subdir"
 
     # Per-file cloud.<remote>.version_id must round-trip into DvcFileEntry
@@ -1540,4 +1548,69 @@ def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
     for fe in subdir.files:
         assert fe.version_id, f"file entry {fe.relpath!r} lost its version_id"
         assert fe.is_path_based is True
+
+
+def test_discover_pipeline_outs_includes_files_format_dir_with_only_per_file_cloud(
+    tmp_path: Path,
+) -> None:
+    """Real-world `dvc push` output: directory outs land in ``dvc.lock`` with
+    only per-file ``cloud`` blocks under ``files:`` — no top-level ``cloud``
+    on the dir-out itself. discover_pipeline_outs must include such dir-outs
+    so fast-sync handles them via fetch_files_dir_contents (which keys off
+    per-file version_id, not the absent top-level one)."""
+    _write_lock(
+        tmp_path,
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: data/dir/\n"
+            "        md5: ffffffffffffffffffffffffffffffff.dir\n"
+            "        size: 500\n"
+            "        files:\n"
+            "          - relpath: a.parquet\n"
+            "            md5: 11111111111111111111111111111111\n"
+            "            cloud:\n"
+            "              x:\n"
+            "                version_id: v-a\n"
+            "          - relpath: b.parquet\n"
+            "            md5: 22222222222222222222222222222222\n"
+            "            cloud:\n"
+            "              x:\n"
+            "                version_id: v-b\n"
+        ),
+    )
+    outs = discover_pipeline_outs(tmp_path, "x")
+    assert len(outs) == 1
+    out = outs[0]
+    assert out.is_files_format is True
+    assert out.version_id is None  # no top-level cloud
+    assert out.files is not None
+    assert all(fe.version_id for fe in out.files)
+
+
+def test_discover_pipeline_outs_excludes_files_format_dir_with_missing_per_file_version_id(
+    tmp_path: Path,
+) -> None:
+    """If even one per-file entry lacks a version_id, the dir-out routes to
+    fallback — fast-sync would silently skip that file's fetch."""
+    _write_lock(
+        tmp_path,
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: data/dir/\n"
+            "        md5: ffffffffffffffffffffffffffffffff.dir\n"
+            "        files:\n"
+            "          - relpath: a.parquet\n"
+            "            md5: 11111111111111111111111111111111\n"
+            "            cloud:\n"
+            "              x:\n"
+            "                version_id: v-a\n"
+            "          - relpath: b.parquet\n"
+            "            md5: 22222222222222222222222222222222\n"
+        ),
+    )
+    assert discover_pipeline_outs(tmp_path, "x") == []
 
