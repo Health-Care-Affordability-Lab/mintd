@@ -251,3 +251,64 @@ def test_data_pull_fast_sync_raises_pull_all_falls_back_to_dvc_pull_no_targets(
     data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
     assert len(fake.pull_calls) == 1
     assert fake.pull_calls[0].targets is None  # not ["a.dvc", "b.dvc"]
+
+
+def test_data_pull_fast_sync_handles_pipeline_only_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pipeline-only project (no .dvc files): fast-sync receives the 6
+    pipeline outs discovered from dvc.lock, dvc_ops.checkout materializes
+    them, and the catch-all dvc pull still runs (because dvc.yaml is
+    present — preserves the existing safety net for non-fast-syncable
+    pipeline outs). This is the test that would have caught the user's
+    original `mintd data clone` hang."""
+    import shutil
+    fixture = Path("tests/fixtures/pipeline_project")
+    shutil.copytree(fixture, tmp_path / "project")
+    project = tmp_path / "project"
+
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=6, fallback_targets=[])
+    data_pull(project, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    assert len(fast_fake.calls) == 1
+    assert fast_fake.calls[0].pipeline_outs is not None
+    assert len(fast_fake.calls[0].pipeline_outs) == 6
+
+    assert len(fake.checkout_calls) == 1
+    checkout_targets = fake.checkout_calls[0].targets or []
+    assert all(t.startswith("data/final/") for t in checkout_targets)
+    assert len(checkout_targets) == 6
+
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets is None
+
+
+def test_data_pull_fast_sync_handles_mixed_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mixed project: one .dvc file AND the pipeline fixture's dvc.lock.
+    Both groups reach fast-sync; both appear in dvc_ops.checkout's targets."""
+    import shutil
+    fixture = Path("tests/fixtures/pipeline_project")
+    shutil.copytree(fixture, tmp_path / "project")
+    project = tmp_path / "project"
+
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: ["a.dvc"])
+
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=7, fallback_targets=[])
+    data_pull(project, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    assert len(fast_fake.calls) == 1
+    assert fast_fake.calls[0].targets == ["a.dvc"]
+    assert fast_fake.calls[0].pipeline_outs is not None
+    assert len(fast_fake.calls[0].pipeline_outs) == 6
+
+    checkout_targets = fake.checkout_calls[0].targets or []
+    assert "a.dvc" in checkout_targets
+    assert any(t.startswith("data/final/") for t in checkout_targets)

@@ -1,0 +1,62 @@
+stages:
+  stage_a:
+    outs:
+      - path: ../data/final/file_a.parquet
+        md5: 93fb182183dd1695aa4cd7e2730ef7ce
+        size: 118568995
+        cloud:
+          test-bucket:
+            etag: eac2642ed1b6419304f85c85a0378f89-3
+            version_id: 001779413884866418407-anAsWI_7fv
+      - path: ../data/final/file_b.parquet
+        md5: 84fb182183dd1695aa4cd7e2730ef7ce
+        size: 25000000
+        cloud:
+          test-bucket:
+            etag: bbc2642ed1b6419304f85c85a0378f89-1
+            version_id: 001779413884866418407-anAsWI_7fv-2
+      - path: ../data/final/file_c.parquet
+        md5: 73ab182183dd1695aa4cd7e2730ef7ce
+        size: 31000000
+        cloud:
+          test-bucket:
+            etag: cc2642ed1b6419304f85c85a0378f89-1
+            version_id: 001779413884866418407-anAsWI_7fv-3
+  stage_b:
+    outs:
+      - path: ../data/final/file_d.parquet
+        md5: 62cd182183dd1695aa4cd7e2730ef7ce
+        size: 17000000
+        cloud:
+          test-bucket:
+            etag: dd2642ed1b6419304f85c85a0378f89-1
+            version_id: 001779413884866418407-anAsWI_7fv-4
+      - path: ../data/final/file_e.parquet
+        md5: 51ef182183dd1695aa4cd7e2730ef7ce
+        size: 8500000
+        cloud:
+          test-bucket:
+            etag: ee2642ed1b6419304f85c85a0378f89-1
+            version_id: 001779413884866418407-anAsWI_7fv-5
+      - path: ../data/final/subdir/
+        md5: ccc82183dd1695aa4cd7e2730ef7ce.dir
+        size: 500
+        cloud:
+          test-bucket:
+            etag: ffd2642ed1b6419304f85c85a0378f89-1
+            version_id: 001779413884866418407-anAsWI_7fv-dir
+        files:
+          - relpath: a.parquet
+            md5: 11182183dd1695aa4cd7e2730ef7ce
+            size: 250
+            cloud:
+              test-bucket:
+                etag: a1d2642ed1b6419304f85c85a0378f89-1
+                version_id: 001779413884866418407-anAsWI_7fv-d1
+          - relpath: b.parquet
+            md5: 22282183dd1695aa4cd7e2730ef7ce
+            size: 250
+            cloud:
+              test-bucket:
+                etag: b2d2642ed1b6419304f85c85a0378f89-1
+                version_id: 001779413884866418407-anAsWI_7fv-d2

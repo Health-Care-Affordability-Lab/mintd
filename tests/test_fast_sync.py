@@ -26,6 +26,7 @@ from mintd._fast_sync_ops import (
     check_bucket_versioning,
     classify_targets,
     discover_all_outs,
+    discover_pipeline_outs,
     ensure_dir_manifest,
     fetch_dir_contents,
     fetch_dir_manifest,
@@ -33,6 +34,7 @@ from mintd._fast_sync_ops import (
     fetch_to_cache,
     get_remote_config,
     is_cached,
+    parse_dvc_lock_outs,
     parse_dvc_outs,
     parse_s3_url,
     s3_key_for,
@@ -1350,3 +1352,192 @@ def test_try_fast_pull_path_based_files_format_dir_nested(
         tmp_path / ".dvc" / "cache" / "files" / "md5"
         / expected_md5[:2] / f"{expected_md5[2:]}.dir"
     ).exists()
+
+def _write_lock(tmp_path: Path, body: str, yaml_body: str | None = None) -> Path:
+    """Write a minimal pipeline project (dvc.lock + optional dvc.yaml) to tmp_path."""
+    (tmp_path / "dvc.lock").write_text(body, encoding="utf-8")
+    if yaml_body is not None:
+        (tmp_path / "dvc.yaml").write_text(yaml_body, encoding="utf-8")
+    return tmp_path
+
+
+def test_parse_dvc_lock_outs_basic(tmp_path: Path) -> None:
+    """Single-stage lock, no wdir → one DvcOut with the cloud version_id."""
+    _write_lock(
+        tmp_path,
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: data/out.parquet\n"
+            "        md5: abcdef1234567890abcdef1234567890\n"
+            "        size: 1024\n"
+            "        cloud:\n"
+            "          test-bucket:\n"
+            "            etag: e1\n"
+            "            version_id: v1\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "test-bucket")
+    assert len(outs) == 1
+    o = outs[0]
+    assert o.target == "data/out.parquet"
+    assert o.path == "data/out.parquet"
+    assert o.md5 == "abcdef1234567890abcdef1234567890"
+    assert o.version_id == "v1"
+    assert o.is_path_based is True
+    assert o.dvc_file == tmp_path / "dvc.lock"
+
+
+def test_parse_dvc_lock_outs_resolves_wdir_relative_paths(tmp_path: Path) -> None:
+    """dvc.lock paths are relative to the stage's wdir from dvc.yaml."""
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  build:\n"
+            "    wdir: code\n"
+            "    outs:\n"
+            "      - path: ../data/final/foo.parquet\n"
+        ),
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: ../data/final/foo.parquet\n"
+            "        md5: abcdef1234567890abcdef1234567890\n"
+            "        cloud:\n"
+            "          x:\n"
+            "            version_id: v1\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert len(outs) == 1
+    assert outs[0].path == "data/final/foo.parquet"
+
+
+def test_parse_dvc_lock_outs_skips_outs_without_cloud_section(tmp_path: Path) -> None:
+    """parse_dvc_lock_outs returns BOTH outs (no filter); discover_pipeline_outs
+    only returns ones with a top-level cloud.<remote>.version_id."""
+    _write_lock(
+        tmp_path,
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: with_cloud.parquet\n"
+            "        md5: 11111111111111111111111111111111\n"
+            "        cloud:\n"
+            "          x:\n"
+            "            version_id: v1\n"
+            "      - path: no_cloud.parquet\n"
+            "        md5: 22222222222222222222222222222222\n"
+        ),
+    )
+    parsed = parse_dvc_lock_outs(tmp_path, "x")
+    assert len(parsed) == 2
+    discovered = discover_pipeline_outs(tmp_path, "x")
+    assert len(discovered) == 1
+    assert discovered[0].path == "with_cloud.parquet"
+
+
+def test_parse_dvc_lock_outs_missing_dvc_lock_returns_empty(tmp_path: Path) -> None:
+    """No dvc.lock at all → []."""
+    assert parse_dvc_lock_outs(tmp_path, "x") == []
+
+
+def test_parse_dvc_lock_outs_missing_dvc_yaml_degrades_to_default_wdir(
+    tmp_path: Path,
+) -> None:
+    """dvc.lock present, dvc.yaml absent: parser falls back to wdir='.' and
+    still returns the outs (does NOT return []). Locks the spec contract that
+    dvc.yaml is optional."""
+    _write_lock(
+        tmp_path,
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: data/final/foo.parquet\n"
+            "        md5: 33333333333333333333333333333333\n"
+            "        cloud:\n"
+            "          x:\n"
+            "            version_id: v1\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert len(outs) == 1
+    assert outs[0].path == "data/final/foo.parquet"
+
+
+def test_try_fast_pull_early_abort_routes_pipeline_outs_to_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The P0-catching regression test. When try_fast_pull aborts early
+    (here: _dvc_version_ok returns False), the FastPullResult.fallback_targets
+    MUST include both .dvc-file targets and the pipeline outs' target IDs.
+    Without this wiring, the orchestrator would compute pipeline outs as
+    'synced' when fast-sync gave up, and dvc_ops.checkout would crash on
+    cache files that were never fetched."""
+    monkeypatch.setattr("mintd._fast_sync_ops._dvc_version_ok", lambda: False)
+
+    pipe_out = DvcOut(
+        target="data/final/foo.parquet",
+        path="data/final/foo.parquet",
+        md5="aabbccddeeff00112233445566778899",
+        is_dir=False,
+        version_id="v-pipeline",
+        is_path_based=True,
+        dvc_file=tmp_path / "dvc.lock",
+    )
+    ops = SubprocessFastSyncOps()
+    result = ops.try_fast_pull(
+        project_path=tmp_path,
+        targets=["a.dvc"],
+        remote_name="x",
+        pipeline_outs=[pipe_out],
+    )
+
+    assert result.success is False
+    assert "a.dvc" in result.fallback_targets
+    assert "data/final/foo.parquet" in result.fallback_targets
+
+
+def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
+    import shutil
+    fixture = Path("tests/fixtures/pipeline_project")
+    shutil.copytree(fixture, tmp_path / "project")
+    project = tmp_path / "project"
+
+    # Verify parser against the 6-out fixture (5 files + 1 dir out)
+    outs = parse_dvc_lock_outs(project, "test-bucket")
+    assert len(outs) == 6
+    assert len(discover_pipeline_outs(project, "test-bucket")) == 6
+
+    # All paths under data/final/, all version_aware, all with non-empty version_id
+    for o in outs:
+        assert o.path.startswith("data/final/")
+        assert o.is_path_based is True
+        assert o.version_id
+        assert o.md5
+
+    # Aggregate size of single-file outs (5 files, ~200 MB total)
+    single_file_size = sum(o.size for o in outs if not o.is_files_format)
+    assert 1.9e8 < single_file_size < 2.1e8
+
+    # Spot check subdir/
+    subdir = next(o for o in outs if "subdir" in o.path)
+    assert subdir.is_files_format is True
+    assert subdir.is_dir is True
+    assert subdir.files is not None
+    assert len(subdir.files) == 2
+    assert subdir.version_id == "001779413884866418407-anAsWI_7fv-dir"
+    assert subdir.path == "data/final/subdir"
+
+    # Per-file cloud.<remote>.version_id must round-trip into DvcFileEntry
+    # so fetch_files_dir_contents can fetch by version (version-aware
+    # safety net for directory outputs).
+    for fe in subdir.files:
+        assert fe.version_id, f"file entry {fe.relpath!r} lost its version_id"
+        assert fe.is_path_based is True
+

@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ._dvc_ops import DvcOps
-from ._fast_sync_ops import FastSyncOps, discover_all_outs, parse_dvc_outs
+from ._fast_sync_ops import (
+    DvcOut,
+    FastSyncOps,
+    discover_all_outs,
+    discover_pipeline_outs,
+    parse_dvc_outs,
+)
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -48,14 +54,22 @@ def data_pull(
         # Track the original request shape: "pull-all" (None) carries different
         # post-fast-sync semantics than "pull these specific .dvc files."
         pull_all_requested = targets is None
+        remote_name = remote or _default_dvc_remote(project_path) or "origin"
+
+        pipeline_outs: list[DvcOut] = []
         if pull_all_requested:
             targets = discover_all_outs(project_path)
-            if targets:
-                logger.info("fast-sync: discovered %d .dvc target(s)", len(targets))
-            else:
-                logger.info("no .dvc targets discovered; only dvc.yaml stages remain (if any)")
+            pipeline_outs = discover_pipeline_outs(project_path, remote_name)
 
-        remote_name = remote or _default_dvc_remote(project_path) or "origin"
+            n_dvc = len(targets)
+            n_pipe = len(pipeline_outs)
+            if n_dvc + n_pipe:
+                logger.info(
+                    "fast-sync: discovered %d .dvc target(s) + %d pipeline output(s)",
+                    n_dvc, n_pipe,
+                )
+            else:
+                logger.info("no .dvc targets and no pipeline outs discovered")
 
         # Compute total bytes upfront for the progress bar (filesystem-only,
         # sub-second on realistic repos).
@@ -69,6 +83,9 @@ def data_pull(
                 # Malformed or missing .dvc — fast-sync will route to fallback.
                 pass
 
+        for out in pipeline_outs:
+            total_bytes += out.size
+
         progress_cm = (
             reporter.progress(total_bytes, desc=f"Pulling {project_path.name}")
             if reporter is not None
@@ -77,7 +94,7 @@ def data_pull(
 
         fast_sync_failed = False
         result = None
-        if targets:
+        if targets or pipeline_outs:
             with progress_cm as advance:
                 had_setter = hasattr(fast_sync_ops, "set_progress")
                 if had_setter:
@@ -86,9 +103,10 @@ def data_pull(
                     try:
                         result = fast_sync_ops.try_fast_pull(
                             project_path=project_path,
-                            targets=targets,
+                            targets=targets or [],
                             remote_name=remote_name,
                             jobs=jobs or 8,
+                            pipeline_outs=pipeline_outs,
                         )
                     except Exception as exc:
                         logger.warning("fast-sync raised; falling back to full dvc pull: %s", exc)
@@ -123,7 +141,10 @@ def data_pull(
                     result.synced_count,
                 )
             fallback_set = set(result.fallback_targets)
-            synced_targets = [t for t in targets if t not in fallback_set] if targets else []
+
+            pipeline_target_ids = [out.target for out in pipeline_outs]
+            candidate_synced = (targets or []) + pipeline_target_ids
+            synced_targets = [t for t in candidate_synced if t not in fallback_set]
 
             if synced_targets:
                 dvc_ops.checkout(targets=synced_targets)

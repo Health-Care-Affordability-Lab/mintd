@@ -1,0 +1,13 @@
+stages:
+  stage_a:
+    wdir: code
+    outs:
+      - path: ../data/final/file_a.parquet
+      - path: ../data/final/file_b.parquet
+      - path: ../data/final/file_c.parquet
+  stage_b:
+    wdir: code
+    outs:
+      - path: ../data/final/file_d.parquet
+      - path: ../data/final/file_e.parquet
+      - path: ../data/final/subdir/

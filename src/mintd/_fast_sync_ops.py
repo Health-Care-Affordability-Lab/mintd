@@ -228,6 +228,128 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     return outs
 
 
+def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
+    """Parse ``project_path/dvc.lock`` into ``DvcOut`` entries for pipeline-
+    stage outputs (no per-output ``.dvc`` pointer files). Slice 37 — gives
+    fast-sync a way to enumerate pipeline products so they bypass DVC's
+    rehash-on-pull cost on version_aware remotes.
+
+    Reads ``dvc.yaml`` (optional) to build the ``stage → wdir`` map so
+    lock-relative ``out.path`` resolves correctly to project-relative.
+    When ``dvc.yaml`` is missing, every stage's ``wdir`` defaults to ``.``.
+
+    Returns ``[]`` when ``dvc.lock`` is missing or malformed.
+    """
+    yaml_path = project_path / "dvc.yaml"
+    lock_path = project_path / "dvc.lock"
+
+    wdir_map: dict[str, str] = {}
+    try:
+        if yaml_path.exists():
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+                if isinstance(data, dict) and "stages" in data:
+                    for stage, stage_data in data["stages"].items():
+                        wdir = stage_data.get("wdir", ".")
+                        if Path(wdir).is_absolute():
+                            logger.warning(
+                                "absolute wdir in dvc.yaml stage %s: %s; skipping stage",
+                                stage, wdir,
+                            )
+                            wdir_map[stage] = "SKIP"
+                        else:
+                            wdir_map[stage] = wdir
+    except (FileNotFoundError, yaml.YAMLError, OSError):
+        pass
+
+    try:
+        with open(lock_path) as f:
+            lock_data = yaml.safe_load(f)
+    except (FileNotFoundError, yaml.YAMLError, OSError):
+        return []
+
+    if not isinstance(lock_data, dict) or "stages" not in lock_data:
+        return []
+
+    outs: list[DvcOut] = []
+    for stage, stage_data in lock_data["stages"].items():
+        if wdir_map.get(stage) == "SKIP":
+            continue
+        if "outs" not in stage_data:
+            continue
+        wdir = wdir_map.get(stage, ".")
+        for out in stage_data["outs"]:
+            has_md5 = bool(out.get("md5"))
+            has_files = "files" in out
+            if not has_md5 and not has_files:
+                continue
+            try:
+                raw_path = out["path"]
+                abs_path = (project_path / wdir / raw_path).resolve()
+                rel = abs_path.relative_to(project_path.resolve()).as_posix()
+            except (ValueError, KeyError):
+                logger.warning(
+                    "path resolution failed for stage %s, out %s; skipping",
+                    stage, out.get("path"),
+                )
+                continue
+
+            cloud_block = out.get("cloud") or {}
+            remote_cloud = cloud_block.get(remote_name) or {}
+            version_id_raw = remote_cloud.get("version_id")
+            version_id = str(version_id_raw) if version_id_raw else None
+            is_path_based = bool(version_id) and not out.get("version_id")
+            md5 = str(out.get("md5", ""))
+
+            if has_files:
+                is_files_format = True
+                is_dir = True
+                files_list: list[DvcFileEntry] | None = [
+                    DvcFileEntry(
+                        md5=str(fe.get("md5", "")),
+                        relpath=str(fe.get("relpath", "")),
+                        size=int(fe.get("size", 0) or 0),
+                        version_id=_extract_version_id_from_file_entry(fe, remote_name),
+                        is_path_based=_is_path_based_file_entry(fe, remote_name),
+                    )
+                    for fe in out["files"]
+                ]
+            else:
+                is_files_format = False
+                is_dir = md5.endswith(".dir")
+                files_list = None
+
+            outs.append(DvcOut(
+                target=rel,
+                path=rel,
+                md5=md5,
+                is_dir=is_dir,
+                version_id=version_id,
+                is_files_format=is_files_format,
+                files=files_list,
+                size=int(out.get("size", 0) or 0),
+                is_path_based=is_path_based,
+                dvc_file=lock_path,
+                is_import=False,
+            ))
+    return outs
+
+
+def discover_pipeline_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
+    """Pipeline outs from ``dvc.lock`` that fast-sync can handle.
+
+    Filters ``parse_dvc_lock_outs`` to entries whose top-level
+    ``cloud.<remote>`` block carries a ``version_id``. Outs without one
+    (never pushed, or pushed under a different remote name) route to
+    ``dvc pull`` instead.
+    """
+    return [
+        out
+        for out in parse_dvc_lock_outs(project_path, remote_name)
+        if out.version_id
+    ]
+
+
 def discover_all_outs(project_path: Path) -> list[str]:
     """Walk project_path recursively for ``*.dvc`` files; return paths
     relative to project_path, sorted lexicographically.
@@ -743,7 +865,7 @@ def _create_s3_client(remote_cfg: dict[str, str], aws_profile_name: str | None) 
         session = boto3.Session(profile_name=aws_profile_name)
     except ProfileNotFound:
         session = boto3.Session()
-    
+
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:
         endpoint_url = remote_cfg.get("endpoint")
@@ -758,6 +880,7 @@ class FastSyncOps(Protocol):
         targets: list[str],
         remote_name: str,
         jobs: int = 8,
+        pipeline_outs: list[DvcOut] | None = None,
     ) -> FastPullResult: ...
 
 
@@ -809,33 +932,45 @@ class SubprocessFastSyncOps:
         targets: list[str],
         remote_name: str,
         jobs: int = 8,
+        pipeline_outs: list[DvcOut] | None = None,
     ) -> FastPullResult:
+        def _all_target_ids() -> list[str]:
+            """Every target identifier this call is responsible for routing
+            to fallback when fast-sync aborts — both .dvc and pipeline."""
+            ids: list[str] = list(targets)
+            if pipeline_outs:
+                ids.extend(o.target for o in pipeline_outs)
+            return ids
+
         if not _dvc_version_ok():
-            return _push_all_to_fallback(targets, "dvc version mismatch")
-            
+            return _push_all_to_fallback(_all_target_ids(), "dvc version mismatch")
+
         try:
             remote_cfg = get_remote_config(project_path, remote_name)
         except (FileNotFoundError, KeyError) as exc:
-            return _push_all_to_fallback(targets, f"remote config not found: {exc}")
-            
+            return _push_all_to_fallback(_all_target_ids(), f"remote config not found: {exc}")
+
         try:
             bucket, prefix = parse_s3_url(remote_cfg.get("url", ""))
         except ValueError as exc:
-            return _push_all_to_fallback(targets, f"non-S3 remote: {exc}")
+            return _push_all_to_fallback(_all_target_ids(), f"non-S3 remote: {exc}")
 
         if boto3 is None:
-            return _push_all_to_fallback(targets, "boto3 not importable")
+            return _push_all_to_fallback(_all_target_ids(), "boto3 not importable")
 
         s3 = _create_s3_client(remote_cfg, self._aws_profile_name)
         if not check_bucket_versioning(s3, bucket):
-            return _push_all_to_fallback(targets, "bucket versioning disabled")
+            return _push_all_to_fallback(_all_target_ids(), "bucket versioning disabled")
 
         all_outs, fallback, hash_missing = classify_targets(project_path, targets, remote_name)
+
+        if pipeline_outs:
+            all_outs.extend(pipeline_outs)
 
         fallback.extend(hash_missing)
 
         if not spot_check_versions(s3, bucket, prefix, all_outs, project_path):
-            return _push_all_to_fallback(targets, "version_id spot-check drift")
+            return _push_all_to_fallback(_all_target_ids(), "version_id spot-check drift")
 
         cache_dir = project_path / _DEFAULT_DVC_CACHE_REL
         synced = 0

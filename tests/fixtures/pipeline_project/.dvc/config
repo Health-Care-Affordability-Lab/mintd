@@ -1,0 +1,5 @@
+[core]
+    remote = test-bucket
+['remote "test-bucket"']
+    url = s3://test-bucket/products/example
+    version_aware = true

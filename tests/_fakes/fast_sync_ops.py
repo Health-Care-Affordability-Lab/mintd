@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+from mintd._fast_sync_ops import DvcOut
 from mintd.model import FastPullResult
 
 
@@ -13,6 +14,7 @@ class FastPullCall(NamedTuple):
     targets: list[str]
     remote_name: str
     jobs: int
+    pipeline_outs: list[DvcOut] | None
 
 
 class _FakeFastSyncOps:
@@ -34,10 +36,15 @@ class _FakeFastSyncOps:
         targets: list[str],
         remote_name: str,
         jobs: int = 8,
+        pipeline_outs: list[DvcOut] | None = None,
     ) -> FastPullResult:
         self.calls.append(
             FastPullCall(
-                project_path=project_path, targets=targets, remote_name=remote_name, jobs=jobs
+                project_path=project_path,
+                targets=targets,
+                remote_name=remote_name,
+                jobs=jobs,
+                pipeline_outs=pipeline_outs,
             )
         )
         if self.raises:
