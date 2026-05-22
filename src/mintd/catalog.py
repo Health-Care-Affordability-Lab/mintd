@@ -356,6 +356,12 @@ class GitCatalogClient:
 
         changes = _diff_entries(existing, new_entry)
 
+        if not changes:
+            return UpdateResult(
+                name=name, changes=[], dry_run=dry_run,
+                pr_number=None, pr_url=None,
+            )
+
         if dry_run:
             return UpdateResult(name=name, changes=changes, dry_run=True)
 

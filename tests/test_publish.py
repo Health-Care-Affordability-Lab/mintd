@@ -134,7 +134,15 @@ def test_publish_allows_equal_version_for_retry(tmp_path):
     assert result.version == "0.2.1"
     assert len(dvc.push_calls) == 1
     assert git.tag_calls[0].name == "v0.2.1"
-    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj, capture_output=True, text=True).stdout.strip() == head_sha
+    # Slice 35: same-version retries restamp status.last_updated etc., so
+    # local_diff is non-empty and a new metadata commit is expected. v1 parity.
+    new_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=proj, capture_output=True, text=True).stdout.strip()
+    assert new_head != head_sha
+    parents = subprocess.run(
+        ["git", "rev-list", "--count", f"{head_sha}..HEAD"],
+        cwd=proj, capture_output=True, text=True,
+    ).stdout.strip()
+    assert parents == "1"
 
 def test_publish_refuses_invalid_semver(tmp_path):
     proj = _seed_project(tmp_path)
@@ -303,6 +311,125 @@ def test_publish_blocked_when_primary_missing(tmp_path, monkeypatch):
             dvc_ops=_FakeDvcOps(),
             git_ops=_FakeRegistryGitOps(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Slice 35 — publish stamps last_updated / last_published_version / outputs[].last_published
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_publish_stamps_timestamps_on_outputs_and_status(tmp_path):
+    """`prepare_publish` writes status.last_updated, status.last_published_version,
+    and every outputs[*].last_published from a single canonical `now` — the
+    fix for the empty-catalog-diff bug that crashed publish on idempotent
+    catalog updates (v1 parity restored)."""
+    from datetime import datetime, timezone
+    from mintd.publish import prepare_publish
+
+    proj = _seed_project(tmp_path)
+    pinned = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=_FakeCatalogClient(),
+        git_ops=_FakeRegistryGitOps(),
+        now=pinned,
+    )
+    assert preview.new_metadata.status.last_updated == pinned
+    assert preview.new_metadata.status.last_published_version == "0.1.1"
+    assert preview.new_metadata.data_products.outputs
+    for o in preview.new_metadata.data_products.outputs:
+        assert o.last_published == pinned.isoformat()
+
+
+def test_prepare_publish_one_canonical_timestamp(tmp_path):
+    """All outputs share the same byte-identical stamp string — one canonical
+    `now()` per publish, not one per output."""
+    from datetime import datetime, timezone
+    from mintd.publish import prepare_publish
+
+    proj = _seed_project(tmp_path)
+    # Add a second output so the singleton assertion is meaningful.
+    m = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    existing_output = m["data_products"]["outputs"][0]
+    second = dict(existing_output)
+    second["path"] = "data/final/extra/"
+    second["primary"] = False
+    m["data_products"]["outputs"].append(second)
+    (proj / "metadata.json").write_text(json.dumps(m))
+    subprocess.run(["git", "add", "metadata.json"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-m", "add second output"], cwd=proj, check=True)
+
+    pinned = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=_FakeCatalogClient(),
+        git_ops=_FakeRegistryGitOps(),
+        now=pinned,
+    )
+    stamps = {o.last_published for o in preview.new_metadata.data_products.outputs}
+    assert len(stamps) == 1
+    assert stamps == {pinned.isoformat()}
+
+
+def test_prepare_publish_dry_run_also_stamps(tmp_path):
+    """Dry-run preview must reflect the stamped fields so the catalog diff
+    is honest about what would be written — no on-disk side effects."""
+    from datetime import datetime, timezone
+    from mintd.publish import prepare_publish
+
+    proj = _seed_project(tmp_path)
+    pinned = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=_FakeCatalogClient(),
+        git_ops=_FakeRegistryGitOps(),
+        now=pinned,
+    )
+    assert preview.new_metadata.status.last_updated == pinned
+    assert preview.new_metadata.data_products.outputs[0].last_published == pinned.isoformat()
+    # No write on dry-run: file on disk still has the seeded values.
+    on_disk = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    assert on_disk["mint"]["version"] == "0.1.0"
+
+
+def test_publish_full_flow_produces_nonempty_catalog_diff(tmp_path):
+    """End-to-end: a same-version retry that produced 0 catalog diff (the
+    original bug) now always produces ≥ 3 changes (status × 2 + per-output
+    last_published × N), so client.update() never reaches an empty-commit."""
+    from mintd.catalog import _diff_entries
+    from mintd.model import Metadata
+    from mintd.publish import prepare_publish
+
+    proj = _seed_project(tmp_path)
+    meta = Metadata.from_json_file(proj / "metadata.json")
+    existing_entry = meta.to_catalog_entry()
+    client = _FakeCatalogClient(entries={meta.project.name: existing_entry})
+
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=client,
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    diff = _diff_entries(existing_entry, preview.new_metadata.to_catalog_entry())
+    paths = {c.field_path for c in diff}
+    assert "status.last_updated" in paths
+    assert "status.last_published_version" in paths
+    # _diff_entries compares outputs as one list-level change rather than
+    # per-element; the new last_published stamp shows up inside that entry.
+    outputs_change = next(c for c in diff if c.field_path == "data_products.outputs")
+    after_first_output = outputs_change.after[0]
+    assert after_first_output["last_published"]  # non-empty
+    assert after_first_output["last_published"] != ""
+    assert len(diff) >= 3
 
 
 def test_prepare_publish_uses_project_name_not_full_name_for_catalog_fetch(tmp_path):

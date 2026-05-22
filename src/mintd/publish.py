@@ -7,6 +7,7 @@ manifest bumped + DVC pushed; the CLI prints partial-state warnings.
 
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ._dvc_ops import DvcOpError, DvcOps
@@ -98,6 +99,7 @@ def prepare_publish(
     dry_run: bool,
     client: CatalogClient,
     git_ops: RegistryGitOps,
+    now: datetime | None = None,
 ) -> PublishPreview:
     metadata_path = project_path / "metadata.json"
     findings = check_project(project_path, upgrades=False)
@@ -119,6 +121,14 @@ def prepare_publish(
     
     new_metadata = current.model_copy(deep=True)
     new_metadata.mint.version = new_version
+    published_at = now or datetime.now(timezone.utc)
+    stamp_str = published_at.isoformat()
+    new_metadata.status.last_updated = published_at
+    new_metadata.status.last_published_version = new_version
+    new_metadata.data_products.outputs = [
+        o.model_copy(update={"last_published": stamp_str})
+        for o in new_metadata.data_products.outputs
+    ]
     local_diff = _compute_diff(current, new_metadata)
     
     catalog_diff: list[FieldChange] = []

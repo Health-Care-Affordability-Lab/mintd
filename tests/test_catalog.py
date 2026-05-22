@@ -143,6 +143,43 @@ def test_update_missing_raises_not_found(client: CatalogClient) -> None:
         client.update(_load_metadata(name="never_registered"))
 
 
+def test_catalog_update_empty_diff_short_circuits_no_git_ops(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """Slice 35 defensive: when the projected entry is byte-identical to the
+    cached one (zero diff), `GitCatalogClient.update` must NOT invoke
+    `commit_all` — a `git commit` on a clean tree would exit 1 and crash
+    publish with a raw `CalledProcessError`. The early-return guards against
+    that. Scoped to the git backend; `InMemoryCatalogClient` already handles
+    empty diff cleanly."""
+
+    git_ops = _FakeRegistryGitOps()
+    git_client = GitCatalogClient(
+        registry_repo_url=str(remote_registry_empty),
+        work_dir=tmp_path / "cache",
+        git_ops=git_ops,
+    )
+    git_client.register(_load_metadata(name="proj"))
+
+    # Now arm the trap: any further commit_all must be the empty-diff bug
+    # (the early-return should bypass commit_all entirely).
+    def _trap(repo_dir: Path, message: str) -> None:
+        raise AssertionError(
+            "commit_all must not be called when the catalog diff is empty"
+        )
+    git_ops.commit_all = _trap  # type: ignore[assignment]
+
+    # Re-update with byte-identical metadata → zero diff.
+    result = git_client.update(_load_metadata(name="proj"))
+
+    assert isinstance(result, UpdateResult)
+    assert result.name == "proj"
+    assert result.changes == []
+    assert result.dry_run is False
+    assert result.pr_number is None
+    assert result.pr_url is None
+
+
 def test_update_dry_run_returns_changes_without_mutating(client: CatalogClient) -> None:
     """update(dry_run=True) returns the would-be UpdateResult; a subsequent
     fetch shows the OLD entry's description."""
