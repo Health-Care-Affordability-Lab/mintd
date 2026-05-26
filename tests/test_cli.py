@@ -49,7 +49,7 @@ def patched_clients(
         classmethod(lambda cls, path=None: cls()),
     )
     monkeypatch.setattr(
-        "mintd.cli._resolve_clients", lambda cfg, **_: (client, dvc_ops)
+        "mintd.cli._resolve_clients", lambda cfg, reporter=None, **_: (client, dvc_ops)
     )
     monkeypatch.setattr(
         "mintd.cli._resolve_catalog_client", lambda cfg, **_: client
@@ -58,6 +58,16 @@ def patched_clients(
         "mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None
     )
     return client, dvc_ops
+
+
+@pytest.fixture
+def recording_reporter(monkeypatch: pytest.MonkeyPatch):
+    """Inject a RecordingReporter as the CLI's reporter so presence
+    assertions (status/update_status/error events) are deterministic."""
+    from tests._fakes.reporter import RecordingReporter
+    rep = RecordingReporter()
+    monkeypatch.setattr("mintd.cli._build_reporter", lambda args: rep)
+    return rep
 
 
 def _register_provider_xw(
@@ -1716,3 +1726,246 @@ def test_cli_publish_non_tty_without_yes_errors(
     err = capsys.readouterr().err
     assert rc == 1
     assert "--yes" in err or "interactive" in err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Slice 38a — feedback presence (status / labels / hints)
+# ---------------------------------------------------------------------------
+
+
+def _register_with_storage(client: InMemoryCatalogClient, name: str = "provider-xw") -> None:
+    """Register an entry with a versioned storage block so `data ls` reaches
+    the S3 listing path."""
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = name
+    data["project"]["full_name"] = f"data_{name}"
+    data["repository"]["github_url"] = f"https://github.com/example-org/{name}"
+    data["storage"] = {
+        "provider": "s3",
+        "bucket": "test-bucket",
+        "prefix": "products/example",
+        "endpoint": "https://s3.example.com",
+        "versioning": True,
+        "dvc": {"remote_name": name},
+    }
+    client.register(Metadata.model_validate(data))
+
+
+def _raises(exc):
+    def _fn(*a, **k):
+        raise exc
+    return _fn
+
+
+def test_cli_config_validate_shows_connectivity_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording_reporter
+) -> None:
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli.config_ops.validate_config", lambda *a, **k: [])
+    monkeypatch.setattr("mintd.cli.config_ops.render_validation", lambda *a, **k: ("ok", 0))
+    cli.main(["config", "validate"])
+    assert ("status", "Validating S3 connectivity...") in recording_reporter.events
+
+
+def test_cli_data_import_single_output_shows_status(
+    tmp_path: Path, patched_clients, recording_reporter
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    statuses = [e[1] for e in recording_reporter.events_of("status")]
+    assert any("Importing provider-xw" in s for s in statuses)
+
+
+def test_cli_data_import_all_updates_status_per_output(
+    tmp_path: Path, patched_clients, recording_reporter
+) -> None:
+    client, _ = patched_clients
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "multi"
+    data["project"]["full_name"] = "data_multi"
+    data["repository"]["github_url"] = "https://github.com/example-org/multi"
+    data["data_products"]["outputs"] = [
+        {"path": f"outputs/o{i}.parquet", "description": "", "primary": i == 0, "last_published": ""}
+        for i in range(2)
+    ]
+    client.register(Metadata.model_validate(data))
+    cli.main(["data", "import", "multi", "--all", "--dest-root", str(tmp_path)])
+    labels = [e[1] for e in recording_reporter.events_of("update_status")]
+    assert any("(1/2)" in s for s in labels)
+    assert any("(2/2)" in s for s in labels)
+    # The determinate progress bar must NOT be used (subprocess invariant).
+    assert recording_reporter.events_of("progress") == []
+
+
+def test_cli_data_import_bump_catches_dvc_op_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mintd._dvc_ops import DvcOpError
+    monkeypatch.setattr("mintd.cli.bump_import", _raises(DvcOpError("boom")))
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and errs[0][2]  # has a hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_data_push_catches_dvc_push_error_with_hint(
+    patched_clients, recording_reporter,
+) -> None:
+    from mintd._dvc_ops import DvcPushError
+    _, dvc_ops = patched_clients
+    dvc_ops.push_raises = DvcPushError("denied")
+    rc = cli.main(["data", "push"])
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and "mintd config validate" in (errs[0][2] or "")
+
+
+def test_cli_data_verify_shows_status(
+    tmp_path: Path, patched_clients, recording_reporter,
+) -> None:
+    cli.main(["data", "verify", "--path", str(tmp_path)])
+    assert ("status", "Verifying DVC data...") in recording_reporter.events
+
+
+def test_cli_data_ls_shows_status_during_listing(
+    monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
+) -> None:
+    from mintd._s3_listing_ops import S3ListingResult
+    client, _ = patched_clients
+    _register_with_storage(client)
+    fake_result = S3ListingResult(
+        bucket="test-bucket", prefix="products/example",
+        endpoint="https://s3.example.com", objects=[], truncated_to_prefix=None,
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_s3_listing_ops", lambda cfg: (lambda **k: fake_result)
+    )
+    cli.main(["data", "ls", "provider-xw"])
+    statuses = [e[1] for e in recording_reporter.events_of("status")]
+    assert any("Listing provider-xw on S3" in s for s in statuses)
+
+
+def test_cli_enclave_bump_shows_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
+) -> None:
+    monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **k: None)
+    cli.main(["enclave", "bump", "provider-xw", "--manifest", str(tmp_path / "m.yaml")])
+    assert any(
+        "Bumping provider-xw" in e[1] for e in recording_reporter.events_of("status")
+    )
+
+
+def test_cli_enclave_pull_shows_outer_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
+) -> None:
+    monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
+    cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+    assert ("status", "Pulling enclave data...") in recording_reporter.events
+
+
+def test_cli_enclave_pull_dvc_op_error_names_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from mintd._dvc_ops import DvcPullError
+    from mintd.enclave import EnclavePullError
+    monkeypatch.setattr(
+        "mintd.cli.enclave_pull",
+        _raises(EnclavePullError("repo-b", DvcPullError("x"))),
+    )
+    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and "repo-b" in (errs[0][2] or "")
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_registry_sync_shows_refresh_status(
+    monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
+) -> None:
+    client, _ = patched_clients
+    monkeypatch.setattr(client, "sync", lambda: 0)
+    cli.main(["registry", "sync"])
+    assert ("status", "Refreshing registry cache...") in recording_reporter.events
+
+
+def test_spinner_dvc_handlers_thread_reporter_into_resolve_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording_reporter,
+) -> None:
+    """Pins fix #2: every spinner-wrapped dvc handler must pass the reporter
+    into _resolve_clients so dvc subprocess stderr flows through the spinner
+    (passthrough_stderr), not raw to the terminal."""
+    captured: list = []
+    client = InMemoryCatalogClient()
+    _register_provider_xw(client)
+    fake_dvc = _FakeDvcOps()
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: client)
+
+    def spy(config, reporter=None, **_):
+        captured.append(reporter)
+        return client, fake_dvc
+
+    monkeypatch.setattr("mintd.cli._resolve_clients", spy)
+    monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
+
+    cli.main(["data", "push"])
+    cli.main(["data", "verify", "--path", str(tmp_path)])
+    cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+
+    assert len(captured) == 4
+    assert all(r is recording_reporter for r in captured)
+
+
+def test_no_handler_calls_sys_stderr_directly() -> None:
+    """Meta-test: every `print(..., file=sys.stderr)` in cli.py is inside the
+    documented allowlist. Pins the slice-38a print→reporter migration.
+
+    Allowlist rationale:
+      - error: argparse framework override (not a handler).
+      - _handle_data_pull: frozen surface (slice 36/37 own its rendering).
+      - _handle_config_show / _handle_config_setup / _handle_update_metadata:
+        not in the 38a audit (decision 4 — touched handlers only).
+      - _render_bump_blocked: shared renderer; 38b cleanup candidate.
+    """
+    import ast
+    src = Path("src/mintd/cli.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    parent: dict = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parent[child] = node
+
+    allowlist = {
+        "error", "_handle_data_pull", "_handle_config_show",
+        "_handle_config_setup", "_handle_update_metadata", "_render_bump_blocked",
+    }
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        uses_stderr = any(
+            kw.arg == "file"
+            and isinstance(kw.value, ast.Attribute)
+            and isinstance(kw.value.value, ast.Name)
+            and kw.value.value.id == "sys"
+            and kw.value.attr == "stderr"
+            for kw in node.keywords
+        )
+        if not uses_stderr:
+            continue
+        # Walk up to the enclosing FunctionDef.
+        cur = node
+        fn_name = None
+        while cur in parent:
+            cur = parent[cur]
+            if isinstance(cur, ast.FunctionDef):
+                fn_name = cur.name
+                break
+        if fn_name not in allowlist:
+            offenders.append(fn_name or "<module>")
+    assert offenders == [], f"unexpected sys.stderr writers: {offenders}"

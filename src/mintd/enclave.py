@@ -24,9 +24,10 @@ from .data import (
 )
 from .check import CheckFinding, _resolve_approved_product_url
 from .producer import MissingPrimaryDataProduct, ProducerView
-from ._dvc_ops import DvcOps
+from ._dvc_ops import DvcOpError, DvcOps
 
 if TYPE_CHECKING:
+    from ._console import Reporter
     from .check import CheckFinding
 
 __all__ = [
@@ -35,6 +36,7 @@ __all__ = [
     "ApprovedProduct",
     "DownloadedItem",
     "EnclaveManifest",
+    "EnclavePullError",
     "InvalidTransferManifest",
     "NothingToPackage",
     "PathTraversalDetected",
@@ -48,6 +50,18 @@ __all__ = [
     "enclave_remove",
     "enclave_verify",
 ]
+
+
+class EnclavePullError(DvcOpError):
+    """A single producer's `dvc import` failed during `enclave_pull`.
+
+    Subclasses DvcOpError so a generic DVC handler still catches it; carries
+    `.repo` as structured data so the CLI can name the failing producer in
+    its hint without parsing the message (slice-9 convention)."""
+
+    def __init__(self, repo: str, cause: Exception) -> None:
+        super().__init__(f"failed to pull {repo!r}: {cause}")
+        self.repo = repo
 
 class AppendOnlyViolation(Exception):
     def __init__(self, path: Path, changed_indices: list[int]) -> None:
@@ -308,6 +322,7 @@ def enclave_pull(
     downloads_root: Path | None = None,
     producer_view_factory: Callable[[str, str], ProducerView] | None = None,
     today: date | None = None,
+    reporter: "Reporter | None" = None,
 ) -> tuple[Path, list[DownloadedItem]]:
     manifest = EnclaveManifest.load(manifest_path)
     targets = [ap for ap in manifest.approved_products if repo is None or ap.repo == repo]
@@ -319,7 +334,12 @@ def enclave_pull(
     new_downloaded: list[DownloadedItem] = list(manifest.downloaded)
     written: list[DownloadedItem] = []
     created_target_dirs: set[Path] = set()
-    for ap in targets:
+    for i, ap in enumerate(targets, 1):
+        # Per-producer feedback (slice 38a). Fired BEFORE the idempotence
+        # skip so the (i/N) count reflects every producer, not just the
+        # ones that needed fetching.
+        if reporter is not None:
+            reporter.update_status(f"Fetching {ap.repo}... ({i}/{len(targets)})")
         # Idempotence: skip resolving if all outputs are already present.
         if not force and _all_already_downloaded(manifest.downloaded, ap):
              continue
@@ -344,13 +364,16 @@ def enclave_pull(
             if staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
             dest = staging_dir / Path(output.rstrip("/")).name
-            dvc_path = dvc_ops.import_(
-                repo_url=repo_url,
-                path=output,
-                dest=dest,
-                rev=ap.pin,
-                force=force,
-            )
+            try:
+                dvc_path = dvc_ops.import_(
+                    repo_url=repo_url,
+                    path=output,
+                    dest=dest,
+                    rev=ap.pin,
+                    force=force,
+                )
+            except DvcOpError as exc:
+                raise EnclavePullError(ap.repo, exc) from exc
             artifact_pin = _read_artifact_pin(dvc_path)
             target_dir = downloads_root / ap.repo / f"{artifact_pin[:7]}-{today_iso}"
             if force and target_dir.exists() and target_dir not in created_target_dirs:

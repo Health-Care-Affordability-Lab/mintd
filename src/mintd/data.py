@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -87,6 +88,7 @@ def import_product(
     force: bool = False,
     extra_dvc_args: list[str] | None = None,
     producer_view_factory: Callable[[str, str], ProducerView] | None = None,
+    reporter: "Reporter | None" = None,
 ) -> list[Path]:
     """Catalog-driven `dvc import`. Returns the list of `.dvc` files written."""
 
@@ -111,30 +113,49 @@ def import_product(
     namespace = project.get("full_name") or name
     nested_root = dest_root / namespace
 
+    # Status feedback (slice 38a). Multi-output imports relabel the spinner
+    # per output. We use the spinner (not the determinate progress bar)
+    # because each `dvc import` streams a subprocess; the bar's render would
+    # be corrupted by the child's stderr (see data_ops.py's
+    # "MUST happen OUTSIDE the progress widget" invariant). The handler
+    # threads the reporter into dvc_ops so child stderr flows through
+    # passthrough_stderr and refreshes the spinner.
+    multi = len(paths) > 1
+    status_cm = (
+        reporter.status(f"Importing {name}...")
+        if reporter is not None
+        else nullcontext()
+    )
+
     produced: list[Path] = []
-    for p in paths:
-        dest = nested_root / Path(p.rstrip("/")).name
-        target_dvc = dest.parent / (dest.name + ".dvc")
-        if target_dvc.exists() and not force:
-            raise ImportDestinationExists(
-                f"{target_dvc} already exists; pass force=True or remove it"
+    with status_cm:
+        for i, p in enumerate(paths, 1):
+            if multi and reporter is not None:
+                reporter.update_status(
+                    f"Importing {Path(p.rstrip('/')).name} ({i}/{len(paths)})..."
+                )
+            dest = nested_root / Path(p.rstrip("/")).name
+            target_dvc = dest.parent / (dest.name + ".dvc")
+            if target_dvc.exists() and not force:
+                raise ImportDestinationExists(
+                    f"{target_dvc} already exists; pass force=True or remove it"
+                )
+            # `dvc import` requires the destination's parent directory to
+            # already exist; it doesn't auto-create it. Create here so a
+            # fresh consumer project (no `data/imports/<namespace>/` yet)
+            # doesn't fail with the cryptic "stage working dir ... does not
+            # exist".
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            produced.append(
+                dvc_ops.import_(
+                    repo_url=repo_url,
+                    path=p,
+                    dest=dest,
+                    rev=rev,
+                    force=force,
+                    extra_args=extra_dvc_args,
+                )
             )
-        # `dvc import` requires the destination's parent directory to
-        # already exist; it doesn't auto-create it. Create here so a
-        # fresh consumer project (no `data/imports/<namespace>/` yet)
-        # doesn't fail with the cryptic "stage working dir ... does not
-        # exist".
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        produced.append(
-            dvc_ops.import_(
-                repo_url=repo_url,
-                path=p,
-                dest=dest,
-                rev=rev,
-                force=force,
-                extra_args=extra_dvc_args,
-            )
-        )
     return produced
 
 

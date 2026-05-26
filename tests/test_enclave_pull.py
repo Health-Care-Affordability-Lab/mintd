@@ -253,3 +253,57 @@ def test_pull_clears_stale_staging_dir_from_interrupted_run(tmp_path):
     assert len(written) == 1
     # The cleanup at end of loop removes _staging again.
     assert not staging.exists()
+
+
+def test_enclave_pull_updates_status_per_producer(tmp_path):
+    """Slice 38a: enclave_pull fires one update_status per producer with an
+    (i/N) suffix, in order, BEFORE the idempotence skip (so N == #producers)."""
+    class _RecordingReporter:
+        def __init__(self):
+            self.labels = []
+        def update_status(self, msg):
+            self.labels.append(msg)
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1"),
+        ApprovedProduct(repo="b", registry_entry="e", pin="1"),
+        ApprovedProduct(repo="c", registry_entry="e", pin="1"),
+    ]).save(m_path)
+    dvc = _FakeDvcOps()
+
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self): return "out"
+        return View()
+
+    rep = _RecordingReporter()
+    enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=factory, reporter=rep)
+    assert len(rep.labels) == 3
+    assert "(1/3)" in rep.labels[0]
+    assert "(2/3)" in rep.labels[1]
+    assert "(3/3)" in rep.labels[2]
+
+
+def test_enclave_pull_wraps_dvc_error_as_enclave_pull_error(tmp_path):
+    """A failing dvc_ops.import_ surfaces as EnclavePullError carrying .repo."""
+    from mintd._dvc_ops import DvcPullError
+    from mintd.enclave import EnclavePullError
+
+    class _FailingDvcOps:
+        def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+            raise DvcPullError("network down")
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="repo-b", registry_entry="e", pin="1"),
+    ]).save(m_path)
+
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self): return "out"
+        return View()
+
+    with pytest.raises(EnclavePullError) as ei:
+        enclave_pull(_Client(), _FailingDvcOps(), manifest_path=m_path, producer_view_factory=factory)
+    assert ei.value.repo == "repo-b"

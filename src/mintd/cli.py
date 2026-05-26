@@ -28,7 +28,7 @@ from pydantic import ValidationError
 from . import config_ops, metadata_migrate
 from ._console import Reporter
 from ._config import Config, ConfigError
-from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, SubprocessDvcOps
+from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, DvcPushError, SubprocessDvcOps
 from ._subprocess import WallTimeoutExceeded
 from ._registry_git_ops import GitOpError
 from ._fast_sync_ops import FastSyncOps
@@ -63,6 +63,7 @@ from .enclave import (
     AlreadyApproved,
     AppendOnlyViolation,
     EnclaveManifest,
+    EnclavePullError,
     InvalidTransferManifest,
     NothingToPackage,
     PathTraversalDetected,
@@ -680,55 +681,63 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
 
 
 def _handle_data_push(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config)
+    _, dvc_ops = _resolve_clients(config, reporter)
     try:
-        data_push(
-            project_path=Path("."),
-            targets=args.targets or None,
-            dvc_ops=dvc_ops,
-            remote=args.remote,
-            jobs=args.jobs,
-        )
+        with reporter.status("Pushing data to DVC..."):
+            data_push(
+                project_path=Path("."),
+                targets=args.targets or None,
+                dvc_ops=dvc_ops,
+                remote=args.remote,
+                jobs=args.jobs,
+            )
     except DvcNotInstalled as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
+    except DvcPushError as e:
+        reporter.error(str(e), hint="check AWS credentials: mintd config validate")
+        return 1
     except DvcOpError as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e))
         return 1
     print("pushed")
     return 0
 
 
 def _handle_data_add(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config)
+    _, dvc_ops = _resolve_clients(config, reporter)
     try:
         produced = data_add(args.path, dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="check the path exists inside a DVC project; 'mintd init' scaffolds one")
         return 1
     print(str(produced))
     return 0
 
 
 def _handle_data_verify(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config)
+    _, dvc_ops = _resolve_clients(config, reporter)
     try:
-        status_map = data_verify(
-            project_path=args.path,
-            targets=args.targets or None,
-            dvc_ops=dvc_ops,
-        )
+        with reporter.status("Verifying DVC data..."):
+            status_map = data_verify(
+                project_path=args.path,
+                targets=args.targets or None,
+                dvc_ops=dvc_ops,
+            )
     except DvcNotInstalled as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="retry with --dvc-arg=-v for verbose DVC output")
         return 1
     if not status_map:
         print("clean")
@@ -742,15 +751,16 @@ def _handle_data_verify(args: argparse.Namespace) -> int:
 
 
 def _handle_data_remove(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config)
+    _, dvc_ops = _resolve_clients(config, reporter)
     try:
         data_remove(args.name, dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        print(f"error: {e}", file=sys.stderr)
+        reporter.error(str(e), hint="check the name; 'mintd data verify' lists tracked outputs")
         return 1
     print(f"removed: {args.name}")
     return 0
@@ -794,13 +804,14 @@ def _handle_data_ls(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        result = listing_fn(
-            bucket=bucket, prefix=prefix, endpoint=endpoint,
-            sub_path=args.sub_path,
-            recursive=args.recursive,
-            include_versions=args.versions,
-            aws_profile_name=config.aws_profile_name,
-        )
+        with reporter.status(f"Listing {args.name} on S3..."):
+            result = listing_fn(
+                bucket=bucket, prefix=prefix, endpoint=endpoint,
+                sub_path=args.sub_path,
+                recursive=args.recursive,
+                include_versions=args.versions,
+                aws_profile_name=config.aws_profile_name,
+            )
     except ValueError as exc:
         reporter.error(str(exc))
         return 2
@@ -1058,22 +1069,27 @@ def _handle_data_import(args: argparse.Namespace) -> int:
     if args.bump and (args.import_path or args.rev or args.all_outputs):
         args._parser.error("--bump cannot be combined with --path, --rev, or --all")
 
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config)
+    client, dvc_ops = _resolve_clients(config, reporter)
 
     if args.bump:
         try:
-            result = bump_import(
-                client,
-                dvc_ops,
-                project_path=Path("."),
-                name=args.name,
-                force=args.force,
-            )
+            with reporter.status(f"Bumping {args.name}..."):
+                result = bump_import(
+                    client,
+                    dvc_ops,
+                    project_path=Path("."),
+                    name=args.name,
+                    force=args.force,
+                )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
         except (ImportNotFound, PrimaryRemovedAtHead) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            reporter.error(str(exc))
+            return 1
+        except DvcOpError as exc:
+            reporter.error(str(exc), hint="check connectivity then retry: mintd config validate")
             return 1
         if result is None:
             print("up to date")
@@ -1092,28 +1108,24 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             all_outputs=args.all_outputs,
             force=args.force,
             extra_dvc_args=args.dvc_args or None,
+            reporter=reporter,
         )
+    except CatalogNotFound as exc:
+        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
+        return 1
     except (
-        CatalogNotFound,
         MissingPrimaryDataProduct,
         ImportDestinationExists,
         ImportNotFound,
         PrimaryRemovedAtHead,
         ProducerError,
     ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         return 1
     except DvcOpError as exc:
-        reporter = getattr(args, "_reporter", None) or Reporter()
         reporter.error(
             str(exc),
-            hint=(
-                "DVC reported an error. If the message mentions 'stage working "
-                "dir ... does not exist', the destination's parent should be "
-                "auto-created — re-run `mintd data import` after upgrading "
-                "mintd. For other DVC errors, retry with `--dvc-arg=-v` for "
-                "verbose output."
-            ),
+            hint="retry with --dvc-arg=-v for verbose DVC output",
         )
         return 1
     for p in produced:
@@ -1207,10 +1219,14 @@ def _render_catalog_table(entries, *, detailed: bool, width: int) -> str:
 
 
 def _handle_enclave_list(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     try:
         manifest = EnclaveManifest.load(args.manifest)
     except FileNotFoundError:
-        print(f"error: enclave_manifest.yaml not found at {args.manifest}", file=sys.stderr)
+        reporter.error(
+            f"enclave_manifest.yaml not found at {args.manifest}",
+            hint="create one with 'mintd enclave add <repo> --pin <sha>', or pass --manifest <path>",
+        )
         return 1
     repo_filter: str | None = args.repo
 
@@ -1245,19 +1261,27 @@ def _handle_enclave_list(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_bump(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
-        result = enclave_bump(
-            client,
-            manifest_path=args.manifest,
-            name=args.name,
-            force=args.force,
-        )
+        with reporter.status(f"Bumping {args.name}..."):
+            result = enclave_bump(
+                client,
+                manifest_path=args.manifest,
+                name=args.name,
+                force=args.force,
+            )
     except BumpBlocked as exc:
         return _render_bump_blocked(exc)
-    except (ImportNotFound, PrimaryRemovedAtHead, AppendOnlyViolation) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except ImportNotFound as exc:
+        reporter.error(str(exc), hint="'mintd enclave list' to see subscribed repos")
+        return 1
+    except PrimaryRemovedAtHead as exc:
+        reporter.error(str(exc), hint="pin to an older SHA or unsubscribe with 'mintd enclave remove'")
+        return 1
+    except AppendOnlyViolation as exc:
+        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
         return 1
     if result is None:
         print("up to date")
@@ -1267,6 +1291,7 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_add(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
@@ -1278,15 +1303,20 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
             source_path=args.source_path,
             all_=args.all_outputs,
         )
-    except (
-        CatalogNotFound,
-        AlreadyApproved,
-        ProducerError,
-        MissingPrimaryDataProduct,
-        AppendOnlyViolation,
-        ValueError,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except AlreadyApproved as exc:
+        reporter.error(str(exc), hint="already subscribed; 'mintd enclave list' to review")
+        return 1
+    except CatalogNotFound as exc:
+        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
+        return 1
+    except MissingPrimaryDataProduct as exc:
+        reporter.error(str(exc), hint="pass --path <output> or --all")
+        return 1
+    except AppendOnlyViolation as exc:
+        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
+        return 1
+    except (ProducerError, ValueError) as exc:
+        reporter.error(str(exc), hint="check the repo/pin arguments")
         return 1
     # Re-load to print the just-added entry's resolved pin.
     manifest = EnclaveManifest.load(path)
@@ -1297,6 +1327,7 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_remove(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
@@ -1307,8 +1338,11 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
             source_path=args.source_path,
             all_=args.all_outputs,
         )
-    except (ImportNotFound, AppendOnlyViolation) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except ImportNotFound as exc:
+        reporter.error(str(exc), hint="'mintd enclave list' to see subscribed repos")
+        return 1
+    except AppendOnlyViolation as exc:
+        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
         return 1
     msg = f"removed: {args.repo}"
     if args.source_path:
@@ -1318,16 +1352,25 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_pull(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config)
+    client, dvc_ops = _resolve_clients(config, reporter)
     try:
-        _, written = enclave_pull(
-            client,
-            dvc_ops,
-            manifest_path=args.manifest,
-            repo=args.repo,
-            force=args.force,
+        with reporter.status("Pulling enclave data..."):
+            _, written = enclave_pull(
+                client,
+                dvc_ops,
+                manifest_path=args.manifest,
+                repo=args.repo,
+                force=args.force,
+                reporter=reporter,
+            )
+    except EnclavePullError as exc:
+        reporter.error(
+            str(exc),
+            hint=f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull --repo {exc.repo}",
         )
+        return 1
     except (
         CatalogNotFound,
         ImportNotFound,
@@ -1336,7 +1379,7 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
         AppendOnlyViolation,
         ValueError,
     ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        reporter.error(str(exc))
         return 1
     if not written:
         print("nothing to pull")
@@ -1347,6 +1390,7 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_package(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     # When --output is unset, hand `enclave_package` an output_dir; it
     # builds the filename from the computed `transfer_id` so same-day
     # re-runs produce distinct archives.
@@ -1356,38 +1400,46 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
         else None
     )
     try:
-        archive = enclave_package(
-            manifest_path=args.manifest,
-            name=args.repo,
-            output_archive=args.output_archive,
-            output_dir=output_dir,
-        )
-    except (
-        NothingToPackage,
-        ArchiveAlreadyExists,
-        UnsafeArchiveMember,
-        InvalidTransferManifest,
-        AppendOnlyViolation,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        with reporter.status("Packaging enclave archive..."):
+            archive = enclave_package(
+                manifest_path=args.manifest,
+                name=args.repo,
+                output_archive=args.output_archive,
+                output_dir=output_dir,
+            )
+    except NothingToPackage as exc:
+        reporter.error(str(exc), hint="run 'mintd enclave pull' first")
+        return 1
+    except ArchiveAlreadyExists as exc:
+        reporter.error(str(exc), hint="remove it or pass --output <path>")
+        return 1
+    except (UnsafeArchiveMember, InvalidTransferManifest) as exc:
+        reporter.error(str(exc), hint="re-run 'mintd enclave pull --force'")
+        return 1
+    except AppendOnlyViolation as exc:
+        reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
         return 1
     print(f"packaged: {archive}")
     return 0
 
 
 def _handle_enclave_verify(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     try:
-        _, written = enclave_verify(
-            extracted_dir=args.extracted_dir,
-            manifest_path=args.manifest,
-            data_root=args.data_root,
-        )
-    except (
-        InvalidTransferManifest,
-        PathTraversalDetected,
-        AppendOnlyViolation,
-    ) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        with reporter.status("Verifying enclave manifest..."):
+            _, written = enclave_verify(
+                extracted_dir=args.extracted_dir,
+                manifest_path=args.manifest,
+                data_root=args.data_root,
+            )
+    except InvalidTransferManifest as exc:
+        reporter.error(str(exc), hint="the archive is malformed; re-export from source")
+        return 1
+    except PathTraversalDetected as exc:
+        reporter.error(str(exc), hint="unsafe paths — do not extract; contact the sender")
+        return 1
+    except AppendOnlyViolation as exc:
+        reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
         return 1
     if not written:
         print("nothing to verify (all entries already in transferred[])")
@@ -1516,9 +1568,11 @@ def _handle_registry_status(args: argparse.Namespace) -> int:
 
 
 def _handle_registry_sync(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
-    count = client.sync()
+    with reporter.status("Refreshing registry cache..."):
+        count = client.sync()
     print(f"synced ({count} entries)")
     return 0
 
@@ -1659,7 +1713,9 @@ def _handle_config_setup(args: argparse.Namespace) -> int:
 
 
 def _handle_config_validate(args: argparse.Namespace) -> int:
-    steps = config_ops.validate_config(args.path, bucket=args.bucket)
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    with reporter.status("Validating S3 connectivity..."):
+        steps = config_ops.validate_config(args.path, bucket=args.bucket)
     text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
     print(text)
     return exit_code
