@@ -1103,6 +1103,19 @@ def _handle_data_import(args: argparse.Namespace) -> int:
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except DvcOpError as exc:
+        reporter = getattr(args, "_reporter", None) or Reporter()
+        reporter.error(
+            str(exc),
+            hint=(
+                "DVC reported an error. If the message mentions 'stage working "
+                "dir ... does not exist', the destination's parent should be "
+                "auto-created — re-run `mintd data import` after upgrading "
+                "mintd. For other DVC errors, retry with `--dvc-arg=-v` for "
+                "verbose output."
+            ),
+        )
+        return 1
     for p in produced:
         print(p)
     return 0

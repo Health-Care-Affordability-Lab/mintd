@@ -101,14 +101,30 @@ def import_product(
 
     paths = _resolve_paths(dumped, path=path, all_outputs=all_outputs, name=name)
 
+    # Namespace the destination by the producer's full_name (e.g.
+    # `data_cms-synpuf`) so importing multiple products into the same
+    # `dest_root` doesn't collide on shared output names (e.g. both
+    # provider-a and provider-b publishing `data/final/` would land at
+    # the same `dest_root/final/` without the namespace). Falls back to
+    # the catalog name if full_name is missing on the entry.
+    project = dumped.get("project") or {}
+    namespace = project.get("full_name") or name
+    nested_root = dest_root / namespace
+
     produced: list[Path] = []
     for p in paths:
-        dest = dest_root / Path(p.rstrip("/")).name
+        dest = nested_root / Path(p.rstrip("/")).name
         target_dvc = dest.parent / (dest.name + ".dvc")
         if target_dvc.exists() and not force:
             raise ImportDestinationExists(
                 f"{target_dvc} already exists; pass force=True or remove it"
             )
+        # `dvc import` requires the destination's parent directory to
+        # already exist; it doesn't auto-create it. Create here so a
+        # fresh consumer project (no `data/imports/<namespace>/` yet)
+        # doesn't fail with the cryptic "stage working dir ... does not
+        # exist".
+        dest.parent.mkdir(parents=True, exist_ok=True)
         produced.append(
             dvc_ops.import_(
                 repo_url=repo_url,

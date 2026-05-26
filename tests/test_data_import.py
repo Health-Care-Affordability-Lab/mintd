@@ -32,6 +32,11 @@ def _register(
 ) -> None:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = name
+    # Mirror real init: full_name = "<type>_<name>". The fixture's
+    # default project.type is "data", so full_name becomes
+    # `data_<name>`. import_product uses this as the dest namespace.
+    project_type = data["project"].get("type", "data")
+    data["project"]["full_name"] = f"{project_type}_{name}"
     data["repository"]["github_url"] = f"https://github.com/example-org/{name}"
     if mutate is not None:
         mutate(data)
@@ -74,7 +79,9 @@ def test_import_product_uses_primary_when_no_path(tmp_path: Path) -> None:
     call = fake.calls[0]
     assert call.path == "outputs/main.parquet"
     assert call.repo_url == "https://github.com/example-org/provider_xw"
-    assert call.dest == tmp_path / "main.parquet"
+    # Slice 38: dest is namespaced by the producer's full_name so
+    # multiple imports into the same dest_root don't collide.
+    assert call.dest == tmp_path / "data_provider_xw" / "main.parquet"
 
 
 def test_import_product_path_override(tmp_path: Path) -> None:
@@ -87,7 +94,7 @@ def test_import_product_path_override(tmp_path: Path) -> None:
     )
 
     assert fake.calls[0].path == "outputs/other.csv"
-    assert fake.calls[0].dest == tmp_path / "other.csv"
+    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "other.csv"
 
 
 def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
@@ -267,7 +274,7 @@ def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
         client, fake, "provider_xw", dest_root=tmp_path
     )
 
-    assert produced == [tmp_path / "main.parquet.dvc"]
+    assert produced == [tmp_path / "data_provider_xw" / "main.parquet.dvc"]
     assert produced[0].exists()
 
 
@@ -275,7 +282,8 @@ def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_provider_xw").mkdir(parents=True)
+    (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
 
     with pytest.raises(ImportDestinationExists):
         import_product(client, fake, "provider_xw", dest_root=tmp_path)
@@ -286,7 +294,8 @@ def test_import_product_force_overwrites(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_provider_xw").mkdir(parents=True)
+    (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
 
     produced = import_product(
         client, fake, "provider_xw", dest_root=tmp_path, force=True
@@ -309,4 +318,28 @@ def test_import_product_trailing_slash_in_path(tmp_path: Path) -> None:
         dest_root=tmp_path,
     )
 
-    assert fake.calls[0].dest == tmp_path / "cms_based"
+    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "cms_based"
+
+
+def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None:
+    """Regression: dvc import requires the destination's parent directory
+    to exist (it doesn't auto-create). A fresh consumer project running
+    `mintd data import <name>` against the default `data/imports/` dest
+    root previously failed with the cryptic 'stage working dir ... does
+    not exist'. import_product now creates dest.parent up-front.
+
+    Also asserts the slice-38 producer-namespacing: dest is nested under
+    `<dest_root>/<full_name>/` so multiple imports don't collide on
+    shared output names."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/main.parquet"))
+    fake = _FakeDvcOps()
+
+    nested_dest = tmp_path / "data" / "imports"
+    assert not nested_dest.exists()
+
+    import_product(client, fake, "provider_xw", dest_root=nested_dest)
+
+    # Both dest_root and the per-producer namespace dir get auto-created.
+    assert (nested_dest / "data_provider_xw").is_dir()
+    assert fake.calls[0].dest == nested_dest / "data_provider_xw" / "main.parquet"
