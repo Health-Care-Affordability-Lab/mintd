@@ -216,8 +216,8 @@ def test_render_validation_exit_code() -> None:
     json_text, json_code = render_validation(steps, json_out=True)
     obj = _json.loads(json_text)
     assert set(obj.keys()) == {"schema", "aws_profile", "s3"}
-    # Pin the per-step shape: {status, message}, not a bare string.
-    assert obj["s3"] == {"status": "fail", "message": "bad"}
+    # Pin the per-step shape: {status, message, latency_ms}, not a bare string.
+    assert obj["s3"] == {"status": "fail", "message": "bad", "latency_ms": None}
     assert obj["schema"]["status"] == "ok"
     assert json_code == 1
 

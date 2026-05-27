@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BumpBlocked",
+    "BumpResult",
+    "CloneResult",
     "ImportDestinationExists",
     "ImportNotFound",
     "MissingPrimaryDataProduct",
@@ -40,6 +43,27 @@ __all__ = [
     "clone_and_pull_product",
     "import_product",
 ]
+
+
+@dataclass(frozen=True)
+class BumpResult:
+    """Outcome of `bump_import` — for the CLI's pin-transition line (slice 38b)."""
+    changed: bool
+    old_pin: str
+    new_pin: str | None
+    dvc_path: Path | None
+
+
+@dataclass(frozen=True)
+class CloneResult:
+    """Outcome of `clone_and_pull_product` — dest + provenance for the CLI's
+    completion line (slice 38b)."""
+    dest: Path
+    rev: str | None
+    remote_bucket: str | None
+    file_count: int = 0
+    total_bytes: int = 0
+    elapsed_s: float = 0.0
 
 
 class ImportDestinationExists(Exception):
@@ -226,7 +250,7 @@ def clone_and_pull_product(
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
-) -> Path:
+) -> "CloneResult":
     """Clone a published data product into a working directory + dvc pull it.
 
     Looks up `name` in the registry, full-clones the producer repo to
@@ -234,6 +258,10 @@ def clone_and_pull_product(
     tracked output by default. Pass ``primary_only=True`` to pull only
     `data_products.primary` (useful when the full product is multi-TB
     but the user only needs the headline output).
+
+    Returns a ``CloneResult`` (dest + best-effort cloned rev + remote
+    bucket) so the CLI can render an informative completion line (slice
+    38b). rev/bucket are best-effort (None on failure) and never block.
 
     Raises:
         ValueError: invalid `name` (path-traversal characters).
@@ -301,7 +329,26 @@ def clone_and_pull_product(
         )
     finally:
         os.chdir(prev_cwd)
-    return resolved_dest
+
+    # Best-effort provenance for the completion line (slice 38b). Neither
+    # the resolved rev nor the bucket blocks the clone — both degrade to
+    # None on failure.
+    resolved_rev: str | None
+    try:
+        resolved_rev = registry_git_ops.current_commit(resolved_dest)
+    except Exception:
+        resolved_rev = None
+    remote_bucket: str | None = None
+    try:
+        from ._fast_sync_ops import get_remote_config, parse_s3_url
+        from .data_ops import _default_dvc_remote
+        remote_name = _default_dvc_remote(resolved_dest) or "origin"
+        url = get_remote_config(resolved_dest, remote_name).get("url", "")
+        remote_bucket, _ = parse_s3_url(url)
+    except Exception:
+        remote_bucket = None
+
+    return CloneResult(dest=resolved_dest, rev=resolved_rev, remote_bucket=remote_bucket)
 
 
 def bump_import(
@@ -313,7 +360,7 @@ def bump_import(
     force: bool = False,
     producer_view_factory: Callable[[str], tuple[ProducerView, str]] | None = None,
     check_findings: list[CheckFinding] | None = None,
-) -> Path | None:
+) -> "BumpResult":
     """Re-resolve `name` at the producer's HEAD and rewrite its `.dvc` file.
 
     Slice 7 consumes slice-6 `_consumer_findings` directly — `check_project`
@@ -325,8 +372,8 @@ def bump_import(
     `dvc import --rev <sha>` records the concrete commit, not the symbolic
     `HEAD` — preserving the pin semantics slice 5 introduced.
 
-    Returns the rewritten `.dvc` `Path` on success, or `None` if the
-    finding says the dep is already `up to date`. Raises:
+    Returns a ``BumpResult`` (old pin, new pin, changed flag, rewritten
+    `.dvc` path) so the CLI can render the pin transition. Raises:
 
     - `ImportNotFound` — `name` is not present in `data/imports/`.
     - `BumpBlocked(name, finding)` — the producer is broken at the pin
@@ -363,7 +410,7 @@ def bump_import(
         # A None here is a regression — never silently dispatch.
         raise BumpBlocked(name, finding)
     if finding.kind == "up_to_date":
-        return None
+        return BumpResult(changed=False, old_pin=dep.contract_pin, new_pin=None, dvc_path=None)
     if finding.kind != "drift":
         # unreachable / schema_too_old / pin_missing / metadata_missing /
         # metadata_invalid / invalid_manifest / catalog_unresolved — all non-actionable.
@@ -378,12 +425,15 @@ def bump_import(
 
     del force  # reserved for future --dry-run; slice 7 always overwrites
     dest_root = dvc_source.parent
-    return dvc_ops.import_(
+    dvc_path = dvc_ops.import_(
         repo_url=dep.producer_repo,
         path=head_primary,
         dest=dest_root / Path(head_primary.rstrip("/")).name,
         rev=head_sha,
         force=True,
+    )
+    return BumpResult(
+        changed=True, old_pin=dep.contract_pin, new_pin=head_sha, dvc_path=dvc_path,
     )
 
 

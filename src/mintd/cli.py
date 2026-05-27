@@ -655,11 +655,12 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    reporter = args._reporter
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config)
+    _, dvc_ops = _resolve_clients(config, reporter)
     fast_sync_ops = _resolve_fast_sync_ops(config)
     try:
-        data_pull(
+        summary = data_pull(
             project_path=project_path,
             targets=args.targets or None,
             dvc_ops=dvc_ops,
@@ -667,7 +668,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             remote=args.remote,
             jobs=args.jobs,
             extra_dvc_args=args.dvc_args or None,
-            reporter=args._reporter,
+            reporter=reporter,
         )
     except DvcNotInstalled as e:
         print(f"error: {e}", file=sys.stderr)
@@ -675,8 +676,21 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     except DvcOpError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    targets = ", ".join(args.targets) if args.targets else ""
-    print(f"pulled: {targets}" if targets else "pulled")
+    if summary.total_bytes:
+        msg = (
+            f"✓ pulled {summary.file_count} file(s) "
+            f"({_human_bytes(summary.total_bytes)}) in {_format_duration(summary.elapsed_s)}"
+        )
+    else:
+        msg = f"✓ pulled {summary.file_count} file(s) in {_format_duration(summary.elapsed_s)}"
+    if reporter.json_mode:
+        reporter.result({
+            "pulled": summary.file_count,
+            "bytes": summary.total_bytes,
+            "elapsed_s": round(summary.elapsed_s, 2),
+        })
+    else:
+        reporter.success(msg)
     return 0
 
 
@@ -878,6 +892,16 @@ def _human_bytes(n: int) -> str:
         size /= 1024
     return f"{size:.1f} PB"
 
+
+def _format_duration(seconds: float) -> str:
+    """Human-readable elapsed time: '142ms', '12s', '3m05s'."""
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s"
+
 _DATA_LS_ROW_CAP = 50
 
 
@@ -969,7 +993,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     
     reporter.debug(f"resolved registry_url={config.registry_url}")
     try:
-        dest = clone_and_pull_product(
+        clone_result = clone_and_pull_product(
             client, dvc_ops, registry_git_ops, fast_sync_ops,
             name=args.name,
             dest=args.dest,
@@ -1004,6 +1028,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         reporter.error(str(exc))
         return 1
     
+    dest = clone_result.dest
     elapsed = time.monotonic() - t0
     primary = _read_primary_from_clone(dest)
     files, total_bytes = _measure_clone_result(dest)
@@ -1013,9 +1038,19 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         "elapsed_s": round(elapsed, 2),
         "files": files,
         "bytes": total_bytes,
+        "rev": clone_result.rev,
+        "remote_bucket": clone_result.remote_bucket,
     }
-    reporter.result(payload, pretty=_pretty_data_clone)
-    reporter.success(f"cloned: {dest}", elapsed_s=elapsed)
+    rev_clause = f" @ {clone_result.rev[:7]}" if clone_result.rev else ""
+    remote_clause = f" from s3://{clone_result.remote_bucket}" if clone_result.remote_bucket else ""
+    size_clause = f" ({files} files, {_human_bytes(total_bytes)})" if files else ""
+    if reporter.json_mode:
+        reporter.result(payload, pretty=_pretty_data_clone)
+    else:
+        reporter.success(
+            f"✓ cloned {args.name}{rev_clause}{remote_clause}{size_clause} "
+            f"→ {dest.name}/ in {_format_duration(elapsed)}"
+        )
     return 0
 
 
@@ -1058,11 +1093,46 @@ def _pretty_data_clone(payload: dict) -> str:
     """Render the clone-result summary footer."""
     lines = []
     if payload.get("primary"):
-        size_mb = payload["bytes"] / (1024 * 1024)
         lines.append(
-            f"  primary: {payload['primary']}  ({payload['files']} files, {size_mb:.1f} MB)"
+            f"  primary: {payload['primary']}  "
+            f"({payload['files']} files, {_human_bytes(payload['bytes'])})"
         )
     return "\n".join(lines) if lines else ""
+
+
+def _import_summary(produced: list[Path]) -> dict:
+    """Derive provenance + size facts from the produced `.dvc` files for the
+    `data import` completion line (slice 38b). Best-effort: a non-import-shaped
+    `.dvc` degrades to a count-only summary rather than raising."""
+    import yaml as _yaml
+    from .imports import DataDependency
+
+    pin: str | None = None
+    repo: str | None = None
+    total_bytes = 0
+    file_count = 0
+    for p in produced:
+        try:
+            dep = DataDependency.from_dvc_file(p)
+            pin = pin or dep.contract_pin
+            repo = repo or dep.producer_repo
+        except Exception:
+            pass
+        try:
+            raw = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            for out in raw.get("outs", []):
+                total_bytes += int(out.get("size", 0) or 0)
+                file_count += int(out.get("nfiles", 1) or 1)
+        except Exception:
+            file_count += 1
+    dest = produced[0].parent if produced else None
+    return {
+        "pin": pin,
+        "producer_repo": repo,
+        "file_count": file_count or len(produced),
+        "total_bytes": total_bytes,
+        "dest": str(dest) if dest else None,
+    }
 
 
 def _handle_data_import(args: argparse.Namespace) -> int:
@@ -1091,10 +1161,22 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         except DvcOpError as exc:
             reporter.error(str(exc), hint="check connectivity then retry: mintd config validate")
             return 1
-        if result is None:
-            print("up to date")
+        if not result.changed:
+            old = result.old_pin[:7] if result.old_pin else "?"
+            if reporter.json_mode:
+                reporter.result({"name": args.name, "changed": False, "pin": result.old_pin})
+            else:
+                reporter.success(f"✓ {args.name} up to date ({old})")
         else:
-            print(result)
+            old = result.old_pin[:7] if result.old_pin else "?"
+            new = result.new_pin[:7] if result.new_pin else "?"
+            if reporter.json_mode:
+                reporter.result({
+                    "name": args.name, "changed": True,
+                    "old_pin": result.old_pin, "new_pin": result.new_pin,
+                })
+            else:
+                reporter.success(f"✓ bumped {args.name}: {old} → {new}")
         return 0
 
     try:
@@ -1128,8 +1210,17 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             hint="retry with --dvc-arg=-v for verbose DVC output",
         )
         return 1
-    for p in produced:
-        print(p)
+    summary = _import_summary(produced)
+    if reporter.json_mode:
+        reporter.result({**summary, "produced": [str(p) for p in produced]})
+    else:
+        pin = summary["pin"]
+        prov = f" @ {pin[:7]}" if pin else ""
+        size = f", {_human_bytes(summary['total_bytes'])}" if summary["total_bytes"] else ""
+        dest = f" → {summary['dest']}/" if summary["dest"] else ""
+        reporter.success(
+            f"✓ imported {args.name}{prov} ({summary['file_count']} file(s){size}){dest}"
+        )
     return 0
 
 
@@ -1382,10 +1473,24 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
         reporter.error(str(exc))
         return 1
     if not written:
-        print("nothing to pull")
+        reporter.info("nothing to pull")
         return 0
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "pulled": [
+                    {"repo": i.repo, "pin": i.contract_pin, "local_path": str(i.local_path)}
+                    for i in written
+                ]
+            }
+        )
+        return 0
+    by_repo: dict[str, list] = {}
     for item in written:
-        print(f"pulled: {item.repo}@{item.contract_pin[:7]} → {item.local_path}")
+        by_repo.setdefault(item.repo, []).append(item)
+    for repo, items in by_repo.items():
+        pin = items[0].contract_pin[:7]
+        reporter.success(f"✓ {repo} @ {pin} ({len(items)} output(s))")
     return 0
 
 
@@ -1537,10 +1642,17 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
     if result.dry_run:
         reporter.info("Dry-run: no PR opened.")
         return 0
+    field_names = [c.field_path for c in result.changes]
+    n = len(field_names)
+    shown = ", ".join(field_names[:3]) + (f", +{n - 3} more" if n > 3 else "")
+    name = metadata.project.name
     if result.pr_url:
-        reporter.success(f"Update PR created: {result.pr_url}")
+        pr_clause = f" → PR {result.pr_url}"
     elif result.pr_number is not None:
-        reporter.success(f"Update PR #{result.pr_number} created.")
+        pr_clause = f" → PR #{result.pr_number}"
+    else:
+        pr_clause = ""
+    reporter.success(f"✓ updated {name} — {n} field(s): {shown}{pr_clause}")
     return 0
 
 
@@ -1637,7 +1749,26 @@ def _handle_publish(args: argparse.Namespace) -> int:
         except (WorkingTreeDirty, PublishError) as exc:
             reporter.error(str(exc), hint=exc.recovery_hint or None)
             return 1
-    reporter.success(f"Published v{result.version}.")
+    tag = f"v{result.version}"
+    storage = getattr(preview.new_metadata, "storage", None)
+    prefix_clause = ""
+    if storage is not None and getattr(storage, "bucket", None):
+        prefix = (getattr(storage, "prefix", None) or "").strip("/")
+        prefix_clause = f", s3://{storage.bucket}/{prefix}/" if prefix else f", s3://{storage.bucket}/"
+    pr_clause = f", PR {result.pr_url}" if result.pr_url else ", PR (local)"
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "project": preview.project_name,
+                "version": result.version,
+                "tag": tag,
+                "pr_url": result.pr_url,
+            }
+        )
+    else:
+        reporter.success(
+            f"✓ published {preview.project_name} v{result.version} — tag {tag}{pr_clause}{prefix_clause}"
+        )
     return 0
 
 
@@ -1718,6 +1849,17 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
         steps = config_ops.validate_config(args.path, bucket=args.bucket)
     text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
     print(text)
+    if not args.json_out:
+        s3_step = next((s for s in steps if s.name == "s3"), None)
+        if s3_step is not None and s3_step.status == "ok":
+            try:
+                config = Config.load()
+                endpoint = config.storage_endpoint or "default AWS endpoint"
+                profile = config.aws_profile_name or "default"
+            except Exception:
+                endpoint, profile = "default AWS endpoint", "default"
+            ms_clause = f" — 200 OK, {s3_step.latency_ms}ms" if s3_step.latency_ms is not None else " — 200 OK"
+            reporter.success(f"✓ s3://{args.bucket} via {endpoint} (profile: {profile}){ms_clause}")
     return exit_code
 
 
@@ -1804,6 +1946,14 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
             print(f"{prefix} [{f.severity}] {loc}: {f.message}")
             if f.hint:
                 print(f"    💡 {f.hint}")
+        if not findings:
+            print("no issues found")
+        else:
+            n_err = sum(1 for f in findings if f.severity == "error")
+            n_warn = sum(1 for f in findings if f.severity == "warning")
+            sections = sorted({f.section for f in findings if f.section})
+            across = f" across {' + '.join(sections)}" if sections else ""
+            print(f"{n_err} error(s), {n_warn} warning(s){across}")
     return 1 if any(f.severity == "error" for f in findings) else 0
 
 

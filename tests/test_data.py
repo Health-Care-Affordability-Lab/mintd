@@ -118,7 +118,9 @@ def test_bump_up_to_date_returns_none(tmp_path: Path) -> None:
         check_findings=[_up_to_date_finding(dvc_path)],
     )
 
-    assert result is None
+    assert result.changed is False
+    assert result.dvc_path is None
+    assert result.new_pin is None
     assert fake.calls == []
 
 
@@ -140,8 +142,10 @@ def test_bump_with_drift_rewrites_dvc_file(tmp_path: Path) -> None:
         check_findings=[_drift_finding(dvc_path)],
     )
 
-    assert produced is not None
-    assert produced.name == "new.parquet.dvc"
+    assert produced.changed is True
+    assert produced.new_pin == HEAD_SHA
+    assert produced.dvc_path is not None
+    assert produced.dvc_path.name == "new.parquet.dvc"
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call.path == "outputs/new.parquet"
@@ -320,7 +324,7 @@ def test_bump_consumes_provided_check_findings_without_recomputing(
         check_findings=[_up_to_date_finding(dvc_path)],
     )
 
-    assert result is None
+    assert result.changed is False
 
 
 def test_bump_default_uses_check_project_when_no_findings_passed(
@@ -344,7 +348,7 @@ def test_bump_default_uses_check_project_when_no_findings_passed(
         name="cms_based",
     )
 
-    assert result is None
+    assert result.changed is False
     assert len(calls) == 1
     assert calls[0][0] == tmp_path
     assert calls[0][1] == {"upgrades": True}

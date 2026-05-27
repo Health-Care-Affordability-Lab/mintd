@@ -10,7 +10,9 @@ in a slice-19 cleanup; for now, the rename would touch slice 7-12 tests.
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -30,6 +32,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class PullSummary:
+    """What a ``data_pull`` did — for the CLI's completion line (slice 38b)."""
+    file_count: int
+    total_bytes: int
+    elapsed_s: float
+
+
 def data_pull(
     project_path: Path,
     *,
@@ -40,7 +50,7 @@ def data_pull(
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
-) -> None:
+) -> PullSummary:
     """Pull dvc-tracked data via fast-sync (boto3 → cache) when available;
     fall back to ``dvc pull`` for anything fast-sync can't handle.
 
@@ -49,7 +59,11 @@ def data_pull(
     fast-sync. Without discovery, the call would fall through to
     ``dvc pull`` directly and hit DVC 3.66.1's cache-write bug on
     version_aware buckets.
+
+    Returns a ``PullSummary`` (file count, total bytes, elapsed) so the CLI
+    can render an informative completion line (slice 38b).
     """
+    start_t = time.monotonic()
     if fast_sync_ops is not None:
         # Track the original request shape: "pull-all" (None) carries different
         # post-fast-sync semantics than "pull these specific .dvc files."
@@ -134,7 +148,11 @@ def data_pull(
                 targets=None if pull_all_requested else targets,
                 remote=remote, jobs=jobs, extra_args=extra_dvc_args,
             )
-            return
+            return PullSummary(
+                file_count=len(targets or []),
+                total_bytes=total_bytes,
+                elapsed_s=time.monotonic() - start_t,
+            )
 
         if result is not None:
             logger.info(
@@ -175,10 +193,26 @@ def data_pull(
             dvc_ops.pull(
                 targets=None, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
             )
-        return
+        # Count both fast-synced outputs and any routed to the dvc-pull
+        # fallback — both land on disk, so both belong in the file count.
+        synced_count = (
+            result.synced_count + len(result.fallback_targets)
+            if result is not None
+            else len(targets or [])
+        )
+        return PullSummary(
+            file_count=synced_count,
+            total_bytes=total_bytes,
+            elapsed_s=time.monotonic() - start_t,
+        )
 
     dvc_ops.pull(
         targets=targets, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+    )
+    return PullSummary(
+        file_count=len(targets or []),
+        total_bytes=0,
+        elapsed_s=time.monotonic() - start_t,
     )
 
 

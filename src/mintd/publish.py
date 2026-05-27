@@ -94,6 +94,7 @@ class PublishResult:
     tagged: bool
     catalog_updated: bool
     preview: PublishPreview | None = None
+    pr_url: str | None = None
 
 
 def prepare_publish(
@@ -235,17 +236,18 @@ def _apply_publish(
     if reporter is not None:
         reporter.update_status("Updating catalog entry...")
     try:
-        client.update(new_metadata, reporter=reporter)
+        update_result = client.update(new_metadata, reporter=reporter)
     except CatalogNotFound as exc:
         raise CatalogUpdateFailed(
             f"catalog update failed: {exc}",
             pushed=True, tagged=True,
             recovery_hint="DVC + tag completed. Run `mintd registry register` first, then rerun `mintd publish` (idempotent retry).",
         ) from exc
-    
+
     return PublishResult(
         version=preview.new_version, dry_run=False, diff=preview.local_diff,
         pushed=True, tagged=True, catalog_updated=True, preview=preview,
+        pr_url=getattr(update_result, "pr_url", None),
     )
 
 

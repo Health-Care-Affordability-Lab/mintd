@@ -223,6 +223,7 @@ class ValidationStep(BaseModel):
     name: Literal["schema", "aws_profile", "s3"]
     status: Literal["ok", "fail", "skipped"]
     message: str
+    latency_ms: int | None = None
 
 
 def validate_config(
@@ -335,6 +336,7 @@ def _check_bucket(bucket: str, profile: str | None) -> ValidationStep:
         name="s3",
         status="ok",
         message=f"head_bucket on s3://{bucket} — 200 OK (latency {ms}ms)",
+        latency_ms=ms,
     )
 
 
@@ -564,7 +566,14 @@ def render_validation(
         # JSON shape: {step_name: {"status": ..., "message": ...}}. Tests
         # assert structure (keys present) rather than exact message strings.
         text = json.dumps(
-            {step.name: {"status": step.status, "message": step.message} for step in steps},
+            {
+                step.name: {
+                    "status": step.status,
+                    "message": step.message,
+                    "latency_ms": step.latency_ms,
+                }
+                for step in steps
+            },
             indent=2,
         )
     else:

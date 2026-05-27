@@ -293,29 +293,44 @@ def test_data_import_unknown_name_exits_one(
 
 def test_data_import_bump_up_to_date_prints_message(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     patched_clients,
+    recording_reporter,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("mintd.cli.bump_import", lambda *a, **kw: None)
+    from mintd.data import BumpResult
+
+    monkeypatch.setattr(
+        "mintd.cli.bump_import",
+        lambda *a, **kw: BumpResult(changed=False, old_pin="abc1234def", new_pin=None, dvc_path=None),
+    )
     rc = cli.main(["data", "import", "provider-xw", "--bump"])
-    out = capsys.readouterr().out
     assert rc == 0
-    assert "up to date" in out
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "up to date" in msg
+    assert "abc1234" in msg
 
 
 def test_data_import_bump_drift_prints_path(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
     patched_clients,
+    recording_reporter,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from mintd.data import BumpResult
+
     new_dvc = tmp_path / "new.parquet.dvc"
-    monkeypatch.setattr("mintd.cli.bump_import", lambda *a, **kw: new_dvc)
+    monkeypatch.setattr(
+        "mintd.cli.bump_import",
+        lambda *a, **kw: BumpResult(
+            changed=True, old_pin="old1234567", new_pin="new7654321", dvc_path=new_dvc
+        ),
+    )
     rc = cli.main(["data", "import", "provider-xw", "--bump"])
-    out = capsys.readouterr().out
     assert rc == 0
-    assert str(new_dvc) in out
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "bumped" in msg
+    assert "old1234" in msg
+    assert "new7654" in msg
 
 
 def test_data_import_bump_unreachable_exits_two_with_hint(
@@ -842,11 +857,13 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     monkeypatch: pytest.MonkeyPatch,
     patched_clients,
 ) -> None:
+    from mintd.data import CloneResult
+
     received: dict[str, object] = {}
 
     def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
         received.update(kwargs)
-        return Path("/tmp/sentinel")
+        return CloneResult(dest=Path("/tmp/sentinel"), rev="abc1234def", remote_bucket="my-bucket")
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
     monkeypatch.setattr(
@@ -869,7 +886,10 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     assert received["jobs"] == 4
     captured = capsys.readouterr()
     # Slice 25: success line is chatter → stderr; result payload → stdout.
-    assert "cloned: /tmp/sentinel" in captured.err
+    # Slice 38b: success line now names the product, rev, and remote bucket.
+    assert "cloned provider-xw" in captured.err
+    assert "abc1234" in captured.err
+    assert "s3://my-bucket" in captured.err
 
 
 def test_cli_data_clone_threads_dvc_args(
@@ -877,11 +897,13 @@ def test_cli_data_clone_threads_dvc_args(
     patched_clients,
 ) -> None:
     """`--dvc-arg` reaches `clone_and_pull_product(extra_dvc_args=...)`."""
+    from mintd.data import CloneResult
+
     received: dict[str, object] = {}
 
     def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
         received.update(kwargs)
-        return Path("/tmp/sentinel")
+        return CloneResult(dest=Path("/tmp/sentinel"), rev=None, remote_bucket=None)
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
     monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
@@ -1150,7 +1172,7 @@ def test_enclave_remove_unknown_exits_one(
 
 def test_enclave_pull_happy_path(
     patched_clients,
-    capsys: pytest.CaptureFixture[str],
+    recording_reporter,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1190,14 +1212,16 @@ def test_enclave_pull_happy_path(
         "--manifest", str(manifest),
     ])
 
-    out = capsys.readouterr().out
     assert rc == 0
-    assert "pulled: provider-xw" in out
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "provider-xw" in msg
+    assert "aaaaaaa" in msg
+    assert "1 output(s)" in msg
 
 
 def test_enclave_pull_nothing_to_pull_message(
     patched_clients,
-    capsys: pytest.CaptureFixture[str],
+    recording_reporter,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1216,9 +1240,9 @@ def test_enclave_pull_nothing_to_pull_message(
         "--manifest", str(manifest),
     ])
 
-    out = capsys.readouterr().out
     assert rc == 0
-    assert "nothing to pull" in out
+    msg = recording_reporter.events_of("info")[-1][1]
+    assert "nothing to pull" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -1969,3 +1993,234 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
         if fn_name not in allowlist:
             offenders.append(fn_name or "<module>")
     assert offenders == [], f"unexpected sys.stderr writers: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Slice 38b — completion-line richness (check (e): state what happened)
+# ---------------------------------------------------------------------------
+
+
+def test_format_duration_cases() -> None:
+    from mintd.cli import _format_duration
+
+    assert _format_duration(0.142) == "142ms"
+    assert _format_duration(12.4) == "12s"
+    assert _format_duration(185) == "3m05s"
+
+
+def _write_import_dvc(path: Path, *, url: str, rev: str, size: int, nfiles: int) -> None:
+    path.write_text(
+        "deps:\n"
+        f"- path: outputs/final.parquet\n"
+        "  repo:\n"
+        f"    url: {url}\n"
+        f"    rev_lock: {rev}\n"
+        "outs:\n"
+        f"- path: final.parquet\n"
+        f"  size: {size}\n"
+        f"  nfiles: {nfiles}\n",
+        encoding="utf-8",
+    )
+
+
+def test_import_summary_parses_import_dvc(tmp_path: Path) -> None:
+    from mintd.cli import _import_summary
+
+    dvc = tmp_path / "final.parquet.dvc"
+    _write_import_dvc(
+        dvc, url="https://github.com/example-org/data_src", rev="deadbeef1234", size=2048, nfiles=3
+    )
+    summary = _import_summary([dvc])
+    assert summary["pin"] == "deadbeef1234"
+    assert summary["producer_repo"] == "https://github.com/example-org/data_src"
+    assert summary["total_bytes"] == 2048
+    assert summary["file_count"] == 3
+    assert summary["dest"] == str(tmp_path)
+
+
+def test_import_summary_falls_back_on_non_import_dvc(tmp_path: Path) -> None:
+    from mintd.cli import _import_summary
+
+    dvc = tmp_path / "raw.csv.dvc"
+    dvc.write_text("outs:\n- path: raw.csv\n  size: 99\n", encoding="utf-8")
+    summary = _import_summary([dvc])
+    assert summary["pin"] is None
+    assert summary["producer_repo"] is None
+    assert summary["total_bytes"] == 99
+    assert summary["file_count"] == 1
+
+
+def test_cli_data_pull_success_shows_count_size_elapsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    from mintd.data_ops import PullSummary
+
+    (tmp_path / ".dvc").mkdir()
+    monkeypatch.setattr(
+        "mintd.cli.data_pull",
+        lambda *a, **k: PullSummary(file_count=4, total_bytes=2048, elapsed_s=12.4),
+    )
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "4 file(s)" in msg
+    assert "2 KB" in msg
+    assert "in 12s" in msg
+
+
+def test_cli_data_pull_success_omits_size_when_zero_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    from mintd.data_ops import PullSummary
+
+    (tmp_path / ".dvc").mkdir()
+    monkeypatch.setattr(
+        "mintd.cli.data_pull",
+        lambda *a, **k: PullSummary(file_count=2, total_bytes=0, elapsed_s=1.0),
+    )
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "2 file(s)" in msg
+    assert "KB" not in msg and "MB" not in msg
+
+
+def test_cli_data_import_success_shows_provenance_and_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    dvc = tmp_path / "final.parquet.dvc"
+    _write_import_dvc(
+        dvc, url="https://github.com/example-org/provider-xw", rev="abc1234def0", size=4096, nfiles=2
+    )
+    monkeypatch.setattr("mintd.cli.import_product", lambda *a, **k: [dvc])
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "imported provider-xw" in msg
+    assert "abc1234" in msg
+    assert "2 file(s)" in msg
+    assert "4 KB" in msg
+
+
+def test_cli_data_import_json_mode_no_checkmark_on_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    dvc = tmp_path / "final.parquet.dvc"
+    _write_import_dvc(
+        dvc, url="https://github.com/example-org/provider-xw", rev="abc1234def0", size=4096, nfiles=2
+    )
+    monkeypatch.setattr("mintd.cli.import_product", lambda *a, **k: [dvc])
+    rc = cli.main(["--json", "data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "✓" not in out
+    payload = json.loads(out)
+    assert payload["pin"] == "abc1234def0"
+    assert payload["total_bytes"] == 4096
+
+
+def test_cli_registry_update_success_names_changed_fields(
+    tmp_path: Path, patched_clients, recording_reporter
+) -> None:
+    client, _ = patched_clients
+    _register_provider_xw(client, primary="outputs/old.parquet")
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "data_provider-xw"
+    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["data_products"]["primary"] = "outputs/new.parquet"
+    (tmp_path / "metadata.json").write_text(json.dumps(data))
+    rc = cli.main(["registry", "update", str(tmp_path)])
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "updated provider-xw" in msg
+    assert "field(s)" in msg
+    assert "primary" in msg
+
+
+def test_cli_config_validate_success_shows_target_and_latency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording_reporter
+) -> None:
+    from mintd.config_ops import ValidationStep
+
+    class _Cfg:
+        storage_endpoint = "https://s3.example.com"
+        aws_profile_name = "mintd"
+
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: _Cfg()))
+    monkeypatch.setattr(
+        "mintd.cli.config_ops.validate_config",
+        lambda *a, **k: [ValidationStep(name="s3", status="ok", message="ok", latency_ms=42)],
+    )
+    rc = cli.main(["config", "validate", "--bucket", "my-bucket"])
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "s3://my-bucket" in msg
+    assert "s3.example.com" in msg
+    assert "mintd" in msg
+    assert "42ms" in msg
+
+
+def test_cli_check_renders_severity_footer(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    findings = [
+        CheckFinding(severity="error", section="schema", message="bad", kind="generic"),
+        CheckFinding(severity="warning", section="consumer", message="meh", kind="drift"),
+    ]
+    monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: findings)
+    rc = cli.main(["check", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "1 error(s), 1 warning(s)" in out
+    assert "consumer" in out and "schema" in out
+
+
+def test_cli_check_clean_footer_says_no_issues(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: [])
+    rc = cli.main(["check", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no issues found" in out
+
+
+def test_cli_publish_success_echoes_tag_and_pr(
+    tmp_path: Path,
+    recording_reporter,
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    client, dvc_ops = patched_clients
+    metadata = _register_provider_xw(client)
+    metadata.data_products.primary = "data/final/"
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+    subprocess.run(["git", "add", "metadata.json"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "-q", "-m", "add metadata"],
+        cwd=tmp_path, check=True,
+    )
+
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
+
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "published provider-xw" in msg
+    assert "tag v" in msg
+    assert "PR" in msg

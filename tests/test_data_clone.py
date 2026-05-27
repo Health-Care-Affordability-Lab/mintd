@@ -77,7 +77,7 @@ def test_clone_and_pull_product_happy_path(
         name="provider-xw",
     )
 
-    assert dest == (tmp_path / "data_provider-xw").resolve()
+    assert dest.dest == (tmp_path / "data_provider-xw").resolve()
     assert len(git.clone_calls) == 1
     assert git.clone_calls[0].shallow is False
     assert git.clone_calls[0].branch is None
@@ -101,7 +101,7 @@ def test_clone_and_pull_product_with_explicit_dest(
         client, dvc, git, None, name="provider-xw", dest=dest_arg,
     )
 
-    assert dest == dest_arg.resolve()
+    assert dest.dest == dest_arg.resolve()
     assert git.clone_calls[0].dest == dest_arg.resolve()
 
 
@@ -237,7 +237,7 @@ def test_clone_and_pull_product_strips_legacy_prefix_in_dest(
 
     dest = clone_and_pull_product(client, dvc, git, None, name="data_aha")
 
-    assert dest == (tmp_path / "data_aha").resolve()
+    assert dest.dest == (tmp_path / "data_aha").resolve()
 
 
 class _RaisingCloneGitOps(_NoopCloneGitOps):
