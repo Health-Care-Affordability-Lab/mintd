@@ -240,6 +240,25 @@ def test_clone_and_pull_product_strips_legacy_prefix_in_dest(
     assert dest.dest == (tmp_path / "data_aha").resolve()
 
 
+def test_clone_and_pull_product_code_type_uses_bare_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Slice 39: cloning a code-type entry lands in `foo/` (bare), matching
+    `mintd init code foo` — not `code_foo/`. The clone-dest is the sixth
+    prefix site, routed through `project_full_name`."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(
+        client, name="foo", mutate=lambda d: d["project"].update({"type": "code"})
+    )
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    dest = clone_and_pull_product(client, dvc, git, None, name="foo")
+
+    assert dest.dest == (tmp_path / "foo").resolve()
+
+
 class _RaisingCloneGitOps(_NoopCloneGitOps):
     def clone(
         self,

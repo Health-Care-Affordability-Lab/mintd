@@ -73,6 +73,32 @@ def test_code_renders_metadata_only(tmp_path: Path) -> None:
     metadata = Metadata.model_validate_json((tmp_path / "metadata.json").read_text(encoding="utf-8"))
     assert metadata.project.type == "code"
     assert metadata.project.name == "foo"
+    assert metadata.project.full_name == "foo"
+
+
+@pytest.mark.parametrize(
+    ("project_type", "expected_full_name"),
+    [
+        ("data", "data_foo"),
+        ("project", "project_foo"),
+        ("enclave", "enclave_foo"),
+        ("code", "foo"),
+    ],
+)
+def test_full_name_prefix_convention(
+    tmp_path: Path, project_type: str, expected_full_name: str
+) -> None:
+    """`code` carries the bare name; every other type keeps `<type>_<name>`
+    (slice 39). `name` and `type` are unchanged across types."""
+    render_scaffold(
+        project_type=project_type, name="foo", language="python", target_dir=tmp_path
+    )
+    metadata = Metadata.model_validate_json(
+        (tmp_path / "metadata.json").read_text(encoding="utf-8")
+    )
+    assert metadata.project.type == project_type
+    assert metadata.project.name == "foo"
+    assert metadata.project.full_name == expected_full_name
 
 
 def test_enclave_renders_transfer_scripts(tmp_path: Path) -> None:

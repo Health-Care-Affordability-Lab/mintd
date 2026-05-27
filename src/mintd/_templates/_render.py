@@ -46,6 +46,19 @@ def validate_project_name(name: str) -> None:
         )
 
 
+def project_full_name(project_type: str, name: str) -> str:
+    """Compute the full project identifier (e.g. ``data_foo``).
+
+    For ``code`` projects, this is the bare ``name``. For all others, it
+    uses the ``{project_type}_{name}`` naming convention. The ``code`` fact
+    is carried by the ``project.type`` field in metadata, making redundant
+    ``code_`` prefixes unnecessary.
+    """
+    if project_type == "code":
+        return name
+    return f"{project_type}_{name}"
+
+
 def _get_mint_hash() -> str:
     """Slice 19 records ``mint_hash`` in the Jinja context for parity with
     the legacy templates, but the v2 Pydantic ``metadata.json`` generation
@@ -114,7 +127,7 @@ def _build_context(
     return {
         # Set by slice-19 init flow.
         "project_name": name,
-        "full_project_name": f"{project_type}_{name}",
+        "full_project_name": project_full_name(project_type, name),
         "package_name": name,
         "project_type": project_type,
         "language": language,
@@ -203,7 +216,7 @@ def _render_metadata_json(context: dict[str, object]) -> str:
         "project": {
             "type": project_type,
             "name": name,
-            "full_name": f"{project_type}_{name}",
+            "full_name": project_full_name(project_type, name),
             "created_at": created_at,
             "created_by": created_by,
         },
@@ -269,7 +282,7 @@ def render_scaffold(
     if context_overrides:
         context.update(context_overrides)
 
-    full_name = f"{project_type}_{name}"
+    full_name = project_full_name(project_type, name)
     dirs, files = dispatch(project_type)(language, name, full_name)
 
     for rel_dir in dirs:
@@ -290,6 +303,7 @@ def render_scaffold(
 
 __all__ = [
     "InitNameInvalid",
+    "project_full_name",
     "render_scaffold",
     "render_template",
     "validate_project_name",

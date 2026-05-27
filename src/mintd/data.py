@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from ._dvc_ops import DvcOps
 from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._templates import project_full_name
 from .catalog import CatalogClient
 from .check import CheckFinding, check_project
 from .data_ops import data_pull
@@ -234,7 +235,7 @@ def _resolve_clone_dest(
         if base.startswith(prefix):
             base = base[len(prefix):]
             break
-    return Path.cwd() / f"{project_type}_{base}"
+    return Path.cwd() / project_full_name(project_type, base)
 
 
 def clone_and_pull_product(

@@ -175,6 +175,32 @@ def test_init_project_writes_full_storage_block(tmp_path: Path) -> None:
     assert m.storage.dvc.remote_name == "data_foo"
 
 
+def test_init_code_type_uses_bare_name_for_dir_and_storage(tmp_path: Path) -> None:
+    """Slice 39: `mintd init code foo` scaffolds `foo/` (not `code_foo/`) and,
+    on the labonly DVC path, names the remote `foo` with an S3 prefix derived
+    from `foo`. The `code` fact lives in `project.type`, not a name prefix."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="code",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="https://s3.wasabisys.com",
+        ops=fake,
+    )
+    assert project_path == tmp_path / "foo"
+    m = _read_metadata(project_path)
+    assert m.project.type == "code"
+    assert m.project.full_name == "foo"
+    assert m.storage is not None
+    assert m.storage.prefix == "lab/foo/"
+    assert m.storage.dvc.remote_name == "foo"
+    assert len(fake.remote_add_calls) == 1
+    assert fake.remote_add_calls[0]["name"] == "foo"
+    assert fake.remote_add_calls[0]["url"] == "s3://cooper-globus/lab/foo/"
+
+
 def test_init_project_calls_dvc_remote_add(tmp_path: Path) -> None:
     fake = _FakeInitOps()
     init_project(

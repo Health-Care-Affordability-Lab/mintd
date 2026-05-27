@@ -18,7 +18,7 @@ from typing import Literal
 from ._console import Reporter
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
 from ._storage_state import SLUG_REGEX, compute_storage_prefix
-from ._templates import InitNameInvalid, render_scaffold
+from ._templates import InitNameInvalid, project_full_name, render_scaffold
 from .model import DvcStorage, Metadata, Storage
 from .publish import atomic_write_json
 
@@ -102,7 +102,7 @@ def init_project(
     if use_current_repo:
         project_path = target_dir
     else:
-        project_path = target_dir / f"{project_type}_{name}"
+        project_path = target_dir / project_full_name(project_type, name)
 
     project_path.mkdir(parents=True, exist_ok=True)
     metadata_path = project_path / "metadata.json"
@@ -130,10 +130,10 @@ def init_project(
 
         prefix = compute_storage_prefix(
             classification=classification,  # type: ignore[arg-type]
-            project_name=f"{project_type}_{name}",
+            project_name=project_full_name(project_type, name),
             slug=slug,
         )
-        remote_name = f"{project_type}_{name}"
+        remote_name = project_full_name(project_type, name)
         remote_url = f"s3://{bucket}/{prefix}"
 
         try:

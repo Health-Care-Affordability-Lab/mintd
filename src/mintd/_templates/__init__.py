@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ._render import (
     InitNameInvalid,
+    project_full_name,
     render_scaffold,
     render_template,
     validate_project_name,
@@ -16,6 +17,7 @@ from ._render import (
 
 __all__ = [
     "InitNameInvalid",
+    "project_full_name",
     "render_scaffold",
     "render_template",
     "validate_project_name",
