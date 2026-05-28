@@ -20,6 +20,11 @@ dev = [
     "types-PyYAML",
     "moto[s3] ~= 5.0",
     "types-boto3",
+    "mintd[schema]",
+]
+schema = [
+    "pandas >= 2.2, < 4",
+    "pyarrow >= 16",
 ]
 
 [build-system]

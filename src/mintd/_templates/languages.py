@@ -33,7 +33,6 @@ LANGUAGES: dict[str, dict[str, Any]] = {
             (f"{source_dir}/ingest.py", "ingest.py.j2"),
             (f"{source_dir}/clean.py", "clean.py.j2"),
             (f"{source_dir}/validate.py", "validate.py.j2"),
-            ("schemas/generate_schema.py", "generate_schema.py.j2"),
         ],
     },
     "r": {
@@ -58,7 +57,6 @@ LANGUAGES: dict[str, dict[str, Any]] = {
             (f"{source_dir}/ingest.R", "ingest.R.j2"),
             (f"{source_dir}/clean.R", "clean.R.j2"),
             (f"{source_dir}/validate.R", "validate.R.j2"),
-            ("schemas/generate_schema.py", "generate_schema.py.j2"),
         ],
     },
     "stata": {
@@ -76,7 +74,6 @@ LANGUAGES: dict[str, dict[str, Any]] = {
             (f"{source_dir}/ingest.do", "ingest.do.j2"),
             (f"{source_dir}/clean.do", "clean.do.j2"),
             (f"{source_dir}/validate.do", "validate.do.j2"),
-            ("schemas/generate_schema.py", "generate_schema.py.j2"),
         ],
     },
 }

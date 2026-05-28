@@ -10,10 +10,12 @@ set -euo pipefail
 
 REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git"
 BRANCH=""
+WITH_SCHEMA=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --branch) BRANCH="$2"; shift 2 ;;
+        --with-schema) WITH_SCHEMA=1; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -30,8 +32,16 @@ if [[ -n "$BRANCH" ]]; then
     GIT_URL="${GIT_URL}@${BRANCH}"
 fi
 
+# uv tool install accepts PEP 508 extras when the spec is suffixed `[extra]`.
+# Wrap the whole spec so the shell doesn't glob the brackets.
+if [[ "$WITH_SCHEMA" -eq 1 ]]; then
+    INSTALL_SPEC="${GIT_URL}[schema]"
+else
+    INSTALL_SPEC="$GIT_URL"
+fi
+
 echo "Installing mintd..."
-uv tool install --force "$GIT_URL"
+uv tool install --force "$INSTALL_SPEC"
 
 # Locate the tool's Python interpreter
 TOOL_PYTHON="$HOME/.local/share/uv/tools/mintd/bin/python"
@@ -52,4 +62,8 @@ uv pip install --python "$TOOL_PYTHON" cffi reflink || {
 }
 
 echo ""
-echo "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
+if [[ "$WITH_SCHEMA" -eq 1 ]]; then
+    echo "mintd installed successfully (with bundled dvc + [schema] extra). Run 'mintd --help' to get started."
+else
+    echo "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
+fi

@@ -6,7 +6,8 @@
 # Or from a specific branch:
 #   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/<branch>/install.ps1))) -Branch <branch>
 param(
-    [string]$Branch = ""
+    [string]$Branch = "",
+    [switch]$WithSchema
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,8 +25,14 @@ if ($Branch) {
     $GitUrl = "${GitUrl}@${Branch}"
 }
 
+if ($WithSchema) {
+    $InstallSpec = "${GitUrl}[schema]"
+} else {
+    $InstallSpec = $GitUrl
+}
+
 Write-Host "Installing mintd..."
-uv tool install --force $GitUrl
+uv tool install --force $InstallSpec
 if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
 
 # Locate the tool's Python interpreter
@@ -47,4 +54,8 @@ if (Test-Path $ToolPython) {
 }
 
 Write-Host ""
-Write-Host "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
+if ($WithSchema) {
+    Write-Host "mintd installed successfully (with bundled dvc + [schema] extra). Run 'mintd --help' to get started."
+} else {
+    Write-Host "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
+}

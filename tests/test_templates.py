@@ -48,7 +48,9 @@ def test_data_python_renders_all_files(tmp_path: Path) -> None:
     assert "code/ingest.py" in rel
     assert "code/clean.py" in rel
     assert "code/validate.py" in rel
-    assert "schemas/generate_schema.py" in rel
+    # Slice 41: scaffold no longer ships generate_schema.py; the CLI
+    # (`mintd data schema generate`) replaces the vendored script.
+    assert "schemas/generate_schema.py" not in rel
     assert "scripts/check-dvc-sync.sh" in rel
 
 

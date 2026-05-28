@@ -313,6 +313,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_remove.add_argument("name")
     p_remove.set_defaults(_handler=_handle_data_remove)
 
+    p_schema = p_data_sub.add_parser("schema", help="Schema operations")
+    p_schema_sub = p_schema.add_subparsers(dest="schema_command")
+    p_schema_gen = p_schema_sub.add_parser(
+        "generate",
+        help="Generate Frictionless table schemas for data files (requires [schema] extra)",
+    )
+    p_schema_gen.add_argument("--project-dir", type=Path, default=None)
+    p_schema_gen.add_argument("--data-dir", type=Path, default=None)
+    p_schema_gen.add_argument("--output", type=Path, default=None)
+    p_schema_gen.add_argument(
+        "--recursive", action=argparse.BooleanOptionalAction, default=True,
+    )
+    p_schema_gen.set_defaults(_handler=_handle_data_schema_generate)
+
     p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
     p_data_list.add_argument("--imported", action="store_true")
     p_data_list.add_argument("--detailed", action="store_true", help="Show full descriptions (no truncation).")
@@ -733,6 +747,49 @@ def _handle_data_add(args: argparse.Namespace) -> int:
         reporter.error(str(e), hint="check the path exists inside a DVC project; 'mintd init' scaffolds one")
         return 1
     print(str(produced))
+    return 0
+
+
+def _handle_data_schema_generate(args: argparse.Namespace) -> int:
+    from .schema_ops import (
+        SchemaExtraNotInstalled,
+        find_project_root,
+        generate_schema_file,
+    )
+
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    try:
+        project_dir = args.project_dir or find_project_root()
+    except FileNotFoundError as e:
+        reporter.error(
+            str(e),
+            hint="cd into a mintd project (one with metadata.json), or pass --project-dir",
+        )
+        return 1
+
+    data_dir = args.data_dir or (project_dir / "data" / "final")
+    output = args.output or (project_dir / "schemas" / "v1" / "schema.json")
+
+    try:
+        with reporter.status("Generating schema..."):
+            generate_schema_file(data_dir, output, recursive=args.recursive)
+    except SchemaExtraNotInstalled:
+        reporter.error(
+            "schema generation requires the [schema] extra",
+            hint=(
+                "Reinstall mintd with: install.sh --with-schema "
+                "(or: uv tool install --force 'mintd[schema]')"
+            ),
+        )
+        return 1
+    except FileNotFoundError as e:
+        reporter.error(str(e), hint=f"add supported data files under {data_dir} or pass --data-dir")
+        return 1
+    except (ValueError, RuntimeError) as e:
+        reporter.error(str(e), hint="check file format support (.dta, .csv, .json, .parquet) and integrity")
+        return 1
+
+    reporter.success(f"Schema saved to: {output}")
     return 0
 
 
