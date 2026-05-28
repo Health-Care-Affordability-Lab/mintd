@@ -11,6 +11,7 @@ mock_aws` (legacy `mock_s3` is removed).
 from __future__ import annotations
 
 import hashlib
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,7 +22,7 @@ from moto import mock_aws
 
 from mintd._fast_sync_ops import (
     SubprocessFastSyncOps,
-    _dvc_version_ok,
+    _check_dvc,
     cache_path_for,
     check_bucket_versioning,
     classify_targets,
@@ -597,18 +598,36 @@ def test_try_fast_pull_advance_fires_once_on_single_file_cache_hit(
 
 # ---------- DVC version canary (2) ----------
 
-def test_dvc_version_canary_match() -> None:
+@pytest.mark.parametrize(
+    "returncode, stdout, stderr, exception, expected_ok, expected_reason",
+    [
+        (0, "3.66.1\n", "", None, True, None),
+        (0, "3.99.9\n", "", None, True, None),
+        (0, "4.0.0\n", "", None, False, "dvc 4.0 above ceiling 4.0"),
+        (0, "3.65.9\n", "", None, False, "dvc 3.65 below floor 3.66"),
+        (0, "invalid\n", "", None, False, "dvc version unparseable: 'invalid'"),
+        (1, "", "", None, False, "dvc version probe failed (exit 1)"),
+        # `sys.executable -m dvc` exits 1 + ModuleNotFoundError when dvc is
+        # absent from mintd's env — we re-emit the honest reason instead of
+        # the opaque "probe failed (exit 1)".
+        (1, "", "ModuleNotFoundError: No module named 'dvc'\n", None, False, "dvc not installed"),
+        (1, "", "/usr/bin/python: No module named dvc\n", None, False, "dvc not installed"),
+        (0, "", "", FileNotFoundError(), False, "dvc not installed"),
+        (0, "", "", subprocess.TimeoutExpired(cmd=["dvc", "--version"], timeout=5), False, "dvc version probe timed out"),
+    ],
+)
+def test_check_dvc(returncode: int, stdout: str, stderr: str, exception: Exception | None, expected_ok: bool, expected_reason: str | None) -> None:
     with patch("mintd._fast_sync_ops.subprocess.run") as run:
-        run.return_value.returncode = 0
-        run.return_value.stdout = "3.66.1\n"
-        assert _dvc_version_ok() is True
+        if exception:
+            run.side_effect = exception
+        else:
+            run.return_value.returncode = returncode
+            run.return_value.stdout = stdout
+            run.return_value.stderr = stderr
 
-
-def test_dvc_version_canary_mismatch() -> None:
-    with patch("mintd._fast_sync_ops.subprocess.run") as run:
-        run.return_value.returncode = 0
-        run.return_value.stdout = "3.67.0\n"
-        assert _dvc_version_ok() is False
+        ok, reason = _check_dvc()
+        assert ok is expected_ok
+        assert reason == expected_reason
 
 
 # ---------- classify_targets P0 (2) ----------
@@ -679,7 +698,7 @@ def test_classify_targets_routes_imports_to_fallback(
 # ---------- orchestrator (6) ----------
 
 def test_try_fast_pull_falls_back_when_version_mismatch(tmp_path: Path) -> None:
-    with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=False):
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(False, "dvc version mismatch")):
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
         )
@@ -689,7 +708,7 @@ def test_try_fast_pull_falls_back_when_version_mismatch(tmp_path: Path) -> None:
 
 
 def test_try_fast_pull_falls_back_when_no_config(tmp_path: Path) -> None:
-    with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
         )
@@ -706,7 +725,7 @@ def test_try_fast_pull_falls_back_when_bucket_not_versioned(tmp_path: Path) -> N
         md5 = _md5_of(body)
         _write_dvc_file_md5(tmp_path, "a", md5)
         s3.put_object(Bucket="bare", Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
-        with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+        with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
             result = SubprocessFastSyncOps().try_fast_pull(
                 project_path=tmp_path, targets=["a"], remote_name="origin"
             )
@@ -727,7 +746,7 @@ def test_try_fast_pull_single_file_happy_path(tmp_path: Path) -> None:
         s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
         _write_dvc_config(tmp_path, bucket)
         _write_dvc_file_md5(tmp_path, "data/x", md5)
-        with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+        with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
             result = SubprocessFastSyncOps().try_fast_pull(
                 project_path=tmp_path, targets=["data/x"], remote_name="origin"
             )
@@ -751,7 +770,7 @@ def test_try_fast_pull_partial_failure_preserves_original_target_string(tmp_path
         _write_dvc_config(tmp_path, bucket)
         _write_dvc_file_md5(tmp_path, "data/foo.csv", "deadbeef")
         # Do NOT upload the object — fetch will fail with NoSuchKey
-        with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+        with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
             result = SubprocessFastSyncOps().try_fast_pull(
                 project_path=tmp_path,
                 targets=["data/foo.csv.dvc"],  # user passes with .dvc suffix
@@ -765,7 +784,7 @@ def test_try_fast_pull_falls_back_on_non_s3_remote(tmp_path: Path) -> None:
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True)
     cfg.write_text("['remote \"origin\"']\n    url = gs://bucket/p\n")
-    with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
         )
@@ -789,7 +808,7 @@ def test_try_fast_pull_falls_back_on_spot_check_drift(tmp_path: Path) -> None:
         s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
         _write_dvc_config(tmp_path, bucket)
         _write_dvc_file_md5(tmp_path, "data/a", md5, version_id="stale-version")
-        with patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+        with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
             result = SubprocessFastSyncOps().try_fast_pull(
                 project_path=tmp_path, targets=["data/a"], remote_name="origin"
             )
@@ -829,7 +848,7 @@ def test_try_fast_pull_with_missing_boto3_falls_back(tmp_path: Path) -> None:
     _write_dvc_config(tmp_path, "irrelevant")
     _write_dvc_file_md5(tmp_path, "a", "deadbeef")
     with patch("mintd._fast_sync_ops.boto3", None), \
-         patch("mintd._fast_sync_ops._dvc_version_ok", return_value=True):
+         patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
         )
@@ -1514,12 +1533,12 @@ def test_try_fast_pull_early_abort_routes_pipeline_outs_to_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The P0-catching regression test. When try_fast_pull aborts early
-    (here: _dvc_version_ok returns False), the FastPullResult.fallback_targets
+    (here: _check_dvc returns False), the FastPullResult.fallback_targets
     MUST include both .dvc-file targets and the pipeline outs' target IDs.
     Without this wiring, the orchestrator would compute pipeline outs as
     'synced' when fast-sync gave up, and dvc_ops.checkout would crash on
     cache files that were never fetched."""
-    monkeypatch.setattr("mintd._fast_sync_ops._dvc_version_ok", lambda: False)
+    monkeypatch.setattr("mintd._fast_sync_ops._check_dvc", lambda: (False, "dvc version mismatch"))
 
     pipe_out = DvcOut(
         target="data/final/foo.parquet",
@@ -1654,3 +1673,10 @@ def test_discover_pipeline_outs_excludes_files_format_dir_with_missing_per_file_
     )
     assert discover_pipeline_outs(tmp_path, "x") == []
 
+
+@pytest.mark.integration
+def test_dvc_cmd_smoke() -> None:
+    from mintd._fast_sync_ops import _check_dvc
+    # the integration tag ensures we actually run the shell command in the dev env
+    ok, reason = _check_dvc()
+    assert ok is True, f"bundled dvc probe failed: {reason}"

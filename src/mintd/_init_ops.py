@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Protocol
+from ._dvc_invoke import dvc_cmd
 
 
 class InitOpError(Exception):
@@ -60,7 +61,7 @@ class SubprocessInitOps:
     def dvc_init(self, target_dir: Path) -> None:
         try:
             result = subprocess.run(
-                ["dvc", "init"],
+                [*dvc_cmd(), "init"],
                 cwd=target_dir,
                 capture_output=True,
                 text=True,
@@ -68,8 +69,10 @@ class SubprocessInitOps:
                 check=False,
             )
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if result.returncode != 0:
+            if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise InitOpError(f"dvc init failed: {result.stderr.strip()}")
         # Slice 30 polish: set the cache.type fallback chain so checkout
         # uses reflink/hardlink/symlink before falling back to copy. DVC
@@ -79,7 +82,7 @@ class SubprocessInitOps:
         # (slow + 2x disk usage). Written to .dvc/config (per-project,
         # no --local/--global) so consumers cloning the repo inherit it.
         result = subprocess.run(
-            ["dvc", "config", "cache.type", "reflink,hardlink,symlink,copy"],
+            [*dvc_cmd(), "config", "cache.type", "reflink,hardlink,symlink,copy"],
             cwd=target_dir,
             capture_output=True,
             text=True,
@@ -107,7 +110,7 @@ class SubprocessInitOps:
         the file's real path (mintd's mental model; matches what
         ``metadata.storage.versioning = True`` already declares).
         """
-        cmd = ["dvc", "remote", "add"]
+        cmd = [*dvc_cmd(), "remote", "add"]
         if default:
             cmd.append("-d")
         cmd.extend([name, url])
@@ -121,12 +124,14 @@ class SubprocessInitOps:
                 check=False,
             )
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if result.returncode != 0:
+            if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise InitOpError(f"dvc remote add failed: {result.stderr.strip()}")
         if endpoint:
             result = subprocess.run(
-                ["dvc", "remote", "modify", name, "endpointurl", endpoint],
+                [*dvc_cmd(), "remote", "modify", name, "endpointurl", endpoint],
                 cwd=target_dir,
                 capture_output=True,
                 text=True,
@@ -134,10 +139,12 @@ class SubprocessInitOps:
                 check=False,
             )
             if result.returncode != 0:
+                if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                    raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
                 raise InitOpError(f"dvc remote modify endpoint failed: {result.stderr.strip()}")
         if profile:
             result = subprocess.run(
-                ["dvc", "remote", "modify", name, "profile", profile],
+                [*dvc_cmd(), "remote", "modify", name, "profile", profile],
                 cwd=target_dir,
                 capture_output=True,
                 text=True,
@@ -145,9 +152,11 @@ class SubprocessInitOps:
                 check=False,
             )
             if result.returncode != 0:
+                if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                    raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
                 raise InitOpError(f"dvc remote modify profile failed: {result.stderr.strip()}")
         result = subprocess.run(
-            ["dvc", "remote", "modify", name, "version_aware", "true"],
+            [*dvc_cmd(), "remote", "modify", name, "version_aware", "true"],
             cwd=target_dir,
             capture_output=True,
             text=True,
@@ -155,6 +164,8 @@ class SubprocessInitOps:
             check=False,
         )
         if result.returncode != 0:
+            if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise InitOpError(
                 f"dvc remote modify version_aware failed: {result.stderr.strip()}"
             )

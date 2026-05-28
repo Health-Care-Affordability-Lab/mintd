@@ -10,6 +10,7 @@ from typing import Optional, Protocol
 
 from ._config import Timeouts
 from ._console import Reporter
+from ._dvc_invoke import dvc_cmd
 from ._subprocess import run_streaming
 
 
@@ -55,6 +56,13 @@ class DvcImportDestinationExists(DvcOpError):
     The consumer-side fix is to remove it or pass `force=True` (which maps to
     `dvc import --force`).
     """
+
+
+def _is_dvc_module_missing(stderr: str) -> bool:
+    """`sys.executable -m dvc` exits 1 with this message when dvc isn't
+    in mintd's env. We re-raise as DvcNotInstalled so users get the
+    reinstall hint instead of a confusing operation-specific error."""
+    return "No module named 'dvc'" in stderr or "No module named dvc" in stderr
 
 
 class DvcOps(Protocol):
@@ -149,7 +157,7 @@ class SubprocessDvcOps:
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
-        cmd: list[str] = ["dvc", "import", repo_url, path, "-o", str(dest)]
+        cmd: list[str] = [*dvc_cmd(), "import", repo_url, path, "-o", str(dest)]
         if rev:
             cmd.extend(["--rev", rev])
         if force:
@@ -160,10 +168,12 @@ class SubprocessDvcOps:
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
 
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             if "Does not exist" in stderr or "Unable to find" in stderr:
                 raise DvcImportPathNotFound(
                     f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"
@@ -179,7 +189,7 @@ class SubprocessDvcOps:
         return dest.parent / (dest.name + ".dvc")
 
     def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
-        cmd = ["dvc", "push"]
+        cmd = [*dvc_cmd(), "push"]
         if remote:
             cmd.extend(["--remote", remote])
         if jobs:
@@ -187,10 +197,13 @@ class SubprocessDvcOps:
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcPushError(
-                f"dvc push failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
+                f"dvc push failed (exit {r.returncode}): {stderr.strip()}"
             )
 
     def pull(
@@ -201,7 +214,7 @@ class SubprocessDvcOps:
         jobs: int | None = None,
         extra_args: list[str] | None = None,
     ) -> None:
-        cmd = ["dvc", "pull"]
+        cmd = [*dvc_cmd(), "pull"]
         if remote:
             cmd.extend(["--remote", remote])
         if jobs:
@@ -213,39 +226,47 @@ class SubprocessDvcOps:
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcPullError(
-                f"dvc pull failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
+                f"dvc pull failed (exit {r.returncode}): {stderr.strip()}"
             )
 
     def add(self, path: Path) -> Path:
-        cmd = ["dvc", "add", str(path)]
+        cmd = [*dvc_cmd(), "add", str(path)]
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcAddError(
-                f"dvc add failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
+                f"dvc add failed (exit {r.returncode}): {stderr.strip()}"
             )
         return path.parent / (path.name + ".dvc")
 
     def status(self, targets: list[str] | None = None) -> dict[str, str]:
         import json
 
-        cmd = ["dvc", "status", "--json"]
+        cmd = [*dvc_cmd(), "status", "--json"]
         if targets:
             cmd.extend(targets)
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, json_mode=True, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
 
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcStatusError(
-                f"dvc status failed (exit {r.returncode}): "
-                f"{''.join(r.stderr_lines).strip()}"
+                f"dvc status failed (exit {r.returncode}): {stderr.strip()}"
             )
         stdout = "".join(r.stdout_lines).strip()
         if not stdout:
@@ -266,25 +287,31 @@ class SubprocessDvcOps:
         return status_map
 
     def remove(self, name: str) -> None:
-        cmd = ["dvc", "remove", name]
+        cmd = [*dvc_cmd(), "remove", name]
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcRemoveError(
-                f"dvc remove failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
+                f"dvc remove failed (exit {r.returncode}): {stderr.strip()}"
             )
 
     def checkout(self, *, targets: list[str] | None = None) -> None:
-        cmd = ["dvc", "checkout"]
+        cmd = [*dvc_cmd(), "checkout"]
         if targets:
             cmd.extend(targets)
         try:
             r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
-            raise DvcNotInstalled("`dvc` binary not found on PATH.") from None
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcCheckoutError(
-                f"dvc checkout failed (exit {r.returncode}): {''.join(r.stderr_lines).strip()}"
+                f"dvc checkout failed (exit {r.returncode}): {stderr.strip()}"
             )

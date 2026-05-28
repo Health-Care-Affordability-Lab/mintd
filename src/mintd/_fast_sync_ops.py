@@ -28,6 +28,7 @@ except ImportError:
     ProfileNotFound = Exception  # type: ignore[assignment,misc]
 
 from mintd._atomic import _try_fsync_parent_dir
+from mintd._dvc_invoke import dvc_cmd
 from mintd.model import FastPullResult
 
 if TYPE_CHECKING:
@@ -35,30 +36,44 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_EXPECTED_DVC_MINOR = "3.66"
+_DVC_FLOOR = (3, 66)
+_DVC_CEILING = (4, 0)  # exclusive
 _RETRYABLE_S3_ERRORS = {"503", "500", "RequestTimeout", "SlowDown"}
 _SPOT_CHECK_N = 5
 _DEFAULT_DVC_CACHE_REL = Path(".dvc/cache")
 
-
-def _dvc_version_ok() -> bool:
+def _check_dvc() -> tuple[bool, str | None]:
+    """Probe the bundled dvc. Return (ok, reason_if_not_ok)."""
     try:
         result = subprocess.run(
-            ["dvc", "--version"],
+            [*dvc_cmd(), "--version"],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
+    except FileNotFoundError:
+        return False, "dvc not installed"
+    except subprocess.TimeoutExpired:
+        return False, "dvc version probe timed out"
     if result.returncode != 0:
-        return False
+        # `sys.executable -m dvc` returns exit 1 + "No module named 'dvc'" on
+        # stderr when dvc isn't installed in mintd's env — re-emit the
+        # honest reason rather than the opaque "probe failed" string.
+        if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+            return False, "dvc not installed"
+        return False, f"dvc version probe failed (exit {result.returncode})"
     version = result.stdout.strip()
     parts = version.split(".")
-    if len(parts) < 2:
-        return False
-    return ".".join(parts[:2]) == _EXPECTED_DVC_MINOR
+    try:
+        major, minor = int(parts[0]), int(parts[1])
+    except (IndexError, ValueError):
+        return False, f"dvc version unparseable: {version!r}"
+    if (major, minor) < _DVC_FLOOR:
+        return False, f"dvc {major}.{minor} below floor {_DVC_FLOOR[0]}.{_DVC_FLOOR[1]}"
+    if (major, minor) >= _DVC_CEILING:
+        return False, f"dvc {major}.{minor} above ceiling {_DVC_CEILING[0]}.{_DVC_CEILING[1]}"
+    return True, None
 
 
 @dataclass(frozen=True)
@@ -957,8 +972,9 @@ class SubprocessFastSyncOps:
                 ids.extend(o.target for o in pipeline_outs)
             return ids
 
-        if not _dvc_version_ok():
-            return _push_all_to_fallback(_all_target_ids(), "dvc version mismatch")
+        ok, reason = _check_dvc()
+        if not ok:
+            return _push_all_to_fallback(_all_target_ids(), reason or "dvc version mismatch")
 
         try:
             remote_cfg = get_remote_config(project_path, remote_name)

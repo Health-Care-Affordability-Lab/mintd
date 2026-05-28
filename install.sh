@@ -52,4 +52,4 @@ uv pip install --python "$TOOL_PYTHON" cffi reflink || {
 }
 
 echo ""
-echo "mintd installed successfully. Run 'mintd --help' to get started."
+echo "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."

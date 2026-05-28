@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from mintd._dvc_invoke import dvc_cmd
 
 from mintd.init import init_project, InitDestinationExists, InitNameInvalid
 from mintd.model import Metadata
@@ -448,9 +449,9 @@ def test_subprocess_dvc_init_sets_cache_type_fallback(
     monkeypatch.setattr(subprocess, "run", fake_run)
     SubprocessInitOps().dvc_init(tmp_path)
 
-    assert calls[0] == ["dvc", "init"]
+    assert calls[0] == [*dvc_cmd(), "init"]
     assert calls[1] == [
-        "dvc", "config", "cache.type",
+        *dvc_cmd(), "config", "cache.type",
         "reflink,hardlink,symlink,copy",
     ]
 
@@ -493,8 +494,8 @@ def test_dvc_remote_add_issues_version_aware_true(
         profile=None,
     )
 
-    assert calls[0] == ["dvc", "remote", "add", "-d", "data_x", "s3://b/k/"]
-    assert ["dvc", "remote", "modify", "data_x", "version_aware", "true"] in calls
+    assert calls[0] == [*dvc_cmd(), "remote", "add", "-d", "data_x", "s3://b/k/"]
+    assert [*dvc_cmd(), "remote", "modify", "data_x", "version_aware", "true"] in calls
 
 
 def test_dvc_remote_add_version_aware_fires_after_endpoint_and_profile(
@@ -528,10 +529,10 @@ def test_dvc_remote_add_version_aware_fires_after_endpoint_and_profile(
     )
 
     assert calls == [
-        ["dvc", "remote", "add", "-d", "data_y", "s3://b/k/"],
-        ["dvc", "remote", "modify", "data_y", "endpointurl", "https://s3.example"],
-        ["dvc", "remote", "modify", "data_y", "profile", "mintd"],
-        ["dvc", "remote", "modify", "data_y", "version_aware", "true"],
+        [*dvc_cmd(), "remote", "add", "-d", "data_y", "s3://b/k/"],
+        [*dvc_cmd(), "remote", "modify", "data_y", "endpointurl", "https://s3.example"],
+        [*dvc_cmd(), "remote", "modify", "data_y", "profile", "mintd"],
+        [*dvc_cmd(), "remote", "modify", "data_y", "version_aware", "true"],
     ]
 
 
@@ -543,6 +544,7 @@ def test_dvc_remote_add_version_aware_failure_raises_init_op_error(
     caller's rollback path (init.py:172-177 rmtree of .dvc/) fires."""
     import subprocess
     from mintd._init_ops import InitOpError, SubprocessInitOps
+    from mintd._dvc_invoke import dvc_cmd
 
     def fake_run(argv, **kwargs):
         class _R:
@@ -550,7 +552,7 @@ def test_dvc_remote_add_version_aware_failure_raises_init_op_error(
             stderr = ""
             returncode = 0
         r = _R()
-        if list(argv[:3]) == ["dvc", "remote", "modify"] and "version_aware" in argv:
+        if list(argv[:len(dvc_cmd()) + 2]) == [*dvc_cmd(), "remote", "modify"] and "version_aware" in argv:
             r.returncode = 1
             r.stderr = "boom"
         return r
@@ -565,3 +567,4 @@ def test_dvc_remote_add_version_aware_failure_raises_init_op_error(
             endpoint=None,
             profile=None,
         )
+

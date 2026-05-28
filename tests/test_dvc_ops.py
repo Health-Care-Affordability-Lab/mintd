@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from mintd._dvc_invoke import dvc_cmd
 from mintd._dvc_ops import DvcOps
 from mintd.imports import DataDependency
 
@@ -109,7 +110,7 @@ def test_subprocess_pull_appends_extra_args_after_typed_flags(
     )
 
     assert captured == [
-        ["dvc", "pull", "--remote", "X", "--jobs", "4", "--verbose", "data/foo"],
+        [*dvc_cmd(), "pull", "--remote", "X", "--jobs", "4", "--verbose", "data/foo"],
     ]
 
 
@@ -128,7 +129,7 @@ def test_subprocess_pull_extra_args_none_keeps_legacy_argv(
     ops.pull(targets=["data/foo"], remote="X", jobs=4)
 
     assert captured == [
-        ["dvc", "pull", "--remote", "X", "--jobs", "4", "data/foo"],
+        [*dvc_cmd(), "pull", "--remote", "X", "--jobs", "4", "data/foo"],
     ]
 
 
@@ -156,7 +157,28 @@ def test_subprocess_import_appends_extra_args_after_typed_flags(
 
     assert captured == [
         [
-            "dvc", "import", "https://example/x", "data/y",
+            *dvc_cmd(), "import", "https://example/x", "data/y",
             "-o", str(dest), "--rev", "abc", "--force", "--verbose",
         ],
     ]
+
+
+def test_pull_raises_dvc_not_installed_when_module_missing(monkeypatch) -> None:
+    """`sys.executable -m dvc` exits 1 + ModuleNotFoundError when dvc isn't
+    in mintd's env. Surface as DvcNotInstalled (with the reinstall hint),
+    not as a generic DvcPullError that buries the cause in stderr."""
+    import pytest
+
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    class _R:
+        returncode = 1
+        stdout_lines: list[str] = []
+        stderr_lines = ["ModuleNotFoundError: No module named 'dvc'\n"]
+
+    monkeypatch.setattr(_dvc_ops, "run_streaming", lambda *a, **k: _R())
+
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    with pytest.raises(_dvc_ops.DvcNotInstalled, match="reinstall mintd"):
+        ops.pull(targets=["data/foo"])

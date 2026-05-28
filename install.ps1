@@ -47,4 +47,4 @@ if (Test-Path $ToolPython) {
 }
 
 Write-Host ""
-Write-Host "mintd installed successfully. Run 'mintd --help' to get started."
+Write-Host "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
