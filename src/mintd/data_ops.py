@@ -21,8 +21,8 @@ from ._fast_sync_ops import (
     DvcOut,
     FastSyncOps,
     discover_all_outs,
-    discover_pipeline_outs,
     parse_dvc_outs,
+    partition_pipeline_outs,
 )
 
 if TYPE_CHECKING:
@@ -84,9 +84,10 @@ def data_pull(
         remote_name = remote or _default_dvc_remote(project_path) or "origin"
 
         pipeline_outs: list[DvcOut] = []
+        all_pipeline: list[DvcOut] = []
         if pull_all_requested:
             targets = discover_all_outs(project_path)
-            pipeline_outs = discover_pipeline_outs(project_path, remote_name)
+            pipeline_outs, all_pipeline = partition_pipeline_outs(project_path, remote_name)
 
             n_dvc = len(targets)
             n_pipe = len(pipeline_outs)
@@ -188,24 +189,34 @@ def data_pull(
                     remote=remote, jobs=jobs, extra_args=extra_dvc_args,
                 )
 
-        # When the user requested pull-all and the project has a dvc.yaml,
-        # do a final `dvc pull` with no targets to catch pipeline-stage
-        # outputs (which discover_all_outs deliberately doesn't enumerate —
-        # they're listed in dvc.yaml, not in .dvc files, and fast-sync's
-        # classify_targets can't consume them). Without this, dvc.yaml-only
-        # outputs would be silently dropped on pull-all. Same code path as
-        # `dvc pull` with no args, just gated on user intent.
-        if pull_all_requested and (project_path / "dvc.yaml").is_file():
-            logger.info("dvc.yaml present; running dvc pull to catch pipeline-stage outputs")
-            dvc_ops.pull(
-                targets=None, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
-            )
-        # Count both fast-synced outputs and any routed to the dvc-pull
-        # fallback — both land on disk, so both belong in the file count.
+        # Pipeline-stage outputs fast-sync couldn't serve (no usable
+        # cloud.<remote> version_id) still need a `dvc pull`. Pull ONLY those —
+        # never targets=None. A blanket pull would re-validate the version-aware
+        # outs fast-sync just cached and re-trigger DVC 3.66.1's rehash-on-pull
+        # (the multi-GB re-download SLICE-37 added fast-sync to avoid).
+        #
+        # The trigger is "are there uncovered stage outs?", NOT "does a dvc.yaml
+        # exist". A stages-less dvc.yaml (e.g. one carrying only `vars:`/docs)
+        # with no dvc.lock yields no stage outs, so the catch-all is correctly
+        # skipped and the project's version-aware .dvc outs stay fast-synced.
+        uncovered: list[str] = []
+        if pull_all_requested:
+            covered = {out.target for out in pipeline_outs}
+            uncovered = sorted({out.target for out in all_pipeline} - covered)
+            if uncovered:
+                logger.info("dvc pull for %d stage out(s) fast-sync can't serve", len(uncovered))
+                dvc_ops.pull(
+                    targets=uncovered, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+                )
+            else:
+                logger.info("no uncovered stage outs; skipping catch-all dvc pull")
+        # Count fast-synced outputs, the dvc-pull fallback, and the uncovered
+        # stage outs the catch-all pulled — all land on disk, so all belong in
+        # the file count.
         synced_count = (
-            result.synced_count + len(result.fallback_targets)
+            result.synced_count + len(result.fallback_targets) + len(uncovered)
             if result is not None
-            else len(targets or [])
+            else len(targets or []) + len(uncovered)
         )
         return PullSummary(
             file_count=synced_count,

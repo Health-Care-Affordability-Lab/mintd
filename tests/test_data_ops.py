@@ -179,14 +179,13 @@ def test_data_pull_partial_pull_failure_still_keeps_synced_checkout(tmp_path: Pa
     assert fake.checkout_calls[0].targets == ["A"]
 
 
-def test_data_pull_pull_all_calls_dvc_pull_for_dvc_yaml_stages(
+def test_data_pull_pull_all_skips_catch_all_when_dvc_yaml_has_no_lock_outs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Slice 26 P0 fix: when targets=None (pull-all) AND a dvc.yaml exists,
-    fall back to ``dvc pull`` (no targets) AFTER fast-sync handles the
-    .dvc files. discover_all_outs deliberately doesn't enumerate
-    dvc.yaml pipeline stages, so without this catch they'd be silently
-    dropped."""
+    """SLICE-42: the catch-all triggers on uncovered ``dvc.lock`` stage outs,
+    NOT on ``dvc.yaml`` existence. A ``dvc.yaml`` with no ``dvc.lock`` (so no
+    resolved stage outs) must NOT trigger a ``dvc pull(targets=None)`` that
+    would re-pull everything fast-sync already handled."""
     monkeypatch.setattr(
         "mintd.data_ops.discover_all_outs",
         lambda _p: ["a.dvc"],
@@ -194,12 +193,12 @@ def test_data_pull_pull_all_calls_dvc_pull_for_dvc_yaml_stages(
     (tmp_path / "dvc.yaml").write_text("stages:\n  foo:\n    cmd: x\n", encoding="utf-8")
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=1, fallback_targets=[])
     data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
     # Fast-sync runs on the discovered .dvc list...
     assert fast_fake.calls[0].targets == ["a.dvc"]
-    # ...and dvc pull (no targets) ALSO runs to catch dvc.yaml stages.
-    pull_calls_without_targets = [c for c in fake.pull_calls if c.targets is None]
-    assert len(pull_calls_without_targets) == 1
+    # ...and NO catch-all dvc pull runs (no uncovered stage outs).
+    assert fake.pull_calls == []
 
 
 def test_data_pull_pull_all_skips_dvc_yaml_catch_when_no_dvc_yaml(
@@ -219,21 +218,20 @@ def test_data_pull_pull_all_skips_dvc_yaml_catch_when_no_dvc_yaml(
     assert pull_calls_without_targets == []
 
 
-def test_data_pull_pull_all_with_only_dvc_yaml_no_dot_dvc_files(
+def test_data_pull_pull_all_with_only_empty_dvc_yaml_skips_catch_all(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repo with only dvc.yaml pipeline stages (no .dvc files): fast-sync
-    has nothing to do; the catch-all dvc pull still runs."""
+    """Repo with an empty/stages-less dvc.yaml and no dvc.lock: fast-sync has
+    nothing to do AND there are no uncovered stage outs, so the catch-all dvc
+    pull is skipped (no targets=None re-pull)."""
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     (tmp_path / "dvc.yaml").write_text("stages: {}\n", encoding="utf-8")
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
-    # No fast-sync call (nothing to sync).
+    # No fast-sync call (nothing to sync) and no uncovered outs → no dvc pull.
     assert fast_fake.calls == []
-    # But the catch-all dvc pull runs.
-    assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0].targets is None
+    assert fake.pull_calls == []
 
 
 def test_data_pull_fast_sync_raises_pull_all_falls_back_to_dvc_pull_no_targets(
@@ -258,11 +256,11 @@ def test_data_pull_fast_sync_handles_pipeline_only_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pipeline-only project (no .dvc files): fast-sync receives the 6
-    pipeline outs discovered from dvc.lock, dvc_ops.checkout materializes
-    them, and the catch-all dvc pull still runs (because dvc.yaml is
-    present — preserves the existing safety net for non-fast-syncable
-    pipeline outs). This is the test that would have caught the user's
-    original `mintd data clone` hang."""
+    version-aware pipeline outs discovered from dvc.lock and dvc_ops.checkout
+    materializes them. SLICE-42: because every stage out is fast-syncable
+    there are NO uncovered outs, so the catch-all dvc pull is skipped — it must
+    NOT re-pull (targets=None) what fast-sync already cached. This is the
+    regression behind the data_mergerbuild hang."""
     import shutil
     fixture = Path("tests/fixtures/pipeline_project")
     shutil.copytree(fixture, tmp_path / "project")
@@ -284,8 +282,8 @@ def test_data_pull_fast_sync_handles_pipeline_only_project(
     assert all(t.startswith("data/final/") for t in checkout_targets)
     assert len(checkout_targets) == 6
 
-    assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0].targets is None
+    # All 6 stage outs were fast-synced → no uncovered outs → no catch-all pull.
+    assert fake.pull_calls == []
 
 
 def test_data_pull_fast_sync_handles_mixed_project(
@@ -384,7 +382,7 @@ def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
         "        cloud:\n          origin:\n            version_id: v3\n"
     )
 
-    monkeypatch.setattr("mintd.data_ops.discover_pipeline_outs", lambda _p, _r: [])
+    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r: ([], []))
 
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -401,3 +399,113 @@ def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
         f"expected sum of per-file sizes (60M), got {summary.total_bytes} "
         "— files-format dir-outs from .dvc targets must aggregate via files[].size"
     )
+
+
+# ---------- SLICE-42: catch-all dvc pull scoped to uncovered stage outs ----------
+
+
+def test_data_pull_skips_catch_all_when_no_dvc_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """data_mergerbuild regression: a stages-less dvc.yaml (vars/docs only),
+    NO dvc.lock, and version-aware .dvc files handled by fast-sync. The
+    catch-all must be skipped entirely — never dvc pull(targets=None) — so the
+    248 already-fast-synced outs aren't re-pulled (the multi-GB hang)."""
+    monkeypatch.setattr(
+        "mintd.data_ops.discover_all_outs",
+        lambda _p: ["temp/a.csv.dvc", "temp/b.dta.dvc"],
+    )
+    (tmp_path / "dvc.yaml").write_text("vars:\n  - dvc_vars.yaml\n", encoding="utf-8")
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=2, fallback_targets=[])
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    # Fast-sync handled the .dvc files; checkout materialized them.
+    assert fast_fake.calls[0].targets == ["temp/a.csv.dvc", "temp/b.dta.dvc"]
+    assert fake.checkout_calls[0].targets == ["temp/a.csv.dvc", "temp/b.dta.dvc"]
+    # No dvc.lock → no uncovered stage outs → NO catch-all pull at all.
+    assert fake.pull_calls == []
+
+
+def test_data_pull_catch_all_pulls_only_uncovered_pipeline_outs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pipeline product with one version-aware stage out (fast-synced) and
+    one without a cloud version_id: the catch-all dvc pull fires for ONLY the
+    uncovered target, never targets=None and never the covered one."""
+    covered = DvcOut(
+        target="data/final/a.parquet", path="data/final/a.parquet",
+        md5="a", is_dir=False, version_id="v1",
+    )
+    uncovered = DvcOut(
+        target="data/final/b.parquet", path="data/final/b.parquet",
+        md5="b", is_dir=False, version_id=None,
+    )
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+    monkeypatch.setattr(
+        "mintd.data_ops.partition_pipeline_outs",
+        lambda _p, _r: ([covered], [covered, uncovered]),
+    )
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=1, fallback_targets=[])
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets == ["data/final/b.parquet"]
+
+
+def test_data_pull_catch_all_excludes_fallback_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version-aware stage out routed to result.fallback_targets is pulled
+    once (the fallback pull at L185), and the catch-all must NOT pull it
+    again — it's already in `covered`, so `uncovered` is empty."""
+    out = DvcOut(
+        target="data/final/a.parquet", path="data/final/a.parquet",
+        md5="a", is_dir=False, version_id="v1",
+    )
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+    monkeypatch.setattr(
+        "mintd.data_ops.partition_pipeline_outs",
+        lambda _p, _r: ([out], [out]),
+    )
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(
+        success=False, synced_count=0, fallback_targets=["data/final/a.parquet"],
+    )
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    # Pulled exactly once — the fallback pull — never a second catch-all pull.
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets == ["data/final/a.parquet"]
+
+
+def test_data_pull_catch_all_only_uncovered_no_fast_sync_counts_correctly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No .dvc files and no fast-syncable stage outs → fast-sync never runs
+    (result is None). The catch-all pulls the uncovered out, and file_count
+    must equal exactly that count — not double-count. (`targets` from
+    discover_all_outs are .dvc files, disjoint from pipeline out paths, and
+    here empty.)"""
+    uncovered = DvcOut(
+        target="data/final/b.parquet", path="data/final/b.parquet",
+        md5="b", is_dir=False, version_id=None,
+    )
+    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
+    monkeypatch.setattr(
+        "mintd.data_ops.partition_pipeline_outs",
+        lambda _p, _r: ([], [uncovered]),
+    )
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    summary = data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+
+    # Fast-sync skipped (nothing fast-syncable); catch-all pulls the one out.
+    assert fast_fake.calls == []
+    assert len(fake.pull_calls) == 1
+    assert fake.pull_calls[0].targets == ["data/final/b.parquet"]
+    assert summary.file_count == 1

@@ -353,10 +353,10 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     return outs
 
 
-def discover_pipeline_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
-    """Pipeline outs from ``dvc.lock`` that fast-sync can handle.
+def _is_fast_syncable_pipeline_out(out: DvcOut) -> bool:
+    """Whether fast-sync can serve this ``dvc.lock`` stage out.
 
-    Accepts two shapes:
+    Two shapes qualify:
 
     1. Single-file outs whose top-level ``cloud.<remote>`` block carries a
        ``version_id`` — the straightforward case.
@@ -369,13 +369,34 @@ def discover_pipeline_outs(project_path: Path, remote_name: str) -> list[DvcOut]
 
     Outs that fit neither shape route to ``dvc pull`` instead.
     """
-    results: list[DvcOut] = []
-    for out in parse_dvc_lock_outs(project_path, remote_name):
-        if out.version_id:
-            results.append(out)
-        elif out.is_files_format and out.files and all(fe.version_id for fe in out.files):
-            results.append(out)
-    return results
+    if out.version_id:
+        return True
+    return bool(out.is_files_format and out.files and all(fe.version_id for fe in out.files))
+
+
+def partition_pipeline_outs(
+    project_path: Path, remote_name: str
+) -> tuple[list[DvcOut], list[DvcOut]]:
+    """Parse ``dvc.lock`` once and partition its stage outs.
+
+    Returns ``(fast_syncable, all_outs)``: the first is the subset fast-sync
+    can serve (see ``_is_fast_syncable_pipeline_out``); the second is every
+    stage out in the lockfile. Callers diff the two to find the outs that must
+    route to ``dvc pull``. One parse, so ``data_pull`` doesn't read the lock
+    twice.
+    """
+    all_outs = parse_dvc_lock_outs(project_path, remote_name)
+    fast_syncable = [o for o in all_outs if _is_fast_syncable_pipeline_out(o)]
+    return fast_syncable, all_outs
+
+
+def discover_pipeline_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
+    """Pipeline outs from ``dvc.lock`` that fast-sync can handle.
+
+    Back-compat wrapper over :func:`partition_pipeline_outs`; returns only the
+    fast-syncable subset. See ``_is_fast_syncable_pipeline_out`` for the shapes.
+    """
+    return partition_pipeline_outs(project_path, remote_name)[0]
 
 
 def discover_all_outs(project_path: Path) -> list[str]:
