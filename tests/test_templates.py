@@ -82,7 +82,7 @@ def test_code_renders_metadata_only(tmp_path: Path) -> None:
     ("project_type", "expected_full_name"),
     [
         ("data", "data_foo"),
-        ("project", "project_foo"),
+        ("project", "prj_foo"),
         ("enclave", "enclave_foo"),
         ("code", "foo"),
     ],

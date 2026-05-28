@@ -46,17 +46,22 @@ def validate_project_name(name: str) -> None:
         )
 
 
+_TYPE_PREFIX = {"project": "prj"}
+
+
 def project_full_name(project_type: str, name: str) -> str:
     """Compute the full project identifier (e.g. ``data_foo``).
 
     For ``code`` projects, this is the bare ``name``. For all others, it
-    uses the ``{project_type}_{name}`` naming convention. The ``code`` fact
-    is carried by the ``project.type`` field in metadata, making redundant
-    ``code_`` prefixes unnecessary.
+    uses the ``{prefix}_{name}`` naming convention, where ``prefix`` is the
+    project type unless overridden in ``_TYPE_PREFIX`` (e.g. ``project`` ->
+    ``prj``). The ``code`` fact is carried by the ``project.type`` field in
+    metadata, making redundant ``code_`` prefixes unnecessary.
     """
     if project_type == "code":
         return name
-    return f"{project_type}_{name}"
+    prefix = _TYPE_PREFIX.get(project_type, project_type)
+    return f"{prefix}_{name}"
 
 
 def _get_mint_hash() -> str:
