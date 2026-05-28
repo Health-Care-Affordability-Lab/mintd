@@ -40,6 +40,19 @@ class PullSummary:
     elapsed_s: float
 
 
+def _out_aggregate_bytes(out: DvcOut) -> int:
+    """Bytes the progress bar should expect for this out.
+
+    Files-format dir-outs (slice 27, version_aware mode) write the
+    top-level ``size:`` as the manifest size only, not the aggregate.
+    Sum per-file sizes instead, otherwise the progress total
+    massively undershoots actual bytes-on-the-wire.
+    """
+    if out.is_files_format and out.files:
+        return sum(fe.size for fe in out.files)
+    return out.size
+
+
 def data_pull(
     project_path: Path,
     *,
@@ -86,26 +99,20 @@ def data_pull(
                 logger.info("no .dvc targets and no pipeline outs discovered")
 
         # Compute total bytes upfront for the progress bar (filesystem-only,
-        # sub-second on realistic repos).
+        # sub-second on realistic repos). See _out_aggregate_bytes for the
+        # files-format quirk that drove this helper.
         total_bytes = 0
         for t in targets or []:
             dvc_path = project_path / t if t.endswith(".dvc") else project_path / f"{t}.dvc"
             try:
                 for out in parse_dvc_outs(dvc_path, remote_name):
-                    total_bytes += out.size
+                    total_bytes += _out_aggregate_bytes(out)
             except Exception:
                 # Malformed or missing .dvc — fast-sync will route to fallback.
                 pass
 
         for out in pipeline_outs:
-            # For files-format dir-outs, sum per-file sizes — DVC writes the
-            # top-level `size:` field as the dir manifest's size only, not
-            # the aggregate. Without this, the progress bar's expected total
-            # massively undershoots actual bytes-on-the-wire.
-            if out.is_files_format and out.files:
-                total_bytes += sum(fe.size for fe in out.files)
-            else:
-                total_bytes += out.size
+            total_bytes += _out_aggregate_bytes(out)
 
         progress_cm = (
             reporter.progress(total_bytes, desc=f"Pulling {project_path.name}")

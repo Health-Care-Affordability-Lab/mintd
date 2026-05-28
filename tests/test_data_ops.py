@@ -3,8 +3,9 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from mintd._dvc_ops import DvcPullError
+from mintd._fast_sync_ops import DvcFileEntry, DvcOut
 from mintd.model import FastPullResult
-from mintd.data_ops import data_add, data_pull, data_push, data_remove, data_verify
+from mintd.data_ops import _out_aggregate_bytes, data_add, data_pull, data_push, data_remove, data_verify
 from tests._fakes.dvc_ops import DvcPullCall, _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 
@@ -312,3 +313,91 @@ def test_data_pull_fast_sync_handles_mixed_project(
     checkout_targets = fake.checkout_calls[0].targets or []
     assert "a.dvc" in checkout_targets
     assert any(t.startswith("data/final/") for t in checkout_targets)
+
+
+# ---------- regression: total_bytes from files-format .dvc targets ----------
+
+
+def test_out_aggregate_bytes_sums_files_for_files_format() -> None:
+    """Files-format dir-outs: top-level out.size is the manifest size,
+    not the aggregate. Aggregate must sum per-file sizes — otherwise the
+    progress bar undershoots actual bytes-on-the-wire (mergerbuild
+    bug, ~60 GB pulled but bar showed a small fraction)."""
+    out = DvcOut(
+        target="data/big",
+        path="data/big",
+        md5="",
+        is_dir=True,
+        is_files_format=True,
+        size=128,  # manifest size, not aggregate
+        files=[
+            DvcFileEntry("aaa", "a.parquet", size=20_000_000),
+            DvcFileEntry("bbb", "b.parquet", size=30_000_000),
+            DvcFileEntry("ccc", "c.parquet", size=10_000_000),
+        ],
+    )
+    assert _out_aggregate_bytes(out) == 60_000_000
+
+
+def test_out_aggregate_bytes_uses_size_for_single_file_out() -> None:
+    out = DvcOut(target="data/x", path="data/x", md5="m", is_dir=False, size=4096)
+    assert _out_aggregate_bytes(out) == 4096
+
+
+def test_out_aggregate_bytes_uses_size_for_md5_dir_out() -> None:
+    """md5-keyed dirs (non-files-format) carry the aggregate in out.size
+    directly — DvcOut.size is the sum from the manifest, not just the
+    manifest's own bytes."""
+    out = DvcOut(
+        target="data/md5dir",
+        path="data/md5dir",
+        md5="aaa.dir",
+        is_dir=True,
+        is_files_format=False,
+        size=12_345,
+    )
+    assert _out_aggregate_bytes(out) == 12_345
+
+
+def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: ``data_pull`` summed ``out.size`` for .dvc targets
+    even when the out was files-format — DVC's top-level ``size:`` for
+    those is just the manifest bytes (slice 27). PullSummary.total_bytes
+    must reflect the aggregate (sum of files[].size), matching how
+    pipeline_outs are already summed."""
+    project = tmp_path
+    # Files-format .dvc with three per-file entries:
+    (project / "data").mkdir()
+    dvc_file = project / "data" / "big.dvc"
+    dvc_file.write_text(
+        "outs:\n"
+        "  - path: big\n"
+        "    size: 128\n"  # manifest size — should NOT be the total
+        "    files:\n"
+        "      - relpath: a.parquet\n        md5: a\n        size: 20000000\n"
+        "        cloud:\n          origin:\n            version_id: v1\n"
+        "      - relpath: b.parquet\n        md5: b\n        size: 30000000\n"
+        "        cloud:\n          origin:\n            version_id: v2\n"
+        "      - relpath: c.parquet\n        md5: c\n        size: 10000000\n"
+        "        cloud:\n          origin:\n            version_id: v3\n"
+    )
+
+    monkeypatch.setattr("mintd.data_ops.discover_pipeline_outs", lambda _p, _r: [])
+
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=1, fallback_targets=[])
+
+    summary = data_pull(
+        project,
+        targets=["data/big.dvc"],
+        dvc_ops=fake,
+        fast_sync_ops=fast_fake,
+    )
+
+    assert summary.total_bytes == 60_000_000, (
+        f"expected sum of per-file sizes (60M), got {summary.total_bytes} "
+        "— files-format dir-outs from .dvc targets must aggregate via files[].size"
+    )
