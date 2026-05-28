@@ -10,6 +10,7 @@ dependencies = [
     "rich ~= 13.0",
     "jinja2 ~= 3.1",
     "dvc >= 3.66, < 4.0",
+    "dvc-s3 >= 3.3, < 4",
 ]
 
 [project.optional-dependencies]
