@@ -313,6 +313,31 @@ def test_publish_blocked_when_primary_missing(tmp_path, monkeypatch):
         )
 
 
+def test_publish_not_blocked_for_non_data_type_missing_primary(tmp_path, monkeypatch):
+    """Slice 45: a fresh non-data repo (no primary) must clear the publish
+    preflight. Exercises the REAL check_project (overriding the autouse mock),
+    so this asserts the type-gating in check.py reaches the publish gate."""
+    from mintd.check import check_project as real_check_project
+    proj = _seed_project(tmp_path)
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["project"]["type"] = "code"
+    meta["data_products"] = {"primary": None, "outputs": []}
+    (proj / "metadata.json").write_text(json.dumps(meta))
+    monkeypatch.setattr("mintd.publish.check_project", real_check_project)
+
+    result = publish_project(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=_FakeCatalogClient(),
+        dvc_ops=_FakeDvcOps(),
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert result.dry_run
+    assert result.version == "0.1.1"
+
+
 # ---------------------------------------------------------------------------
 # Slice 35 — publish stamps last_updated / last_published_version / outputs[].last_published
 # ---------------------------------------------------------------------------

@@ -54,6 +54,12 @@ if TYPE_CHECKING:
 
 ProducerViewFactory = Callable[[str, str], "ProducerView | ProducerError"]
 
+# Project types for which a `data_products.primary` is mandatory. Other types
+# (code/project/enclave) may declare a primary but are not required to — a
+# code/project repo publishes no consumable data product, and an enclave
+# resolves *upstream* producers' primaries rather than publishing its own.
+PRIMARY_REQUIRED_TYPES: frozenset[str] = frozenset({"data"})
+
 # ---------------------------------------------------------------------------
 # Finding type
 # ---------------------------------------------------------------------------
@@ -210,19 +216,8 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
 def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
     findings: list[CheckFinding] = []
     primary = meta.data_products.primary
-    if not primary:
-        findings.append(
-            CheckFinding(
-                severity="error",
-                section="producer",
-                message="data_products.primary is not set",
-                field_path="data_products.primary",
-                source=metadata_path,
-                kind="data_products_primary_missing",
-                hint="set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). Consumers can't import this product without it.",
-            )
-        )
-    else:
+    if primary:
+        # A declared primary must be valid regardless of project type.
         output_paths = [o.path for o in meta.data_products.outputs]
         if primary not in output_paths:
             hint = f"available outputs: {', '.join(output_paths) or '(none)'}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
@@ -237,6 +232,19 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
                     hint=hint,
                 )
             )
+    elif meta.project.type in PRIMARY_REQUIRED_TYPES:
+        # A missing primary only blocks data-publishing project types.
+        findings.append(
+            CheckFinding(
+                severity="error",
+                section="producer",
+                message="data_products.primary is not set",
+                field_path="data_products.primary",
+                source=metadata_path,
+                kind="data_products_primary_missing",
+                hint="set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). Consumers can't import this product without it.",
+            )
+        )
     return findings
 
 

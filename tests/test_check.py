@@ -734,3 +734,53 @@ def test_check_no_data_products_finding_when_primary_matches_output(tmp_path: Pa
     findings = check_project(tmp_path)
     dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
     assert dp == []
+
+
+# ---------------------------------------------------------------------------
+# Slice 45 — primary mandatory only for `data`-type projects
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("project_type", ["code", "project", "enclave"])
+def test_check_no_primary_finding_for_non_data_types(tmp_path: Path, project_type: str):
+    """A missing primary must not block non-data project types (code/project/
+    enclave) — they may publish no consumable data product."""
+    def _make(d):
+        d["project"]["type"] = project_type
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _make)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert dp == []
+
+
+@pytest.mark.parametrize("project_type", ["data"])
+def test_check_primary_missing_still_fires_for_data_type(
+    tmp_path: Path, project_type: str
+):
+    """`data` is the only type that requires a primary — a missing one is still
+    a blocking error. Parametrized to guard against the rule silently widening."""
+    def _make(d):
+        d["project"]["type"] = project_type
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _make)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert len(dp) == 1
+    assert dp[0].kind == "data_products_primary_missing"
+    assert dp[0].severity == "error"
+
+
+def test_check_primary_mismatch_fires_for_non_data_type(tmp_path: Path):
+    """The mismatch branch is type-agnostic: a non-data repo that *declares* a
+    primary must still declare it correctly (slice 45, decision #2)."""
+    def _make(d):
+        d["project"]["type"] = "project"
+        d["data_products"] = {
+            "primary": "data/x/",
+            "outputs": [{"path": "data/y/", "description": "", "primary": False, "last_published": ""}],
+        }
+    _write_metadata(tmp_path, _make)
+    findings = check_project(tmp_path)
+    dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
+    assert len(dp) == 1
+    assert dp[0].kind == "data_products_primary_mismatch"
