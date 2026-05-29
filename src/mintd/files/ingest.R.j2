@@ -1,80 +1,91 @@
 #' Data ingestion for {{ project_name }}
 #'
-#' This script handles downloading and initial processing of raw data.
+#' Reads data/raw/ (immutable source data), parses and normalizes it, and
+#' writes data/intermediate/. This is the first stage of the DVC pipeline
+#' (ingest -> validate).
+#'
 #' NOTE: This script runs from the code/ directory. Data paths use ../data/
-
-# =============================================================================
-# UPDATING FOR NEW DATA (e.g., annual releases)
-# =============================================================================
-# Data versioning is handled by DVC. When new data becomes available:
-#
-# 1. Update this script to point to the new data source
-# 2. Run the pipeline: dvc repro
-# 3. Commit changes: git add . && git commit -m "Update to 2024 data"
-# 4. Push data and code: dvc push && git push
-#
-# DVC tracks all versions - use `dvc diff` to see changes between versions
-# and `git log` / `dvc checkout` to access previous versions.
-# =============================================================================
+#'
+#' data/raw/ is treated as IMMUTABLE: this script reads it but never writes to
+#' it. To update raw data, either re-run the optional `fetch` stage (see
+#' fetch.R / dvc.yaml) or run `dvc add data/raw/` after manually updating files.
+#'
+#' For large datasets with expensive parsing, consider separating `parse_*`
+#' functions (raw formats -> data frames) from `clean_*` functions
+#' (business-logic standardization). The helpers in clean.R can be sourced here.
 
 # Import mint utilities (located in same code/ directory)
 source("_mintd_utils.R")
 
-#' List and log all files in the raw data directory
-list_raw_files <- function(logger) {
-  raw_files <- list.files(RAW_DIR, full.names = TRUE)
+# Load tidyverse for data manipulation
+library(dplyr, warn.conflicts = FALSE)
+library(readr)
+library(stringr)
 
-  if (length(raw_files) > 0) {
-    logger$log("Found ", length(raw_files), " files in RAW_DIR:")
-    for (f in raw_files) {
-      size_kb <- file.info(f)$size / 1024
-      logger$log("  - ", basename(f), " (", round(size_kb, 1), " KB)")
-    }
-  } else {
-    logger$log("No files found in RAW_DIR. Add raw data files to get started.")
+#' Normalize a raw data frame into analysis-ready intermediate form.
+#'
+#' Customize with your project's parsing/cleaning logic. The default applies
+#' safe, generic standardization (drop empty rows, strip whitespace, normalize
+#' column names).
+parse_and_clean <- function(df, logger) {
+  initial_rows <- nrow(df)
+  df <- df %>% filter(rowSums(is.na(.)) < ncol(.))
+  if (initial_rows - nrow(df) > 0) {
+    logger$log("  Removed ", initial_rows - nrow(df), " empty rows")
   }
 
-  return(raw_files)
+  char_cols <- names(df)[sapply(df, is.character)]
+  if (length(char_cols) > 0) {
+    df <- df %>% mutate(across(all_of(char_cols), str_trim))
+    logger$log("  Stripped whitespace from ", length(char_cols), " character columns")
+  }
+
+  names(df) <- names(df) %>%
+    tolower() %>%
+    str_replace_all(" ", "_") %>%
+    str_replace_all("-", "_")
+  logger$log("  Final row count: ", nrow(df))
+  return(df)
 }
 
 main <- function() {
-  # Initialize logging (validates directory and creates log file)
   logger <- ParameterAwareLogger("ingest")
   logger$log("Starting data ingestion for {{ project_name }}...")
 
-  # Ensure data directories exist (using global paths from _mintd_utils.R)
+  # Ensure pipeline directories exist (raw is read-only here; do NOT write it).
   paths <- get_data_paths()
   lapply(paths, function(d) {
     if (!dir.exists(d)) dir.create(d, recursive = TRUE)
   })
 
-  logger$log("Directories ready:")
-  logger$log("  Raw data: ", RAW_DIR)
-  logger$log("  Intermediate: ", INTERMEDIATE_DIR)
-  logger$log("  Final data: ", FINAL_DIR)
+  logger$log("Reading raw data from: ", RAW_DIR)
+  logger$log("Writing intermediate data to: ", INTERMEDIATE_DIR)
 
-  # List existing raw files
-  raw_files <- list_raw_files(logger)
+  raw_files <- list.files(RAW_DIR, pattern = "\\.csv$", full.names = TRUE)
+  if (length(raw_files) == 0) {
+    logger$log(
+      "No CSV files found in RAW_DIR. Place source data in data/raw/ ",
+      "(or run `dvc repro fetch` if using programmatic acquisition)."
+    )
+  } else {
+    logger$log("Found ", length(raw_files), " raw file(s) to ingest")
+    for (raw_file in raw_files) {
+      logger$log("Processing: ", basename(raw_file))
+      # ----------------------------------------------------------------------
+      # CUSTOMIZE: read each raw format, normalize, write to intermediate.
+      #   CSV:     df <- read_csv(raw_file, show_col_types = FALSE)
+      #   Excel:   df <- readxl::read_excel(raw_file)
+      # ----------------------------------------------------------------------
+      df <- read_csv(raw_file, show_col_types = FALSE)
+      logger$log("  Loaded ", nrow(df), " rows, ", ncol(df), " columns")
 
-  # ==========================================================================
-  # CUSTOMIZE: Add your data ingestion logic below
-  # ==========================================================================
-  # Examples of common ingestion patterns:
-  #
-  # 1. Download from URL:
-  #    library(httr)
-  #    response <- GET("https://example.com/data.csv")
-  #    writeBin(content(response, "raw"), file.path(RAW_DIR, "data.csv"))
-  #
-  # 2. Copy from local source:
-  #    file.copy("/path/to/source/data.csv", file.path(RAW_DIR, "data.csv"))
-  #
-  # 3. Read from database:
-  #    library(DBI)
-  #    con <- dbConnect(...)
-  #    df <- dbGetQuery(con, "SELECT * FROM table")
-  #    readr::write_csv(df, file.path(RAW_DIR, "data.csv"))
-  # ==========================================================================
+      df <- parse_and_clean(df, logger)
+
+      output_file <- file.path(INTERMEDIATE_DIR, basename(raw_file))
+      write_csv(df, output_file)
+      logger$log("  Wrote: ", basename(output_file))
+    }
+  }
 
   logger$log("Data ingestion completed successfully.")
   logger$close()

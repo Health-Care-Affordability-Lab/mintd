@@ -2,6 +2,21 @@ vars:
   - dvc_vars.yaml
 
 stages:
+# ---------------------------------------------------------------------------
+# Optional: uncomment the fetch stage to download raw data programmatically.
+# When enabled, this is the ONLY stage that writes data/raw/.
+# If raw data is hand-placed or tracked via `dvc add data/raw/`, leave this
+# block commented out. See fetch.{py,R,do} for the matching script stub.
+#
+#  fetch:
+#    wdir: {{ source_dir }}
+#    cmd: YOUR_FETCH_CMD              # e.g. ${python_cmd} fetch.py
+#    deps:
+#      - YOUR_FETCH_SCRIPT           # e.g. fetch.py
+#    outs:
+#      - ../data/raw/
+# ---------------------------------------------------------------------------
+
   ingest:
     wdir: {{ source_dir }}
 {% if language == "python" %}
@@ -18,27 +33,6 @@ stages:
       - ingest.R
 {% elif language == "stata" %}
       - ingest.do
-      - _mintd_utils.do
-{% endif %}
-    outs:
-      - ../data/raw/
-
-  clean:
-    wdir: {{ source_dir }}
-{% if language == "python" %}
-    cmd: ${python_cmd} clean.py
-{% elif language == "r" %}
-    cmd: ${r_cmd} clean.R
-{% elif language == "stata" %}
-    cmd: ${stata_cmd} -b do clean.do
-{% endif %}
-    deps:
-{% if language == "python" %}
-      - clean.py
-{% elif language == "r" %}
-      - clean.R
-{% elif language == "stata" %}
-      - clean.do
       - _mintd_utils.do
 {% endif %}
       - ../data/raw/

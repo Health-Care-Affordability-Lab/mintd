@@ -1,88 +1,96 @@
-"""Data ingestion script for {{ project_name }}.
+"""Data ingestion for {{ project_name }}.
+
+Reads ``data/raw/`` (immutable source data), parses and normalizes it, and
+writes ``data/intermediate/``. This is the first stage of the DVC pipeline
+(``ingest`` -> ``validate``).
 
 NOTE: This script runs from the code/ directory. Data paths use ../data/
+
+data/raw/ is treated as IMMUTABLE: this script reads it but never writes to
+it. To update raw data, either re-run the optional `fetch` stage (see
+fetch.py / dvc.yaml) or run `dvc add data/raw/` after manually updating files.
+
+For large datasets with expensive parsing, consider organizing this file as
+two clearly-separated groups: `parse_*` functions that turn raw formats into
+DataFrames, and `clean_*` functions that apply business-logic
+standardization. The helpers in clean.py can be imported and called here.
 """
 
-import sys
 from pathlib import Path
+
+import pandas as pd
 
 # Import mint utilities (located in same code/ directory)
 from _mintd_utils import (
-    setup_project_directory,
     ParameterAwareLogger,
     RAW_DIR,
     INTERMEDIATE_DIR,
-    FINAL_DIR,
-    get_data_paths
+    get_data_paths,
 )
 
-# =============================================================================
-# UPDATING FOR NEW DATA (e.g., annual releases)
-# =============================================================================
-# Data versioning is handled by DVC. When new data becomes available:
-#
-# 1. Update this script to point to the new data source
-# 2. Run the pipeline: dvc repro
-# 3. Commit changes: git add . && git commit -m "Update to 2024 data"
-# 4. Push data and code: dvc push && git push
-#
-# DVC tracks all versions - use `dvc diff` to see changes between versions
-# and `git log` / `dvc checkout` to access previous versions.
-# =============================================================================
 
+def parse_and_clean(df, logger):
+    """Normalize a raw DataFrame into analysis-ready intermediate form.
 
-def list_raw_files(logger):
-    """List and log all files in the raw data directory."""
-    raw_files = list(RAW_DIR.glob("*"))
-    if raw_files:
-        logger.log(f"Found {len(raw_files)} files in RAW_DIR:")
-        for f in raw_files:
-            size_kb = f.stat().st_size / 1024 if f.is_file() else 0
-            logger.log(f"  - {f.name} ({size_kb:.1f} KB)")
-    else:
-        logger.log("No files found in RAW_DIR. Add raw data files to get started.")
-    return raw_files
+    Customize this with your project's parsing and cleaning logic. The default
+    applies safe, generic standardization (drop empty rows, strip whitespace,
+    normalize column names).
+    """
+    initial_rows = len(df)
+    df = df.dropna(how="all")
+    if initial_rows - len(df) > 0:
+        logger.log(f"  Removed {initial_rows - len(df)} empty rows")
+
+    string_cols = df.select_dtypes(include=["object"]).columns
+    for col in string_cols:
+        df[col] = df[col].astype(str).str.strip().replace("nan", pd.NA)
+    if len(string_cols) > 0:
+        logger.log(f"  Stripped whitespace from {len(string_cols)} string columns")
+
+    df.columns = df.columns.str.lower().str.replace(" ", "_").str.replace("-", "_")
+    logger.log(f"  Final row count: {len(df)}")
+    return df
 
 
 def main():
-    """Main ingestion workflow."""
-    # Initialize logging (validates directory and creates log file)
+    """Read raw source data, normalize it, write to the intermediate directory."""
     logger = ParameterAwareLogger("ingest")
     logger.log("Starting data ingestion for {{ project_name }}...")
 
-    # Get data paths and ensure directories exist
+    # Ensure pipeline directories exist (raw is read-only here; do NOT write it).
     paths = get_data_paths()
     for name, path in paths.items():
-        if name != 'logs':  # logs already created by logger
+        if name != "logs":  # logs already created by logger
             path.mkdir(parents=True, exist_ok=True)
 
-    logger.log(f"Raw data directory: {RAW_DIR}")
-    logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
-    logger.log(f"Final data directory: {FINAL_DIR}")
+    logger.log(f"Reading raw data from: {RAW_DIR}")
+    logger.log(f"Writing intermediate data to: {INTERMEDIATE_DIR}")
 
-    # List existing raw files
-    raw_files = list_raw_files(logger)
+    raw_files = list(RAW_DIR.glob("*.csv"))
+    if not raw_files:
+        logger.log(
+            "No CSV files found in RAW_DIR. Place source data in data/raw/ "
+            "(or run `dvc repro fetch` if using programmatic acquisition)."
+        )
+    else:
+        logger.log(f"Found {len(raw_files)} raw file(s) to ingest")
+        for raw_file in raw_files:
+            logger.log(f"Processing: {raw_file.name}")
+            # ------------------------------------------------------------------
+            # CUSTOMIZE: read each raw format, normalize, write to intermediate.
+            # Examples:
+            #   CSV:         df = pd.read_csv(raw_file)
+            #   Parquet:     df = pd.read_parquet(raw_file)
+            #   Fixed-width: df = pd.read_fwf(raw_file, widths=[...])
+            # ------------------------------------------------------------------
+            df = pd.read_csv(raw_file)
+            logger.log(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
 
-    # ==========================================================================
-    # CUSTOMIZE: Add your data ingestion logic below
-    # ==========================================================================
-    # Examples of common ingestion patterns:
-    #
-    # 1. Download from URL:
-    #    import requests
-    #    response = requests.get("https://example.com/data.csv")
-    #    with open(RAW_DIR / "data.csv", 'wb') as f:
-    #        f.write(response.content)
-    #
-    # 2. Copy from local source:
-    #    import shutil
-    #    shutil.copy("/path/to/source/data.csv", RAW_DIR / "data.csv")
-    #
-    # 3. Query database:
-    #    import pandas as pd
-    #    df = pd.read_sql("SELECT * FROM table", connection)
-    #    df.to_csv(RAW_DIR / "data.csv", index=False)
-    # ==========================================================================
+            df = parse_and_clean(df, logger)
+
+            output_file = INTERMEDIATE_DIR / raw_file.name
+            df.to_csv(output_file, index=False)
+            logger.log(f"  Wrote: {output_file.name}")
 
     logger.log("Data ingestion completed successfully.")
     logger.close()

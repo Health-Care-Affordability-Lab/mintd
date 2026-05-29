@@ -1,0 +1,42 @@
+#' Data acquisition script for {{ project_name }}
+#'
+#' This script implements the OPTIONAL `fetch` DVC stage — the only stage that
+#' writes data/raw/.
+#'
+#' To activate:
+#'   1. Uncomment the `fetch` stage block in dvc.yaml.
+#'   2. Implement fetch_raw_data() below.
+#'   3. Run: dvc repro fetch
+#'
+#' data/raw/ is treated as IMMUTABLE once populated. The rest of the pipeline
+#' (ingest -> validate) reads raw but never modifies it.
+#'
+#' NOTE: Run this script via `dvc repro fetch`, not directly. Direct execution
+#' bypasses DVC tracking and will not update dvc.lock.
+
+# Import mint utilities (located in same code/ directory)
+source("_mintd_utils.R")
+
+#' Download or copy raw data files into data/raw/.
+#'
+#' Customize this function. Examples:
+#'   1. Download: writeBin(httr::content(httr::GET(url), "raw"),
+#'                         file.path(RAW_DIR, "data.csv"))
+#'   2. Copy:     file.copy("/network/share/data.csv",
+#'                          file.path(RAW_DIR, "data.csv"))
+fetch_raw_data <- function(logger) {
+  stop("Implement fetch_raw_data() before running `dvc repro fetch`.")
+}
+
+main <- function() {
+  logger <- ParameterAwareLogger("fetch")
+  logger$log("Starting data fetch for {{ project_name }}...")
+  if (!dir.exists(RAW_DIR)) dir.create(RAW_DIR, recursive = TRUE)
+  fetch_raw_data(logger)
+  logger$log("Data fetch completed.")
+  logger$close()
+}
+
+if (!interactive()) {
+  main()
+}

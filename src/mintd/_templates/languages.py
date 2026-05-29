@@ -30,6 +30,7 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "data_files": lambda source_dir: [
             ("requirements.txt", "requirements_data.txt.j2"),
             (f"{source_dir}/_mintd_utils.py", "_mintd_utils.py.j2"),
+            (f"{source_dir}/fetch.py", "fetch.py.j2"),
             (f"{source_dir}/ingest.py", "ingest.py.j2"),
             (f"{source_dir}/clean.py", "clean.py.j2"),
             (f"{source_dir}/validate.py", "validate.py.j2"),
@@ -54,6 +55,7 @@ LANGUAGES: dict[str, dict[str, Any]] = {
             (".Rprofile", ".Rprofile.j2"),
             ("NAMESPACE", "NAMESPACE.j2"),
             (f"{source_dir}/_mintd_utils.R", "_mintd_utils.R.j2"),
+            (f"{source_dir}/fetch.R", "fetch.R.j2"),
             (f"{source_dir}/ingest.R", "ingest.R.j2"),
             (f"{source_dir}/clean.R", "clean.R.j2"),
             (f"{source_dir}/validate.R", "validate.R.j2"),
@@ -71,6 +73,7 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "data_files": lambda source_dir: [
             ("stata-packages.txt", "stata-packages.txt.j2"),
             (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
+            (f"{source_dir}/fetch.do", "fetch.do.j2"),
             (f"{source_dir}/ingest.do", "ingest.do.j2"),
             (f"{source_dir}/clean.do", "clean.do.j2"),
             (f"{source_dir}/validate.do", "validate.do.j2"),

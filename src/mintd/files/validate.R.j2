@@ -91,7 +91,7 @@ main <- function() {
   intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "\\.csv$", full.names = TRUE)
 
   if (length(intermediate_files) == 0) {
-    logger$log("No CSV files found in INTERMEDIATE_DIR. Run clean.R first.")
+    logger$log("No CSV files found in INTERMEDIATE_DIR. Run `dvc repro ingest` first.")
     validation_report <- list(status = "no_files", datasets = list())
   } else {
     logger$log("Found ", length(intermediate_files), " CSV files to validate")

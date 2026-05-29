@@ -1,0 +1,51 @@
+"""Data acquisition script for {{ project_name }}.
+
+This script implements the OPTIONAL `fetch` DVC stage — the only stage that
+writes data/raw/.
+
+To activate:
+  1. Uncomment the `fetch` stage block in dvc.yaml.
+  2. Implement fetch_raw_data() below.
+  3. Run: dvc repro fetch
+
+data/raw/ is treated as IMMUTABLE once populated. The rest of the pipeline
+(ingest -> validate) reads raw but never modifies it.
+
+NOTE: Run this script via `dvc repro fetch`, not directly. Direct execution
+bypasses DVC tracking and will not update dvc.lock.
+"""
+
+from _mintd_utils import ParameterAwareLogger, RAW_DIR
+
+
+def fetch_raw_data(logger):
+    """Download or copy raw data files into data/raw/.
+
+    Customize this function. Examples:
+      1. Download:
+           import requests
+           r = requests.get(URL)
+           (RAW_DIR / "data.csv").write_bytes(r.content)
+      2. Copy:
+           import shutil
+           shutil.copy("/network/share/data.csv", RAW_DIR / "data.csv")
+      3. S3:
+           import boto3
+           boto3.client("s3").download_file(BUCKET, KEY, str(RAW_DIR / "data.csv"))
+    """
+    raise NotImplementedError(
+        "Implement fetch_raw_data() before running `dvc repro fetch`."
+    )
+
+
+def main():
+    logger = ParameterAwareLogger("fetch")
+    logger.log("Starting data fetch for {{ project_name }}...")
+    RAW_DIR.mkdir(parents=True, exist_ok=True)
+    fetch_raw_data(logger)
+    logger.log("Data fetch completed.")
+    logger.close()
+
+
+if __name__ == "__main__":
+    main()
