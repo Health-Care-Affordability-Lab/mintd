@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -174,6 +175,34 @@ def migrate_v1_to_v2(v1_data: dict) -> tuple[dict, MigrationReport]:
     return out, report
 
 
+def _find_dropped_keys(raw: Any, modeled: Any, prefix: str = "") -> list[str]:
+    """Key paths present in ``raw`` but absent from ``modeled``.
+
+    Compares key *existence* only — never values — so pydantic's value
+    normalisation (``None`` defaults, datetime formatting) never registers as a
+    drop. Recurses into dicts and zips lists by index, emitting paths like
+    ``metadata.configurations`` and ``data_products.outputs[0].format``. Used to
+    report which unmodeled v1 fields the canonical model dump strips on write.
+    """
+    dropped: list[str] = []
+    if isinstance(raw, dict):
+        modeled_dict = modeled if isinstance(modeled, dict) else {}
+        for key, raw_val in raw.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in modeled_dict:
+                dropped.append(path)
+            else:
+                dropped.extend(_find_dropped_keys(raw_val, modeled_dict[key], path))
+    elif isinstance(raw, list):
+        modeled_list = modeled if isinstance(modeled, list) else []
+        for i, raw_item in enumerate(raw):
+            if i < len(modeled_list):
+                dropped.extend(
+                    _find_dropped_keys(raw_item, modeled_list[i], f"{prefix}[{i}]")
+                )
+    return dropped
+
+
 def apply_metadata_migration(
     path: Path, *, dry_run: bool = False
 ) -> MigrationReport:
@@ -199,7 +228,7 @@ def apply_metadata_migration(
     v2_data, report = migrate_v1_to_v2(v1_data)
 
     try:
-        Metadata.model_validate(v2_data)
+        model = Metadata.model_validate(v2_data)
     except ValidationError as exc:
         errs = exc.errors()
         if errs:
@@ -211,8 +240,20 @@ def apply_metadata_migration(
             ) from exc
         raise MetadataMigrateError(str(exc)) from exc
 
+    # Write the validated model dump, not the raw migrated dict. The dump drops
+    # every field the v2 model doesn't declare — legacy meta-meta cruft like
+    # ``metadata.configurations``/``methods``/``data_dependencies`` that pydantic
+    # silently ignores on sub-models — so a migrated file is byte-identical to
+    # what ``mintd init`` scaffolds. Record the stripped keys so ``--dry-run``
+    # shows them leaving (key existence only, never value diffs).
+    canonical = (
+        model.model_dump_json(by_alias=True, exclude_none=False, indent=2) + "\n"
+    )
+    modeled = model.model_dump(by_alias=True, exclude_none=False, mode="json")
+    report.dropped.extend(_find_dropped_keys(v2_data, modeled))
+
     if not dry_run:
-        atomic_write_json(metadata_path, json.dumps(v2_data, indent=2) + "\n")
+        atomic_write_json(metadata_path, canonical)
 
     return report
 

@@ -14,10 +14,7 @@
   "metadata": {
     "version": "1.0.0",
     "description": "{{ description | default('') }}",
-    "tags": {{ tags | default([]) | tojson }},
-    "configurations": {{ configurations | default([]) | tojson }},
-    "methods": {{ methods | default([]) | tojson }},
-    "data_dependencies": {{ data_dependencies | default([]) | tojson }}
+    "tags": {{ tags | default([]) | tojson }}
   },
   "ownership": {
     "team": "{{ team }}",

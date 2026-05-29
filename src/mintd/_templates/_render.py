@@ -158,7 +158,6 @@ def _build_context(
         "contract_info": "",
         "description": "",
         "tags": [],
-        "methods": "",
         "data_kind": "",
 
         # Team fields absorbed in slice 21. `team` itself remains deferred —
@@ -182,9 +181,7 @@ def _build_context(
         "mirror_purpose": "",
 
         # Deferred (pipeline definition / catalog imports).
-        "data_dependencies": [],
         "data_products_primary": "",
-        "configurations": [],
     }
 
 
@@ -248,7 +245,12 @@ def _render_metadata_json(context: dict[str, object]) -> str:
             "last_published_version": "",
         },
     }
-    return Metadata.model_validate(data).model_dump_json(indent=2) + "\n"
+    return (
+        Metadata.model_validate(data).model_dump_json(
+            by_alias=True, exclude_none=False, indent=2
+        )
+        + "\n"
+    )
 
 
 def _write_file(out_path: Path, template_name: str, context: dict[str, object]) -> None:

@@ -183,6 +183,96 @@ def test_apply_missing_file_raises(tmp_path: Path) -> None:
         apply_metadata_migration(tmp_path)
 
 
+def test_apply_strips_unmodeled_fields_and_reports_them(tmp_path: Path) -> None:
+    """Legacy v1 fields the v2 model doesn't declare (``metadata.configurations``
+    /``methods``/``data_dependencies``, ``access_control`` extras, per-output
+    ``format``) must not survive into the written file, and each must surface in
+    ``report.dropped`` so ``--dry-run`` shows them leaving."""
+    v1 = {
+        "schema_version": "1.0",
+        "mint": {"version": "0.0.1", "commit_hash": ""},
+        "project": {"type": "data", "name": "x", "full_name": "data_x",
+                    "created_at": "2026-01-01T00:00:00Z", "created_by": "t"},
+        "metadata": {"version": "1.0.0", "description": "d", "tags": ["a"],
+                     "configurations": ["c"], "methods": ["m"],
+                     "data_dependencies": ["dep"]},
+        "ownership": {"team": "", "maintainers": ["t"]},
+        "access_control": {"teams": [], "individuals": ["bob"],
+                           "requirements": ["x"]},
+        "governance": {"classification": "private", "contract_info": ""},
+        "repository": {"github_url": "", "default_branch": "main",
+                       "visibility": "private",
+                       "mirror": {"url": "", "purpose": ""}},
+        "status": {"state": "active", "last_updated": "2026-01-01T00:00:00Z"},
+        "data_products": {"primary": "p", "outputs": [
+            {"path": "p", "description": "d", "primary": True,
+             "last_published": "v1", "format": "parquet"}]},
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(v1))
+    report = apply_metadata_migration(tmp_path)
+
+    written = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    assert "configurations" not in written["metadata"]
+    assert "methods" not in written["metadata"]
+    assert "data_dependencies" not in written["metadata"]
+    assert "individuals" not in written["access_control"]
+    assert "requirements" not in written["access_control"]
+    assert "format" not in written["data_products"]["outputs"][0]
+
+    for expected in (
+        "metadata.configurations",
+        "metadata.methods",
+        "metadata.data_dependencies",
+        "access_control.individuals",
+        "access_control.requirements",
+        "data_products.outputs[0].format",
+    ):
+        assert expected in report.dropped, f"missing from dropped: {expected}"
+
+
+def test_migrated_matches_init_output(tmp_path: Path) -> None:
+    """The canonical regression guard: a migrated v1 file is byte-identical to
+    what ``mintd init`` scaffolds for the same type/name. Both paths round-trip
+    through the same model serialization, so unmodeled v1 cruft (carried here in
+    the ``metadata`` block) is stripped identically."""
+    from mintd._templates._render import _render_metadata_json
+
+    created_at = "2026-01-01T00:00:00Z"
+    context = {
+        "project_type": "data",
+        "project_name": "x",
+        "created_at": created_at,
+        "created_by": "alice",
+        "mint_version": "0.0.1",
+    }
+    init_output = _render_metadata_json(context)
+
+    v1 = {
+        "schema_version": "1.0",
+        "mint": {"version": "0.0.1", "commit_hash": ""},
+        "project": {"type": "data", "name": "x", "full_name": "data_x",
+                    "created_at": created_at, "created_by": "alice"},
+        # Dead v1 fields that must be stripped to match init's output.
+        "metadata": {"version": "1.0.0", "description": "", "tags": [],
+                     "configurations": [], "methods": ["legacy"],
+                     "data_dependencies": ["dep"]},
+        "ownership": {"team": "", "maintainers": ["alice"]},
+        "access_control": {"teams": [], "individuals": ["bob"]},
+        "governance": {"classification": "private", "contract_info": ""},
+        "repository": {"github_url": "", "default_branch": "main",
+                       "visibility": "private",
+                       "mirror": {"url": "", "purpose": ""}},
+        "status": {"state": "active", "last_updated": created_at},
+        # data_products omitted → both paths default to {"primary": None,
+        # "outputs": []}.
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(v1))
+    apply_metadata_migration(tmp_path)
+    migrated_output = (tmp_path / "metadata.json").read_text(encoding="utf-8")
+
+    assert migrated_output == init_output
+
+
 def test_apply_validation_failure_surfaces_field_path(tmp_path: Path) -> None:
     """A synthetic v1 file with a required v2 sub-field broken raises
     MetadataMigrateError naming the failing field path."""

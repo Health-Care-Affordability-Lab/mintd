@@ -244,7 +244,6 @@ _MIN_CONTEXT: dict[str, object] = {
     "contract_info": "",
     "description": "",
     "tags": [],
-    "methods": "",
     "data_kind": "",
     "team": "",
     "admin_team": "",
@@ -259,7 +258,5 @@ _MIN_CONTEXT: dict[str, object] = {
     "registry_url": "",
     "mirror_url": "",
     "mirror_purpose": "",
-    "data_dependencies": [],
     "data_products_primary": "",
-    "configurations": [],
 }

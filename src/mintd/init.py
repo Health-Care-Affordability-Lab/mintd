@@ -167,7 +167,8 @@ def init_project(
             )
             atomic_write_json(
                 metadata_path,
-                metadata.model_dump_json(by_alias=True, exclude_none=False, indent=2),
+                metadata.model_dump_json(by_alias=True, exclude_none=False, indent=2)
+                + "\n",
             )
         except Exception:
             # Rollback boundary: remove .dvc/ on remote-add or patch
