@@ -1,0 +1,46 @@
+* Data acquisition script for {{ project_name }}
+*
+* This do-file implements the OPTIONAL `fetch` DVC stage — the only stage that
+* writes data/raw/.
+*
+* To activate:
+*   1. Uncomment the `fetch` stage block in dvc.yaml.
+*   2. Implement the download logic in fetch_raw_data below.
+*   3. Run: dvc repro fetch
+*
+* data/raw/ is treated as IMMUTABLE once populated. The rest of the pipeline
+* (ingest -> validate) reads raw but never modifies it.
+*
+* NOTE: Run this script via `dvc repro fetch`, not directly. Direct execution
+* bypasses DVC tracking and will not update dvc.lock.
+
+* Import mint utilities (located in same code/ directory)
+do _mintd_utils.do
+
+* Download or copy raw data files into data/raw/.
+capture program drop fetch_raw_data
+program define fetch_raw_data
+    * Add your data download logic here. Examples:
+    *   copy "https://example.com/data.csv" "$RAW_DIR/data.csv", replace
+    *   copy "/network/share/data.csv" "$RAW_DIR/data.csv", replace
+    display as error "ERROR: fetch_raw_data not implemented."
+    display as error "Add download logic to fetch.do before running: dvc repro fetch"
+    exit 198
+end
+
+// Main fetch program
+capture program drop main
+program define main
+    ParameterAwareLogger fetch
+    log_message "Starting data fetch for {{ project_name }}..."
+    capture mkdir "$DATA_DIR"
+    capture mkdir "$RAW_DIR"
+    fetch_raw_data
+    log_message "Data fetch completed."
+    close_logger
+end
+
+// Run if called directly
+if "`c(mode)'" != "batch" {
+    main
+}

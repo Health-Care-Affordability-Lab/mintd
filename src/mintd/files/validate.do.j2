@@ -90,7 +90,7 @@ program define main
     local total_files = 0
 
     if `file_count' == 0 {
-        log_message "No .dta files found in INTERMEDIATE_DIR. Run clean.do first."
+        log_message "No .dta files found in INTERMEDIATE_DIR. Run: dvc repro ingest"
     }
     else {
         log_message "Found `file_count' .dta files to validate"

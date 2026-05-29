@@ -45,6 +45,7 @@ def test_data_python_renders_all_files(tmp_path: Path) -> None:
     assert "metadata.json" in rel
     assert "README.md" in rel
     assert "requirements.txt" in rel
+    assert "code/fetch.py" in rel
     assert "code/ingest.py" in rel
     assert "code/clean.py" in rel
     assert "code/validate.py" in rel
@@ -123,6 +124,7 @@ def test_data_r_renders_r_sources(tmp_path: Path) -> None:
         project_type="data", name="foo", language="r", target_dir=tmp_path
     )
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
+    assert "code/fetch.R" in rel
     assert "code/ingest.R" in rel
     assert "code/clean.R" in rel
     assert "DESCRIPTION" in rel
@@ -135,10 +137,77 @@ def test_data_stata_renders_do_sources(tmp_path: Path) -> None:
         project_type="data", name="foo", language="stata", target_dir=tmp_path
     )
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
+    assert "code/fetch.do" in rel
     assert "code/ingest.do" in rel
     assert "code/clean.do" in rel
     assert "stata-packages.txt" in rel
     assert "code/ingest.py" not in rel
+
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
+    """Rendered dvc.yaml must match the immutable-raw governance model:
+    ingest reads raw + writes intermediate; clean is not a stage; no active
+    stage writes data/raw/; fetch ships only as a commented-out block."""
+    import yaml
+
+    render_scaffold(
+        project_type="data", name="foo", language=language, target_dir=tmp_path
+    )
+    raw_text = (tmp_path / "dvc.yaml").read_text(encoding="utf-8")
+    stages = yaml.safe_load(raw_text)["stages"]
+
+    ingest = stages["ingest"]
+    assert "../data/raw/" in ingest["deps"], "ingest must read data/raw/"
+    assert ingest["outs"] == ["../data/intermediate/"], (
+        "ingest must write data/intermediate/"
+    )
+
+    assert "clean" not in stages, "clean must not be a DVC stage (demoted to helper)"
+
+    validate = stages["validate"]
+    assert "../data/intermediate/" in validate["deps"]
+    assert "../data/raw/" not in validate.get("deps", [])
+
+    # Immutability invariant: no active stage declares data/raw/ as an out.
+    for stage_name, stage in stages.items():
+        assert "../data/raw/" not in stage.get("outs", []), (
+            f"stage {stage_name!r} writes data/raw/ — immutability violation"
+        )
+
+    # fetch ships as a commented-out block, not an active stage.
+    assert "fetch" not in stages, "fetch must be commented out, not an active stage"
+    assert "#  fetch:" in raw_text, "commented fetch block must be present"
+
+    # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
+    # schema output into validate. Either way the DAG stays acyclic.
+    if language == "stata":
+        assert stages["schema"]["outs"] == ["../schemas/v1/schema.json"]
+        assert "../schemas/v1/schema.json" not in validate.get("outs", [])
+    else:
+        assert "schema" not in stages
+        assert "../schemas/v1/schema.json" in validate["outs"]
+
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_validate_stubs_no_stale_clean_reference(
+    tmp_path: Path, language: str
+) -> None:
+    """Rendered validate scripts must point users at `dvc repro ingest`, not the
+    demoted clean stage."""
+    render_scaffold(
+        project_type="data", name="foo", language=language, target_dir=tmp_path
+    )
+    ext = {"python": "py", "r": "R", "stata": "do"}[language]
+    validate_script = (tmp_path / "code" / f"validate.{ext}").read_text(
+        encoding="utf-8"
+    )
+    assert "Run clean." not in validate_script, (
+        f"validate.{ext} must not reference the demoted clean stage"
+    )
+    assert "dvc repro ingest" in validate_script, (
+        f"validate.{ext} empty-dir message must point to `dvc repro ingest`"
+    )
 
 
 # --- correctness invariants -----------------------------------------------

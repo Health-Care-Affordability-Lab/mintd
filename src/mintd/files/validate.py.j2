@@ -102,7 +102,7 @@ def main():
     intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
 
     if not intermediate_files:
-        logger.log("No CSV files found in INTERMEDIATE_DIR. Run clean.py first.")
+        logger.log("No CSV files found in INTERMEDIATE_DIR. Run `dvc repro ingest` first.")
         validation_report = {'status': 'no_files', 'datasets': []}
     else:
         logger.log(f"Found {len(intermediate_files)} CSV files to validate")

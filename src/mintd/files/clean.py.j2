@@ -1,20 +1,25 @@
-"""Data cleaning script for {{ project_name }}.
+"""Data quality inspection helper for {{ project_name }}.
+
+STANDALONE TOOL — this is NOT a DVC pipeline stage. The pipeline's cleaning
+logic lives in ingest.py (which reads data/raw/ and writes data/intermediate/).
+This script reads the already-ingested data/intermediate/ files and reports
+what `clean_dataset` would change, WITHOUT writing any output. Use it to audit
+data quality interactively after running the pipeline.
+
+Run it after `dvc repro ingest` has populated data/intermediate/.
 
 NOTE: This script runs from the code/ directory. Data paths use ../data/
+
+The cleaning functions below are importable utilities — ingest.py may call
+`clean_dataset` directly.
 """
 
-import sys
-from pathlib import Path
 import pandas as pd
 
 # Import mint utilities (located in same code/ directory)
 from _mintd_utils import (
-    setup_project_directory,
     ParameterAwareLogger,
-    RAW_DIR,
     INTERMEDIATE_DIR,
-    FINAL_DIR,
-    get_data_paths
 )
 
 
@@ -62,45 +67,30 @@ def clean_dataset(df, logger):
 
 
 def main():
-    """Main cleaning workflow."""
-    # Initialize logging (validates directory and creates log file)
+    """Inspect intermediate data quality. Reads data/intermediate/, reports what
+    cleaning would do, and writes NOTHING — the pipeline owns those files."""
     logger = ParameterAwareLogger("clean")
-    logger.log("Starting data cleaning for {{ project_name }}...")
+    logger.log("Inspecting intermediate data quality for {{ project_name }}...")
+    logger.log(
+        "This is a read-only audit. It does NOT modify any files. "
+        "Run `dvc repro ingest` first if data/intermediate/ is empty."
+    )
 
-    # Get data paths and ensure directories exist
-    paths = get_data_paths()
-    for name, path in paths.items():
-        if name != 'logs':  # logs already created by logger
-            path.mkdir(parents=True, exist_ok=True)
-
-    logger.log(f"Raw data directory: {RAW_DIR}")
-    logger.log(f"Intermediate data directory: {INTERMEDIATE_DIR}")
-    logger.log(f"Final data directory: {FINAL_DIR}")
-
-    # Process all CSV files in RAW_DIR
-    raw_files = list(RAW_DIR.glob("*.csv"))
-
-    if not raw_files:
-        logger.log("No CSV files found in RAW_DIR. Run ingest.py first.")
+    intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
+    if not intermediate_files:
+        logger.log(
+            "No CSV files found in INTERMEDIATE_DIR. Run `dvc repro ingest` first."
+        )
     else:
-        logger.log(f"Found {len(raw_files)} CSV files to clean")
-
-        for raw_file in raw_files:
-            logger.log(f"Processing: {raw_file.name}")
-
-            # Load raw data
-            df = pd.read_csv(raw_file)
+        logger.log(f"Found {len(intermediate_files)} intermediate file(s) to inspect")
+        for data_file in intermediate_files:
+            logger.log(f"Inspecting: {data_file.name}")
+            df = pd.read_csv(data_file)
             logger.log(f"  Loaded {len(df)} rows, {len(df.columns)} columns")
+            # Report what cleaning would change; discard the result (no write).
+            clean_dataset(df.copy(), logger)
 
-            # Apply cleaning
-            df = clean_dataset(df, logger)
-
-            # Save to intermediate directory
-            output_file = INTERMEDIATE_DIR / f"clean_{raw_file.name}"
-            df.to_csv(output_file, index=False)
-            logger.log(f"  Saved to: {output_file.name}")
-
-    logger.log("Data cleaning completed successfully.")
+    logger.log("Data quality inspection completed.")
     logger.close()
 
 
