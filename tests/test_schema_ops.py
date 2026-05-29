@@ -22,6 +22,7 @@ from mintd.schema_ops import (
     find_project_root,
     generate_schema_file,
     infer_table_schema,
+    parse_published_schema,
 )
 
 
@@ -225,3 +226,134 @@ def test_raises_schema_extra_not_installed_when_pandas_missing(
 
     with pytest.raises(SchemaExtraNotInstalled, match=r"\[schema\] extra"):
         generate_schema_file(tmp_path, tmp_path / "schema.json", recursive=True)
+
+
+# ---------------- parse_published_schema ----------------
+
+WRAPPER_3FILE = {
+    "generator": "mintd",
+    "schema_standard": "frictionless-table-schema",
+    "files": [
+        {
+            "filename": "hospital.csv",
+            "path": "hospital.csv",
+            "observations": 1200,
+            "columns": 2,
+            "schema": {
+                "fields": [
+                    {"name": "id", "type": "integer", "title": "Hospital ID"},
+                    {
+                        "name": "name",
+                        "type": "string",
+                        "description": "Facility name",
+                        "constraints": {"required": True},
+                    },
+                ]
+            },
+        },
+        {
+            "filename": "measures.csv",
+            "path": "measures.csv",
+            "observations": 50000,
+            "columns": 1,
+            "schema": {"fields": [{"name": "rate", "type": "number"}]},
+        },
+        {
+            "filename": "year.parquet",
+            "path": "year.parquet",
+            "observations": None,
+            "columns": 1,
+            "schema": {"fields": [{"name": "yr", "type": "integer"}]},
+        },
+    ],
+}
+
+
+def test_parse_published_schema_wrapper_one_table_per_file() -> None:
+    tables = parse_published_schema(json.dumps(WRAPPER_3FILE).encode())
+
+    assert [t["filename"] for t in tables] == [
+        "hospital.csv",
+        "measures.csv",
+        "year.parquet",
+    ]
+    assert tables[0]["observations"] == 1200
+    assert tables[0]["columns"] == 2
+    assert tables[0]["fields"][0] == {
+        "name": "id",
+        "type": "integer",
+        "description": "Hospital ID",  # falls back to title when no description
+        "required": False,
+    }
+    assert tables[0]["fields"][1] == {
+        "name": "name",
+        "type": "string",
+        "description": "Facility name",
+        "required": True,
+    }
+    assert tables[2]["observations"] is None
+
+
+def test_parse_published_schema_round_trips_generate_schema_file(tmp_path: Path) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _write_csv(data_dir / "first.csv", rows=5)
+    _write_csv(data_dir / "second.csv", rows=2)
+    out = tmp_path / "schema.json"
+    generate_schema_file(data_dir, out, recursive=True)
+
+    tables = parse_published_schema(out.read_bytes())
+
+    assert {t["filename"] for t in tables} == {"first.csv", "second.csv"}
+    first = next(t for t in tables if t["filename"] == "first.csv")
+    assert first["observations"] == 5
+    assert [f["name"] for f in first["fields"]] == ["a", "b"]
+    assert all(set(f) == {"name", "type", "description", "required"} for f in first["fields"])
+
+
+def test_parse_published_schema_bare_frictionless() -> None:
+    doc = {
+        "fields": [
+            {"name": "a", "type": "integer"},
+            {"name": "b", "type": "string", "constraints": {"required": True}},
+        ]
+    }
+
+    tables = parse_published_schema(json.dumps(doc).encode())
+
+    assert len(tables) == 1
+    assert tables[0]["filename"] == ""
+    assert tables[0]["observations"] is None
+    assert tables[0]["columns"] == 2
+    assert tables[0]["fields"][1]["required"] is True
+
+
+def test_parse_published_schema_json_schema() -> None:
+    doc = {
+        "properties": {
+            "a": {"type": "integer", "description": "count"},
+            "b": {"type": ["string", "null"]},
+        },
+        "required": ["a"],
+    }
+
+    tables = parse_published_schema(json.dumps(doc).encode())
+
+    assert len(tables) == 1
+    fields = tables[0]["fields"]
+    assert fields[0] == {"name": "a", "type": "integer", "description": "count", "required": True}
+    assert fields[1] == {"name": "b", "type": "string/null", "description": "", "required": False}
+
+
+def test_parse_published_schema_invalid_json_raises() -> None:
+    with pytest.raises(ValueError, match="not valid JSON"):
+        parse_published_schema(b"{not json")
+
+
+def test_parse_published_schema_non_object_raises() -> None:
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        parse_published_schema(b"[1, 2, 3]")
+
+
+def test_parse_published_schema_unrecognized_shape_returns_empty() -> None:
+    assert parse_published_schema(b'{"unrelated": "doc"}') == []

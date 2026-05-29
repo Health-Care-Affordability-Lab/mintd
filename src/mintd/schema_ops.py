@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 FRICTIONLESS_SCHEMA_URL = "https://specs.frictionlessdata.io/schemas/table-schema.json"
 
@@ -238,3 +238,112 @@ def generate_schema_file(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(combined, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Reading published schema files back into typed tables. The inverse of
+# `generate_schema_file()` — a stable public surface for consumers (e.g.
+# mint-registry's catalog generator) so the writer and reader of the format
+# share one definition instead of drifting.
+# ---------------------------------------------------------------------------
+
+
+class Field(TypedDict):
+    name: str
+    type: str
+    description: str
+    required: bool
+
+
+class Table(TypedDict):
+    filename: str
+    observations: int | None
+    columns: int
+    fields: list[Field]
+
+
+def _fields_from_frictionless(schema: dict[str, Any]) -> list[Field]:
+    return [
+        {
+            "name": f.get("name", ""),
+            "type": f.get("type", ""),
+            "description": f.get("description") or f.get("title", ""),
+            "required": bool((f.get("constraints") or {}).get("required")),
+        }
+        for f in (schema.get("fields") or [])
+    ]
+
+
+def _fields_from_jsonschema(doc: dict[str, Any]) -> list[Field]:
+    required = set(doc.get("required", []))
+    fields: list[Field] = []
+    for name, spec in doc["properties"].items():
+        spec = spec if isinstance(spec, dict) else {}
+        type_ = spec.get("type", "")
+        if isinstance(type_, list):
+            type_ = "/".join(type_)
+        fields.append(
+            {
+                "name": name,
+                "type": type_,
+                "description": spec.get("description", ""),
+                "required": name in required,
+            }
+        )
+    return fields
+
+
+def parse_published_schema(raw: bytes) -> list[Table]:
+    """Parse a published schema file into a list of tables.
+
+    The inverse of `generate_schema_file()`. Handles all three shapes a
+    published `schema.json` may take:
+
+    - mintd wrapper: ``{generator, schema_standard, files: [{filename,
+      observations, columns, schema: {fields: [...]}}]}`` — one table per file.
+    - bare frictionless table schema: ``{fields: [...]}`` — a single table.
+    - JSON Schema: ``{properties: {...}, required: [...]}`` — a single table.
+
+    Raises:
+        ValueError: ``raw`` is not a JSON object.
+
+    A valid JSON object that matches none of the three shapes yields ``[]``.
+    """
+    try:
+        doc = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise ValueError(f"schema is not valid JSON: {e}") from e
+    if not isinstance(doc, dict):
+        raise ValueError(f"schema must be a JSON object, got {type(doc).__name__}")
+
+    if isinstance(doc.get("files"), list):  # mintd wrapper
+        tables: list[Table] = []
+        for file_obj in doc["files"]:
+            if not isinstance(file_obj, dict):
+                continue
+            fields = _fields_from_frictionless(file_obj.get("schema") or {})
+            if not fields:
+                continue
+            tables.append(
+                {
+                    "filename": file_obj.get("filename") or file_obj.get("path") or "",
+                    "observations": file_obj.get("observations"),
+                    "columns": file_obj.get("columns") or len(fields),
+                    "fields": fields,
+                }
+            )
+        return tables
+
+    if isinstance(doc.get("fields"), list):  # bare frictionless table schema
+        fields = _fields_from_frictionless(doc)
+        if not fields:
+            return []
+        return [{"filename": "", "observations": None, "columns": len(fields), "fields": fields}]
+
+    if isinstance(doc.get("properties"), dict):  # JSON Schema
+        fields = _fields_from_jsonschema(doc)
+        if not fields:
+            return []
+        return [{"filename": "", "observations": None, "columns": len(fields), "fields": fields}]
+
+    return []

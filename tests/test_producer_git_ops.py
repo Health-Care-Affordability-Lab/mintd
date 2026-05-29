@@ -17,9 +17,13 @@ PIN = "a" * 40
 
 
 def _make_tar_with_metadata(content: bytes = b'{"schema_version":"2.0"}') -> bytes:
+    return _make_tar_with_path("metadata.json", content)
+
+
+def _make_tar_with_path(path: str, content: bytes) -> bytes:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tar:
-        info = tarfile.TarInfo(name="metadata.json")
+        info = tarfile.TarInfo(name=path)
         info.size = len(content)
         tar.addfile(info, io.BytesIO(content))
     return buf.getvalue()
@@ -482,3 +486,144 @@ def test_stderr_bytes_decoded_safely(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_single_subprocess_call_site() -> None:
     text = Path("src/mintd/_producer_git_ops.py").read_text(encoding="utf-8")
     assert text.count("subprocess.run(") == 1
+
+
+# --------------------------------------------------------------------------- #
+# fetch_path_at — the generalized fetch behind fetch_metadata_at
+# --------------------------------------------------------------------------- #
+
+SCHEMA_PATH = "schemas/v1/schema.json"
+
+
+def test_fetch_path_at_argv_uses_given_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    content = b'{"files":[]}'
+    d = _install(
+        monkeypatch,
+        _Dispatcher(
+            {"archive": {"returncode": 0, "stdout": _make_tar_with_path(SCHEMA_PATH, content)}}
+        ),
+    )
+
+    result = GitArchiveFetcher().fetch_path_at(REPO, PIN, SCHEMA_PATH)
+
+    assert result == content
+    assert d.calls[0] == [
+        "git",
+        "archive",
+        "--format=tar",
+        "--remote",
+        REPO,
+        PIN,
+        SCHEMA_PATH,
+    ]
+
+
+def test_fetch_path_at_missing_path_maps_to_path_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d = _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {
+                    "returncode": 128,
+                    "stderr": f"fatal: pathspec '{SCHEMA_PATH}' did not match any files".encode(),
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(FetchError) as ei:
+        GitArchiveFetcher().fetch_path_at(REPO, PIN, SCHEMA_PATH)
+
+    assert ei.value.reason == FetchError.Reason.PATH_MISSING
+    assert d.count("clone") == 0
+
+
+def test_fetch_path_at_missing_ref_maps_to_pin_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {
+                    "returncode": 128,
+                    "stderr": b"fatal: bad revision unknown revision abc",
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(FetchError) as ei:
+        GitArchiveFetcher().fetch_path_at(REPO, PIN, SCHEMA_PATH)
+
+    assert ei.value.reason == FetchError.Reason.PIN_MISSING
+
+
+def test_fetch_path_at_falls_back_to_clone_for_subpath(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    show_bytes = b'{"files":[{"filename":"a.csv"}]}'
+    d = _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {"returncode": 128, "stderr": b"Operation not supported by server"},
+                "clone": {"returncode": 0},
+                "fetch": {"returncode": 0},
+                "show": {"returncode": 0, "stdout": show_bytes},
+            }
+        ),
+    )
+
+    result = GitArchiveFetcher().fetch_path_at(REPO, PIN, SCHEMA_PATH)
+
+    assert result == show_bytes
+    show_call = next(c for c in d.calls if d._subcmd_for(c) == "show")
+    assert show_call[-1] == f"{PIN}:{SCHEMA_PATH}"
+
+
+def test_fetch_path_at_clone_show_missing_path_maps_to_path_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {"returncode": 128, "stderr": b"Operation not supported"},
+                "clone": {"returncode": 0},
+                "fetch": {"returncode": 0},
+                "show": {
+                    "returncode": 128,
+                    "stderr": f"fatal: path '{SCHEMA_PATH}' does not exist in '{PIN}'".encode(),
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(FetchError) as ei:
+        GitArchiveFetcher().fetch_path_at(REPO, PIN, SCHEMA_PATH)
+
+    assert ei.value.reason == FetchError.Reason.PATH_MISSING
+
+
+def test_fetch_metadata_at_translates_path_missing_to_metadata_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {
+                    "returncode": 128,
+                    "stderr": b"fatal: pathspec 'metadata.json' did not match any files",
+                },
+            }
+        ),
+    )
+
+    with pytest.raises(FetchError) as ei:
+        GitArchiveFetcher().fetch_metadata_at(REPO, PIN)
+
+    assert ei.value.reason == FetchError.Reason.METADATA_MISSING

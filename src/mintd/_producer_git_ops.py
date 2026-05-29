@@ -23,6 +23,7 @@ class FetchError(Exception):
         UNREACHABLE = "unreachable"
         PIN_MISSING = "pin_missing"
         METADATA_MISSING = "metadata_missing"
+        PATH_MISSING = "path_missing"
 
     def __init__(
         self,
@@ -49,12 +50,24 @@ class FetchError(Exception):
     def metadata_missing(cls, repo: str, pin: str, detail: str = "") -> "FetchError":
         return cls(cls.Reason.METADATA_MISSING, repo, pin, detail)
 
+    @classmethod
+    def path_missing(cls, repo: str, pin: str, detail: str = "") -> "FetchError":
+        return cls(cls.Reason.PATH_MISSING, repo, pin, detail)
+
 
 class Fetcher(Protocol):
-    """Returns the raw bytes of metadata.json at `pin` for `repo`.
+    """Returns the raw bytes of a file at `pin` for `repo`.
 
     Implementations raise `FetchError` for transport failures.
     """
+
+    def fetch_path_at(self, repo: str, pin: str, path: str) -> bytes:
+        """Return the bytes of `path` in `repo` at `pin`.
+
+        Raises `FetchError` — `PATH_MISSING` for a missing file, `PIN_MISSING`
+        for a missing ref, `UNREACHABLE` for transport failures.
+        """
+        ...
 
     def fetch_metadata_at(self, repo: str, pin: str) -> bytes: ...
 
@@ -69,17 +82,17 @@ class Fetcher(Protocol):
 
 # ---------------------------------------------------------------------------
 # Stderr classifiers — substring-based mapping from git error text to typed
-# FetchError reasons. _classify_metadata_missing runs *before* _classify_stderr
+# FetchError reasons. _classify_path_missing runs *before* _classify_stderr
 # so a path-missing error isn't misclassified as a pin-missing one.
 # ---------------------------------------------------------------------------
 
 
-def _classify_metadata_missing(stderr: str) -> bool:
+def _classify_path_missing(stderr: str, path: str) -> bool:
     return any(
         token in stderr
         for token in (
             "did not match any",
-            "pathspec 'metadata.json'",
+            f"pathspec '{path}'",
             "exists on disk, but not in",
             "does not exist in",
         )
@@ -123,7 +136,7 @@ class GitArchiveFetcher:
     def __init__(self, *, timeout: float = 60.0) -> None:
         self.timeout = timeout
 
-    def fetch_metadata_at(self, repo: str, pin: str) -> bytes:
+    def fetch_path_at(self, repo: str, pin: str, path: str) -> bytes:
         archive_argv = [
             "git",
             "archive",
@@ -131,7 +144,7 @@ class GitArchiveFetcher:
             "--remote",
             repo,
             pin,
-            "metadata.json",
+            path,
         ]
         result = _run(
             archive_argv,
@@ -142,30 +155,43 @@ class GitArchiveFetcher:
         )
 
         if result.returncode == 0:
-            return _extract_metadata_bytes(result.stdout, repo=repo, pin=pin)
+            return _extract_path_bytes(result.stdout, path, repo=repo, pin=pin)
 
         stderr_text = result.stderr.decode("utf-8", errors="replace")
 
-        if _classify_metadata_missing(stderr_text):
-            raise FetchError.metadata_missing(repo, pin, detail=stderr_text.strip())
+        if _classify_path_missing(stderr_text, path):
+            raise FetchError.path_missing(repo, pin, detail=stderr_text.strip())
 
         classified = _classify_stderr(stderr_text)
         if classified is not None:
             raise FetchError(classified, repo, pin, detail=stderr_text.strip())
 
-        return self._fallback_clone(repo, pin)
+        return self._fallback_clone(repo, pin, path)
+
+    def fetch_metadata_at(self, repo: str, pin: str) -> bytes:
+        """Fetch `metadata.json` at `pin`. Thin wrapper over `fetch_path_at`.
+
+        Translates `PATH_MISSING` back to `METADATA_MISSING` so the producer
+        contract (and its callers in `producer.py`) is unchanged.
+        """
+        try:
+            return self.fetch_path_at(repo, pin, "metadata.json")
+        except FetchError as e:
+            if e.reason is FetchError.Reason.PATH_MISSING:
+                raise FetchError.metadata_missing(repo, pin, detail=e.detail) from e
+            raise
 
     def fetch_metadata_at_head(self, repo: str) -> tuple[bytes, str]:
         head_sha = _git_ls_remote_head(repo, timeout=self.timeout)
         raw = self.fetch_metadata_at(repo, head_sha)
         return raw, head_sha
 
-    def _fallback_clone(self, repo: str, pin: str) -> bytes:
+    def _fallback_clone(self, repo: str, pin: str, path: str) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
-            self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, tmp], repo=repo, pin=pin)
-            self._run_clone(["git", "-C", tmp, "fetch", "--depth=1", "origin", pin], repo=repo, pin=pin)
+            self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, tmp], repo=repo, pin=pin, path=path)
+            self._run_clone(["git", "-C", tmp, "fetch", "--depth=1", "origin", pin], repo=repo, pin=pin, path=path)
             show = _run(
-                ["git", "-C", tmp, "show", f"{pin}:metadata.json"],
+                ["git", "-C", tmp, "show", f"{pin}:{path}"],
                 timeout=self.timeout,
                 repo=repo,
                 pin=pin,
@@ -173,17 +199,17 @@ class GitArchiveFetcher:
             )
             if show.returncode != 0:
                 stderr_text = show.stderr.decode("utf-8", errors="replace")
-                if _classify_metadata_missing(stderr_text):
-                    raise FetchError.metadata_missing(repo, pin, detail=stderr_text.strip())
+                if _classify_path_missing(stderr_text, path):
+                    raise FetchError.path_missing(repo, pin, detail=stderr_text.strip())
                 classified = _classify_stderr(stderr_text)
                 if classified is not None:
                     raise FetchError(classified, repo, pin, detail=stderr_text.strip())
                 raise FetchError.unreachable(repo, pin, detail=stderr_text.strip())
             if not show.stdout:
-                raise FetchError.metadata_missing(repo, pin, detail="show returned empty")
+                raise FetchError.path_missing(repo, pin, detail="show returned empty")
             return show.stdout
 
-    def _run_clone(self, argv: list[str], *, repo: str, pin: str) -> None:
+    def _run_clone(self, argv: list[str], *, repo: str, pin: str, path: str) -> None:
         result = _run(
             argv,
             timeout=self.timeout,
@@ -193,34 +219,34 @@ class GitArchiveFetcher:
         )
         if result.returncode != 0:
             stderr_text = result.stderr
-            if _classify_metadata_missing(stderr_text):
-                raise FetchError.metadata_missing(repo, pin, detail=stderr_text.strip())
+            if _classify_path_missing(stderr_text, path):
+                raise FetchError.path_missing(repo, pin, detail=stderr_text.strip())
             classified = _classify_stderr(stderr_text)
             if classified is not None:
                 raise FetchError(classified, repo, pin, detail=stderr_text.strip())
             raise FetchError.unreachable(repo, pin, detail=stderr_text.strip())
 
 
-def _extract_metadata_bytes(archive_bytes: bytes, *, repo: str, pin: str) -> bytes:
+def _extract_path_bytes(archive_bytes: bytes, path: str, *, repo: str, pin: str) -> bytes:
     try:
         with tarfile.open(fileobj=BytesIO(archive_bytes), mode="r|") as tar:
             for member in tar:
-                if member.name != "metadata.json":
+                if member.name != path:
                     continue
                 if member.issym() or member.islnk():
-                    raise FetchError.metadata_missing(
-                        repo, pin, detail="metadata.json is a symlink/hardlink in archive"
+                    raise FetchError.path_missing(
+                        repo, pin, detail=f"{path} is a symlink/hardlink in archive"
                     )
                 handle = tar.extractfile(member)
                 if handle is None:
-                    raise FetchError.metadata_missing(repo, pin, detail="metadata.json empty in archive")
+                    raise FetchError.path_missing(repo, pin, detail=f"{path} empty in archive")
                 data = handle.read()
                 if not data:
-                    raise FetchError.metadata_missing(repo, pin, detail="metadata.json empty in archive")
+                    raise FetchError.path_missing(repo, pin, detail=f"{path} empty in archive")
                 return data
     except tarfile.TarError as e:
-        raise FetchError.metadata_missing(repo, pin, detail=f"tar read failed: {e}") from e
-    raise FetchError.metadata_missing(repo, pin, detail="metadata.json missing from archive")
+        raise FetchError.path_missing(repo, pin, detail=f"tar read failed: {e}") from e
+    raise FetchError.path_missing(repo, pin, detail=f"{path} missing from archive")
 
 
 @overload
