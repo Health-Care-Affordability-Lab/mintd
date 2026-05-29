@@ -41,7 +41,7 @@ else
 fi
 
 echo "Installing mintd..."
-uv tool install --force "$INSTALL_SPEC"
+uv tool install --force --reinstall --refresh "$INSTALL_SPEC"
 
 # Locate the tool's Python interpreter
 TOOL_PYTHON="$HOME/.local/share/uv/tools/mintd/bin/python"

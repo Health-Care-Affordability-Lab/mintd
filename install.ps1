@@ -32,7 +32,7 @@ if ($WithSchema) {
 }
 
 Write-Host "Installing mintd..."
-uv tool install --force $InstallSpec
+uv tool install --force --reinstall --refresh $InstallSpec
 if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
 
 # Locate the tool's Python interpreter
