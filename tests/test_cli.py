@@ -1907,6 +1907,42 @@ def test_cli_enclave_pull_dvc_op_error_names_producer(
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_cli_enclave_pull_not_in_repo_hint_is_not_pin_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter,
+) -> None:
+    """A not-DVC-initialized enclave must not get the misleading pin/repo hint
+    (slice 47, Q3) — the pin/repo are fine; the fix is `dvc init`."""
+    from mintd._dvc_ops import DvcNotInRepoError
+    from mintd.enclave import EnclavePullError
+    monkeypatch.setattr(
+        "mintd.cli.enclave_pull",
+        _raises(EnclavePullError("repo-b", DvcNotInRepoError("nope"))),
+    )
+    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+    assert rc == 1
+    hint = recording_reporter.events_of("error")[0][2] or ""
+    assert "pin/repo" not in hint
+    assert "dvc init" in hint.lower()
+
+
+def test_cli_enclave_pull_path_not_found_keeps_pin_repo_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter,
+) -> None:
+    """A genuine pin/repo failure (path missing at rev) keeps the pin/repo hint."""
+    from mintd._dvc_ops import DvcImportPathNotFound
+    from mintd.enclave import EnclavePullError
+    monkeypatch.setattr(
+        "mintd.cli.enclave_pull",
+        _raises(EnclavePullError("repo-b", DvcImportPathNotFound("missing"))),
+    )
+    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+    assert rc == 1
+    hint = recording_reporter.events_of("error")[0][2] or ""
+    assert "pin/repo" in hint
+
+
 def test_cli_registry_sync_shows_refresh_status(
     monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
 ) -> None:

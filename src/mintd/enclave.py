@@ -62,6 +62,7 @@ class EnclavePullError(DvcOpError):
     def __init__(self, repo: str, cause: Exception) -> None:
         super().__init__(f"failed to pull {repo!r}: {cause}")
         self.repo = repo
+        self.cause = cause
 
 class AppendOnlyViolation(Exception):
     def __init__(self, path: Path, changed_indices: list[int]) -> None:
@@ -329,6 +330,14 @@ def enclave_pull(
     if repo is not None and not targets:
         raise ImportNotFound(f"{repo!r} not in approved_products[] in {manifest_path}")
     downloads_root = downloads_root or (manifest_path.parent / "downloads")
+    # `dvc import` requires the enclave dir to be a DVC repo, but `init`
+    # deliberately skips DVC *storage* wiring for enclaves (Slice 30). A bare
+    # local `.dvc/` is orthogonal to that — `import` fetches from the source
+    # repo's remote, not the enclave's. Lazily create it (idempotent; the op
+    # also tolerates an existing repo) so a fresh enclave pulls with no manual
+    # `dvc init`. No storage remote is written, so the Slice-30 invariant holds.
+    if not (manifest_path.parent / ".dvc").exists():
+        dvc_ops.init(cwd=manifest_path.parent)
     today_iso = (today or date.today()).isoformat()
     factory = producer_view_factory or (lambda url, pin: ProducerView.at(url, pin))
     new_downloaded: list[DownloadedItem] = list(manifest.downloaded)
@@ -363,6 +372,11 @@ def enclave_pull(
             # existing dest, breaking future pulls until manual cleanup.
             if staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
+            # `dvc import` writes its stage pointer into staging_dir and
+            # requires that working dir to already exist (it won't auto-create
+            # it) — else it fails with "stage working dir ... does not exist".
+            # Mirror the consumer-import path (data.import_product).
+            staging_dir.mkdir(parents=True, exist_ok=True)
             dest = staging_dir / Path(output.rstrip("/")).name
             try:
                 dvc_path = dvc_ops.import_(

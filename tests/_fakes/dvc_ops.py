@@ -11,6 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
+from mintd._dvc_ops import DvcOpError
+
+
+class DvcInitCall(NamedTuple):
+    cwd: Path | None
+
 
 class DvcImportCall(NamedTuple):
     repo_url: str
@@ -53,6 +59,7 @@ class _FakeDvcOps:
     """Implements `mintd._dvc_ops.DvcOps` structurally."""
 
     def __init__(self) -> None:
+        self.init_calls: list[DvcInitCall] = []
         self.calls: list[DvcImportCall] = []
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
@@ -67,6 +74,9 @@ class _FakeDvcOps:
         self.remove_raises: Exception | None = None
         self.checkout_calls: list[DvcCheckoutCall] = []
         self.checkout_raises: Exception | None = None
+
+    def init(self, *, cwd: Path | None = None) -> None:
+        self.init_calls.append(DvcInitCall(cwd=cwd))
 
     def import_(
         self,
@@ -84,8 +94,16 @@ class _FakeDvcOps:
                 extra_args=extra_args,
             )
         )
+        # Mirror real `dvc import`: the destination's parent (the stage working
+        # dir) must already exist. The caller is responsible for creating it;
+        # do NOT mkdir here, or we mask the "stage working dir does not exist"
+        # failure that bit enclave_pull (slice 47).
+        if not dest.parent.exists():
+            raise DvcOpError(
+                f"dvc import failed (exit 1): stage working dir "
+                f"'{dest.parent}' does not exist"
+            )
         dvc_file = dest.parent / (dest.name + ".dvc")
-        dvc_file.parent.mkdir(parents=True, exist_ok=True)
         # Stub shape: enough for DataDependency.from_dvc_file to parse.
         rev_lock = rev if (rev and len(rev) == 40) else "fake0pin" + "0" * 32
         dvc_file.write_text(

@@ -11,7 +11,12 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
+# `downloads/` is also mintd's enclave-pull staging root. Ignore the bulk
+# data but keep DVC pointers trackable (dvc import refuses to write a
+# git-ignored `.dvc` file) — mirrors the `/data/**` negation block below.
+downloads/**
+!downloads/**/
+!downloads/**/*.dvc
 eggs/
 .eggs/
 lib/

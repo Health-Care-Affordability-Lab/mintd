@@ -46,6 +46,14 @@ class DvcCheckoutError(DvcOpError):
     """`dvc checkout` exited non-zero."""
 
 
+class DvcNotInRepoError(DvcOpError):
+    """A `dvc` command ran outside a DVC repository (no `.dvc/` scaffold).
+
+    Distinct from a pin/repo problem: the consumer-side fix is `dvc init`
+    (which `enclave_pull` now does lazily), not checking the producer's pin.
+    """
+
+
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
@@ -70,6 +78,10 @@ class DvcOps(Protocol):
 
     Tests pass a fake; production passes `SubprocessDvcOps`.
     """
+
+    def init(self, *, cwd: Path | None = None) -> None:
+        """Run `dvc init` (bare, no remote). Tolerant of an already-init repo."""
+        ...
 
     def import_(
         self,
@@ -147,6 +159,25 @@ class SubprocessDvcOps:
         env.setdefault("AWS_PROFILE", self._aws_profile_name)
         return env
 
+    def init(self, *, cwd: Path | None = None) -> None:
+        cmd = [*dvc_cmd(), "init"]
+        try:
+            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, cwd=cwd, env=self._env())
+        except FileNotFoundError:
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        if r.returncode != 0:
+            stderr = "".join(r.stderr_lines)
+            if _is_dvc_module_missing(stderr):
+                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+            # Tolerate an already-initialized repo so callers can init
+            # unconditionally and repeated pulls stay idempotent. `dvc init`
+            # exits non-zero with "'.dvc' exists. Use `-f` to force." in that case.
+            if ".dvc' exists" in stderr or "already initialized" in stderr:
+                return
+            raise DvcOpError(
+                f"dvc init failed (exit {r.returncode}): {stderr.strip()}"
+            )
+
     def import_(
         self,
         *,
@@ -174,6 +205,10 @@ class SubprocessDvcOps:
             stderr = "".join(r.stderr_lines)
             if _is_dvc_module_missing(stderr):
                 raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+            if "not inside of a DVC repository" in stderr:
+                raise DvcNotInRepoError(
+                    f"not inside a DVC repository while importing into '{dest}'"
+                )
             if "Does not exist" in stderr or "Unable to find" in stderr:
                 raise DvcImportPathNotFound(
                     f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"

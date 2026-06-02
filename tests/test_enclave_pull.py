@@ -12,12 +12,17 @@ class _Client:
 class _FakeDvcOps:
     def __init__(self):
         self.calls = []
+        self.init_calls = []
+    def init(self, *, cwd=None):
+        self.init_calls.append(cwd)
     def import_(self, repo_url, path, dest, rev, force, extra_args=None):
         self.calls.append((repo_url, path, dest, rev, force))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("dummy-data")  # Add this: create the file
+        # Mirror real `dvc import`: the stage working dir must already exist.
+        # enclave_pull is responsible for creating it (slice 47); don't mkdir
+        # here, or we'd mask a regression of that fix.
+        assert dest.parent.exists(), f"stage working dir {dest.parent} does not exist"
+        dest.write_text("dummy-data")
         dvc_path = dest.parent / (dest.name + ".dvc")
-        dvc_path.parent.mkdir(parents=True, exist_ok=True)
         dvc_path.write_text("outs:\n- md5: ffffffffffffffffffffffffffffffff\n")
         return dvc_path
 
@@ -291,6 +296,8 @@ def test_enclave_pull_wraps_dvc_error_as_enclave_pull_error(tmp_path):
     from mintd.enclave import EnclavePullError
 
     class _FailingDvcOps:
+        def init(self, *, cwd=None):
+            pass
         def import_(self, repo_url, path, dest, rev, force, extra_args=None):
             raise DvcPullError("network down")
 
@@ -307,3 +314,33 @@ def test_enclave_pull_wraps_dvc_error_as_enclave_pull_error(tmp_path):
     with pytest.raises(EnclavePullError) as ei:
         enclave_pull(_Client(), _FailingDvcOps(), manifest_path=m_path, producer_view_factory=factory)
     assert ei.value.repo == "repo-b"
+
+
+# Slice 47 — lazy `dvc init` so a fresh enclave (no `.dvc/`) pulls without a
+# manual `dvc init`.
+
+def _single_out_factory(url, pin):
+    class View:
+        def primary_or_raise(self): return "out"
+    return View()
+
+
+def test_pull_lazy_inits_dvc_when_no_dvc_dir(tmp_path):
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1")
+    ]).save(m_path)
+    dvc = _FakeDvcOps()
+    enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=_single_out_factory)
+    assert dvc.init_calls == [m_path.parent]
+
+
+def test_pull_skips_init_when_dvc_dir_exists(tmp_path):
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1")
+    ]).save(m_path)
+    (tmp_path / ".dvc").mkdir()
+    dvc = _FakeDvcOps()
+    enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=_single_out_factory)
+    assert dvc.init_calls == []

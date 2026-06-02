@@ -28,7 +28,15 @@ from pydantic import ValidationError
 from . import config_ops, metadata_migrate
 from ._console import Reporter
 from ._config import Config, ConfigError
-from ._dvc_ops import DvcNotInstalled, DvcOpError, DvcOps, DvcPushError, SubprocessDvcOps
+from ._dvc_ops import (
+    DvcImportPathNotFound,
+    DvcNotInRepoError,
+    DvcNotInstalled,
+    DvcOpError,
+    DvcOps,
+    DvcPushError,
+    SubprocessDvcOps,
+)
 from ._subprocess import WallTimeoutExceeded
 from ._registry_git_ops import GitOpError
 from ._fast_sync_ops import FastSyncOps
@@ -1514,10 +1522,20 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
                 reporter=reporter,
             )
     except EnclavePullError as exc:
-        reporter.error(
-            str(exc),
-            hint=f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull --repo {exc.repo}",
-        )
+        # The pin/repo retry hint only makes sense when the producer's pin/repo
+        # is actually the problem. For an un-DVC-initialized enclave (now
+        # auto-fixed by lazy init, but possible if `dvc` itself is broken) it
+        # actively misleads — point at DVC init instead.
+        if isinstance(exc.cause, DvcNotInRepoError):
+            hint = (
+                "enclave is not DVC-initialized; re-run `mintd enclave pull` "
+                "(it initializes DVC automatically) or run `dvc init` once"
+            )
+        elif isinstance(exc.cause, DvcImportPathNotFound):
+            hint = f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull --repo {exc.repo}"
+        else:
+            hint = f"retry: mintd enclave pull --repo {exc.repo}"
+        reporter.error(str(exc), hint=hint)
         return 1
     except (
         CatalogNotFound,

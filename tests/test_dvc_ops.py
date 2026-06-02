@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from mintd._dvc_invoke import dvc_cmd
 from mintd._dvc_ops import DvcOps
 from mintd.imports import DataDependency
@@ -182,3 +184,68 @@ def test_pull_raises_dvc_not_installed_when_module_missing(monkeypatch) -> None:
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcNotInstalled, match="reinstall mintd"):
         ops.pull(targets=["data/foo"])
+
+
+# Slice 47 — lazy `dvc init` op + typed not-in-repo error.
+
+
+def test_subprocess_init_runs_dvc_init_in_cwd(monkeypatch, tmp_path) -> None:
+    """`init(cwd=...)` shells out to `dvc init` in the given dir."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+
+    class _R:
+        returncode = 0
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+    def _fake(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["cwd"] = kwargs.get("cwd")
+        return _R()
+
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _fake)
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.init(cwd=tmp_path)
+
+    assert seen["cmd"] == [*dvc_cmd(), "init"]
+    assert seen["cwd"] == tmp_path
+
+
+def test_subprocess_init_tolerates_already_initialized(monkeypatch) -> None:
+    """Re-running `init` on a DVC repo must not raise — repeated pulls stay
+    idempotent. `dvc init` exits non-zero with "'.dvc' exists" in that case."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    class _R:
+        returncode = 1
+        stdout_lines: list[str] = []
+        stderr_lines = ["ERROR: failed to initiate DVC - '.dvc' exists. Use `-f` to force.\n"]
+
+    monkeypatch.setattr(_dvc_ops, "run_streaming", lambda *a, **k: _R())
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.init()  # must not raise
+
+
+def test_subprocess_import_raises_not_in_repo(monkeypatch, tmp_path) -> None:
+    """`dvc import` outside a DVC repo surfaces as the typed DvcNotInRepoError,
+    not a generic DvcOpError — so the CLI can give a `dvc init` hint instead of
+    the misleading pin/repo one."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    class _R:
+        returncode = 253
+        stdout_lines: list[str] = []
+        stderr_lines = [
+            "ERROR: you are not inside of a DVC repository "
+            "(checked up to mount point '/')\n"
+        ]
+
+    monkeypatch.setattr(_dvc_ops, "run_streaming", lambda *a, **k: _R())
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    with pytest.raises(_dvc_ops.DvcNotInRepoError):
+        ops.import_(repo_url="http://x", path="out", dest=tmp_path / "d")

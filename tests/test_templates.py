@@ -290,6 +290,27 @@ def test_scaffold_template_names_resolve_to_vendored_files() -> None:
                 )
 
 
+def test_gitignore_negates_dvc_pointers_under_downloads(tmp_path: Path) -> None:
+    """The scaffolded `.gitignore` must keep bulk data under `downloads/`
+    ignored while leaving DVC `.dvc` pointers trackable — else `dvc import`
+    refuses to write into the enclave staging tree (slice 47, Failure 2)."""
+    import subprocess
+
+    render_scaffold(
+        project_type="enclave", name="foo", language="python", target_dir=tmp_path
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    def is_ignored(rel: str) -> bool:
+        # `git check-ignore -q` exits 0 when the path is ignored, 1 when not.
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "check-ignore", "-q", rel]
+        ).returncode == 0
+
+    assert not is_ignored("downloads/provider-x/_staging/outputs.dvc")
+    assert is_ignored("downloads/provider-x/_staging/outputs/part.parquet")
+
+
 @pytest.mark.parametrize("template_name", ["transfer.py.j2", "package.py.j2"])
 def test_transfer_manifest_default_schema_version_validates(
     template_name: str, tmp_path: Path
