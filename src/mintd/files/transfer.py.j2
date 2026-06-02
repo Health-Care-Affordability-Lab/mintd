@@ -136,7 +136,7 @@ def create_transfer_manifest(source_data: Dict[str, Path]) -> Dict:
     full_manifest = load_manifest()
 
     transfer_manifest = {
-        'schema_version': full_manifest.get('schema_version', '1.0'),
+        'schema_version': full_manifest.get('schema_version', '2.0'),
         'enclave_name': full_manifest.get('enclave_name', ''),
         'transfer_date': datetime.now().isoformat(),
         'transfer_id': f"transfer-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}",

@@ -290,6 +290,31 @@ def test_scaffold_template_names_resolve_to_vendored_files() -> None:
                 )
 
 
+@pytest.mark.parametrize("template_name", ["transfer.py.j2", "package.py.j2"])
+def test_transfer_manifest_default_schema_version_validates(
+    template_name: str, tmp_path: Path
+) -> None:
+    """A transfer manifest built from a source manifest that omits
+    ``schema_version`` must default to ``"2.0"`` and validate against
+    ``TransferManifest`` (slice 46). Guards the fallback default in the
+    generated transfer/package scripts against future drift back to ``"1.0"``.
+    """
+    from mintd.enclave import TransferManifest
+
+    source = render_template(template_name, _MIN_CONTEXT)
+    namespace: dict[str, object] = {"__file__": str(tmp_path / "script.py")}
+    exec(compile(source, template_name, "exec"), namespace)
+
+    # Simulate an enclave manifest missing ``schema_version`` (hand-edited,
+    # older file, or partial write) with no downloaded contents.
+    namespace["load_manifest"] = lambda: {"enclave_name": "foo"}
+
+    manifest = namespace["create_transfer_manifest"]({})
+
+    assert manifest["schema_version"] == "2.0"
+    TransferManifest.model_validate(manifest)
+
+
 # --- helpers --------------------------------------------------------------
 
 _MIN_CONTEXT: dict[str, object] = {
