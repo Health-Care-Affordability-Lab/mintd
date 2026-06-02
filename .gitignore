@@ -44,6 +44,7 @@ notes/
 .agents
 .pi
 .codex
-.agent-sync 
-.venv 
-.claude 
+.agent-sync
+.venv
+.claude
+.forge-scout/
