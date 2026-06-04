@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from mintd._dvc_ops import DvcOpError
+from mintd._dvc_ops import DvcOpError, DvcPushResult
 
 
 class DvcInitCall(NamedTuple):
@@ -63,6 +63,7 @@ class _FakeDvcOps:
         self.calls: list[DvcImportCall] = []
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
+        self.push_result: DvcPushResult = DvcPushResult(pushed=1, up_to_date=False)
         self.pull_calls: list[DvcPullCall] = []
         self.pull_raises: Exception | None = None
         self.add_calls: list[DvcAddCall] = []
@@ -120,10 +121,11 @@ class _FakeDvcOps:
         )
         return dvc_file
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
         if self.push_raises:
             raise self.push_raises
         self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs))
+        return self.push_result
 
     def pull(
         self,

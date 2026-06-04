@@ -722,7 +722,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     _, dvc_ops = _resolve_clients(config, reporter)
     try:
         with reporter.status("Pushing data to DVC..."):
-            data_push(
+            summary = data_push(
                 project_path=Path("."),
                 targets=args.targets or None,
                 dvc_ops=dvc_ops,
@@ -738,7 +738,32 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     except DvcOpError as e:
         reporter.error(str(e))
         return 1
-    print("pushed")
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "remote": summary.remote,
+                "pushed": summary.pushed,
+                "bytes": summary.bytes,
+                "elapsed_s": round(summary.elapsed_s, 2),
+                "up_to_date": summary.up_to_date,
+            },
+            pretty=_pretty_data_push,
+        )
+    else:
+        remote_clause = f" → s3://{summary.remote}"
+        duration = _format_duration(summary.elapsed_s)
+        if summary.up_to_date:
+            reporter.success(f"✓ already up to date{remote_clause} in {duration}")
+        else:
+            count_clause = (
+                f" {summary.pushed} object(s)" if summary.pushed is not None else ""
+            )
+            size_clause = (
+                f" ({_human_bytes(summary.bytes)})" if summary.bytes else ""
+            )
+            reporter.success(
+                f"✓ pushed{count_clause}{size_clause}{remote_clause} in {duration}"
+            )
     return 0
 
 
@@ -1163,6 +1188,17 @@ def _pretty_data_clone(payload: dict) -> str:
             f"({payload['files']} files, {_human_bytes(payload['bytes'])})"
         )
     return "\n".join(lines) if lines else ""
+
+
+def _pretty_data_push(payload: dict) -> str:
+    """Render the push-result summary footer (non-json pretty mode)."""
+    remote_clause = f" → s3://{payload['remote']}" if payload.get("remote") else ""
+    if payload.get("up_to_date"):
+        return f"✓ already up to date{remote_clause}"
+    pushed = payload.get("pushed")
+    count_clause = f" {pushed} object(s)" if pushed is not None else ""
+    size_clause = f" ({_human_bytes(payload['bytes'])})" if payload.get("bytes") else ""
+    return f"✓ pushed{count_clause}{size_clause}{remote_clause}"
 
 
 def _import_summary(produced: list[Path]) -> dict:

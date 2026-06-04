@@ -5,6 +5,7 @@ Only this module shells out to `dvc`. Mirrors `_registry_git_ops.py` for git/gh.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
 
@@ -66,6 +67,41 @@ class DvcImportDestinationExists(DvcOpError):
     """
 
 
+@dataclass
+class DvcPushResult:
+    """What `dvc push` reported, best-effort.
+
+    `dvc push` has no `--json` mode (unlike `dvc status`), so the count is
+    scraped from its human summary line (`N file(s) pushed` /
+    `Everything is up to date.`). When that line can't be parsed across dvc
+    versions, `pushed` stays `None` and the caller still succeeds. `bytes` is
+    never reported by `dvc push`; it exists for summary symmetry and stays
+    `None`.
+    """
+
+    pushed: int | None = None
+    bytes: int | None = None
+    up_to_date: bool = False
+
+
+def _parse_push_output(stdout: str) -> DvcPushResult:
+    """Best-effort scrape of `dvc push`'s human summary.
+
+    dvc emits `Everything is up to date.` when there's nothing to upload, or
+    `N file(s) pushed` after a real transfer. Never raises: unrecognized
+    output yields `pushed=None`, and the caller still reports success.
+    """
+    import re
+
+    if "Everything is up to date." in stdout:
+        return DvcPushResult(pushed=0, up_to_date=True)
+    m = re.search(r"(\d+)\s+files?\s+pushed", stdout)
+    if m:
+        n = int(m.group(1))
+        return DvcPushResult(pushed=n, up_to_date=(n == 0))
+    return DvcPushResult(pushed=None)
+
+
 def _is_dvc_module_missing(stderr: str) -> bool:
     """`sys.executable -m dvc` exits 1 with this message when dvc isn't
     in mintd's env. We re-raise as DvcNotInstalled so users get the
@@ -96,8 +132,8 @@ class DvcOps(Protocol):
         """Run `dvc import` and return the path of the produced `.dvc` file."""
         ...
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
-        """Run `dvc push`."""
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
+        """Run `dvc push`; report best-effort pushed count / up-to-date state."""
         ...
 
     def pull(
@@ -223,14 +259,22 @@ class SubprocessDvcOps:
 
         return dest.parent / (dest.name + ".dvc")
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> None:
+    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
         cmd = [*dvc_cmd(), "push"]
         if remote:
             cmd.extend(["--remote", remote])
         if jobs:
             cmd.extend(["--jobs", str(jobs)])
+        # json_mode suppresses dvc's stdout summary token ("1 file pushed" /
+        # "Everything is up to date.") from leaking to the terminal/stdout —
+        # we render our own summary instead, and JSON consumers must not see
+        # it. Live transfer progress is on stderr and is unaffected, so the
+        # spinner still ticks during the upload.
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
+            r = run_streaming(
+                cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter,
+                json_mode=True, env=self._env(),
+            )
         except FileNotFoundError:
             raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
@@ -240,6 +284,7 @@ class SubprocessDvcOps:
             raise DvcPushError(
                 f"dvc push failed (exit {r.returncode}): {stderr.strip()}"
             )
+        return _parse_push_output("\n".join(r.stdout_lines))
 
     def pull(
         self,

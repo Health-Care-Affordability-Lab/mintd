@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ._dvc_ops import DvcOps
+from ._dvc_ops import DvcOps, DvcPushResult
 from ._fast_sync_ops import (
     DvcOut,
     FastSyncOps,
@@ -38,6 +38,21 @@ class PullSummary:
     file_count: int
     total_bytes: int
     elapsed_s: float
+
+
+@dataclass(frozen=True)
+class PushSummary:
+    """What a ``data_push`` did — for the CLI's completion line (slice 48).
+
+    Mirrors ``PullSummary``. ``pushed``/``bytes`` are best-effort (dvc push has
+    no ``--json``; the count is scraped, bytes are never reported), so both are
+    optional. ``up_to_date`` distinguishes a no-op from a real upload.
+    """
+    remote: str
+    pushed: int | None
+    bytes: int | None
+    elapsed_s: float
+    up_to_date: bool
 
 
 def _out_aggregate_bytes(out: DvcOut) -> int:
@@ -277,9 +292,21 @@ def data_push(
     dvc_ops: DvcOps,
     remote: str | None = None,
     jobs: int | None = None,
-) -> None:
-    del project_path  # unused; accepted for signature symmetry with pull
-    dvc_ops.push(remote=remote, jobs=jobs)  # DVC push doesn't accept targets
+) -> PushSummary:
+    # Resolve the effective remote for display only (explicit > .dvc/config >
+    # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
+    # applies its own default when None. ``targets`` is dropped — dvc push
+    # doesn't accept it (honoring it is a separate slice).
+    effective_remote = remote or _default_dvc_remote(project_path) or "origin"
+    start_t = time.monotonic()
+    result: DvcPushResult = dvc_ops.push(remote=remote, jobs=jobs)
+    return PushSummary(
+        remote=effective_remote,
+        pushed=result.pushed,
+        bytes=result.bytes,
+        elapsed_s=time.monotonic() - start_t,
+        up_to_date=result.up_to_date,
+    )
 
 
 def data_add(path: Path, *, dvc_ops: DvcOps) -> Path:

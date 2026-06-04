@@ -249,3 +249,60 @@ def test_subprocess_import_raises_not_in_repo(monkeypatch, tmp_path) -> None:
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcNotInRepoError):
         ops.import_(repo_url="http://x", path="out", dest=tmp_path / "d")
+
+
+# Slice 48 — push scrapes its count from captured stdout under json_mode.
+# (json_mode suppresses terminal *forwarding* only; capture into stdout_lines
+# is unaffected — same invariant `status()` relies on.)
+
+
+def _stub_push_run_streaming(stdout_lines: list[str], seen: dict):
+    def _fake(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["kwargs"] = kwargs
+
+        class _R:
+            returncode = 0
+            stderr_lines: list[str] = []
+
+        _R.stdout_lines = list(stdout_lines)
+        return _R()
+
+    return _fake
+
+
+def test_subprocess_push_parses_count_from_captured_stdout(monkeypatch) -> None:
+    """`push` returns the scraped count even though `json_mode=True` is set —
+    proving json_mode doesn't empty `r.stdout_lines`. Also: no `--json` in argv
+    (dvc push rejects it)."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        _dvc_ops, "run_streaming", _stub_push_run_streaming(["3 files pushed"], seen)
+    )
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    result = ops.push(remote="r")
+
+    assert result.pushed == 3
+    assert result.up_to_date is False
+    assert "--json" not in seen["cmd"]
+    assert seen["kwargs"].get("json_mode") is True
+
+
+def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch) -> None:
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        _dvc_ops,
+        "run_streaming",
+        _stub_push_run_streaming(["Everything is up to date."], seen),
+    )
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    result = ops.push()
+
+    assert result.pushed == 0
+    assert result.up_to_date is True
