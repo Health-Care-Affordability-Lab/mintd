@@ -59,3 +59,66 @@ if ($WithSchema) {
 } else {
     Write-Host "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
 }
+
+# --- Post-install verification (non-fatal diagnostics) -----------------------
+# Catch the common Windows failure mode where a successful reinstall still
+# leaves an OLDER mintd winning on PATH (pipx / pip --user / another bin dir
+# resolving before the uv tool shim).
+Write-Host ""
+Write-Host "Verifying installation..."
+
+# (a) Resolved 'mintd' first on PATH + its version.
+$ResolvedCmd = Get-Command mintd -ErrorAction SilentlyContinue
+if ($ResolvedCmd) {
+    $ResolvedMintd = $ResolvedCmd.Source
+    Write-Host "  mintd on PATH: $ResolvedMintd"
+    $MintdVersion = (& mintd --version 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $MintdVersion) {
+        Write-Host "  $MintdVersion"
+    } else {
+        Write-Warning "'mintd --version' did not run cleanly."
+    }
+} else {
+    Write-Warning "'mintd' is not on your PATH yet."
+    Write-Warning "Open a new shell, or add the uv tool bin dir to PATH (see below)."
+}
+
+# (b) PATH-shadowing check against uv's tool bin dir.
+$UvBinDir = (& uv tool dir --bin 2>$null)
+if ($LASTEXITCODE -eq 0 -and $UvBinDir) {
+    $UvBinDir = $UvBinDir.Trim()
+    Write-Host "  uv tool bin dir: $UvBinDir"
+    if ($ResolvedMintd) {
+        $ResolvedDir = Split-Path -Parent $ResolvedMintd
+        # Normalize both paths for a case-insensitive, separator-tolerant compare.
+        try { $ResolvedDirFull = (Resolve-Path -LiteralPath $ResolvedDir -ErrorAction Stop).Path } catch { $ResolvedDirFull = $ResolvedDir }
+        try { $UvBinDirFull = (Resolve-Path -LiteralPath $UvBinDir -ErrorAction Stop).Path } catch { $UvBinDirFull = $UvBinDir }
+        $ResolvedNorm = $ResolvedDirFull.TrimEnd('\').ToLowerInvariant()
+        $UvBinNorm = $UvBinDirFull.TrimEnd('\').ToLowerInvariant()
+        if ($ResolvedNorm -ne $UvBinNorm) {
+            Write-Host ""
+            Write-Warning "PATH shadowing detected!"
+            Write-Warning "  The 'mintd' on your PATH resolves to:"
+            Write-Warning "    $ResolvedMintd"
+            Write-Warning "  but uv installed mintd into:"
+            Write-Warning "    $UvBinDirFull"
+            Write-Warning "  You are likely running an OLDER mintd (pipx / pip --user / another"
+            Write-Warning "  install) that wins on PATH. Inspect duplicates with:"
+            Write-Warning "    where.exe mintd"
+            Write-Warning "  Remove the stale copy, or put '$UvBinDirFull' earlier on your PATH,"
+            Write-Warning "  then open a new shell."
+            # Surface every mintd on PATH so the user can see the duplicates.
+            $AllMintd = (& where.exe mintd 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $AllMintd) {
+                Write-Warning "  All 'mintd' entries on PATH:"
+                foreach ($line in $AllMintd) { Write-Warning "    $line" }
+            }
+        }
+    }
+}
+
+# (c) Surface what uv knows about the install.
+Write-Host ""
+Write-Host "Installed uv tools:"
+& uv tool list
+if ($LASTEXITCODE -ne 0) { Write-Warning "Could not run 'uv tool list'." }
