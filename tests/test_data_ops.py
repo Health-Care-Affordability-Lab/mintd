@@ -401,6 +401,36 @@ def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
     )
 
 
+@pytest.mark.parametrize("raw_target", ["data/foo.csv/", ".\\data\\foo.csv"])
+def test_data_pull_total_bytes_counts_denormalized_targets(
+    raw_target: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the total-bytes pre-pass used the raw target string
+    while classify_targets normalizes, so a trailing-slash or backslash
+    target fast-synced fine but the progress total (and
+    PullSummary.total_bytes) reported 0."""
+    project = tmp_path
+    (project / "data").mkdir()
+    (project / "data" / "foo.csv.dvc").write_text(
+        "outs:\n  - path: foo.csv\n    md5: cafe\n    size: 1234\n"
+    )
+
+    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r: ([], []))
+
+    fake = _FakeDvcOps()
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(success=True, synced_count=1, fallback_targets=[])
+
+    summary = data_pull(
+        project,
+        targets=[raw_target],
+        dvc_ops=fake,
+        fast_sync_ops=fast_fake,
+    )
+
+    assert summary.total_bytes == 1234
+
+
 # ---------- SLICE-42: catch-all dvc pull scoped to uncovered stage outs ----------
 
 

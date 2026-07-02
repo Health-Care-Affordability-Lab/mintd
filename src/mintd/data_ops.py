@@ -21,6 +21,7 @@ from ._fast_sync_ops import (
     DvcOut,
     FastSyncOps,
     discover_all_outs,
+    normalize_target,
     parse_dvc_outs,
     partition_pipeline_outs,
 )
@@ -119,7 +120,10 @@ def data_pull(
         # files-format quirk that drove this helper.
         total_bytes = 0
         for t in targets or []:
-            dvc_path = project_path / t if t.endswith(".dvc") else project_path / f"{t}.dvc"
+            # Same normalization classify_targets applies, so a denormalized
+            # target that fast-syncs fine doesn't get counted as 0 bytes here.
+            nt = normalize_target(t)
+            dvc_path = project_path / nt if nt.endswith(".dvc") else project_path / f"{nt}.dvc"
             try:
                 for out in parse_dvc_outs(dvc_path, remote_name):
                     total_bytes += _out_aggregate_bytes(out)
