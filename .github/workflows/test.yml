@@ -80,12 +80,17 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Create venv and install
+        # $PSNativeCommandUseErrorActionPreference makes pwsh fail the step on
+        # ANY native command's non-zero exit, not just the last one — without
+        # it a mid-step failure is swallowed and the step reports green.
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           python -m venv .venv
           .venv\Scripts\python.exe -m pip install --upgrade pip
           .venv\Scripts\python.exe -m pip install -e ".[dev]"
       - name: Configure git identity
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           git config --global user.email "ci@example.com"
           git config --global user.name "CI"
       - name: Lint
@@ -99,6 +104,7 @@ jobs:
         # console-script launches on Windows. Enclave init is used because
         # data/code/project types prompt interactively and CI is non-TTY.
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
           .venv\Scripts\mintd.exe --version
           .venv\Scripts\mintd.exe --help
           .venv\Scripts\mintd.exe init --help
