@@ -39,6 +39,12 @@ Thumbs.db
 .env
 .envrc
 
+# DVC runtime droppings in the pipeline fixture: tests run real dvc
+# against this fixture, which recreates .dvc/tmp, .dvc/cache, and its
+# own .gitignore. Only the checked-in config is real fixture content.
+tests/fixtures/pipeline_project/.dvc/*
+!tests/fixtures/pipeline_project/.dvc/config
+
 # Local-only working notes (slice specs, retros, decisions, plan refs)
 notes/
 .agents
