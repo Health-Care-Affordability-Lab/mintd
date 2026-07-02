@@ -64,6 +64,14 @@ if ($WithSchema) {
 # Catch the common Windows failure mode where a successful reinstall still
 # leaves an OLDER mintd winning on PATH (pipx / pip --user / another bin dir
 # resolving before the uv tool shim).
+#
+# Everything below is diagnostics only, so relax the script-wide EAP=Stop:
+# in Windows PowerShell 5.1, `2>$null` on a native command turns each stderr
+# line into an ErrorRecord, and under Stop the first one terminates the
+# script — e.g. a broken stale shim would abort the install output right
+# before the PATH-shadowing warning it exists to trigger. (PS 7.2+ no longer
+# does this.) Nothing fatal runs after this point.
+$ErrorActionPreference = "Continue"
 Write-Host ""
 Write-Host "Verifying installation..."
 
