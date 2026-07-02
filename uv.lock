@@ -1376,7 +1376,6 @@ wheels = [
 
 [[package]]
 name = "mintd"
-version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
