@@ -11,7 +11,9 @@ and overwrite the consumer's `.dvc` file with the new pin.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ __all__ = [
     "MissingPrimaryDataProduct",
     "PrimaryRemovedAtHead",
     "ProducerError",
+    "UnknownProductPath",
     "bump_import",
     "clone_and_pull_product",
     "import_product",
@@ -75,6 +78,13 @@ class ImportDestinationExists(Exception):
 class ImportNotFound(Exception):
     """`bump_import(name=...)` was called with a name that isn't imported
     in the project's `data/imports/` directory."""
+
+
+class UnknownProductPath(ValueError):
+    """A requested ``--path`` is not a tracked output of the product. The
+    message lists the product's `data_products.outputs[].path` values (and
+    primary) so the user can pick a real target instead of decoding a raw
+    DVC "no such target" stderr."""
 
 
 class BumpBlocked(Exception):
@@ -187,10 +197,19 @@ def import_product(
 def _resolve_paths(
     entry: dict[str, Any],
     *,
-    path: str | None,
+    path: str | list[str] | None,
     all_outputs: bool,
     name: str,
+    missing_primary_hint: str = "pass --path or --all",
 ) -> list[str]:
+    """Shared path resolver for `import_product` and `clone_and_pull_product`.
+
+    Precedence: ``all_outputs`` → every `data_products.outputs[].path`;
+    ``path`` (a single string or a list of them) → exactly those; otherwise
+    fall back to `data_products.primary` (raising with the caller-supplied
+    hint when no primary is set). One resolver for both verbs so their
+    selection semantics cannot drift.
+    """
     data_products = entry.get("data_products") or {}
 
     if all_outputs:
@@ -198,14 +217,76 @@ def _resolve_paths(
         return [o["path"] for o in outputs if isinstance(o, dict) and "path" in o]
 
     if path is not None:
-        return [path]
+        return [path] if isinstance(path, str) else list(path)
 
     primary = data_products.get("primary")
     if not primary:
         raise MissingPrimaryDataProduct(
-            f"catalog entry {name!r} has no data_products.primary; pass --path or --all"
+            f"catalog entry {name!r} has no data_products.primary; "
+            f"{missing_primary_hint}"
         )
     return [primary]
+
+
+def _tracked_output_targets(entry: dict[str, Any]) -> list[str]:
+    """The product's tracked outputs (`data_products.outputs[].path`), plus
+    the primary if it isn't already listed among them."""
+    data_products = entry.get("data_products") or {}
+    outputs = data_products.get("outputs") or []
+    tracked = [o["path"] for o in outputs if isinstance(o, dict) and "path" in o]
+    primary = data_products.get("primary")
+    if primary and normalize_target(primary) not in {
+        normalize_target(t) for t in tracked
+    }:
+        tracked.append(primary)
+    return tracked
+
+
+def _validate_requested_targets(
+    entry: dict[str, Any], *, requested: list[str], name: str
+) -> None:
+    """Reject requested pull targets that aren't tracked outputs of the
+    product — with a message listing the real outputs — instead of letting
+    `dvc pull` fail later with a raw "no such target" stderr. Both sides are
+    compared through `normalize_target` so `./x`, `x/`, and backslash
+    spellings all match."""
+    tracked = _tracked_output_targets(entry)
+    known = {normalize_target(t) for t in tracked}
+    unknown = [p for p in requested if normalize_target(p) not in known]
+    if not unknown:
+        return
+    primary = (entry.get("data_products") or {}).get("primary")
+    primary_norm = normalize_target(primary) if primary else None
+    listed = ", ".join(
+        f"{normalize_target(t)} (primary)"
+        if normalize_target(t) == primary_norm
+        else normalize_target(t)
+        for t in tracked
+    ) or "<none>"
+    unknown_desc = ", ".join(repr(p) for p in unknown)
+    raise UnknownProductPath(
+        f"catalog entry {name!r} has no tracked output {unknown_desc}; "
+        f"tracked outputs: {listed}"
+    )
+
+
+def _cloned_metadata_entry(
+    dest: Path, *, fallback: dict[str, Any]
+) -> dict[str, Any]:
+    """The cloned repo's `metadata.json` as a dict — the tracked-outputs
+    source of truth at the *cloned rev*. Used to validate ``--path`` when
+    ``--rev`` is pinned (the registry catalog serves HEAD, which can drift
+    from an older tag). Falls back to the catalog entry when the file is
+    missing, malformed, or has no usable `data_products` block."""
+    try:
+        data = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+    if not isinstance(data, dict) or not isinstance(
+        data.get("data_products"), dict
+    ):
+        return fallback
+    return data
 
 
 def _require_repo_url(entry: dict[str, Any], *, name: str) -> str:
@@ -248,6 +329,7 @@ def clone_and_pull_product(
     dest: Path | None = None,
     rev: str | None = None,
     primary_only: bool = False,
+    paths: list[str] | None = None,
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
@@ -258,24 +340,69 @@ def clone_and_pull_product(
     `./<type>_<name>/` (or `dest` if provided), then `dvc pull`s every
     tracked output by default. Pass ``primary_only=True`` to pull only
     `data_products.primary` (useful when the full product is multi-TB
-    but the user only needs the headline output).
+    but the user only needs the headline output), or ``paths=[...]`` to
+    pull exactly those tracked outputs (files or directories) — the same
+    selection model as `import_product`'s ``--path``. Precedence:
+    ``paths`` → those targets; else ``primary_only`` → the primary; else
+    everything. ``paths`` and ``primary_only`` together is a usage error.
 
     Returns a ``CloneResult`` (dest + best-effort cloned rev + remote
     bucket) so the CLI can render an informative completion line (slice
     38b). rev/bucket are best-effort (None on failure) and never block.
 
     Raises:
-        ValueError: invalid `name` (path-traversal characters).
+        ValueError: invalid `name` (path-traversal characters), or
+            `paths` combined with `primary_only`.
         CatalogNotFound: `name` not in registry.
         ImportDestinationExists: dest exists and is non-empty.
         ProducerError: clone failed (UNREACHABLE).
         MissingPrimaryDataProduct: `primary_only=True` and no primary set.
+        UnknownProductPath: a `paths` entry is not a tracked output —
+            checked against the catalog entry *before* the clone at the
+            default rev, or against the cloned repo's metadata.json when
+            `rev` is pinned (the clone is removed again in that case so a
+            corrected retry isn't blocked by ImportDestinationExists).
         DvcOpError: dvc pull failed after clone.
     """
     _validate_clone_name(name)
+    if paths and primary_only:
+        raise ValueError(
+            "paths and primary_only are mutually exclusive; "
+            "pass --path to pull specific outputs OR --primary for the "
+            "primary output, not both"
+        )
     entry = client.fetch(name)
     dumped = entry.model_dump()
     repo_url = _require_repo_url(dumped, name=name)
+
+    # Resolve + validate pull targets BEFORE the (non-shallow, potentially
+    # multi-GB) clone: a typo'd --path or a missing primary must fail
+    # without leaving a clone on disk that would make the corrected retry
+    # trip over ImportDestinationExists.
+    targets: list[str] | None
+    if paths or primary_only:
+        # One resolver with import_product: `paths` wins, else fall back
+        # to `data_products.primary` (primary_only). No-flag clone stays
+        # targets=None (pull everything) — clone's "all" is DVC's own
+        # discovery, not the catalog outputs list.
+        selected = _resolve_paths(
+            dumped,
+            path=list(paths) if paths else None,
+            all_outputs=False,
+            name=name,
+            missing_primary_hint="drop --primary to pull all tracked outputs",
+        )
+        targets = [normalize_target(p) for p in selected]
+        if paths and rev is None:
+            # The catalog entry mirrors the producer's HEAD, so at the
+            # default rev the check can run here, pre-clone. With --rev
+            # pinned the tracked outputs may differ from the catalog
+            # snapshot; validation is deferred until after the clone and
+            # runs against the cloned metadata.json at exactly that rev.
+            _validate_requested_targets(dumped, requested=targets, name=name)
+    else:
+        targets = None
+
     resolved_dest = _resolve_clone_dest(dumped, name=name, dest=dest).resolve()
     if resolved_dest.exists() and any(resolved_dest.iterdir()):
         raise ImportDestinationExists(
@@ -302,16 +429,25 @@ def clone_and_pull_product(
             ),
         ) from exc
 
-    if primary_only:
-        primary = (dumped.get("data_products") or {}).get("primary")
-        if not primary:
-            raise MissingPrimaryDataProduct(
-                f"catalog entry {name!r} has no data_products.primary; "
-                f"drop --primary to pull all tracked outputs"
+    if paths and rev is not None and targets is not None:
+        # Deferred half of the --path validation (see above): the registry
+        # catalog serves HEAD's outputs, which can drift from a pinned
+        # --rev. Validate against the cloned repo's metadata.json at
+        # exactly that rev, falling back to the catalog entry when it
+        # can't be read.
+        try:
+            _validate_requested_targets(
+                _cloned_metadata_entry(resolved_dest, fallback=dumped),
+                requested=targets,
+                name=name,
             )
-        targets: list[str] | None = [normalize_target(primary)]
-    else:
-        targets = None
+        except UnknownProductPath:
+            # Remove the clone this call just created so the corrected
+            # retry doesn't fail with ImportDestinationExists. Safe: the
+            # pre-clone guard guarantees resolved_dest was absent or
+            # empty before the clone.
+            shutil.rmtree(resolved_dest, ignore_errors=True)
+            raise
 
     # SubprocessDvcOps' subprocess.run calls don't pass cwd=, so they
     # inherit os.getcwd(). chdir into the clone before invoking data_pull

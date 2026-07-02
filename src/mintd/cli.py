@@ -55,6 +55,7 @@ from .data import (
     ImportDestinationExists,
     ImportNotFound,
     PrimaryRemovedAtHead,
+    UnknownProductPath,
     bump_import,
     clone_and_pull_product,
     import_product,
@@ -287,9 +288,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Destination path (default: ./<type>_<name>)",
     )
     p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
-    p_clone.add_argument(
+    clone_scope = p_clone.add_mutually_exclusive_group()
+    clone_scope.add_argument(
         "--primary", dest="primary_only", action="store_true",
         help="Pull only the primary data product (default: pull every tracked output)",
+    )
+    clone_scope.add_argument(
+        "--path", dest="paths", action="append", metavar="PATH",
+        help="Pull only this tracked output — a file or directory from the "
+             "product's data_products.outputs (repeatable; same selector as "
+             "`mintd data import --path`). Default: pull every tracked output.",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
@@ -1089,6 +1097,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             dest=args.dest,
             rev=args.rev,
             primary_only=args.primary_only,
+            paths=args.paths or None,
             jobs=args.jobs,
             extra_dvc_args=args.dvc_args or None,
             reporter=reporter,
@@ -1098,6 +1107,13 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         return 1
     except MissingPrimaryDataProduct as exc:
         reporter.error(str(exc), hint="drop --primary to pull every tracked output")
+        return 1
+    except UnknownProductPath as exc:
+        reporter.error(
+            str(exc),
+            hint="pass --path with one of the tracked outputs listed above, "
+                 "or drop --path to pull everything",
+        )
         return 1
     except ImportDestinationExists as exc:
         reporter.error(str(exc), hint="pass --dest <path> or remove the existing directory")

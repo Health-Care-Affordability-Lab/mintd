@@ -925,6 +925,72 @@ def test_cli_data_clone_threads_dvc_args(
     assert received["extra_dvc_args"] == ["--verbose", "-v"]
 
 
+def test_cli_data_clone_threads_repeated_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """Repeatable `--path` reaches `clone_and_pull_product(paths=[...])`."""
+    from mintd.data import CloneResult
+
+    received: dict[str, object] = {}
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        received.update(kwargs)
+        return CloneResult(dest=Path("/tmp/sentinel"), rev=None, remote_bucket=None)
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
+
+    rc = cli.main([
+        "data", "clone", "provider-xw",
+        "--path", "data/final/",
+        "--path", "data/intermediate/defs_30min.parquet",
+    ])
+    assert rc == 0
+    assert received["paths"] == [
+        "data/final/",
+        "data/intermediate/defs_30min.parquet",
+    ]
+    assert received["primary_only"] is False
+
+
+def test_cli_data_clone_path_and_primary_exits_64(
+    patched_clients,
+) -> None:
+    """argparse mutex: --path and --primary conflict → exit 64."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "data", "clone", "provider-xw",
+            "--path", "data/final/",
+            "--primary",
+        ])
+    assert exc.value.code == 64
+
+
+def test_cli_data_clone_unknown_path_reports_tracked_outputs(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """UnknownProductPath renders the tracked-outputs message + hint, rc 1."""
+    def _raise(*a, **kw):
+        from mintd.data import UnknownProductPath
+        raise UnknownProductPath(
+            "catalog entry 'provider-xw' has no tracked output 'data/nope.csv'; "
+            "tracked outputs: data/final (primary)"
+        )
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
+    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
+
+    rc = cli.main(["data", "clone", "provider-xw", "--path", "data/nope.csv"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "data/nope.csv" in err
+    assert "data/final (primary)" in err
+    assert "drop --path" in err
+
+
 def test_cli_data_clone_returns_one_on_catalog_not_found(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,

@@ -14,6 +14,8 @@ from mintd.catalog import InMemoryCatalogClient
 from mintd.data import (
     ImportDestinationExists,
     MissingPrimaryDataProduct,
+    UnknownProductPath,
+    _resolve_paths,
     clone_and_pull_product,
 )
 from mintd.model import Metadata
@@ -370,6 +372,381 @@ def test_clone_and_pull_product_restores_cwd_on_dvc_failure(
         )
 
     assert Path.cwd() == tmp_path  # restored even on failure
+
+
+# ---------- `--path` selector (issue: data-clone-path-selector) ---------
+
+
+def _add_file_output(d: dict[str, Any]) -> None:
+    """Track a non-primary single-file output alongside the `data/final/`
+    directory output the fixture already declares."""
+    d["data_products"]["outputs"].append(
+        {
+            "path": "data/intermediate/markets/defs_30min.parquet",
+            "description": "drive-time market definitions",
+            "primary": False,
+            "last_published": "",
+        }
+    )
+
+
+def test_clone_and_pull_product_with_path_pulls_only_that_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths=[<file>]`` narrows the dvc pull to that single tracked file."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_add_file_output)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw",
+        paths=["data/intermediate/markets/defs_30min.parquet"],
+    )
+
+    assert dvc.pull_calls[0].targets == [
+        "data/intermediate/markets/defs_30min.parquet"
+    ]
+
+
+def test_clone_and_pull_product_with_path_directory_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths`` works for a directory output too (fixture tracks
+    `data/final/`); the trailing slash is normalized away."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", paths=["data/final/"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/final"]
+
+
+def test_clone_and_pull_product_with_repeated_paths_pulls_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_add_file_output)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw",
+        paths=["data/final/", "data/intermediate/markets/defs_30min.parquet"],
+    )
+
+    assert dvc.pull_calls[0].targets == [
+        "data/final",
+        "data/intermediate/markets/defs_30min.parquet",
+    ]
+
+
+def test_clone_and_pull_product_path_accepts_primary_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The primary counts as a tracked output even when it isn't repeated
+    in `data_products.outputs` (the fixture's primary is mutated to
+    `outputs/main.parquet` while outputs only lists `data/final/`)."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw",
+        paths=["outputs/main.parquet"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
+
+
+def test_clone_and_pull_product_normalizes_path_spellings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'./x', 'x/', and backslash spellings of a tracked output all match —
+    validation and the pull target go through normalize_target."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw",
+        paths=[".\\data\\final\\"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/final"]
+
+
+def test_clone_and_pull_product_paths_plus_primary_is_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """paths + primary_only conflict fails fast — before the registry
+    round-trip and before anything touches the filesystem."""
+    monkeypatch.chdir(tmp_path)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        clone_and_pull_product(
+            _AssertNotFetchedClient(),  # type: ignore[arg-type]
+            dvc, git, None,
+            name="provider-xw",
+            paths=["data/final/"],
+            primary_only=True,
+        )
+
+    assert git.clone_calls == []
+    assert dvc.pull_calls == []
+
+
+def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown --path fails with the product's tracked outputs (and
+    primary) in the message — not a raw DVC 'no such target' stderr —
+    BEFORE the clone touches disk: no git clone, no dest dir, no dvc pull.
+    The corrected retry must not hit ImportDestinationExists."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_add_file_output)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    with pytest.raises(UnknownProductPath) as exc:
+        clone_and_pull_product(
+            client, dvc, git, None, name="provider-xw",
+            paths=["data/nope.csv"],
+        )
+
+    msg = str(exc.value)
+    assert "data/nope.csv" in msg
+    assert "data/final" in msg
+    assert "data/intermediate/markets/defs_30min.parquet" in msg
+    assert "outputs/main.parquet (primary)" in msg
+    assert git.clone_calls == []
+    assert not (tmp_path / "data_provider-xw").exists()
+    assert dvc.pull_calls == []
+
+    # The corrected retry just works — no leftover clone in the way.
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", paths=["data/final/"],
+    )
+    assert len(git.clone_calls) == 1
+    assert dvc.pull_calls[0].targets == ["data/final"]
+
+
+def test_clone_and_pull_product_missing_primary_fails_before_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """primary_only=True with no catalog primary fails before the clone —
+    same pre-clone placement as the --path validation."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _drop_primary(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = None
+
+    _register(client, mutate=_drop_primary)
+    git = _NoopCloneGitOps()
+
+    with pytest.raises(MissingPrimaryDataProduct):
+        clone_and_pull_product(
+            client, _FakeDvcOps(), git, None,
+            name="provider-xw", primary_only=True,
+        )
+
+    assert git.clone_calls == []
+    assert not (tmp_path / "data_provider-xw").exists()
+
+
+# ---------- --rev pinned: validate against the cloned metadata.json ------
+
+
+class _MetadataWritingGitOps(_NoopCloneGitOps):
+    """Fake clone that also drops a metadata.json into the dest, standing in
+    for the producer repo's metadata at the cloned rev."""
+
+    def __init__(self, data_products: dict[str, Any] | None) -> None:
+        super().__init__()
+        self._data_products = data_products
+
+    def clone(
+        self,
+        url: str,
+        dest: Path,
+        *,
+        shallow: bool = True,
+        branch: str | None = None,
+    ) -> None:
+        super().clone(url, dest, shallow=shallow, branch=branch)
+        if self._data_products is not None:
+            (Path(dest) / "metadata.json").write_text(
+                json.dumps({"data_products": self._data_products}),
+                encoding="utf-8",
+            )
+
+
+def test_clone_and_pull_product_rev_validates_against_cloned_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With --rev pinned, a --path that exists at the cloned rev is accepted
+    even when the registry's (HEAD) catalog entry no longer lists it."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)  # catalog outputs: data/final/ (+ primary)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps(
+        {
+            "primary": "outputs/main.parquet",
+            "outputs": [
+                {"path": "data/final/"},
+                {"path": "data/intermediate/old_defs.parquet"},
+            ],
+        }
+    )
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        paths=["data/intermediate/old_defs.parquet"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/intermediate/old_defs.parquet"]
+
+
+def test_clone_and_pull_product_rev_unknown_path_removes_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With --rev pinned the --path check runs post-clone against the cloned
+    metadata.json; on failure the fresh clone is removed so the corrected
+    retry doesn't hit ImportDestinationExists."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps(
+        {"primary": None, "outputs": [{"path": "data/rev-only.parquet"}]}
+    )
+
+    with pytest.raises(UnknownProductPath) as exc:
+        clone_and_pull_product(
+            client, dvc, git, None, name="provider-xw", rev="v1.0",
+            paths=["data/typo.parquet"],
+        )
+
+    # Message lists the rev's outputs (from the clone), not HEAD's catalog.
+    assert "data/rev-only.parquet" in str(exc.value)
+    assert dvc.pull_calls == []
+    assert not (tmp_path / "data_provider-xw").exists()
+
+    # Corrected retry works against the same (now absent) dest.
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        paths=["data/rev-only.parquet"],
+    )
+    assert dvc.pull_calls[0].targets == ["data/rev-only.parquet"]
+
+
+def test_clone_and_pull_product_rev_falls_back_to_catalog_without_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With --rev pinned but no readable metadata.json in the clone, the
+    --path check falls back to the catalog entry."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)  # catalog outputs: data/final/ (+ primary)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps(None)  # clone writes no metadata.json
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        paths=["data/final/"],
+    )
+    assert dvc.pull_calls[0].targets == ["data/final"]
+
+    with pytest.raises(UnknownProductPath):
+        clone_and_pull_product(
+            client, dvc, git, None, name="provider-xw", rev="v1.0",
+            paths=["data/nope.csv"], dest=tmp_path / "other-dest",
+        )
+    assert not (tmp_path / "other-dest").exists()
+
+
+def test_clone_and_pull_product_no_flags_unchanged_with_paths_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """paths=None + primary_only=False keeps the pull-everything default."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", paths=None,
+    )
+
+    assert dvc.pull_calls[0].targets is None
+
+
+# ---------- _resolve_paths precedence matrix (shared import/clone) -------
+
+
+_ENTRY: dict[str, Any] = {
+    "data_products": {
+        "primary": "outputs/main.parquet",
+        "outputs": [
+            {"path": "data/final/"},
+            {"path": "data/intermediate/markets/defs_30min.parquet"},
+        ],
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("path", "all_outputs", "expected"),
+    [
+        # explicit single path (import --path) wins over primary fallback
+        ("data/final/", False, ["data/final/"]),
+        # explicit path list (clone --path, repeatable) is passed through
+        (["a", "b"], False, ["a", "b"]),
+        # all_outputs returns every outputs[].path
+        (
+            None,
+            True,
+            ["data/final/", "data/intermediate/markets/defs_30min.parquet"],
+        ),
+        # neither → primary fallback
+        (None, False, ["outputs/main.parquet"]),
+    ],
+)
+def test_resolve_paths_precedence_matrix(
+    path: str | list[str] | None, all_outputs: bool, expected: list[str]
+) -> None:
+    assert (
+        _resolve_paths(_ENTRY, path=path, all_outputs=all_outputs, name="x")
+        == expected
+    )
+
+
+def test_resolve_paths_no_primary_raises_with_hint() -> None:
+    entry: dict[str, Any] = {"data_products": {"primary": None, "outputs": []}}
+    with pytest.raises(MissingPrimaryDataProduct, match="pass --path or --all"):
+        _resolve_paths(entry, path=None, all_outputs=False, name="x")
+    with pytest.raises(MissingPrimaryDataProduct, match="drop --primary"):
+        _resolve_paths(
+            entry, path=None, all_outputs=False, name="x",
+            missing_primary_hint="drop --primary to pull all tracked outputs",
+        )
 
 
 # ---------- slice 26: reporter threaded through to data_pull -----------
