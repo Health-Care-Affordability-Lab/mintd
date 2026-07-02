@@ -35,6 +35,7 @@ from mintd._fast_sync_ops import (
     fetch_to_cache,
     get_remote_config,
     is_cached,
+    normalize_target,
     parse_dvc_lock_outs,
     parse_dvc_outs,
     parse_s3_url,
@@ -628,6 +629,32 @@ def test_check_dvc(returncode: int, stdout: str, stderr: str, exception: Excepti
         ok, reason = _check_dvc()
         assert ok is expected_ok
         assert reason == expected_reason
+
+
+# ---------- normalize_target ----------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("./outputs/main.parquet", "outputs/main.parquet"),
+    ("outputs/main.parquet/", "outputs/main.parquet"),
+    (".\\outputs\\main.parquet", "outputs/main.parquet"),  # backslashes
+    (".\\outputs\\main.parquet\\", "outputs/main.parquet"),  # combined
+    ("outputs/main.parquet", "outputs/main.parquet"),  # idempotent
+])
+def test_normalize_target(raw: str, expected: str) -> None:
+    assert normalize_target(raw) == expected
+
+
+def test_classify_targets_normalizes_backslash_target(tmp_path: Path) -> None:
+    """A backslash/'./'-prefixed target still finds the on-disk .dvc file,
+    while out.target preserves the caller's original string."""
+    _write_dvc_file_md5(tmp_path, "data/foo.csv", "cafe")
+    all_outs, fallback, missing = classify_targets(
+        tmp_path, ["./data\\foo.csv"], "origin"
+    )
+    assert len(all_outs) == 1
+    assert all_outs[0].path == "data/foo.csv"
+    assert all_outs[0].target == "./data\\foo.csv"  # original preserved
+    assert fallback == []
 
 
 # ---------- classify_targets P0 (2) ----------

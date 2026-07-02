@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._dvc_ops import DvcOps
-from ._fast_sync_ops import FastSyncOps
+from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._templates import project_full_name
 from .catalog import CatalogClient
@@ -309,7 +309,7 @@ def clone_and_pull_product(
                 f"catalog entry {name!r} has no data_products.primary; "
                 f"drop --primary to pull all tracked outputs"
             )
-        targets: list[str] | None = [primary]
+        targets: list[str] | None = [normalize_target(primary)]
     else:
         targets = None
 

@@ -155,6 +155,28 @@ def test_clone_and_pull_product_with_primary_only(
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
 
 
+def test_clone_and_pull_product_normalizes_windows_primary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--primary: a catalog primary stored with backslashes, a leading
+    './', or a trailing '/' still resolves to the posix .dvc target."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _denormalize(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = ".\\outputs\\main.parquet\\"
+
+    _register(client, mutate=_denormalize)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    clone_and_pull_product(
+        client, dvc, git, None, name="provider-xw", primary_only=True,
+    )
+
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
+
+
 def test_clone_and_pull_product_refuses_existing_nonempty_dest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

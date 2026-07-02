@@ -440,6 +440,28 @@ def is_cached(cache_dir: Path, md5: str) -> bool:
     return cache_path_for(cache_dir, md5).exists()
 
 
+def normalize_target(target: str) -> str:
+    """Normalize a catalog-supplied target into the posix-relative form
+    that the ``.dvc`` lookup (classify_targets / data_pull) expects.
+
+    The no-flag clone path discovers targets via ``discover_all_outs``,
+    which already emits ``rel.as_posix()`` strings. ``--primary`` is the
+    only caller that turns a hand-written ``data_products.primary`` string
+    into a target, so a value stored on Windows (backslash separators), or
+    written with a leading ``./`` or a trailing ``/``, would otherwise miss
+    the on-disk ``.dvc`` file. Normalize once, at the boundary.
+
+    Backslashes are treated as path separators. On POSIX a backslash is a
+    legal filename character, but mintd data products never use them (DVC
+    stores posix outs), and the value being normalized is a hand-edited
+    catalog metadata string whose intent is a path separator.
+    """
+    t = target.replace("\\", "/")
+    if t.startswith("./"):
+        t = t[2:]
+    return t.rstrip("/")
+
+
 def classify_targets(project_path: Path, targets: list[str], remote_name: str) -> tuple[list[DvcOut], list[str], list[str]]:
     """Resolve each user-supplied target to a list of single-file DvcOut entries.
 
@@ -454,7 +476,8 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
     hash_missing = []
 
     for target in targets:
-        dvc_path = project_path / target if target.endswith(".dvc") else project_path / f"{target}.dvc"
+        lookup = normalize_target(target)
+        dvc_path = project_path / lookup if lookup.endswith(".dvc") else project_path / f"{lookup}.dvc"
         outs = parse_dvc_outs(dvc_path, remote_name)
         if not outs:
             if dvc_path.exists():
