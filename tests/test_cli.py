@@ -985,7 +985,10 @@ def test_cli_data_clone_unknown_path_reports_tracked_outputs(
 
     rc = cli.main(["data", "clone", "provider-xw", "--path", "data/nope.csv"])
     assert rc == 1
-    err = capsys.readouterr().err
+    # Reporter wraps at console width, which can split asserted phrases
+    # across lines (first seen on the Windows CI runner) — compare against
+    # whitespace-normalized output.
+    err = " ".join(capsys.readouterr().err.split())
     assert "data/nope.csv" in err
     assert "data/final (primary)" in err
     assert "drop --path" in err
