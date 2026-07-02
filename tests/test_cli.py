@@ -115,6 +115,57 @@ def test_cli_data_pull_dvc_error_exits_one(
     assert "oops" in capsys.readouterr().err
 
 
+def test_cli_data_pull_wall_timeout_renders_sentence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """Slice D (pull-all audit, fix 5): a WallTimeoutExceeded escaping a
+    handler renders as a full sentence with a config hint — never the bare
+    seconds float."""
+    from mintd._subprocess import WallTimeoutExceeded
+
+    _, dvc_ops = patched_clients
+    dvc_ops.pull_raises = WallTimeoutExceeded(30.0)
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "command exceeded wall timeout of 30.0s" in err
+    assert "hint:" in err
+    assert "config.yaml" in err
+    # The float never appears on its own line (the old rendering).
+    assert not any(line.strip() == "30.0" for line in err.splitlines())
+
+
+def test_cli_data_pull_storage_key_error_names_target_and_retry(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """Slice D (pull-all audit, fix 6): dvc's StorageKeyError tuple crash
+    surfaces as `error: ... <target> ...` plus the targeted-retry hint, not
+    the opaque `('data', 'final', ...)` tuple."""
+    from mintd._dvc_ops import DvcStorageKeyError
+
+    _, dvc_ops = patched_clients
+    dvc_ops.pull_raises = DvcStorageKeyError(
+        "dvc pull failed (exit 255): storage key error on "
+        "'data/final/aha_ccn_xw/crosswalk_aha_pos.dta' (target data/final.dvc)"
+        " — plain dvc cannot serve this version-aware output",
+        target="data/final.dvc",
+        hint="retry just this target: mintd data pull data/final.dvc",
+    )
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "storage key error" in err
+    assert "data/final.dvc" in err
+    assert "hint:" in err
+    assert "mintd data pull data/final.dvc" in err
+
+
 def test_cli_data_pull_threads_dvc_args(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2170,7 +2221,7 @@ def test_cli_data_pull_success_shows_count_size_elapsed(
     (tmp_path / ".dvc").mkdir()
     monkeypatch.setattr(
         "mintd.cli.data_pull",
-        lambda *a, **k: PullSummary(file_count=4, total_bytes=2048, elapsed_s=12.4),
+        lambda *a, **k: PullSummary(targets_pulled=4, total_bytes=2048, elapsed_s=12.4),
     )
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 0
@@ -2188,7 +2239,7 @@ def test_cli_data_pull_success_omits_size_when_zero_bytes(
     (tmp_path / ".dvc").mkdir()
     monkeypatch.setattr(
         "mintd.cli.data_pull",
-        lambda *a, **k: PullSummary(file_count=2, total_bytes=0, elapsed_s=1.0),
+        lambda *a, **k: PullSummary(targets_pulled=2, total_bytes=0, elapsed_s=1.0),
     )
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 0
@@ -2336,3 +2387,173 @@ def test_cli_publish_success_echoes_tag_and_pr(
     assert "published provider-xw" in msg
     assert "tag v" in msg
     assert "PR" in msg
+
+def test_cli_data_pull_error_count_exits_nonzero_with_summary_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Slice C (pull-all audit, fix 4): version-aware targets fast-sync could
+    not serve make `mintd data pull` exit non-zero, with a summary error line
+    pointing at the per-target errors (each already carries its own
+    targeted-retry hint). No ✓ success line."""
+    from mintd.data_ops import PullSummary
+
+    (tmp_path / ".dvc").mkdir()
+    monkeypatch.setattr(
+        "mintd.cli.data_pull",
+        lambda *a, **k: PullSummary(
+            targets_pulled=3, total_bytes=2048, elapsed_s=2.0, error_count=2,
+        ),
+    )
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert len(errs) == 1
+    _, msg, hint = errs[0]
+    assert "2 target(s) failed" in msg
+    assert "3 file(s) pulled" in msg
+    assert "retry command" in hint
+    assert recording_reporter.events_of("success") == []
+
+
+def test_cli_data_pull_error_count_zero_still_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Slice C: the imports-only full-fallback shape (error_count=0) keeps
+    the pre-fix behavior — exit 0, ✓ success line."""
+    from mintd.data_ops import PullSummary
+
+    (tmp_path / ".dvc").mkdir()
+    monkeypatch.setattr(
+        "mintd.cli.data_pull",
+        lambda *a, **k: PullSummary(
+            targets_pulled=2, total_bytes=0, elapsed_s=1.0, error_count=0,
+        ),
+    )
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 0
+    assert recording_reporter.events_of("error") == []
+    assert "2 file(s)" in recording_reporter.events_of("success")[-1][1]
+
+
+def test_cli_data_pull_error_count_json_mode_includes_errors_and_exits_nonzero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Slice C, json mode: the result payload carries an `errors` count and
+    the exit code is still non-zero."""
+    from mintd.data_ops import PullSummary
+
+    (tmp_path / ".dvc").mkdir()
+    recording_reporter.json_mode = True
+    monkeypatch.setattr(
+        "mintd.cli.data_pull",
+        lambda *a, **k: PullSummary(
+            targets_pulled=1, total_bytes=512, elapsed_s=0.5, error_count=1,
+        ),
+    )
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    assert rc == 1
+    payloads = recording_reporter.events_of("result")
+    assert payloads and payloads[-1][1] == {
+        "pulled": 1, "bytes": 512, "elapsed_s": 0.5, "errors": 1,
+    }
+
+
+def test_cli_data_pull_incomplete_targets_exit_nonzero_no_success_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Pull-all audit follow-up: per-file download failures that survived the
+    retries (incomplete_targets) leave the out absent from the workspace — the
+    run must exit non-zero with reporter.error naming the target, NOT print
+    the ✓ success line (previously: warn + '✓ pulled' + exit 0)."""
+    _, dvc_ops = patched_clients
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.result = FastPullResult(
+        success=False,
+        synced_count=0,
+        fallback_targets=[],
+        incomplete_targets=["data/final"],
+        files_dir_failures=["data/final: b.csv: 404"],
+        reason="per-file download failures (not demoted to dvc pull): data/final",
+    )
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: fast_fake)
+    (tmp_path / ".dvc").mkdir()
+    rc = cli.main(["data", "pull", "data/final", "--path", str(tmp_path)])
+    assert rc == 1
+    assert recording_reporter.events_of("success") == []
+    errors = recording_reporter.events_of("error")
+    assert any(
+        "data/final" in msg and hint == "retry just this target: mintd data pull data/final"
+        for _, msg, hint in errors
+    )
+    assert any("pull incomplete" in msg for _, msg, _h in errors)
+    # Never handed to the plain dvc pull fallback.
+    assert dvc_ops.pull_calls == []
+
+
+def test_cli_data_clone_pull_errors_exit_nonzero_no_success_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Pull-all audit fix 4, clone surface: when the post-clone pull could
+    not serve targets (CloneResult.pull_error_count > 0), `mintd data clone`
+    must NOT print '✓ cloned ...' and must exit non-zero — previously the
+    PullSummary was discarded and CI saw success with the product missing."""
+    from mintd.data import CloneResult
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        return CloneResult(
+            dest=Path("/tmp/sentinel"), rev="abc1234def",
+            remote_bucket="my-bucket", pull_error_count=2,
+        )
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    rc = cli.main(["data", "clone", "provider-xw"])
+    assert rc == 1
+    assert recording_reporter.events_of("success") == []
+    errors = recording_reporter.events_of("error")
+    assert len(errors) == 1
+    _, msg, hint = errors[0]
+    assert "pull incomplete" in msg
+    assert "2 target(s) failed" in msg
+    assert "retry command" in hint
+
+
+def test_cli_data_clone_pull_errors_json_mode_includes_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Clone json mode: the result payload carries the pull `errors` count
+    and the exit code is non-zero."""
+    from mintd.data import CloneResult
+
+    recording_reporter.json_mode = True
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        return CloneResult(
+            dest=Path("/tmp/sentinel"), rev=None, remote_bucket=None,
+            pull_error_count=1,
+        )
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    rc = cli.main(["data", "clone", "provider-xw"])
+    assert rc == 1
+    payloads = recording_reporter.events_of("result")
+    assert payloads and payloads[-1][1]["errors"] == 1
+
+
+def test_cli_data_clone_zero_pull_errors_keeps_success_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
+) -> None:
+    """Clone with a clean pull (pull_error_count=0) keeps the ✓ line and
+    exit 0 — the failure path must not regress the happy path."""
+    from mintd.data import CloneResult
+
+    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
+        return CloneResult(dest=Path("/tmp/sentinel"), rev=None, remote_bucket=None)
+
+    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
+    rc = cli.main(["data", "clone", "provider-xw"])
+    assert rc == 0
+    assert recording_reporter.events_of("error") == []
+    assert any(
+        "cloned provider-xw" in msg
+        for _, msg in recording_reporter.events_of("success")
+    )

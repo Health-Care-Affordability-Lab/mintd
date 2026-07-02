@@ -5,6 +5,8 @@ Only this module shells out to `dvc`. Mirrors `_registry_git_ops.py` for git/gh.
 
 from __future__ import annotations
 
+import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
@@ -16,7 +18,26 @@ from ._subprocess import run_streaming
 
 
 class DvcOpError(Exception):
-    """Generic non-zero exit from a `dvc` invocation."""
+    """Generic non-zero exit from a `dvc` invocation.
+
+    ``hint`` is an optional actionable recovery command for the CLI's error
+    renderer; ``None`` on every subclass except the ones that populate it
+    (currently ``DvcStorageKeyError``).
+    """
+
+    hint: str | None = None
+
+
+def pull_retry_hint(target: str | None) -> str:
+    """The canonical targeted-retry hint for a target mintd could not pull.
+
+    One composition site so a wording change (or a future flag the retry
+    must carry) doesn't need coordinated edits across the error surfaces.
+    ``None`` means the owning ``.dvc`` target could not be resolved.
+    """
+    if target is None:
+        return "retry the .dvc target that tracks this path: mintd data pull <target>.dvc"
+    return f"retry just this target: mintd data pull {target}"
 
 
 class DvcNotInstalled(DvcOpError):
@@ -45,6 +66,25 @@ class DvcRemoveError(DvcOpError):
 
 class DvcCheckoutError(DvcOpError):
     """`dvc checkout` exited non-zero."""
+
+
+class DvcStorageKeyError(DvcOpError):
+    """dvc crashed with dvc_data's opaque StorageKeyError tuple.
+
+    Raw stderr looks like ``ERROR: unexpected error - ('data', 'final',
+    'aha_ccn_xw', 'crosswalk_aha_pos.dta')`` (exit 255): the tuple is the
+    path components of a workspace file dvc's checkout phase could not map
+    to a cache entry — the rehash-on-pull pathology plain `dvc pull` hits
+    on version-aware remotes (see the fallback-scope comments in
+    data_ops.py). Carries the owning ``.dvc`` target when it can be found
+    on disk plus a targeted mintd retry ``hint`` so the CLI renders an
+    actionable error instead of the bare tuple.
+    """
+
+    def __init__(self, message: str, *, target: str | None, hint: str) -> None:
+        super().__init__(message)
+        self.target = target
+        self.hint = hint
 
 
 class DvcNotInRepoError(DvcOpError):
@@ -100,6 +140,62 @@ def _parse_push_output(stdout: str) -> DvcPushResult:
         n = int(m.group(1))
         return DvcPushResult(pushed=n, up_to_date=(n == 0))
     return DvcPushResult(pushed=None)
+
+
+# dvc renders an uncaught dvc_data StorageKeyError as
+# "ERROR: unexpected error - ('data', 'final', ..., 'file.dta')".
+_STORAGE_KEY_TUPLE_RE = re.compile(r"unexpected error\s*-\s*(\([^()]*\))")
+
+
+def _translate_storage_key_error(
+    stderr: str, *, op: str, exit_code: int, cwd: Path | None = None,
+) -> DvcStorageKeyError | None:
+    """Translate dvc's StorageKeyError tuple crash into an actionable error.
+
+    The tuple's elements are the path components of the workspace file dvc's
+    checkout phase failed on. Join them back into a path, then walk prefixes
+    (longest first, relative to ``cwd`` — the dir the dvc subprocess ran in)
+    looking for the owning ``<prefix>.dvc`` target so the user gets a
+    concrete `mintd data pull <target>` recovery command. Returns ``None``
+    when stderr carries no such tuple (caller raises its generic error).
+    """
+    m = _STORAGE_KEY_TUPLE_RE.search(stderr)
+    if not m:
+        return None
+    try:
+        parts = ast.literal_eval(m.group(1))
+    except (ValueError, SyntaxError):
+        return None
+    if not (
+        isinstance(parts, tuple)
+        and parts
+        and all(isinstance(p, str) for p in parts)
+    ):
+        return None
+    rel = "/".join(parts)
+    base = cwd if cwd is not None else Path.cwd()
+    target: str | None = None
+    for i in range(len(parts), 0, -1):
+        candidate = "/".join(parts[:i])
+        try:
+            if (base / f"{candidate}.dvc").is_file():
+                target = f"{candidate}.dvc"
+                break
+        except OSError:
+            break
+    if target is not None:
+        return DvcStorageKeyError(
+            f"dvc {op} failed (exit {exit_code}): storage key error on "
+            f"'{rel}' (target {target}) — plain dvc cannot serve this "
+            "version-aware output",
+            target=target,
+            hint=pull_retry_hint(target),
+        )
+    return DvcStorageKeyError(
+        f"dvc {op} failed (exit {exit_code}): storage key error on '{rel}'",
+        target=None,
+        hint=pull_retry_hint(None),
+    )
 
 
 def _is_dvc_module_missing(stderr: str) -> bool:
@@ -311,6 +407,11 @@ class SubprocessDvcOps:
             stderr = "".join(r.stderr_lines)
             if _is_dvc_module_missing(stderr):
                 raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+            translated = _translate_storage_key_error(
+                stderr, op="pull", exit_code=r.returncode,
+            )
+            if translated is not None:
+                raise translated
             raise DvcPullError(
                 f"dvc pull failed (exit {r.returncode}): {stderr.strip()}"
             )
@@ -384,14 +485,24 @@ class SubprocessDvcOps:
         cmd = [*dvc_cmd(), "checkout"]
         if targets:
             cmd.extend(targets)
+        # transfer tier, NOT fast: checkout
+        # materializes cache blobs into the workspace — tens of GB across
+        # ~80 targets on a fresh clone. 0.6s on APFS reflink, but minutes
+        # of real copying on non-reflink filesystems (the lab's Linux
+        # boxes); the 30s fast tier SIGTERM'd dvc mid-materialization.
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
+            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
         except FileNotFoundError:
             raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
             if _is_dvc_module_missing(stderr):
                 raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+            translated = _translate_storage_key_error(
+                stderr, op="checkout", exit_code=r.returncode,
+            )
+            if translated is not None:
+                raise translated
             raise DvcCheckoutError(
                 f"dvc checkout failed (exit {r.returncode}): {stderr.strip()}"
             )

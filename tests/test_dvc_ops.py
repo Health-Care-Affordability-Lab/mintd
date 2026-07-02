@@ -306,3 +306,159 @@ def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch) -> None:
 
     assert result.pushed == 0
     assert result.up_to_date is True
+
+
+# Slice D (pull-all audit, fixes 5+6) — checkout timeout tier and the
+# StorageKeyError tuple translation.
+
+
+def _stub_result_run_streaming(seen: dict, *, returncode: int = 255, stderr_lines: list[str] | None = None):
+    """Fake `run_streaming` recording cmd/kwargs; exits with ``returncode``
+    (default: the failure the StorageKeyError translation tests need) and
+    the given stderr."""
+
+    class _R:
+        stdout_lines: list[str] = []
+
+    _R.returncode = returncode  # type: ignore[attr-defined]
+    _R.stderr_lines = stderr_lines or []  # type: ignore[attr-defined]
+
+    def _fake(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["kwargs"] = kwargs
+        return _R()
+
+    return _fake
+
+
+def test_subprocess_checkout_runs_under_transfer_timeout(monkeypatch) -> None:
+    """`dvc checkout` materializes cache blobs into the workspace — tens of
+    GB on a fresh clone of a real product. It must run under the transfer
+    tier, not the 30s fast tier that SIGTERM'd it mid-materialization on
+    non-reflink filesystems."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_result_run_streaming(seen, returncode=0))
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts(fast=1.0, transfer=345.0))
+    ops.checkout(targets=["data/final.dvc"])
+
+    assert seen["kwargs"]["wall_timeout"] == 345.0
+
+
+def test_subprocess_checkout_default_timeouts_mean_no_wall_timeout(
+    monkeypatch,
+) -> None:
+    """Default config: transfer=None → checkout gets NO wall timeout (it
+    previously inherited fast=30.0 and got killed)."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_result_run_streaming(seen, returncode=0))
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.checkout()
+
+    assert seen["kwargs"]["wall_timeout"] is None
+
+
+def test_subprocess_pull_translates_storage_key_tuple(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """dvc's `unexpected error - ('data', 'final', ...)` crash is translated
+    into the owning .dvc target plus a `mintd data pull <target>` hint,
+    instead of surfacing the bare tuple."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text("outs: []\n")
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        _dvc_ops,
+        "run_streaming",
+        _stub_result_run_streaming(
+            seen,
+            stderr_lines=[
+                "ERROR: unexpected error - "
+                "('data', 'final', 'aha_ccn_xw', 'crosswalk_aha_pos.dta')"
+            ],
+        ),
+    )
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    with pytest.raises(_dvc_ops.DvcStorageKeyError) as exc_info:
+        ops.pull(targets=["data/final.dvc"])
+
+    err = exc_info.value
+    assert err.target == "data/final.dvc"
+    assert "data/final/aha_ccn_xw/crosswalk_aha_pos.dta" in str(err)
+    assert "data/final.dvc" in str(err)
+    assert err.hint == "retry just this target: mintd data pull data/final.dvc"
+
+
+def test_subprocess_checkout_translates_storage_key_tuple(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """The same translation applies to `dvc checkout` (dvc's unguarded
+    StorageKeyError sites live in its checkout phase)."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text("outs: []\n")
+    monkeypatch.chdir(tmp_path)
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        _dvc_ops,
+        "run_streaming",
+        _stub_result_run_streaming(
+            seen,
+            stderr_lines=["ERROR: unexpected error - ('data', 'final', 'part.parquet')"],
+        ),
+    )
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    with pytest.raises(_dvc_ops.DvcStorageKeyError) as exc_info:
+        ops.checkout(targets=["data/final.dvc"])
+
+    err = exc_info.value
+    assert err.target == "data/final.dvc"
+    assert "checkout" in str(err)
+    assert err.hint == "retry just this target: mintd data pull data/final.dvc"
+
+
+def test_translate_storage_key_error_without_owning_dvc_file(
+    tmp_path: Path,
+) -> None:
+    """No `<prefix>.dvc` on disk: the message still names the failing path
+    and the hint stays actionable (generic targeted-retry shape)."""
+    from mintd._dvc_ops import _translate_storage_key_error
+
+    err = _translate_storage_key_error(
+        "ERROR: unexpected error - ('data', 'final', 'x.dta')",
+        op="pull",
+        exit_code=255,
+        cwd=tmp_path,
+    )
+    assert err is not None
+    assert err.target is None
+    assert "data/final/x.dta" in str(err)
+    assert "mintd data pull" in err.hint
+
+
+def test_translate_storage_key_error_ignores_other_stderr(tmp_path: Path) -> None:
+    """Non-tuple failures keep the generic DvcPullError path: the translator
+    returns None for ordinary stderr and for a non-string tuple."""
+    from mintd._dvc_ops import _translate_storage_key_error
+
+    assert _translate_storage_key_error(
+        "ERROR: failed to pull data from the cloud",
+        op="pull", exit_code=1, cwd=tmp_path,
+    ) is None
+    assert _translate_storage_key_error(
+        "ERROR: unexpected error - (1, 2)",
+        op="pull", exit_code=255, cwd=tmp_path,
+    ) is None

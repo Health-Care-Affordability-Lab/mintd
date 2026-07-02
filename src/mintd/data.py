@@ -61,13 +61,21 @@ class BumpResult:
 @dataclass(frozen=True)
 class CloneResult:
     """Outcome of `clone_and_pull_product` — dest + provenance for the CLI's
-    completion line (slice 38b)."""
+    completion line (slice 38b).
+
+    ``pull_error_count``: targets the post-clone ``data_pull`` could not
+    serve (blocked + incomplete version-aware targets — see
+    ``PullSummary.error_count``). Each was already reported via
+    ``reporter.error`` with a targeted-retry hint; a non-zero count makes
+    `mintd data clone` skip the ✓ line and exit non-zero.
+    """
     dest: Path
     rev: str | None
     remote_bucket: str | None
     file_count: int = 0
     total_bytes: int = 0
     elapsed_s: float = 0.0
+    pull_error_count: int = 0
 
 
 class ImportDestinationExists(Exception):
@@ -349,6 +357,9 @@ def clone_and_pull_product(
     Returns a ``CloneResult`` (dest + best-effort cloned rev + remote
     bucket) so the CLI can render an informative completion line (slice
     38b). rev/bucket are best-effort (None on failure) and never block.
+    ``pull_error_count`` carries the post-clone pull's failure count
+    so the CLI can exit non-zero instead of
+    printing a false ✓ line when targets could not be served.
 
     Raises:
         ValueError: invalid `name` (path-traversal characters), or
@@ -455,7 +466,7 @@ def clone_and_pull_product(
     prev_cwd = Path.cwd()
     os.chdir(resolved_dest)
     try:
-        data_pull(
+        pull_summary = data_pull(
             project_path=resolved_dest,
             targets=targets,
             dvc_ops=dvc_ops,
@@ -485,7 +496,12 @@ def clone_and_pull_product(
     except Exception:
         remote_bucket = None
 
-    return CloneResult(dest=resolved_dest, rev=resolved_rev, remote_bucket=remote_bucket)
+    return CloneResult(
+        dest=resolved_dest,
+        rev=resolved_rev,
+        remote_bucket=remote_bucket,
+        pull_error_count=pull_summary.error_count,
+    )
 
 
 def bump_import(

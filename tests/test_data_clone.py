@@ -764,6 +764,8 @@ def test_clone_and_pull_product_forwards_reporter_to_data_pull(
 
     def _spy_data_pull(**kwargs):
         received.update(kwargs)
+        from mintd.data_ops import PullSummary
+        return PullSummary(targets_pulled=0, total_bytes=0, elapsed_s=0.0)
 
     monkeypatch.setattr("mintd.data.data_pull", _spy_data_pull)
     monkeypatch.chdir(tmp_path)
@@ -779,3 +781,44 @@ def test_clone_and_pull_product_forwards_reporter_to_data_pull(
     )
 
     assert received.get("reporter") is reporter
+
+
+# ---------- pull-all audit fix 4: pull outcome propagates to the CLI ----------
+
+
+def test_clone_and_pull_product_propagates_pull_error_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clone_and_pull_product must not discard data_pull's PullSummary: its
+    error_count (fail-loudly targets + per-file failures) surfaces on
+    CloneResult.pull_error_count so `mintd data clone` can exit non-zero."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    from mintd.data_ops import PullSummary
+
+    monkeypatch.setattr(
+        "mintd.data.data_pull",
+        lambda *a, **k: PullSummary(
+            targets_pulled=1, total_bytes=0, elapsed_s=0.1, error_count=3,
+        ),
+    )
+    result = clone_and_pull_product(client, dvc, git, None, name="provider-xw")
+    assert result.pull_error_count == 3
+
+
+def test_clone_and_pull_product_clean_pull_error_count_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: a clean pull yields pull_error_count == 0."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+
+    result = clone_and_pull_product(client, dvc, git, None, name="provider-xw")
+    assert result.pull_error_count == 0

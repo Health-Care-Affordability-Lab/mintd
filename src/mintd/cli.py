@@ -35,6 +35,7 @@ from ._dvc_ops import (
     DvcOpError,
     DvcOps,
     DvcPushError,
+    DvcStorageKeyError,
     SubprocessDvcOps,
 )
 from ._subprocess import WallTimeoutExceeded
@@ -190,8 +191,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         # etc.) and any user-configured timeouts.transfer that fires from
         # handlers that don't catch the exception themselves (data pull /
         # push / add / verify / remove / import / publish). data clone
-        # catches it locally for a richer message.
-        args._reporter.error(str(e))
+        # catches it locally for a richer message. str(e) is the full
+        # sentence ("command exceeded wall timeout of Ns"), never the bare
+        # seconds float.
+        args._reporter.error(
+            str(e),
+            hint="raise (or null out) the matching timeouts: entry in "
+                 "~/.config/mintd/config.yaml — see notes/CONFIG.md",
+        )
         return 1
     except ConfigError as e:
         args._reporter.error(str(e))
@@ -703,19 +710,45 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     except DvcNotInstalled as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except DvcStorageKeyError as e:
+        # dvc's opaque StorageKeyError tuple crash, already translated by
+        # _dvc_ops into the failing target (the DvcOpError subclass that
+        # populates the base-class ``hint``); render with the targeted-retry
+        # hint instead of the bare tuple.
+        reporter.error(str(e), hint=e.hint)
+        return 1
     except DvcOpError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    if summary.error_count:
+        # Version-aware targets fast-sync could not serve. Each was already
+        # reported via reporter.error with its own targeted-retry hint
+        # inside data_pull; summarize and exit non-zero so scripts/CI can't
+        # mistake a partial pull for success.
+        if reporter.json_mode:
+            reporter.result({
+                "pulled": summary.targets_pulled,
+                "bytes": summary.total_bytes,
+                "elapsed_s": round(summary.elapsed_s, 2),
+                "errors": summary.error_count,
+            })
+        else:
+            reporter.error(
+                f"pull incomplete: {summary.error_count} target(s) failed, "
+                f"{summary.targets_pulled} file(s) pulled",
+                hint="each failed target has a retry command in the errors above",
+            )
+        return 1
     if summary.total_bytes:
         msg = (
-            f"✓ pulled {summary.file_count} file(s) "
+            f"✓ pulled {summary.targets_pulled} file(s) "
             f"({_human_bytes(summary.total_bytes)}) in {_format_duration(summary.elapsed_s)}"
         )
     else:
-        msg = f"✓ pulled {summary.file_count} file(s) in {_format_duration(summary.elapsed_s)}"
+        msg = f"✓ pulled {summary.targets_pulled} file(s) in {_format_duration(summary.elapsed_s)}"
     if reporter.json_mode:
         reporter.result({
-            "pulled": summary.file_count,
+            "pulled": summary.targets_pulled,
             "bytes": summary.total_bytes,
             "elapsed_s": round(summary.elapsed_s, 2),
         })
@@ -1131,7 +1164,9 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         reporter.error(f"command exceeded wall timeout of {exc.seconds}s")
         return 1
     except (DvcOpError, ValueError) as exc:
-        reporter.error(str(exc))
+        # DvcOpError.hint is None except on the subclasses that populate it
+        # (DvcStorageKeyError's targeted `mintd data pull <target>` retry).
+        reporter.error(str(exc), hint=exc.hint if isinstance(exc, DvcOpError) else None)
         return 1
     
     dest = clone_result.dest
@@ -1150,6 +1185,23 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     rev_clause = f" @ {clone_result.rev[:7]}" if clone_result.rev else ""
     remote_clause = f" from s3://{clone_result.remote_bucket}" if clone_result.remote_bucket else ""
     size_clause = f" ({files} files, {_human_bytes(total_bytes)})" if files else ""
+    if clone_result.pull_error_count:
+        # The clone succeeded but the post-clone pull could not serve
+        # every target — mirror
+        # _handle_data_pull: no ✓ line, exit non-zero so scripts/CI can't
+        # mistake a partial clone for success. Each failed target was
+        # already reported via reporter.error with its own retry hint.
+        if reporter.json_mode:
+            payload["errors"] = clone_result.pull_error_count
+            reporter.result(payload, pretty=_pretty_data_clone)
+        else:
+            reporter.error(
+                f"cloned {args.name} → {dest.name}/ but pull incomplete: "
+                f"{clone_result.pull_error_count} target(s) failed",
+                hint="each failed target has a retry command in the errors "
+                     f"above; run them inside {dest.name}/",
+            )
+        return 1
     if reporter.json_mode:
         reporter.result(payload, pretty=_pretty_data_clone)
     else:
