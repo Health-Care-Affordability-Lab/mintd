@@ -159,6 +159,9 @@ mintd data ls my-cleaned-survey
 mintd data clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
 mintd data clone my-cleaned-survey --rev v0.1.0 --primary
+# or: only specific tracked outputs (repeatable; same selector as
+# `data import --path` — an unknown path lists the valid outputs):
+mintd data clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import a single output and
 # record the pin in this repo's .dvc files:
