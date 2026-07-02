@@ -9,9 +9,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # windows-latest disabled until vendored shell scripts have .ps1
-        # siblings and POSIX-shaped tests are abstracted. Tracked in the
-        # project_windows_support_followup memory note.
+        # windows-latest is run by the separate `windows-test` job below
+        # (continue-on-error) rather than in this matrix, until vendored
+        # shell scripts have .ps1 siblings and POSIX-shaped tests are
+        # abstracted. Tracked in the project_windows_support_followup note.
         os: [ubuntu-latest, macos-latest]
         python: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
@@ -49,3 +50,54 @@ jobs:
           mintd publish --help
           mintd data --help
           mintd init enclave ci-smoke --path "${{ runner.temp }}"
+  windows-test:
+    # Catches Windows path / git-clone regressions. Kept out of the main
+    # matrix and marked continue-on-error until the vendored *.sh templates
+    # have *.ps1 siblings and POSIX-shaped tests are abstracted (see the
+    # project_windows_support_followup note). Installs into a real .venv to
+    # mirror local dev. Drop continue-on-error once this is reliably green.
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so a future git-derived version
+          # (e.g. setuptools-scm) resolves on the runner.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Create venv and install
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install -e ".[dev]"
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+      - name: Lint
+        run: .venv\Scripts\ruff.exe check src tests
+      - name: Type-check
+        run: .venv\Scripts\mypy.exe src/mintd
+      - name: Test
+        run: .venv\Scripts\pytest.exe -q
+      - name: Smoke install
+        # Mirrors the POSIX smoke step: confirms the installed mintd
+        # console-script launches on Windows. Enclave init is used because
+        # data/code/project types prompt interactively and CI is non-TTY.
+        run: |
+          .venv\Scripts\mintd.exe --version
+          .venv\Scripts\mintd.exe --help
+          .venv\Scripts\mintd.exe init --help
+          .venv\Scripts\mintd.exe check --help
+          .venv\Scripts\mintd.exe publish --help
+          .venv\Scripts\mintd.exe data --help
+          .venv\Scripts\mintd.exe init enclave ci-smoke --path "${{ runner.temp }}"
