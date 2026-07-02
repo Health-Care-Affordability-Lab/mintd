@@ -25,7 +25,7 @@ from typing import NoReturn, Optional
 
 from pydantic import ValidationError
 
-from . import config_ops, metadata_migrate
+from . import __version__, config_ops, metadata_migrate
 from ._console import Reporter
 from ._config import Config, ConfigError
 from ._dvc_ops import (
@@ -210,7 +210,7 @@ def _build_parser() -> argparse.ArgumentParser:
         description="mintd: Lightweight data product framework for research labs",
     )
     _add_global_output_flags(parser)
-    parser.add_argument("--version", action="version", version="%(prog)s 0.0.1")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subs = parser.add_subparsers(dest="command")
 
     p_init = subs.add_parser("init", help="Create a new mintd project")

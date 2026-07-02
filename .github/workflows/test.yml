@@ -18,6 +18,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so setuptools-scm derives a real version,
+          # matching the windows-test job. Without this the POSIX matrix
+          # falls back to 0.0.1 and --version diverges from Windows CI.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}

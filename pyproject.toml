@@ -1,6 +1,6 @@
 [project]
 name = "mintd"
-version = "0.0.1"
+dynamic = ["version"]
 description = "Lightweight data product framework for research labs"
 requires-python = ">=3.11"
 dependencies = [
@@ -29,7 +29,7 @@ schema = [
 ]
 
 [build-system]
-requires = ["setuptools >= 61"]
+requires = ["setuptools >= 61", "setuptools-scm >= 8"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -37,6 +37,12 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 mintd = ["files/*.j2", "files/.Rprofile.j2", "files/*.txt"]
+
+[tool.setuptools_scm]
+# No git tags exist yet; without a fallback setuptools-scm errors out.
+# Produces e.g. 0.0.1.dev74+g<shortsha> until the first real tag lands.
+version_scheme = "guess-next-dev"
+fallback_version = "0.0.1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

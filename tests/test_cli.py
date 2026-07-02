@@ -664,7 +664,10 @@ def test_registry_status_no_name_works_without_registry_url(
 
 def test_python_m_mintd_version_smoke() -> None:
     """End-to-end check that `python -m mintd --version` works via
-    __main__.py and the installed package surface."""
+    __main__.py and the installed package surface, and that the CLI
+    derives its version from installed metadata (single source of truth)."""
+    from importlib.metadata import version as pkg_version
+
     result = subprocess.run(
         [sys.executable, "-m", "mintd", "--version"],
         capture_output=True,
@@ -672,7 +675,11 @@ def test_python_m_mintd_version_smoke() -> None:
         timeout=15,
     )
     assert result.returncode == 0
-    assert "0.0.1" in result.stdout
+    out = result.stdout.strip()
+    assert out.startswith("mintd ")
+    reported = out.removeprefix("mintd ").strip()
+    assert reported  # non-empty
+    assert reported == pkg_version("mintd")  # CLI derives from installed metadata
 
 def test_data_list_catalog_empty(patched_clients, capsys):
     cli.main(["data", "list"])
