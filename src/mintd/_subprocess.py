@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 from typing import Callable, List, Dict, Optional, Any
+import logging
+import shlex
 import subprocess
 import threading
 import time
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class StreamResult:
@@ -55,6 +59,12 @@ def run_streaming(
 
     cb_stdout = on_stdout or _default_stdout
     cb_stderr = on_stderr or _default_stderr
+
+    # Observability: -vv must show exactly which subprocess ran (the silent
+    # dvc-checkout hunt was blind without this). One line, debug level.
+    logger.debug(
+        "subprocess argv: %s (cwd=%s)", shlex.join(argv), cwd or Path.cwd(),
+    )
 
     proc = popen_factory(
         argv,

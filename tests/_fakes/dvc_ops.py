@@ -75,6 +75,20 @@ class _FakeDvcOps:
         self.remove_raises: Exception | None = None
         self.checkout_calls: list[DvcCheckoutCall] = []
         self.checkout_raises: Exception | None = None
+        # Post-checkout verification (data_pull) stats workspace paths, so a
+        # fake checkout must be able to MATERIALIZE its targets. Set
+        # ``workspace`` to the project root to enable it. Knobs model the
+        # dvc 3.67.1 index_from_targets bug:
+        # - checkout_materializes=False: checkout exits 0 having written
+        #   nothing (the silent multi-target no-op);
+        # - checkout_single_target_only=True: only single-target invocations
+        #   materialize (the cluster shape — bulk no-ops, retries work).
+        self.workspace: Path | None = None
+        self.checkout_materializes: bool = True
+        self.checkout_single_target_only: bool = False
+        # Targets checkout NEVER materializes (even single-target retries)
+        # — models a target whose cache blobs are unusable/corrupt.
+        self.checkout_never_materializes: set[str] = set()
 
     def init(self, *, cwd: Path | None = None) -> None:
         self.init_calls.append(DvcInitCall(cwd=cwd))
@@ -167,3 +181,61 @@ class _FakeDvcOps:
         if self.checkout_raises:
             raise self.checkout_raises
         self.checkout_calls.append(DvcCheckoutCall(targets=targets))
+        if (
+            self.workspace is not None
+            and self.checkout_materializes
+            and (not self.checkout_single_target_only or len(targets or []) == 1)
+        ):
+            for t in targets or []:
+                if t not in self.checkout_never_materializes:
+                    self._materialize_target(t)
+
+    def _materialize_target(self, target: str) -> None:
+        """Write what a real `dvc checkout` would: the target's workspace
+        path(s). Out shapes (file vs dir vs files-format dir) come from the
+        on-disk .dvc / dvc.lock, same as production's verification pass; a
+        target with neither is materialized as a plain file.
+
+        Path resolution and shape dispatch are imported from production
+        (`workspace_path_for`, `DvcOut.materializes_as_dir`,
+        `EMPTY_DIR_MD5`) — the fake WRITES the paths production STATS, so
+        writer and reader must agree on the address by construction. Only
+        the stand-in file CONTENT below is fake-specific."""
+        from mintd._fast_sync_ops import (
+            EMPTY_DIR_MD5,
+            outs_for_target,
+            parse_dvc_lock_outs,
+            workspace_path_for,
+        )
+
+        root = self.workspace
+        assert root is not None
+        outs = outs_for_target(root, target, "origin")
+        if not outs:
+            outs = [o for o in parse_dvc_lock_outs(root, "origin") if o.target == target]
+        if not outs:
+            dest = root / (target[:-4] if target.endswith(".dvc") else target)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("materialized")
+            return
+        for out in outs:
+            dest = workspace_path_for(root, out)
+            if out.materializes_as_dir:
+                dest.mkdir(parents=True, exist_ok=True)
+                if out.files is not None:
+                    # files-format: exactly the pinned entries — an empty
+                    # files: [] list yields an EMPTY directory, like real dvc.
+                    rels = [fe.relpath for fe in out.files]
+                elif out.md5 == EMPTY_DIR_MD5:
+                    rels = []  # empty-manifest md5 dir: real dvc makes it empty
+                else:
+                    # md5-keyed dir: the fake can't read the cached .dir
+                    # manifest, so stand in one file for "non-empty content".
+                    rels = [".materialized"]
+                for rel in rels:
+                    p = dest / rel
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text("materialized")
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text("materialized")

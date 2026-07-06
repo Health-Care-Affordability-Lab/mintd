@@ -191,19 +191,47 @@ class Metadata(BaseModel):
 
 
 class FastPullResult(BaseModel):
-    """Result of a fast-pull attempt.
+    """Result of a fast-pull attempt. Sole consumer: ``data_ops.data_pull``,
+    which owns the routing described per field below.
 
-    Caller pipes `fallback_targets` into `dvc_ops.pull(targets=fallback_targets)`
-    and `synced_targets = set(targets) - set(fallback_targets)` into
-    `dvc_ops.checkout(targets=synced_targets)`. When `fallback_targets` is empty,
-    a single `dvc_ops.checkout(targets=targets)` materializes the worktree.
+    Per-bucket routing (a target lands in at most one bucket; anything in no
+    bucket was fast-synced into the cache and is checked out):
+
+    - ``fallback_targets`` — plain ``dvc pull`` can serve these (dvc-imports,
+      md5-keyed outs, unparseable/hash-missing targets). Caller checks out any
+      that are already fully cached, pulls the rest, counts all as pulled.
+    - ``blocked_targets`` — version-aware outs fast-sync could not serve at
+      all (a guard fired, spot-check found drift, or the fetch errored):
+      nothing was fetched for them. Never fed to ``dvc pull`` (documented
+      broken on version-aware outs). Caller checks out any already fully
+      cached; the rest error loudly and drive a non-zero exit.
+      ``blocked_reasons`` has an entry for EVERY blocked target (producer
+      invariant — both producers pair each append with a reason).
+    - ``incomplete_targets`` — version-aware outs where some per-file
+      downloads still failed after retries (cache blobs incomplete). Never
+      checked out, never pulled; error loudly, non-zero exit. Each failed
+      file is named in ``files_dir_failures`` (informational; the producer
+      already warned per file).
+
+    Being outside every bucket does not guarantee workspace presence: the
+    caller stat-verifies each checkout target post-hoc (data_ops'
+    verify-and-retry pass), and a target ``dvc checkout`` claims but leaves
+    absent joins the caller's error accounting — a data_pull-side lane,
+    deliberately NOT a FastPullResult bucket because it applies to synced,
+    cached-fallback, and cached-blocked targets alike.
+
+    ``reason`` is a human summary for logs. ``success`` is True only when
+    every bucket is empty.
     """
     model_config = ConfigDict(frozen=True)
     success: bool
     synced_count: int = 0
     fallback_targets: list[str] = Field(default_factory=list)
+    incomplete_targets: list[str] = Field(default_factory=list)
     reason: str = ""
     files_dir_failures: list[str] = Field(default_factory=list)
+    blocked_targets: list[str] = Field(default_factory=list)
+    blocked_reasons: dict[str, str] = Field(default_factory=dict)
 
 
 def _unwrap_container(tp: Any) -> Any:

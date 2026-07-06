@@ -27,7 +27,6 @@ from mintd._fast_sync_ops import (
     check_bucket_versioning,
     classify_targets,
     discover_all_outs,
-    discover_pipeline_outs,
     ensure_dir_manifest,
     fetch_dir_contents,
     fetch_dir_manifest,
@@ -38,6 +37,7 @@ from mintd._fast_sync_ops import (
     normalize_target,
     parse_dvc_lock_outs,
     parse_dvc_outs,
+    partition_pipeline_outs,
     parse_s3_url,
     s3_key_for,
     s3_key_for_out,
@@ -340,10 +340,15 @@ def test_spot_check_versions_all_match(s3_versioned, tmp_path: Path) -> None:
     md5 = _md5_of(body)
     resp = s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
     out = DvcOut(target="a", path="a", md5=md5, is_dir=False, version_id=resp["VersionId"])
-    assert spot_check_versions(s3, bucket, "", [out], tmp_path) is True
+    # Slice B: returns the list of VERIFIED-drift (target, reason) pairs —
+    # empty means no drift (was: bool True).
+    assert spot_check_versions(s3, bucket, "", [out], tmp_path) == []
 
 
-def test_spot_check_versions_drift_returns_false(s3_versioned, tmp_path: Path) -> None:
+def test_spot_check_versions_drift_names_affected_out(s3_versioned, tmp_path: Path) -> None:
+    """Slice B: a verified 404 on the pinned version reports (target, reason)
+    for THAT out only (was: bool False, which the orchestrator turned into
+    demote-everything)."""
     from mintd._fast_sync_ops import DvcOut
 
     s3, bucket = s3_versioned
@@ -351,7 +356,9 @@ def test_spot_check_versions_drift_returns_false(s3_versioned, tmp_path: Path) -
     md5 = _md5_of(body)
     s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
     out = DvcOut(target="a", path="a", md5=md5, is_dir=False, version_id="bogus-version")
-    assert spot_check_versions(s3, bucket, "", [out], tmp_path) is False
+    drift = spot_check_versions(s3, bucket, "", [out], tmp_path)
+    assert [t for t, _ in drift] == ["a"]
+    assert "404" in drift[0][1]
 
 
 # ---------- downloads (3) ----------
@@ -697,6 +704,30 @@ def test_classify_targets_hash_missing_routes_to_hash_missing(tmp_path: Path) ->
     assert missing == ["data/x"]
 
 
+def test_classify_targets_targeted_bare_stage_out_routes_to_scoped_fallback(
+    tmp_path: Path,
+) -> None:
+    """A targeted pull of a bare dvc.lock stage-out path (no per-output
+    .dvc file) has no `<path>.dvc` for classify_targets to parse, so it
+    routes to `fallback` (a scoped `dvc pull <path>`), NOT fast-sync and
+    NOT `all_outs`. Pipeline stage outs only fast-sync on pull-all, where
+    partition_pipeline_outs enumerates them from dvc.lock; by name they
+    fall back. This pins the sane-but-suboptimal behavior so a refactor
+    can't turn 'targeted stage out -> loud scoped fallback' into a silent
+    drop. See the data_ops.py pull_all_requested comment."""
+    # A dvc.lock stage out exists, but there is no data/staged.dvc pointer.
+    (tmp_path / "data").mkdir()
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  build:\n    cmd: make\n    outs:\n"
+        "      - path: data/staged\n        hash: md5\n        md5: cafe\n"
+        "        size: 100\n"
+    )
+    all_outs, fallback, missing = classify_targets(tmp_path, ["data/staged"], "origin")
+    assert all_outs == []          # not fast-synced
+    assert fallback == ["data/staged"]  # scoped dvc pull, never targets=None
+    assert missing == []
+
+
 def test_classify_targets_routes_imports_to_fallback(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -819,10 +850,12 @@ def test_try_fast_pull_falls_back_on_non_s3_remote(tmp_path: Path) -> None:
     assert "non-s3" in result.reason.lower()
 
 
-def test_try_fast_pull_falls_back_on_spot_check_drift(tmp_path: Path) -> None:
-    """Orchestrator-gate test: when a version_id doesn't match, every target
-    routes to fallback. Confirms the gate is actually wired into try_fast_pull
-    (not just unit-tested in isolation)."""
+def test_try_fast_pull_spot_check_drift_errors_loudly_not_fallback(tmp_path: Path) -> None:
+    """Orchestrator-gate test: verified version_id drift on an out. A drifted
+    out is by definition version-aware (only outs with a version_id are
+    probed), so under the fix-4 contract it lands in blocked_targets — plain
+    `dvc pull` is documented broken on version-aware outs and is never
+    attempted for them. (Pre-slice-C this test expected fallback_targets.)"""
     with mock_aws():
         s3 = boto3.client("s3", region_name="us-east-1")
         bucket = "drift-bucket"
@@ -839,7 +872,10 @@ def test_try_fast_pull_falls_back_on_spot_check_drift(tmp_path: Path) -> None:
             result = SubprocessFastSyncOps().try_fast_pull(
                 project_path=tmp_path, targets=["data/a"], remote_name="origin"
             )
-    assert result.fallback_targets == ["data/a"]
+    assert result.success is False
+    assert result.fallback_targets == []
+    assert result.blocked_targets == ["data/a"]
+    assert "drift" in result.blocked_reasons["data/a"].lower()
     assert "spot" in result.reason.lower() or "version" in result.reason.lower()
 
 
@@ -1329,7 +1365,8 @@ def test_spot_check_versions_uses_path_for_path_based(s3_versioned, tmp_path: Pa
         version_id=version_id, is_path_based=True,
         dvc_file=tmp_path / "data/foo.parquet.dvc",
     )
-    assert spot_check_versions(s3, bucket, "lab", [out], tmp_path) is True
+    # Slice B: no-drift is now the empty drift list, not bool True.
+    assert spot_check_versions(s3, bucket, "lab", [out], tmp_path) == []
 
 
 def test_fetch_files_dir_contents_branches_on_entry_is_path_based(
@@ -1503,8 +1540,8 @@ def test_parse_dvc_lock_outs_resolves_wdir_relative_paths(tmp_path: Path) -> Non
 
 
 def test_parse_dvc_lock_outs_skips_outs_without_cloud_section(tmp_path: Path) -> None:
-    """parse_dvc_lock_outs returns BOTH outs (no filter); discover_pipeline_outs
-    only returns ones with a top-level cloud.<remote>.version_id."""
+    """parse_dvc_lock_outs returns BOTH outs (no filter); the fast-syncable
+    partition only keeps ones with a top-level cloud.<remote>.version_id."""
     _write_lock(
         tmp_path,
         body=(
@@ -1522,7 +1559,7 @@ def test_parse_dvc_lock_outs_skips_outs_without_cloud_section(tmp_path: Path) ->
     )
     parsed = parse_dvc_lock_outs(tmp_path, "x")
     assert len(parsed) == 2
-    discovered = discover_pipeline_outs(tmp_path, "x")
+    discovered = partition_pipeline_outs(tmp_path, "x")[0]
     assert len(discovered) == 1
     assert discovered[0].path == "with_cloud.parquet"
 
@@ -1560,11 +1597,13 @@ def test_try_fast_pull_early_abort_routes_pipeline_outs_to_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The P0-catching regression test. When try_fast_pull aborts early
-    (here: _check_dvc returns False), the FastPullResult.fallback_targets
-    MUST include both .dvc-file targets and the pipeline outs' target IDs.
-    Without this wiring, the orchestrator would compute pipeline outs as
-    'synced' when fast-sync gave up, and dvc_ops.checkout would crash on
-    cache files that were never fetched."""
+    (here: _check_dvc returns False), every target and pipeline out MUST
+    land in fallback_targets or blocked_targets — never be computed as
+    'synced' (dvc_ops.checkout would crash on cache files that were never
+    fetched). Slice C sharpens the split: the version-aware pipeline out
+    errors loudly (plain `dvc pull` is documented broken on it) while the
+    md5-keyed pipeline out and the unparseable .dvc target keep the
+    fallback route."""
     monkeypatch.setattr("mintd._fast_sync_ops._check_dvc", lambda: (False, "dvc version mismatch"))
 
     pipe_out = DvcOut(
@@ -1576,17 +1615,28 @@ def test_try_fast_pull_early_abort_routes_pipeline_outs_to_fallback(
         is_path_based=True,
         dvc_file=tmp_path / "dvc.lock",
     )
+    md5_pipe_out = DvcOut(
+        target="data/interim/bar.parquet",
+        path="data/interim/bar.parquet",
+        md5="00112233445566778899aabbccddeeff",
+        is_dir=False,
+        dvc_file=tmp_path / "dvc.lock",
+    )
     ops = SubprocessFastSyncOps()
     result = ops.try_fast_pull(
         project_path=tmp_path,
         targets=["a.dvc"],
         remote_name="x",
-        pipeline_outs=[pipe_out],
+        pipeline_outs=[pipe_out, md5_pipe_out],
     )
 
     assert result.success is False
     assert "a.dvc" in result.fallback_targets
-    assert "data/final/foo.parquet" in result.fallback_targets
+    assert "data/interim/bar.parquet" in result.fallback_targets
+    # Slice C (fix 4): version-aware → loud error, never plain dvc pull.
+    assert "data/final/foo.parquet" in result.blocked_targets
+    assert "data/final/foo.parquet" not in result.fallback_targets
+    assert "version mismatch" in result.blocked_reasons["data/final/foo.parquet"]
 
 
 def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
@@ -1598,7 +1648,7 @@ def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
     # Verify parser against the 6-out fixture (5 files + 1 dir out)
     outs = parse_dvc_lock_outs(project, "test-bucket")
     assert len(outs) == 6
-    assert len(discover_pipeline_outs(project, "test-bucket")) == 6
+    assert len(partition_pipeline_outs(project, "test-bucket")[0]) == 6
 
     # All paths under data/final/
     for o in outs:
@@ -1636,12 +1686,12 @@ def test_parse_dvc_lock_outs_against_real_pipeline_fixture(tmp_path: Path):
         assert fe.is_path_based is True
 
 
-def test_discover_pipeline_outs_includes_files_format_dir_with_only_per_file_cloud(
+def test_fast_syncable_pipeline_outs_include_files_format_dir_with_only_per_file_cloud(
     tmp_path: Path,
 ) -> None:
     """Real-world `dvc push` output: directory outs land in ``dvc.lock`` with
     only per-file ``cloud`` blocks under ``files:`` — no top-level ``cloud``
-    on the dir-out itself. discover_pipeline_outs must include such dir-outs
+    on the dir-out itself. The fast-syncable partition must include such dir-outs
     so fast-sync handles them via fetch_files_dir_contents (which keys off
     per-file version_id, not the absent top-level one)."""
     _write_lock(
@@ -1666,7 +1716,7 @@ def test_discover_pipeline_outs_includes_files_format_dir_with_only_per_file_clo
             "                version_id: v-b\n"
         ),
     )
-    outs = discover_pipeline_outs(tmp_path, "x")
+    outs = partition_pipeline_outs(tmp_path, "x")[0]
     assert len(outs) == 1
     out = outs[0]
     assert out.is_files_format is True
@@ -1675,7 +1725,7 @@ def test_discover_pipeline_outs_includes_files_format_dir_with_only_per_file_clo
     assert all(fe.version_id for fe in out.files)
 
 
-def test_discover_pipeline_outs_excludes_files_format_dir_with_missing_per_file_version_id(
+def test_fast_syncable_pipeline_outs_exclude_files_format_dir_with_missing_per_file_version_id(
     tmp_path: Path,
 ) -> None:
     """If even one per-file entry lacks a version_id, the dir-out routes to
@@ -1698,7 +1748,7 @@ def test_discover_pipeline_outs_excludes_files_format_dir_with_missing_per_file_
             "            md5: 22222222222222222222222222222222\n"
         ),
     )
-    assert discover_pipeline_outs(tmp_path, "x") == []
+    assert partition_pipeline_outs(tmp_path, "x")[0] == []
 
 
 @pytest.mark.integration
@@ -1707,3 +1757,390 @@ def test_dvc_cmd_smoke() -> None:
     # the integration tag ensures we actually run the shell command in the dev env
     ok, reason = _check_dvc()
     assert ok is True, f"bundled dvc probe failed: {reason}"
+
+
+# ---------- slice B (pull-all audit fixes 2+3): retry, don't demote ----------
+#
+# Style note: fakes below patch ``mintd._fast_sync_ops.time.sleep`` so the
+# capped exponential backoff is instant in tests.
+
+def _client_error(code: str, status: int = 400, op: str = "HeadObject") -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": code},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        op,
+    )
+
+
+def test_is_transient_s3_error_classification() -> None:
+    from botocore.exceptions import (
+        ConnectionClosedError,
+        EndpointConnectionError,
+        NoCredentialsError,
+        ReadTimeoutError,
+    )
+
+    from mintd._fast_sync_ops import is_transient_s3_error
+
+    # Widened ClientError code set (503/500/RequestTimeout/SlowDown + Throttling).
+    assert is_transient_s3_error(_client_error("503", 503)) is True
+    assert is_transient_s3_error(_client_error("SlowDown", 503)) is True
+    assert is_transient_s3_error(_client_error("Throttling", 400)) is True
+    # botocore network-layer errors are transient too (were previously not).
+    assert is_transient_s3_error(EndpointConnectionError(endpoint_url="https://s3.example")) is True
+    assert is_transient_s3_error(ReadTimeoutError(endpoint_url="https://s3.example")) is True
+    assert is_transient_s3_error(ConnectionClosedError(endpoint_url="https://s3.example")) is True
+    # Verified 404 and credential failures are NOT transient.
+    assert is_transient_s3_error(_client_error("404", 404)) is False
+    assert is_transient_s3_error(NoCredentialsError()) is False
+
+
+def test_check_bucket_versioning_transient_error_retried_not_disabled() -> None:
+    """Slice B: a transient 503 on the versioning probe is retried, not read
+    as 'versioning disabled' (which used to demote every target)."""
+    calls = {"n": 0}
+
+    class _FlakyS3:
+        def get_bucket_versioning(self, Bucket):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise _client_error("503", 503, "GetBucketVersioning")
+            return {"Status": "Enabled"}
+
+    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        assert check_bucket_versioning(_FlakyS3(), "bkt") is True
+    assert calls["n"] == 3
+    assert mock_sleep.call_count == 2
+
+
+def test_spot_check_versions_transient_head_error_retried_no_drift(tmp_path: Path) -> None:
+    """Slice B: a transient error on a spot-check HEAD is retried and, once
+    the HEAD succeeds with the pinned version, causes NO demotion."""
+    from botocore.exceptions import EndpointConnectionError
+
+    calls = {"n": 0}
+
+    class _FlakyS3:
+        def head_object(self, Bucket, Key, VersionId):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise EndpointConnectionError(endpoint_url="https://s3.example")
+            return {"VersionId": VersionId}
+
+    out = DvcOut(target="a", path="a", md5="c" * 32, is_dir=False, version_id="v1")
+    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        drift = spot_check_versions(_FlakyS3(), "bkt", "", [out], tmp_path)
+    assert drift == []
+    assert calls["n"] == 2
+    assert mock_sleep.call_count == 1
+
+
+def test_spot_check_versions_persistent_transient_is_inconclusive_not_drift(tmp_path: Path) -> None:
+    """Slice B: a probe that still fails after all retries is inconclusive —
+    logged and skipped — never counted as drift."""
+    from botocore.exceptions import ReadTimeoutError
+
+    calls = {"n": 0}
+
+    class _DeadS3:
+        def head_object(self, Bucket, Key, VersionId):
+            calls["n"] += 1
+            raise ReadTimeoutError(endpoint_url="https://s3.example")
+
+    out = DvcOut(target="a", path="a", md5="c" * 32, is_dir=False, version_id="v1")
+    with patch("mintd._fast_sync_ops.time.sleep"):
+        drift = spot_check_versions(_DeadS3(), "bkt", "", [out], tmp_path)
+    assert drift == []
+    assert calls["n"] == 3  # all attempts consumed
+
+
+def test_try_fast_pull_spot_check_drift_demotes_only_affected_target(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """Slice B: verified drift on one out demotes ONLY that out (named in
+    the reason); the healthy out still fast-syncs. Slice C: the drifted out
+    is version-aware, so it errors loudly (blocked_targets) instead of being
+    fed to plain `dvc pull` (fallback_targets stays empty)."""
+    s3, bucket = s3_versioned
+    body = b"good content"
+    md5 = _md5_of(body)
+    resp = s3.put_object(Bucket=bucket, Key=f"files/md5/{md5[:2]}/{md5[2:]}", Body=body)
+    _write_dvc_config(tmp_path, bucket)
+    _write_dvc_file_md5(tmp_path, "data/good", md5, version_id=resp["VersionId"])
+    # Pinned version doesn't exist on the remote → verified 404 → drift.
+    _write_dvc_file_md5(tmp_path, "data/stale", "d" * 32, version_id="stale-version")
+
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path,
+            targets=["data/good", "data/stale"],
+            remote_name="origin",
+        )
+    assert result.fallback_targets == []
+    assert result.blocked_targets == ["data/stale"]
+    assert "drift" in result.blocked_reasons["data/stale"].lower()
+    assert result.synced_count == 1
+    assert "data/stale" in result.reason
+    assert "data/good" not in result.reason
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
+    assert cp.read_bytes() == body
+
+
+def test_try_fast_pull_no_credentials_named_reason_not_retried(tmp_path: Path) -> None:
+    """Slice B: NoCredentialsError is a NAMED degradation reason and is not
+    retried (retrying cannot mint credentials)."""
+    from botocore.exceptions import NoCredentialsError
+
+    calls = {"n": 0}
+
+    class _NoCredsS3:
+        def get_bucket_versioning(self, Bucket):
+            calls["n"] += 1
+            raise NoCredentialsError()
+
+    _write_dvc_config(tmp_path, "some-bucket")
+    _write_dvc_file_md5(tmp_path, "a", "deadbeef")
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)), \
+         patch("mintd._fast_sync_ops._create_s3_client", return_value=_NoCredsS3()), \
+         patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path, targets=["a"], remote_name="origin"
+        )
+    assert result.fallback_targets == ["a"]
+    assert "credentials" in result.reason.lower()
+    assert calls["n"] == 1  # non-retried
+    assert mock_sleep.call_count == 0
+
+
+def test_fetch_to_cache_retries_connection_reset_then_succeeds(tmp_path: Path) -> None:
+    """Slice B: a mid-file connection reset (botocore ConnectionClosedError —
+    previously non-retryable) is retried and the fetch succeeds."""
+    from botocore.exceptions import ConnectionClosedError
+
+    body = b"reset then fine"
+    md5 = _md5_of(body)
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
+    cp.parent.mkdir(parents=True)
+
+    calls = {"n": 0}
+
+    def fake_download_file(Filename, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionClosedError(endpoint_url="https://s3.example")
+        Path(Filename).write_bytes(body)
+
+    fake_s3 = type("FakeS3", (), {"download_file": staticmethod(fake_download_file)})()
+    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        assert fetch_to_cache(fake_s3, "b", "k", cp, md5) is True
+    assert calls["n"] == 2
+    assert mock_sleep.call_count == 1
+    assert cp.read_bytes() == body
+
+
+@pytest.mark.parametrize("version_aware", [True, False], ids=["version-aware", "md5-keyed"])
+def test_try_fast_pull_files_format_per_file_failure_routing(
+    version_aware: bool, s3_versioned, tmp_path: Path
+) -> None:
+    """A persistent per-file failure inside a files-format dir fails THAT
+    FILE by name (files_dir_failures + reason) and routes the out per
+    dvc_pull_can_serve: a VERSION-AWARE dir (per-file cloud version pins)
+    lands in incomplete_targets — NEVER demoted to the dvc-pull fallback
+    (plain dvc pull is documented broken on these) — while a dir with no
+    version pins anywhere keeps the fallback route (plain dvc pull
+    genuinely serves md5-keyed outs)."""
+    s3, bucket = s3_versioned
+    body = b"content"
+    md5_ok = _md5_of(body)
+    md5_missing = "e" * 32
+    (tmp_path / "data").mkdir()
+    _write_dvc_config(tmp_path, bucket)
+    resp = s3.put_object(Bucket=bucket, Key="data/f/a.csv", Body=body)
+    # data/f/b.csv is NOT uploaded → persistent (non-transient) per-file failure.
+    if version_aware:
+        (tmp_path / "data" / "f.dvc").write_text(
+            "outs:\n  - path: f\n    files:\n"
+            f"      - relpath: a.csv\n        md5: {md5_ok}\n        size: 7\n"
+            "        cloud:\n          origin:\n"
+            f"            version_id: {resp['VersionId']}\n"
+            f"      - relpath: b.csv\n        md5: {md5_missing}\n        size: 7\n"
+            "        cloud:\n          origin:\n            version_id: bogus\n"
+        )
+    else:
+        (tmp_path / "data" / "f.dvc").write_text(
+            "outs:\n  - path: data/f\n    files:\n"
+            f"      - relpath: a.csv\n        md5: {md5_ok}\n        size: 7\n"
+            f"      - relpath: b.csv\n        md5: {md5_missing}\n        size: 7\n"
+        )
+
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path, targets=["data/f"], remote_name="origin"
+        )
+    assert result.fallback_targets == ([] if version_aware else ["data/f"])
+    assert result.incomplete_targets == (["data/f"] if version_aware else [])
+    assert result.success is False
+    assert result.synced_count == 0
+    assert any("data/f" in f and "b.csv" in f for f in result.files_dir_failures)
+    if version_aware:
+        assert "data/f" in result.reason
+
+
+@pytest.mark.parametrize("version_aware", [True, False], ids=["version-aware", "md5-keyed"])
+def test_try_fast_pull_md5_dir_per_file_failure_routing(
+    version_aware: bool, s3_versioned, tmp_path: Path
+) -> None:
+    """The same routing split in the md5-dir lane: an out-level version pin
+    makes constituent fetch failures land in incomplete_targets (never the
+    dvc-pull fallback), while an unpinned md5-keyed dir-out keeps the
+    fallback route (plain dvc pull can restore it) — the failed file is
+    named either way."""
+    s3, bucket = s3_versioned
+    entries = [DvcFileEntry("f" * 32, "a.csv")]  # blob never uploaded
+    full_md5 = _put_dir_manifest(s3, bucket, "", entries)
+    (tmp_path / "data").mkdir()
+    _write_dvc_config(tmp_path, bucket)
+    dvc_body = f"outs:\n  - path: data/mdir\n    md5: {full_md5}\n"
+    if version_aware:
+        manifest_resp = s3.list_object_versions(
+            Bucket=bucket, Prefix=f"files/md5/{full_md5[:2]}/"
+        )
+        version_id = manifest_resp["Versions"][0]["VersionId"]
+        dvc_body += f"    version_id: {version_id}\n"
+    (tmp_path / "data" / "mdir.dvc").write_text(dvc_body)
+
+    with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path, targets=["data/mdir"], remote_name="origin"
+        )
+    assert result.fallback_targets == ([] if version_aware else ["data/mdir"])
+    assert result.incomplete_targets == (["data/mdir"] if version_aware else [])
+    assert result.success is False
+    assert any("data/mdir" in f and "a.csv" in f for f in result.files_dir_failures)
+
+
+# ---------- guards split per dvc_pull_can_serve ----------
+
+def test_guard_mixed_targets_imports_md5_fall_back_version_aware_error(
+    tmp_path: Path,
+) -> None:
+    """Slice C: an all-or-nothing guard (here: dvc version mismatch) no
+    longer dumps every target into one plain `dvc pull`. Classification is
+    pure .dvc parsing (no S3, no boto3), then: imports + md5-keyed outs keep
+    the fallback route; version-aware outs (top-level version_id AND
+    cloud-nested/path-based) land in blocked_targets with the guard's reason."""
+    _write_dvc_file_md5(tmp_path, "data/md5only", "ca" * 16)
+    _write_dvc_file_import(tmp_path, "data/imported", "deadbeef.dir")
+    _write_dvc_file_md5(tmp_path, "data/versioned", "be" * 16, version_id="v1")
+    (tmp_path / "data" / "pathbased.dvc").write_text(
+        "outs:\n"
+        f"  - path: pathbased\n"
+        f"    md5: {'ab' * 16}\n"
+        "    size: 1\n"
+        "    cloud:\n"
+        "      origin:\n"
+        "        version_id: v2\n"
+    )
+    with patch(
+        "mintd._fast_sync_ops._check_dvc",
+        return_value=(False, "dvc version mismatch"),
+    ):
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path,
+            targets=["data/md5only", "data/imported", "data/versioned", "data/pathbased"],
+            remote_name="origin",
+        )
+    assert result.success is False
+    assert sorted(result.fallback_targets) == ["data/imported", "data/md5only"]
+    assert sorted(result.blocked_targets) == ["data/pathbased", "data/versioned"]
+    for t in ("data/versioned", "data/pathbased"):
+        assert "version mismatch" in result.blocked_reasons[t]
+    assert "version mismatch" in result.reason
+
+
+def test_guard_imports_only_repo_full_fallback_no_errors(tmp_path: Path) -> None:
+    """Slice C: an imports-only repo under a guard behaves exactly as before
+    the fix — every target routes to plain `dvc pull` (the slice 29 contract)
+    and nothing errors, so the CLI still exits 0."""
+    _write_dvc_file_import(tmp_path, "data/imports/a", "aa.dir")
+    _write_dvc_file_import(tmp_path, "data/imports/b", "bb.dir")
+    with patch(
+        "mintd._fast_sync_ops._check_dvc",
+        return_value=(False, "dvc version mismatch"),
+    ):
+        result = SubprocessFastSyncOps().try_fast_pull(
+            project_path=tmp_path,
+            targets=["data/imports/a", "data/imports/b"],
+            remote_name="origin",
+        )
+    assert result.success is False
+    assert result.blocked_targets == []
+    assert result.blocked_reasons == {}
+    assert sorted(result.fallback_targets) == ["data/imports/a", "data/imports/b"]
+
+
+def test_guard_versioning_disabled_also_splits_by_version_awareness(
+    tmp_path: Path,
+) -> None:
+    """Slice C: the split applies to every guard, not just _check_dvc —
+    here the 'bucket versioning disabled' guard (the last all-or-nothing
+    return before per-out processing)."""
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="bare")  # versioning never enabled
+        _write_dvc_config(tmp_path, "bare")
+        _write_dvc_file_md5(tmp_path, "data/plain", "ca" * 16)
+        _write_dvc_file_md5(tmp_path, "data/versioned", "be" * 16, version_id="v1")
+        with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
+            result = SubprocessFastSyncOps().try_fast_pull(
+                project_path=tmp_path,
+                targets=["data/plain", "data/versioned"],
+                remote_name="origin",
+            )
+    assert result.fallback_targets == ["data/plain"]
+    assert result.blocked_targets == ["data/versioned"]
+    assert "versioning disabled" in result.blocked_reasons["data/versioned"]
+
+
+# ---------- slice B: retry backoff policy is pinned, not just attempt count ----------
+
+
+def test_retry_transient_backoff_durations_pinned() -> None:
+    """The locked Slice B policy is 3 attempts with capped exponential
+    backoff from a 0.5s base: sleeps between the attempts must be exactly
+    0.5s then 1.0s. Attempt counts alone don't pin this — a time.sleep(0)
+    or an unbounded backoff would otherwise pass the suite."""
+    from unittest.mock import call
+
+    from mintd._fast_sync_ops import retry_transient
+
+    calls = {"n": 0}
+
+    def _flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _client_error("503", 503)
+        return "ok"
+
+    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        assert retry_transient(_flaky) == "ok"
+    assert calls["n"] == 3
+    assert mock_sleep.call_args_list == [call(0.5), call(1.0)]
+
+
+def test_retry_transient_backoff_caps_at_8s() -> None:
+    """The exponential backoff is capped at 8s: a long retry run must plateau
+    (0.5, 1, 2, 4, 8, 8, ...) — never keep doubling."""
+    def _dead() -> None:
+        raise _client_error("503", 503)
+
+    from mintd._fast_sync_ops import retry_transient
+
+    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+        with pytest.raises(ClientError):
+            retry_transient(_dead, attempts=10)
+    assert [c.args[0] for c in mock_sleep.call_args_list] == [
+        0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+    ]

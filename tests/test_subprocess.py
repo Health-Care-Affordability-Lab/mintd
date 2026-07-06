@@ -78,3 +78,21 @@ def test_streaming_forwards_raw_chunks_to_callback():
     # Forwarder sees the raw chunk including the \r ticks. The Reporter
     # decides how to display it (spinner update vs scrollback print).
     assert "".join(forwarded) == progress
+
+
+def test_streaming_logs_argv_at_debug_level(caplog):
+    """Observability contract: every subprocess invocation (dvc included)
+    logs its full argv at debug level, so `mintd -vv` shows exactly what was
+    invoked — the silent dvc-checkout hunt was blind without it."""
+    import logging
+
+    mock_proc = FakeProcess(stdout_text="ok\n")
+
+    def popen_factory(*args, **kwargs):
+        return mock_proc
+
+    with caplog.at_level(logging.DEBUG, logger="mintd._subprocess"):
+        run_streaming(["dvc", "checkout", "data/final.dvc"], popen_factory=popen_factory)
+    argv_lines = [r.message for r in caplog.records if "subprocess argv:" in r.message]
+    assert len(argv_lines) == 1
+    assert "dvc checkout data/final.dvc" in argv_lines[0]
