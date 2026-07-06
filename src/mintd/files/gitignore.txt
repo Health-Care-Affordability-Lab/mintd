@@ -137,9 +137,11 @@ renv/python/
 !/data/**/.gitkeep
 !/data/**/*.dvc
 
-# Output directories
-output/
-!output/.gitkeep
+# Results (let DVC handle these)
+/results/**
+!/results/**/
+!/results/**/.gitkeep
+!/results/**/*.dvc
 
 # OS files
 .DS_Store

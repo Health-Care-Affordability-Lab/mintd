@@ -50,7 +50,11 @@ def get_registry_url() -> str:
             pass
 
     if not registry_url:
-        raise ValueError("No registry URL configured. Run 'mintd create enclave --registry-url <url>' to set it.")
+        raise ValueError(
+            "No registry URL configured. Set 'registry_url' in "
+            "enclave_manifest.yaml, or run 'mintd config setup' to configure "
+            "the global fallback."
+        )
 
     return registry_url
 

@@ -131,7 +131,8 @@ def test_init_python_data_writes_rich_scaffold(tmp_path: Path) -> None:
     assert (project_path / "README.md").exists()
     assert (project_path / "requirements.txt").exists()
     assert (project_path / "code" / "ingest.py").exists()
-    assert (project_path / "code" / "clean.py").exists()
+    # The clean.* stub was deleted (demoted into ingest's parse_and_clean).
+    assert not (project_path / "code" / "clean.py").exists()
     assert (project_path / "code" / "validate.py").exists()
     # Slice 41: scaffold no longer ships generate_schema.py.
     assert not (project_path / "schemas" / "generate_schema.py").exists()

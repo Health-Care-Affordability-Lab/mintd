@@ -13,7 +13,8 @@ fetch.py / dvc.yaml) or run `dvc add data/raw/` after manually updating files.
 For large datasets with expensive parsing, consider organizing this file as
 two clearly-separated groups: `parse_*` functions that turn raw formats into
 DataFrames, and `clean_*` functions that apply business-logic
-standardization. The helpers in clean.py can be imported and called here.
+standardization. If the clean_* helpers grow, split them into their own module
+— and into their own dvc.yaml stage between ingest and validate.
 """
 
 from pathlib import Path

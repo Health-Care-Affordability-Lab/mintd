@@ -75,66 +75,40 @@ pip install -r requirements.txt
 
 ## Pipeline Scripts
 
+The pipeline is a DVC DAG defined in `dvc.yaml`:
+
 {% if language == "python" %}
-1. **Ingest**: `code/ingest.py` - Raw data acquisition and initial processing
-2. **Clean**: `code/clean.py` - Data cleaning and preprocessing
-3. **Validate**: `code/validate.py` - Data quality checks and validation
+1. **Ingest**: `code/ingest.py` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
+2. **Validate**: `code/validate.py` - runs quality checks on `data/intermediate/`, writes `data/final/` and the schema
 {% elif language == "r" %}
-1. **Ingest**: `code/ingest.R` - Raw data acquisition and initial processing
-2. **Clean**: `code/clean.R` - Data cleaning and preprocessing
-3. **Validate**: `code/validate.R` - Data quality checks and validation
+1. **Ingest**: `code/ingest.R` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
+2. **Validate**: `code/validate.R` - runs quality checks on `data/intermediate/`, writes `data/final/` and the schema
 {% elif language == "stata" %}
-1. **Ingest**: `code/ingest.do` - Raw data acquisition and initial processing
-2. **Clean**: `code/clean.do` - Data cleaning and preprocessing
-3. **Validate**: `code/validate.do` - Data quality checks and validation
+1. **Ingest**: `code/ingest.do` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
+2. **Validate**: `code/validate.do` - runs quality checks on `data/intermediate/`, writes `data/final/`
+3. **Schema**: `mintd data schema generate` - derives `schemas/v1/schema.json` from `data/final/` (runs as the `schema` stage)
 {% endif %}
+
+Data cleaning lives inside `ingest` (see its `parse_and_clean` helper). When it
+grows, promote it to its own `clean` stage between `ingest` and `validate` in
+`dvc.yaml`, keeping the `deps`/`outs` chain connected.
 
 ## Instructions to Replicators
 
-{% if language == "python" %}
-Run the complete pipeline:
+Reproduce the whole pipeline with DVC. It runs the stages in dependency order
+and skips any that are already up to date:
+
 ```bash
-# Ingest raw data
-python code/ingest.py
-
-# Clean data
-python code/clean.py
-
-# Validate results
-python code/validate.py
-```
-{% elif language == "r" %}
-Run the complete pipeline:
-```r
-# Ingest raw data
-source("code/ingest.R")
-
-# Clean data
-source("code/clean.R")
-
-# Validate results
-source("code/validate.R")
+# Place raw source data under data/raw/ (or enable the optional fetch stage in
+# dvc.yaml), then reproduce:
+dvc repro
 ```
 
-Or from command line:
+To run a single stage:
+
 ```bash
-Rscript code/ingest.R
-Rscript code/clean.R
-Rscript code/validate.R
+dvc repro ingest      # or: dvc repro validate
 ```
-{% elif language == "stata" %}
-Run the complete pipeline in Stata:
-```stata
-// Ingest raw data
-do code/ingest.do
-
-// Clean data
-do code/clean.do
-
-// Validate results
-do code/validate.do
-```
-{% endif %}
 
 ## Extending the Pipeline
 

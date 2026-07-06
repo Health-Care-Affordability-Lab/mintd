@@ -58,10 +58,11 @@ main <- function() {
   cat(rep("=", 60), "\n", sep = "")
 
   # Load configuration
-  config_path <- file.path(CODE_DIR, "00_setup", "config.R")
-  if (file.exists(config_path)) {
-    source(config_path)
+  config_path <- file.path(CODE_DIR, "config.R")
+  if (!file.exists(config_path)) {
+    stop("Configuration not found: ", config_path)
   }
+  source(config_path)
 
   # Define scripts to run in order
   scripts <- list(

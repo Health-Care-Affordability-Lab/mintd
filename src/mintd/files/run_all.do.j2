@@ -24,6 +24,7 @@ local project_root "`c(pwd)'"
 * Start master log
 local datetime = string(date("`c(current_date)'", "dmy"), "%tdCCYYNNDD") + "_" + ///
                  subinstr("`c(current_time)'", ":", "", .)
+capture mkdir "`project_root'/logs"
 log using "`project_root'/logs/run_all_`datetime'.log", replace
 
 display "================================================================================"
@@ -33,7 +34,13 @@ display "Started: `c(current_date)' `c(current_time)'"
 display "================================================================================"
 
 * Load configuration
-do "`project_root'/code/00_setup/config.do"
+capture confirm file "`project_root'/code/config.do"
+if _rc {
+    display as error "Configuration not found: `project_root'/code/config.do"
+    display as error "Create code/config.do (the scaffold ships a template) before running run_all.do."
+    exit 601
+}
+do "`project_root'/code/config.do"
 
 * =============================================================================
 * RUN SCRIPTS IN ORDER
