@@ -164,6 +164,35 @@ The old four-step resolver (manifest → catalog → producer-metadata → conve
 
 ---
 
+### Pull lanes: `fallback` / `blocked` / `incomplete` (data-pull hardening, PR #4)
+
+How `data_pull` classifies every target that fast-sync could not fully serve — the three
+lanes are mutually exclusive and drive different behavior:
+
+- **fallback** — plain `dvc pull` *can* genuinely serve it (dvc-imports by design — slice
+  29 — and md5-keyed legacy outs). Pulled via a scoped `dvc pull <targets>`, never
+  `targets=None` after fast-sync ran.
+- **blocked** — a version-aware out fast-sync could not serve (guard fired, verified
+  spot-check drift, unsyncable). Never handed to plain `dvc pull` (documented broken on
+  version-aware outs); reported loudly with a targeted-retry hint, non-zero exit.
+  `blocked_reasons` names why, per target.
+- **incomplete** — per-file downloads failed after retries, so the cache holds partial
+  blobs. Never checked out, never pulled; loud error, non-zero exit.
+
+Why: every silent-data-loss path in the pull-all audit was a degradation that blurred
+these lanes. Carried on `FastPullResult`; rendered by `data pull` / `data clone`.
+
+### Verify-after-checkout (PR #4)
+
+`dvc checkout` exit 0 is not trusted: after every checkout, mintd stats each target's
+workspace outcome (shape-aware — file vs dir vs files-format dir vs provably-empty dir),
+retries missing outs once single-target, and reports still-missing ones as errors.
+Companion: `_checkout_grouped` never mixes `.dvc` paths and bare stage-out paths in one
+argv (dvc 3.66-3.67 `index_from_targets` silently drops outs on mixed argvs). The
+principle generalizes: **verify outcomes, don't trust exit codes.**
+
+---
+
 ## What's deliberately not in this vocab yet
 
 Listed here so they're not "missing" — they'll get definitions in the slice where they land:
@@ -171,3 +200,8 @@ Listed here so they're not "missing" — they'll get definitions in the slice wh
 - `Pin`, `DataDependency`, `Imports` — slice 5 (`imports.yaml`).
 - `ProducerView`, `Fetcher`, `ProducerError` — slice 6 (`--upgrades` mode).
 - `RegistrationStatus`, pending registrations — slice 3.
+- `share/` lane, Stratum T transport, `share_user` — share S1 (`notes/PLAN-share-s1.md`);
+  an *ephemeral, uncatalogued, unpinned* handoff lane — the deliberate exception to the
+  pin discipline, named so nobody retrofits pins onto it.
+- repo file cache (S3), `mintd-lane=cache` tag, push/pull skip-compare — cache slice
+  (`notes/PLAN-cache.md`); *durable but unpinned*, governed by the repo's own tier.
