@@ -1226,16 +1226,22 @@ def _read_primary_from_clone(dest: Path) -> str | None:
 
 
 def _measure_clone_result(dest: Path) -> tuple[int, int]:
-    """Sum file count and total bytes under dest, skipping the .git tree.
-    Returns (0, 0) if dest is unreadable (e.g., test stub)."""
+    """Sum file count and total bytes under dest, skipping the .git and
+    .dvc trees. Returns (0, 0) if dest is unreadable (e.g., test stub).
+
+    .dvc/ holds the local cache: every pulled byte exists there AND as its
+    workspace materialization, so counting both doubled the ✓-line's
+    files/bytes (e.g. 37 GB of product reported as 74.3 GB)."""
     files = 0
     total = 0
     try:
         for p in dest.rglob("*"):
             if not p.is_file():
                 continue
-            # Skip .git internals — they're clone metadata, not data product.
-            if ".git" in p.relative_to(dest).parts:
+            # Skip clone metadata: .git internals and the .dvc dir
+            # (cache/tmp/config) — neither is data product content.
+            parts = p.relative_to(dest).parts
+            if ".git" in parts or ".dvc" in parts:
                 continue
             files += 1
             try:

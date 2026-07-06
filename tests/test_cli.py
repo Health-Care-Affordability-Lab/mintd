@@ -1018,6 +1018,23 @@ def test_cli_data_clone_path_and_primary_exits_64(
     assert exc.value.code == 64
 
 
+def test_measure_clone_result_excludes_git_and_dvc_trees(tmp_path: Path) -> None:
+    """Regression: the clone ✓-line measured .dvc/cache alongside the
+    workspace, double-counting every pulled byte (37 GB of product
+    reported as 74.3 GB). Only workspace files count."""
+    (tmp_path / "data" / "final").mkdir(parents=True)
+    (tmp_path / "data" / "final" / "a.parquet").write_bytes(b"x" * 100)
+    (tmp_path / ".git" / "objects").mkdir(parents=True)
+    (tmp_path / ".git" / "objects" / "blob").write_bytes(b"g" * 999)
+    (tmp_path / ".dvc" / "cache" / "files" / "md5" / "ab").mkdir(parents=True)
+    (tmp_path / ".dvc" / "cache" / "files" / "md5" / "ab" / "cdef").write_bytes(b"x" * 100)
+    (tmp_path / ".dvc" / "config").write_text("[core]\n")
+
+    files, total = cli._measure_clone_result(tmp_path)
+    assert files == 1
+    assert total == 100
+
+
 def test_cli_data_clone_unknown_path_reports_tracked_outputs(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
