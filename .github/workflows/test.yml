@@ -56,12 +56,12 @@ jobs:
           mintd data --help
           mintd init enclave ci-smoke --path "${{ runner.temp }}"
   windows-test:
-    # Catches Windows path / git-clone regressions. Kept out of the main
-    # matrix and marked continue-on-error until the vendored *.sh templates
-    # have *.ps1 siblings and POSIX-shaped tests are abstracted (see the
-    # project_windows_support_followup note). Installs into a real .venv to
-    # mirror local dev. Drop continue-on-error once this is reliably green.
-    continue-on-error: true
+    # REQUIRED since the canary first went fully green (fsync fix #5 +
+    # test-portability #7): a red windows-test now means a real regression.
+    # Vendored *.sh templates still lack *.ps1 siblings (Windows-GA work,
+    # tracked in the project_windows_support_followup note) — the affected
+    # tests skip on nt with reasons rather than fail. Installs into a real
+    # .venv to mirror local dev.
     strategy:
       fail-fast: false
       matrix:
