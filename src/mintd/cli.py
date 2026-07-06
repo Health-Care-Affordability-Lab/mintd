@@ -273,7 +273,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
 
     p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
-    p_pull.add_argument("targets", nargs="*")
+    p_pull.add_argument(
+        "targets", nargs="*",
+        help="Limit pull to these tracked files/directories, .dvc files or "
+             "stage names (default: pull everything tracked)",
+    )
     p_pull.add_argument("--remote")
     p_pull.add_argument("--jobs", type=int)
     p_pull.add_argument("--path", type=Path, default=Path("."))
@@ -318,7 +322,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clone.set_defaults(_handler=_handle_data_clone)
 
     p_push = p_data_sub.add_parser("push", help="Push DVC data")
-    p_push.add_argument("targets", nargs="*")
+    p_push.add_argument(
+        "targets", nargs="*",
+        help="Limit push to these tracked files/directories, .dvc files or "
+             "stage names (default: push everything tracked)",
+    )
     p_push.add_argument("--remote")
     p_push.add_argument("--jobs", type=int)
     p_push.set_defaults(_handler=_handle_data_push)

@@ -30,6 +30,7 @@ class DvcImportCall(NamedTuple):
 class DvcPushCall(NamedTuple):
     remote: str | None
     jobs: int | None
+    targets: list[str] | None = None
 
 
 class DvcPullCall(NamedTuple):
@@ -135,10 +136,16 @@ class _FakeDvcOps:
         )
         return dvc_file
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
+    def push(
+        self,
+        *,
+        targets: list[str] | None = None,
+        remote: str | None = None,
+        jobs: int | None = None,
+    ) -> DvcPushResult:
         if self.push_raises:
             raise self.push_raises
-        self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs))
+        self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs, targets=targets))
         return self.push_result
 
     def pull(

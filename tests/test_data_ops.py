@@ -116,6 +116,18 @@ def test_data_push_with_remote_passes_it(tmp_path: Path) -> None:
     assert fake.push_calls[0].remote == "origin"
 
 
+def test_data_push_with_targets_passes_them(tmp_path: Path) -> None:
+    fake = _FakeDvcOps()
+    data_push(tmp_path, targets=["data/a.dvc"], dvc_ops=fake)
+    assert fake.push_calls[0].targets == ["data/a.dvc"]
+
+
+def test_data_push_default_targets_none(tmp_path: Path) -> None:
+    fake = _FakeDvcOps()
+    data_push(tmp_path, dvc_ops=fake)
+    assert fake.push_calls[0].targets is None
+
+
 def test_data_add_returns_dvc_path(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     path = tmp_path / "raw.csv"

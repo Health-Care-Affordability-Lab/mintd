@@ -228,7 +228,13 @@ class DvcOps(Protocol):
         """Run `dvc import` and return the path of the produced `.dvc` file."""
         ...
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
+    def push(
+        self,
+        *,
+        targets: list[str] | None = None,
+        remote: str | None = None,
+        jobs: int | None = None,
+    ) -> DvcPushResult:
         """Run `dvc push`; report best-effort pushed count / up-to-date state."""
         ...
 
@@ -355,12 +361,20 @@ class SubprocessDvcOps:
 
         return dest.parent / (dest.name + ".dvc")
 
-    def push(self, *, remote: str | None = None, jobs: int | None = None) -> DvcPushResult:
+    def push(
+        self,
+        *,
+        targets: list[str] | None = None,
+        remote: str | None = None,
+        jobs: int | None = None,
+    ) -> DvcPushResult:
         cmd = [*dvc_cmd(), "push"]
         if remote:
             cmd.extend(["--remote", remote])
         if jobs:
             cmd.extend(["--jobs", str(jobs)])
+        if targets:
+            cmd.extend(targets)
         # json_mode suppresses dvc's stdout summary token ("1 file pushed" /
         # "Everything is up to date.") from leaking to the terminal/stdout —
         # we render our own summary instead, and JSON consumers must not see
