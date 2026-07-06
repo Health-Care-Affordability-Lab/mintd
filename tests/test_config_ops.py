@@ -407,7 +407,10 @@ def test_interactive_setup_captures_aws_credentials_when_mintd_missing(
         aws_credentials_path=creds,
     )
     assert creds.is_file()
-    assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600
+    # POSIX mode bits only — Windows uses ACLs (see the note in
+    # test_aws_credentials + project_windows_support_followup).
+    if os.name != "nt":
+        assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600
     cp = configparser.ConfigParser()
     cp.read(creds)
     assert cp.get("mintd", "aws_access_key_id") == "AKIA0001"

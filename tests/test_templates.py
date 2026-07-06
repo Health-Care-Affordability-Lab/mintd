@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,11 @@ def test_render_scaffold_matrix_no_unrendered_markers(
         assert "{%" not in text, f"{project_type}/{language}: unrendered block in {path.name}"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX exec bit; the scaffolded .sh are bash-only (Windows GA "
+    "tracks .ps1 siblings — see project_windows_support_followup)",
+)
 def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
     """Enclave transfer shell scripts must ship with 0o755. The legacy
     workflow `bash scripts/pull_data.sh` relies on the exec bit."""
@@ -267,6 +273,11 @@ def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
         assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX exec bit; the scaffolded .sh are bash-only (Windows GA "
+    "tracks .ps1 siblings — see project_windows_support_followup)",
+)
 def test_data_scaffold_check_scripts_executable(tmp_path: Path) -> None:
     """The data scaffold's pre-commit-driven check scripts must also be exec."""
     render_scaffold(

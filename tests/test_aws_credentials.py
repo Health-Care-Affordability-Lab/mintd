@@ -26,8 +26,14 @@ def test_write_profile_creates_new_file_with_mode_0600(tmp_path: Path) -> None:
     creds = tmp_path / "credentials"
     write_profile("AKIA0001", "secret-1", credentials_path=creds)
     assert creds.is_file()
-    mode = stat.S_IMODE(os.stat(creds).st_mode)
-    assert mode == 0o600
+    # POSIX mode bits only. Windows uses ACLs, not st_mode perms, so the
+    # 0o600 owner-only guarantee is not verifiable (and os.chmod is largely
+    # a no-op) there — securing the creds file on Windows is an open
+    # Windows-GA item (see project_windows_support_followup). Skip the mode
+    # assertion on Windows rather than claim a protection we can't verify.
+    if os.name != "nt":
+        mode = stat.S_IMODE(os.stat(creds).st_mode)
+        assert mode == 0o600
     cp = configparser.ConfigParser()
     cp.read(creds)
     assert cp.get("mintd", "aws_access_key_id") == "AKIA0001"
