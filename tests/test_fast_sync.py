@@ -704,6 +704,30 @@ def test_classify_targets_hash_missing_routes_to_hash_missing(tmp_path: Path) ->
     assert missing == ["data/x"]
 
 
+def test_classify_targets_targeted_bare_stage_out_routes_to_scoped_fallback(
+    tmp_path: Path,
+) -> None:
+    """A targeted pull of a bare dvc.lock stage-out path (no per-output
+    .dvc file) has no `<path>.dvc` for classify_targets to parse, so it
+    routes to `fallback` (a scoped `dvc pull <path>`), NOT fast-sync and
+    NOT `all_outs`. Pipeline stage outs only fast-sync on pull-all, where
+    partition_pipeline_outs enumerates them from dvc.lock; by name they
+    fall back. This pins the sane-but-suboptimal behavior so a refactor
+    can't turn 'targeted stage out -> loud scoped fallback' into a silent
+    drop. See the data_ops.py pull_all_requested comment."""
+    # A dvc.lock stage out exists, but there is no data/staged.dvc pointer.
+    (tmp_path / "data").mkdir()
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  build:\n    cmd: make\n    outs:\n"
+        "      - path: data/staged\n        hash: md5\n        md5: cafe\n"
+        "        size: 100\n"
+    )
+    all_outs, fallback, missing = classify_targets(tmp_path, ["data/staged"], "origin")
+    assert all_outs == []          # not fast-synced
+    assert fallback == ["data/staged"]  # scoped dvc pull, never targets=None
+    assert missing == []
+
+
 def test_classify_targets_routes_imports_to_fallback(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:

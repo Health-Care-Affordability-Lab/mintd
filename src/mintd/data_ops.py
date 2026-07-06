@@ -520,6 +520,17 @@ def data_pull(
     pull_all_requested = targets is None
     remote_name = remote or _default_dvc_remote(project_path) or "origin"
 
+    # dvc.lock stage outs are discovered ONLY on pull-all. A targeted pull
+    # of a bare stage-out path (e.g. `data pull data/staged`, no .dvc file)
+    # therefore never fast-syncs: classify_targets finds no `<path>.dvc`,
+    # routes it to `fallback`, and it lands via a scoped `dvc pull <path>`.
+    # That is correct and safe (scoped, never targets=None; single
+    # homogeneous argv, so the mixed-argv checkout bug can't fire; dvc pull
+    # raises loudly on failure) but bypasses fast-sync, so a large
+    # version-aware stage out pulled by name uses plain dvc pull rather than
+    # the direct version-keyed fetch. Pinned by
+    # test_data_pull_targeted_bare_stage_out_routes_to_scoped_fallback.
+    # Fast-syncing targeted stage outs is a deferred enhancement.
     pipeline_outs: list[DvcOut] = []
     all_pipeline: list[DvcOut] = []
     if pull_all_requested:
