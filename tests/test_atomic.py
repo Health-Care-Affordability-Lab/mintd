@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,12 @@ def test_try_fsync_parent_dir_swallows_oserror(
     _atomic._try_fsync_parent_dir(target)
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="opening a directory fd (os.open(dir, O_RDONLY)) is POSIX-only; on "
+    "Windows _try_fsync_parent_dir returns early before any fd is opened, so "
+    "the fd-leak scenario this asserts cannot arise",
+)
 def test_try_fsync_parent_dir_closes_fd_on_fsync_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

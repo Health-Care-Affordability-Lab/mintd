@@ -424,5 +424,6 @@ def test_verify_multi_repo_extracted_dir(tmp_path: Path) -> None:
     assert len(written) == 3
     for item in written:
         # All local_paths must be absolute regardless of how
-        # `manifest_path` / `data_root` were passed.
-        assert item.local_path.startswith("/")
+        # `manifest_path` / `data_root` were passed. os.path.isabs is the
+        # portable check (a Windows absolute path is 'C:\\...', not '/...').
+        assert os.path.isabs(item.local_path)

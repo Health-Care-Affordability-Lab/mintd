@@ -87,9 +87,11 @@ def test_package_appends_to_transferred(tmp_path: Path) -> None:
     assert t.repo == "ds-alpha"
     assert t.transfer_id == "transfer-2026-05-15-000000"
     # `.resolve()` must produce an absolute path regardless of how
-    # `downloads_root` was passed.
-    assert t.local_path.startswith("/")
-    assert t.local_path.endswith(f"ds-alpha/{version_folder}") or t.local_path.endswith(
+    # `downloads_root` was passed. os.path.isabs is the portable check
+    # (a Windows absolute path is 'C:\\...', not '/...').
+    assert os.path.isabs(t.local_path)
+    _lp = Path(t.local_path).as_posix()
+    assert _lp.endswith(f"ds-alpha/{version_folder}") or _lp.endswith(
         f"ds-alpha{os.sep}{version_folder}"
     )
 
