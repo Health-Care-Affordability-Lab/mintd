@@ -202,6 +202,32 @@ def test_cli_data_push_calls_data_push(
     assert len(dvc_ops.push_calls) == 1
 
 
+def test_cli_data_push_forwards_targets(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """End-to-end regression for the reported bug: a positional target reaches
+    the fake as `["data/x.dvc"]` instead of being silently dropped."""
+    _, dvc_ops = patched_clients
+    rc = cli.main(["data", "push", "data/x.dvc"])
+    assert rc == 0
+    assert dvc_ops.push_calls[0].targets == ["data/x.dvc"]
+
+
+def test_cli_data_push_no_targets_is_none(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """Bare `data push` pins the `args.targets or None` conversion: no
+    positionals means a full-repo push (targets is None)."""
+    _, dvc_ops = patched_clients
+    rc = cli.main(["data", "push"])
+    assert rc == 0
+    assert dvc_ops.push_calls[0].targets is None
+
+
 def test_cli_data_add_prints_dvc_path(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

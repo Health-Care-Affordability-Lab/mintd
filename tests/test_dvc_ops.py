@@ -308,6 +308,25 @@ def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch) -> None:
     assert result.up_to_date is True
 
 
+def test_subprocess_push_appends_targets_after_flags(monkeypatch) -> None:
+    """Targets land at the END of the argv, AFTER `--remote`/`--jobs` —
+    options-before-positionals, the same shape pull uses."""
+    from mintd import _dvc_ops
+    from mintd._config import Timeouts
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        _dvc_ops, "run_streaming", _stub_push_run_streaming(["2 files pushed"], seen)
+    )
+    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
+    ops.push(targets=["a.dvc", "dir/b"], remote="r", jobs=2)
+
+    cmd = seen["cmd"]
+    assert cmd[-2:] == ["a.dvc", "dir/b"]
+    assert cmd.index("--remote") < cmd.index("a.dvc")
+    assert cmd.index("--jobs") < cmd.index("a.dvc")
+
+
 # Slice D (pull-all audit, fixes 5+6) — checkout timeout tier and the
 # StorageKeyError tuple translation.
 

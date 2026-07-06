@@ -700,11 +700,14 @@ def data_push(
 ) -> PushSummary:
     # Resolve the effective remote for display only (explicit > .dvc/config >
     # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
-    # applies its own default when None. ``targets`` is dropped — dvc push
-    # doesn't accept it (honoring it is a separate slice).
+    # applies its own default when None. ``targets`` pass straight through to
+    # ``dvc push <targets>`` (None = push everything tracked, dvc's default).
+    # Push deliberately has no fast-sync/grouping analog: those exist only to
+    # work around dvc's pull/checkout-side materialization bugs, whereas push
+    # uploads from an intact local cache.
     effective_remote = remote or _default_dvc_remote(project_path) or "origin"
     start_t = time.monotonic()
-    result: DvcPushResult = dvc_ops.push(remote=remote, jobs=jobs)
+    result: DvcPushResult = dvc_ops.push(targets=targets, remote=remote, jobs=jobs)
     return PushSummary(
         remote=effective_remote,
         pushed=result.pushed,
