@@ -47,7 +47,7 @@ except ImportError:
     ReadTimeoutError = _BotocoreMissingError  # type: ignore[assignment,misc]
     SSLError = _BotocoreMissingError  # type: ignore[assignment,misc]
 
-from mintd._atomic import _try_fsync_parent_dir
+from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
 from mintd._dvc_invoke import dvc_cmd
 from mintd.model import FastPullResult
 
@@ -1080,11 +1080,7 @@ def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
     tmp_path.write_bytes(serialized)
-    fd = os.open(str(tmp_path), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    _try_fsync_file(tmp_path)
     tmp_path.replace(manifest_path)
     _try_fsync_parent_dir(manifest_path)
     return full_md5
@@ -1137,11 +1133,10 @@ def fetch_to_cache(
                 raise ValueError(f"md5 mismatch: expected {vr.expected}, got {vr.actual}")
 
             # fsync the tmp file's data, rename, then fsync the parent dir.
-            fd = os.open(str(tmp_path), os.O_RDONLY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+            # Both fsyncs are best-effort (no-op on platforms that reject
+            # them, e.g. Windows) — the rename is what makes the write
+            # visible; fsync only hardens durability.
+            _try_fsync_file(tmp_path)
             tmp_path.replace(cache_path)
             _try_fsync_parent_dir(cache_path)
             return True

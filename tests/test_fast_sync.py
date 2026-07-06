@@ -1021,6 +1021,29 @@ def test_ensure_dir_manifest_writes_synthetic_dir_file(tmp_path: Path) -> None:
     assert expected_bytes == b'[{"md5": "a", "relpath": "a.csv"}, {"md5": "b", "relpath": "b.csv"}]'
 
 
+def test_ensure_dir_manifest_survives_fsync_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduces the Windows failure mode: os.fsync on the fresh tmp file
+    raises OSError [Errno 9] Bad file descriptor. The manifest write is
+    durable-best-effort, so it must complete and produce the correct file
+    rather than crash the cache probe (was: OSError propagated out of
+    _split_cached during data_pull on Windows)."""
+    import mintd._atomic as _atomic
+
+    monkeypatch.setattr(
+        _atomic.os, "fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError(9, "Bad file descriptor")),
+    )
+    entries = [DvcFileEntry("b", "b.csv"), DvcFileEntry("a", "a.csv")]
+    manifest_name = ensure_dir_manifest(tmp_path, entries)  # must not raise
+    expected_bytes = _manifest_bytes(entries)
+    expected_md5 = hashlib.md5(expected_bytes, usedforsecurity=False).hexdigest()
+    assert manifest_name == f"{expected_md5}.dir"
+    manifest_path = tmp_path / "files" / "md5" / expected_md5[:2] / f"{expected_md5[2:]}.dir"
+    assert manifest_path.read_bytes() == expected_bytes
+
+
 def test_try_fast_pull_files_format_happy(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
     (tmp_path / "data").mkdir()
