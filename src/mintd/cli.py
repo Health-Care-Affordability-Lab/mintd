@@ -237,7 +237,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "--use-current-repo",
         action="store_true",
-        help="Scaffold into --path directly instead of into a new ``{type}_{name}`` subdir.",
+        help=(
+            "Scaffold into --path directly instead of into a new subdir "
+            "(named data_<name>, prj_<name>, enclave_<name>, or the bare "
+            "name for code repos)."
+        ),
     )
     p_init.add_argument(
         "--lang",
@@ -660,6 +664,7 @@ def _handle_init(args: argparse.Namespace) -> int:
             bucket=bucket,
             endpoint=endpoint,
             profile=profile,
+            reporter=reporter,
         )
     except (InitDestinationExists, InitNameInvalid, InitOpError) as exc:
         reporter.error(str(exc))

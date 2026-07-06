@@ -97,6 +97,7 @@ def init_project(
     endpoint: str | None = None,
     profile: str | None = None,
     ops: InitOps | None = None,
+    reporter: Reporter | None = None,
 ) -> tuple[Path, list[Path]]:
     """Initialize a fresh mintd project with storage configuration."""
     if use_current_repo:
@@ -174,8 +175,30 @@ def init_project(
             # Rollback boundary: remove .dvc/ on remote-add or patch
             # failure. metadata.json is left in place (atomic write +
             # replay-safe; rerunning init re-applies the storage block).
+            # `dvc init` staged `.dvc/*` in git's index before it failed;
+            # unstage those entries too so a subsequent rerun/commit
+            # doesn't carry a phantom `.dvc/config` (best-effort, never
+            # raises — must not mask the original failure).
             shutil.rmtree(project_path / ".dvc", ignore_errors=True)
+            ops.git_unstage(project_path, [".dvc"])
             raise
+
+    # `dvc init` stages `.dvc/config`, and the subsequent
+    # `dvc config cache.type` + any `dvc remote add` rewrite it — leaving
+    # an `AM` (staged-then-modified) index entry. Restage it once so a
+    # teammate's `git commit` captures the config *with* the remote, not a
+    # stale half-staged copy. Covers both index-dirtying sources (cache.type
+    # fires even when classification is None) in one place. A failed restage
+    # must not fail an otherwise-healthy init — rerunning would then hit
+    # InitDestinationExists — so warn and return success.
+    if project_type in _DVC_INIT_TYPES:
+        try:
+            ops.git_add(project_path, [".dvc/config"])
+        except InitOpError:
+            if reporter is not None:
+                reporter.warn(
+                    "could not restage .dvc/config; run: git add .dvc/config"
+                )
 
     return project_path, written
 

@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from mintd._dvc_invoke import dvc_cmd
 
+from mintd._console import Reporter
+from mintd._init_ops import InitOpError
 from mintd.init import init_project, InitDestinationExists, InitNameInvalid
 from mintd.model import Metadata
 from tests._fakes.init_ops import _FakeInitOps
@@ -350,6 +352,173 @@ def test_init_project_patches_storage_even_when_template_emits_partial_block(
     assert m.storage is not None
     assert m.storage.bucket == "cooper-globus"
     assert m.storage.prefix == "lab/data_foo/"
+
+
+# ---------------------------------------------------------------------------
+# F4 — restage .dvc/config after init (git_add) + rollback unstage
+# ---------------------------------------------------------------------------
+
+
+class _WarnRecorder(Reporter):
+    """Reporter subclass that records ``warn`` calls instead of printing.
+
+    Local to this module so the F4 tests can assert *exactly one* restage
+    warning fired on failure and *zero* on success, without depending on
+    stderr capture or touching the shared RecordingReporter fake.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.warnings: list[str] = []
+
+    def warn(self, msg: str) -> None:
+        self.warnings.append(msg)
+
+
+def test_init_restages_dvc_config_after_dvc_init_no_classification(
+    tmp_path: Path,
+) -> None:
+    """The `dvc config cache.type` write inside `dvc_init` dirties the
+    staged `.dvc/config` even when classification is None, so the restage
+    must fire on the plain data path — once, and after `dvc_init`."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data", name="foo", target_dir=tmp_path, ops=fake
+    )
+    assert fake.git_add_calls == [(project_path, [".dvc/config"])]
+    # restage happens after dvc was initialized
+    assert fake.call_log.index("git_add") > fake.call_log.index("dvc_init")
+
+
+def test_init_restages_dvc_config_after_remote_add_when_classified(
+    tmp_path: Path,
+) -> None:
+    """With classification set, `dvc remote add` also rewrites
+    `.dvc/config`; the single restage must land after remote-add."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+        ops=fake,
+    )
+    assert fake.git_add_calls == [(project_path, [".dvc/config"])]
+    assert fake.call_log.index("git_add") > fake.call_log.index("dvc_remote_add")
+
+
+def test_init_enclave_does_not_restage_dvc_config(tmp_path: Path) -> None:
+    """Enclave is not a DVC type (`_DVC_INIT_TYPES`), so there is no
+    `.dvc/config` to restage."""
+    fake = _FakeInitOps()
+    init_project(
+        project_type="enclave", name="foo", target_dir=tmp_path, ops=fake
+    )
+    assert fake.git_add_calls == []
+
+
+def test_init_rollback_unstages_dvc_and_skips_restage(tmp_path: Path) -> None:
+    """On a remote-add failure the rollback rmtree's `.dvc/` and unstages
+    the `.dvc/*` index entries `dvc init` left behind; the restage never
+    runs (its config target no longer exists)."""
+    fake = _FakeInitOps(fail_on={"dvc_remote_add"})
+    with pytest.raises(InitOpError, match="dvc_remote_add"):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            classification="labonly",
+            bucket="cooper-globus",
+            endpoint="",
+            ops=fake,
+        )
+    assert fake.git_unstage_calls == [(tmp_path / "data_foo", [".dvc"])]
+    assert fake.git_add_calls == []
+
+
+def test_init_failed_restage_warns_once_and_returns_success(
+    tmp_path: Path,
+) -> None:
+    """A failed restage must not fail an otherwise-healthy init: init
+    returns success and the reporter records exactly one actionable warn."""
+    fake = _FakeInitOps(fail_on={"git_add"})
+    reporter = _WarnRecorder()
+    project_path, written = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+    assert (project_path / "metadata.json").exists()
+    assert len(reporter.warnings) == 1
+    assert "git add .dvc/config" in reporter.warnings[0]
+
+
+def test_init_successful_restage_emits_no_warning(tmp_path: Path) -> None:
+    """The restage warning fires only on failure — a clean restage is
+    silent (zero warns)."""
+    fake = _FakeInitOps()
+    reporter = _WarnRecorder()
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+    assert reporter.warnings == []
+
+
+def test_init_failed_restage_without_reporter_still_succeeds(
+    tmp_path: Path,
+) -> None:
+    """Reporterless callers (library/tests) still get a healthy project on
+    a restage failure — the warn is simply skipped, never a raise."""
+    fake = _FakeInitOps(fail_on={"git_add"})
+    project_path, _ = init_project(
+        project_type="data", name="foo", target_dir=tmp_path, ops=fake
+    )
+    assert (project_path / "metadata.json").exists()
+
+
+def test_subprocess_git_add_restages_dvc_config_live(tmp_path: Path) -> None:
+    """Live seam: a real `git init` + `dvc init` leaves `.dvc/config`
+    staged-then-modified (`AM`, because the cache.type write rewrites it);
+    `SubprocessInitOps.git_add` must restage it to a clean `A `."""
+    import shutil
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+    try:
+        import dvc  # noqa: F401
+    except ImportError:
+        pytest.skip("dvc not importable")
+
+    ops = SubprocessInitOps()
+    ops.git_init(tmp_path)
+    ops.dvc_init(tmp_path)
+
+    def _status() -> str:
+        return subprocess.run(
+            ["git", "status", "--porcelain", "--", ".dvc/config"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+    # Before restage: staged by `dvc init`, then dirtied by cache.type.
+    assert _status().startswith("AM")
+    ops.git_add(tmp_path, [".dvc/config"])
+    # After restage: index clean ("A " — added, no worktree delta).
+    after = _status()
+    assert after.startswith("A ")
+    assert not after.startswith("AM")
 
 
 # ---------------------------------------------------------------------------
