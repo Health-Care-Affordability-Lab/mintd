@@ -31,6 +31,8 @@ class InitNonInteractive(InitOpError):
 
 class InitOps(Protocol):
     def git_init(self, target_dir: Path) -> None: ...
+    def git_add(self, target_dir: Path, paths: list[str]) -> None: ...
+    def git_unstage(self, target_dir: Path, paths: list[str]) -> None: ...
     def dvc_init(self, target_dir: Path) -> None: ...
     def dvc_remote_add(
         self, target_dir: Path, *,
@@ -57,6 +59,43 @@ class SubprocessInitOps:
             raise GitNotInstalled("`git` binary not found on PATH.") from None
         if result.returncode != 0:
             raise InitOpError(f"git init failed: {result.stderr.strip()}")
+
+    def git_add(self, target_dir: Path, paths: list[str]) -> None:
+        """Stage ``paths`` (``git add -- <paths>``). Raises ``InitOpError``
+        on non-zero exit, mirroring ``git_init``. Used to restage
+        ``.dvc/config`` after ``dvc init``/``dvc remote add`` rewrite it —
+        so a teammate cloning the repo gets the config (with the remote)
+        rather than a half-staged ``AM`` entry."""
+        try:
+            result = subprocess.run(
+                ["git", "add", "--", *paths],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise GitNotInstalled("`git` binary not found on PATH.") from None
+        if result.returncode != 0:
+            raise InitOpError(f"git add failed: {result.stderr.strip()}")
+
+    def git_unstage(self, target_dir: Path, paths: list[str]) -> None:
+        """Best-effort ``git rm -r --cached --ignore-unmatch -- <paths>``.
+        Never raises — this is rollback cleanup after ``.dvc/`` was
+        rmtree'd, so a missing binary or non-zero exit must not mask the
+        original failure (precedent: best-effort fsync, commit 2bccf43)."""
+        try:
+            subprocess.run(
+                ["git", "rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", *paths],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     def dvc_init(self, target_dir: Path) -> None:
         try:
