@@ -27,9 +27,9 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 # Reuse the guarded-import sentinels from _fast_sync_ops rather than
 # paraphrasing its try/except: these are the *same* class objects that
@@ -126,6 +126,12 @@ class RemoteObjectNotFound(TransferError):
 class RemoteObjectInfo:
     size: int
     checksum_sha256: str | None  # None => object was written without SHA256
+    # User metadata (``x-amz-meta-*``), keys lowercased and de-prefixed by
+    # botocore (so ``x-amz-meta-mintd-sha256`` arrives as ``mintd-sha256``).
+    # ``mintd cache`` reads ``metadata.get("mintd-sha256")`` for its skip
+    # compare and pre-replace verify; share ignores it. Additive + default-
+    # empty so no existing caller/construction breaks.
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 _RESERVED_UPLOAD_ARGS = frozenset({"ChecksumAlgorithm"})
@@ -238,6 +244,7 @@ def head_remote_object(s3: Any, bucket: str, key: str) -> RemoteObjectInfo:
     return RemoteObjectInfo(
         size=int(resp["ContentLength"]),
         checksum_sha256=resp.get("ChecksumSHA256"),
+        metadata=resp.get("Metadata", {}),
     )
 
 
@@ -248,7 +255,7 @@ def upload_object(
     local_path: Path,
     *,
     progress: Callable[[int], None],
-    extra_args: dict[str, str] | None = None,
+    extra_args: Mapping[str, Any] | None = None,
 ) -> int:
     """Upload ``local_path`` to ``bucket/key`` with a baked-in SHA256 checksum.
 
@@ -311,16 +318,25 @@ def download_object(
     progress: Callable[[int], None],
     verify_tmp: Callable[[Path], None] | None = None,
     expected_size: int | None = None,
+    tmp_suffix: str | None = None,
 ) -> int:
     """Download ``bucket/key`` to ``dest`` atomically.
 
     Borrows ``fetch_to_cache``'s tmp→verify→fsync→replace discipline
     (_fast_sync_ops:1115-1147) with three grounded deviations:
 
-    1. tmp name is ``dest.name + ".tmp"`` (the ``write_manifest`` precedent at
-       _fast_sync_ops:1081), NOT ``with_suffix(".tmp")`` — the latter would
-       collapse user-named ``report.parquet`` / ``report.csv`` into one
-       ``report.tmp``;
+    1. tmp name is ``dest.name + tmp_suffix`` (default ``".tmp"``, the
+       ``write_manifest`` precedent at _fast_sync_ops:1081), NOT
+       ``with_suffix(".tmp")`` — the latter would collapse user-named
+       ``report.parquet`` / ``report.csv`` into one ``report.tmp``. The default
+       suffix is safe for share (single file, dest namespace is share-owned and
+       an existing dest is refused). Consumers whose dest namespace is
+       *user-controlled and concurrent* — e.g. ``mintd cache pull`` mapping
+       server keys straight into the working tree — MUST pass a collision-proof
+       ``tmp_suffix`` (a per-call ``uuid4`` token) so the predictable ``.tmp``
+       path can never (a) clobber a user's own ``<name>.tmp`` scratch file nor
+       (b) equal a sibling task's *final* dest (pulling both ``foo`` and
+       ``foo.tmp`` would otherwise race: ``foo``'s tmp IS ``foo.tmp``);
     2. no md5-pin verify — share has no pin; integrity rides
        ``ChecksumMode="ENABLED"`` (botocore verifies the stored SHA256 on the
        response, raising on mismatch). ``verify_tmp`` is the policy-free
@@ -331,7 +347,7 @@ def download_object(
        orphan tmp.
 
     Returns the downloaded byte count."""
-    tmp = dest.with_name(dest.name + ".tmp")
+    tmp = dest.with_name(dest.name + (tmp_suffix if tmp_suffix is not None else ".tmp"))
     tmp.parent.mkdir(parents=True, exist_ok=True)
 
     def _attempt() -> None:
@@ -458,6 +474,25 @@ def _has_control_char(value: str) -> bool:
     or DEL — none belong in an S3 key segment and several (NUL, newline)
     enable key-smuggling / log-injection."""
     return any(ch < " " or ch == "\x7f" for ch in value)
+
+
+def neutralize_control_chars(value: str) -> str:
+    """Escape C0 control chars and DEL for safe display, preserving Unicode.
+
+    Unlike ``unicode_escape`` (which mangles *every* non-ASCII byte, fine only
+    for already-refused hostile keys), this touches solely the bytes that can
+    forge terminal rows or inject ANSI — newline, CR, ESC, NUL, other C0, DEL.
+    So a legitimate accented/CJK object key renders normally in ``mintd data
+    ls`` / ``cache ls``, while a planted key like ``a\\n  ✓ pulled 9999 files``
+    cannot smuggle a fake status line into the listing. The common (clean) case
+    short-circuits with no allocation."""
+    if not _has_control_char(value):
+        return value
+    return "".join(
+        ch if not (ch < " " or ch == "\x7f")
+        else ch.encode("unicode_escape").decode("ascii")
+        for ch in value
+    )
 
 
 def _normalise_or_share_error(sub_path: str | None) -> str:

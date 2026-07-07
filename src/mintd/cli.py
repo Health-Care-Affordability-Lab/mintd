@@ -17,11 +17,12 @@ import argparse
 import json
 import logging
 import os
+import posixpath
 import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import Any, NoReturn, Optional
 
 from pydantic import ValidationError
 
@@ -72,9 +73,19 @@ from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
 from ._share_ops import (
     ShareError,
     TransferError,
+    neutralize_control_chars,
     resolve_share_user,
     share_get,
     share_put,
+)
+from ._cache_ops import (
+    CacheError,
+    CachePullSummary,
+    CachePushSummary,
+    cache_pull,
+    cache_push,
+    list_cache_objects,
+    resolve_repo_remote,
 )
 from .enclave import (
     AlreadyApproved,
@@ -217,6 +228,66 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
+
+
+def _add_cache_parser(subs: Any) -> None:
+    """Wire the ``cache push/pull/ls`` subparsers. Split out of ``_build_parser``
+    so the naming-discipline grep test can scope to exactly the cache surface's
+    argparse help strings (SLICE-37: help text rots under prose-only norms)."""
+    p_cache = subs.add_parser(
+        "cache", help="Durable repo file cache (S3): mirror untracked repo files to the repo's prefix"
+    )
+    p_cache_sub = p_cache.add_subparsers(dest="cache_command")
+
+    p_cache_push = p_cache_sub.add_parser(
+        "push", help="Upload untracked working-tree files to the repo file cache (S3)"
+    )
+    p_cache_push.add_argument(
+        "paths", nargs="+",
+        help="Files or directories in the working tree (anything not DVC-tracked)",
+    )
+    p_cache_push.add_argument("--remote", help="DVC remote name (default: the project's)")
+    p_cache_push.add_argument("--jobs", type=int, default=8, help="Upload parallelism (default: 8)")
+    p_cache_push.add_argument(
+        "--dry-run", action="store_true", dest="dry_run",
+        help="Report the would-upload/unchanged split without moving bytes "
+             "(still performs the LIST + HEAD precheck)",
+    )
+    p_cache_push.add_argument("--path", type=Path, default=Path("."),
+                              help="Project root (default: current directory)")
+    p_cache_push.set_defaults(_handler=_handle_cache_push)
+
+    p_cache_pull = p_cache_sub.add_parser(
+        "pull", help="Download objects from the repo file cache (S3) to their repo paths"
+    )
+    p_cache_pull.add_argument(
+        "--prefix", default=None,
+        help="Limit to objects under cache/<prefix> (e.g. data/scratch/)",
+    )
+    p_cache_pull.add_argument("--remote", help="DVC remote name (default: the project's)")
+    p_cache_pull.add_argument("--jobs", type=int, default=8, help="Download parallelism (default: 8)")
+    p_cache_pull.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing working-tree files (default: skip-and-warn on a "
+             "local file with different content)",
+    )
+    p_cache_pull.add_argument("--path", type=Path, default=Path("."),
+                              help="Project root (default: current directory)")
+    p_cache_pull.set_defaults(_handler=_handle_cache_pull)
+
+    p_cache_ls = p_cache_sub.add_parser(
+        "ls", help="List objects in the repo file cache (S3)"
+    )
+    p_cache_ls.add_argument(
+        "--prefix", default=None,
+        help="Limit to objects under cache/<prefix> (e.g. isochrones/ct/)",
+    )
+    p_cache_ls.add_argument("--remote", help="DVC remote name (default: the project's)")
+    p_cache_ls.add_argument("--no-truncate", dest="no_truncate", action="store_true",
+                            help="Render every row (default: truncate past 50 files)")
+    p_cache_ls.add_argument("--path", type=Path, default=Path("."),
+                            help="Project root (default: current directory)")
+    p_cache_ls.set_defaults(_handler=_handle_cache_ls)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -420,6 +491,8 @@ def _build_parser() -> argparse.ArgumentParser:
              "that directory; default: current directory)",
     )
     p_share_get.set_defaults(_handler=_handle_share_get)
+
+    _add_cache_parser(subs)
 
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
     p_enclave_sub = p_enclave.add_subparsers(dest="enclave_command")
@@ -626,6 +699,20 @@ def _resolve_s3_listing_ops(config: Config):
         logger.warning("data ls unavailable (boto3 not importable): %s", exc)
         return None
     return list_product_objects
+
+
+def _resolve_cache_ops(config: Config):
+    """Return the S3 client factory for the repo file cache (S3) verbs; tests
+    monkeypatch this seam to inject a moto client. Probes boto3 like
+    ``_resolve_fast_sync_ops`` so a missing dependency yields a clean
+    ``reporter.error`` + exit 2 instead of a first-call crash."""
+    try:
+        import boto3  # noqa: F401 — availability probe only
+    except ImportError as exc:
+        logger.warning("cache unavailable (boto3 not importable): %s", exc)
+        return None
+    from ._fast_sync_ops import _create_s3_client
+    return _create_s3_client
 
 
 def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> RegistryGitOps:
@@ -952,6 +1039,217 @@ def _handle_share_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any] | int:
+    """Shared preflight for the three cache verbs: project probe + config +
+    boto3-backed factory. Returns ``(reporter, project_path, config, factory)``
+    or an exit code."""
+    reporter = args._reporter
+    project_path = args.path.resolve()
+    if not (project_path / ".dvc").is_dir():
+        reporter.error(
+            f"not inside a mintd project (no .dvc/ at {project_path})",
+            hint="the repo file cache (S3) lives inside a project's own bucket "
+                 "prefix — cd into the project; for ad-hoc handoffs use mintd share put",
+        )
+        return 1
+    config = Config.load()
+    factory = _resolve_cache_ops(config)
+    if factory is None:
+        reporter.error(
+            "the repo file cache (S3) requires boto3, which is not installed",
+            hint="install it: pip install 'dvc[s3]' (see notes/INSTALL.md)",
+        )
+        return 2
+    return reporter, project_path, config, factory
+
+
+def _handle_cache_push(args: argparse.Namespace) -> int:
+    pre = _cache_project_preflight(args)
+    if isinstance(pre, int):
+        return pre
+    reporter, project_path, config, factory = pre
+    try:
+        summary = cache_push(
+            project_path=project_path,
+            paths=args.paths,
+            config=config,
+            reporter=reporter,
+            remote=args.remote,
+            jobs=args.jobs,
+            dry_run=args.dry_run,
+            s3_client_factory=factory,
+        )
+    except (CacheError, TransferError) as exc:
+        reporter.error(str(exc), hint=getattr(exc, "hint", None))
+        return 1
+    return _render_cache_push(summary, reporter)
+
+
+def _render_cache_push(summary: CachePushSummary, reporter: Reporter) -> int:
+    failed = summary.failed
+    for o in failed:
+        reporter.error(
+            f"upload failed for {o.rel}: {o.reason}",
+            hint=o.hint,
+        )
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "cached": summary.total,
+                "uploaded": summary.uploaded,
+                "unchanged": summary.unchanged,
+                "failed": len(failed),
+                "bytes": summary.uploaded_bytes,
+                "prefix": summary.key_prefix,
+                "dry_run": summary.dry_run,
+                "elapsed_s": round(summary.elapsed_s, 2),
+            }
+        )
+        return 1 if failed else 0
+    if failed:
+        reporter.error(
+            f"push incomplete: {len(failed)} file(s) failed, "
+            f"{summary.uploaded} uploaded, {summary.unchanged} unchanged",
+            hint="each failed file has a targeted retry command above",
+        )
+        return 1
+    verb = "would upload" if summary.dry_run else "uploaded"
+    dur = _format_duration(summary.elapsed_s)
+    dest = f" → s3://{summary.bucket}/{summary.key_prefix}/"
+    reporter.success(
+        f"✓ pushed {summary.total} file(s) to the repo file cache (S3) "
+        f"({_human_bytes(summary.uploaded_bytes)} · {summary.uploaded} {verb}, "
+        f"{summary.unchanged} unchanged){'' if summary.dry_run else dest} in {dur}"
+    )
+    if not summary.dry_run and summary.uploaded:
+        reporter.success(
+            "💡 the repo file cache (S3) is durable but unpinned — for versioned, "
+            "citable outputs use: mintd data push"
+        )
+    return 0
+
+
+def _handle_cache_pull(args: argparse.Namespace) -> int:
+    pre = _cache_project_preflight(args)
+    if isinstance(pre, int):
+        return pre
+    reporter, project_path, config, factory = pre
+    try:
+        summary = cache_pull(
+            project_path=project_path,
+            config=config,
+            reporter=reporter,
+            prefix=args.prefix,
+            remote=args.remote,
+            jobs=args.jobs,
+            force=args.force,
+            s3_client_factory=factory,
+        )
+    except (CacheError, TransferError) as exc:
+        reporter.error(str(exc), hint=getattr(exc, "hint", None))
+        return 1
+    except ValueError as exc:  # bad --prefix via _normalise_sub_path
+        reporter.error(str(exc), hint="drop '..', a leading '/', or '\\' from --prefix")
+        return 2
+    return _render_cache_pull(summary, reporter)
+
+
+def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
+    failed = summary.failed
+    for o in failed:
+        reporter.error(f"pull failed for {o.rel}: {o.reason}", hint=o.hint)
+    skipped = summary.skipped_existing
+    for o in skipped:
+        reporter.warn(f"kept local (differs, not overwritten): {o.rel} — {o.hint}")
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "pulled": summary.pulled,
+                "unchanged": summary.unchanged,
+                "skipped_existing": len(skipped),
+                "failed": len(failed),
+                "bytes": summary.pulled_bytes,
+                "prefix": summary.sub,
+                "elapsed_s": round(summary.elapsed_s, 2),
+            }
+        )
+        return 1 if failed else 0
+    if failed:
+        reporter.error(
+            f"pull incomplete: {len(failed)} file(s) failed, "
+            f"{summary.pulled} pulled, {summary.unchanged} unchanged, "
+            f"{len(skipped)} kept-local",
+            hint="a refused key is an admin conversation; retry after it is cleaned up",
+        )
+        return 1
+    if summary.pulled == 0 and summary.unchanged == 0 and not skipped:
+        # empty listing already warned + returned exit 0 in the ops layer
+        return 0
+    skip_note = f", {len(skipped)} kept-local (use --force to overwrite)" if skipped else ""
+    reporter.success(
+        f"✓ pulled {summary.pulled} file(s) from the repo file cache (S3) "
+        f"({_human_bytes(summary.pulled_bytes)}) to their repo paths"
+        f"{skip_note} in {_format_duration(summary.elapsed_s)}"
+    )
+    reporter.success(
+        "💡 the repo file cache (S3) is not DVC-tracked — 'mintd data pull' "
+        "handles the versioned outputs"
+    )
+    return 0
+
+
+def _handle_cache_ls(args: argparse.Namespace) -> int:
+    pre = _cache_project_preflight(args)
+    if isinstance(pre, int):
+        return pre
+    reporter, project_path, config, factory = pre
+    try:
+        repo = resolve_repo_remote(project_path, args.remote)
+    except CacheError as exc:
+        reporter.error(str(exc), hint=exc.hint)
+        return 1
+    try:
+        with reporter.status("Listing the repo file cache (S3)..."):
+            result = list_cache_objects(
+                repo,
+                sub_path=args.prefix,
+                aws_profile_name=config.aws_profile_name,
+                factory=factory,
+            )
+    except ValueError as exc:
+        reporter.error(str(exc), hint="drop '..', a leading '/', or '\\' from --prefix")
+        return 2
+    except BucketNotFound as exc:
+        reporter.error(str(exc), hint="check the project's remote url in .dvc/config")
+        return 1
+    except BucketAccessError as exc:
+        reporter.error(str(exc), hint="check AWS credentials (aws configure list / aws_profile_name)")
+        return 1
+
+    payload = _data_ls_payload("cache", result, include_versions=False)
+    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. The
+    # hint must name a PREFIX that cache_pull can actually list under: --prefix
+    # is normalised with a trailing '/', so a full file key (`iso/a.bin`) becomes
+    # `iso/a.bin/` and matches nothing. Point at the file's containing directory
+    # instead (keys are relative to sub_path, so prepend it).
+    first_file = next((o for o in result.objects if not o.is_dir), None)
+    if first_file is not None:
+        sub = result.truncated_to_prefix or ""
+        sub = sub.strip("/") + "/" if sub.strip("/") else ""
+        target = (sub + posixpath.dirname(first_file.key)).strip("/")
+        payload["hint"] = (
+            f"mintd cache pull --prefix {target}/" if target else "mintd cache pull"
+        )
+    no_truncate = getattr(args, "no_truncate", False)
+    reporter.result(
+        payload,
+        pretty=lambda p: _pretty_data_ls(
+            p, name="cache", versions=False, no_truncate=no_truncate,
+        ),
+    )
+    return 0
+
+
 def _handle_data_add(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
@@ -1211,7 +1509,11 @@ def _pretty_data_ls(
     for o in rows:
         # Slice-31 review P1: CommonPrefixes keys ALREADY end in `/`;
         # don't add another or we render `data//`.
-        key = o["key"]
+        # Cache-redteam P2: object keys are remote-controlled (any teammate /
+        # `aws s3 cp` can plant one); neutralize control chars before writing
+        # to stdout so a key can't forge table rows or inject ANSI. JSON mode
+        # is already safe (json.dumps escapes control chars).
+        key = neutralize_control_chars(o["key"])
         size = _human_bytes(o["size"]) if not o["is_dir"] else "-"
         modified = o["last_modified"] or "-"
         args_row = [key, size, modified]
@@ -1243,7 +1545,11 @@ def _pretty_data_ls(
     if "hint" in payload:
         # Use the payload's pre-computed hint (already targets the first
         # FILE, not a directory — slice-31 review P1).
-        lines.append(f"\n💡 Download a single file:\n   {payload['hint']}")
+        # Cache-redteam P2: the hint embeds a remote-controlled key; neutralize
+        # so the suggested command can't carry a smuggled newline/ANSI.
+        lines.append(
+            f"\n💡 Download a single file:\n   {neutralize_control_chars(payload['hint'])}"
+        )
     return "\n".join(lines)
 
 

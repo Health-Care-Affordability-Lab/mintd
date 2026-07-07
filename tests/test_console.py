@@ -46,11 +46,23 @@ def test_progress_yields_advance_callable(capsys):
     # transient bar erases on exit; capsys may or may not catch frames.
 
 
+def test_progress_handle_supports_set_description(capsys):
+    """The yielded handle is callable as advance(n) AND carries
+    set_description(text) so a multi-file transfer can relabel the live bar."""
+    reporter = Reporter(no_color=True)
+    with reporter.progress(100, desc="x") as adv:
+        adv(50)
+        adv.set_description("x · 1/2 file(s)")  # must not raise
+        adv(50)
+
+
 def test_progress_suppressed_in_json_mode(capsys):
-    """``--json`` mode: no rendering, yields a no-op callable."""
+    """``--json`` mode: no rendering, yields a no-op handle whose advance() and
+    set_description() are both inert."""
     reporter = Reporter(json_mode=True)
     with reporter.progress(100, desc="x") as adv:
         adv(50)
+        adv.set_description("x · 1/1 file(s)")  # no-op, must not raise
     out, err = capsys.readouterr()
     assert out == ""
     assert err == ""
