@@ -14,6 +14,29 @@ from rich.progress import (
 )
 from rich.status import Status
 
+
+class _ProgressHandle:
+    """What :meth:`Reporter.progress` yields. Callable as ``advance(n_bytes)``
+    (so existing callers are unchanged) and additionally carries
+    ``set_description(text)`` to relabel the live bar — e.g. a multi-file
+    transfer appending a ``N/M files`` completion counter. Both are no-ops in
+    the suppressed (json/quiet/empty) case."""
+
+    __slots__ = ("_advance", "_set_desc")
+
+    def __init__(
+        self, advance: Callable[[int], None], set_desc: Callable[[str], None]
+    ) -> None:
+        self._advance = advance
+        self._set_desc = set_desc
+
+    def __call__(self, n: int) -> None:
+        self._advance(n)
+
+    def set_description(self, text: str) -> None:
+        self._set_desc(text)
+
+
 class Reporter:
     def __init__(self, *, verbose: int = 0, quiet: int = 0,
                  json_mode: bool = False, no_color: bool = False) -> None:
@@ -185,9 +208,10 @@ class Reporter:
             self._active_status.update(complete_tick)
 
     @contextmanager
-    def progress(self, total: int, *, desc: str) -> Iterator[Callable[[int], None]]:
-        """Determinate progress bar via ``rich.Progress``. Yields an
-        ``advance(n_bytes)`` callable.
+    def progress(self, total: int, *, desc: str) -> Iterator[_ProgressHandle]:
+        """Determinate progress bar via ``rich.Progress``. Yields a
+        ``_ProgressHandle`` — call it as ``advance(n_bytes)`` and/or
+        ``.set_description(text)`` to relabel the bar mid-transfer.
 
         Suspends the active spinner (``self._active_status``) for the
         duration so the bar and the spinner don't fight for the terminal
@@ -200,7 +224,7 @@ class Reporter:
         Single-active per Reporter — nesting is not supported (no current
         caller nests; would corrupt ``_active_status`` tracking)."""
         if self.json_mode or self.level < 1 or total <= 0:
-            yield lambda _n: None
+            yield _ProgressHandle(lambda _n: None, lambda _t: None)
             return
         had_status = self._active_status is not None
         base = self._status_base
@@ -223,9 +247,12 @@ class Reporter:
         def advance(n: int) -> None:
             prog.update(task_id, advance=n)
 
+        def set_desc(text: str) -> None:
+            prog.update(task_id, description=text)
+
         try:
             with prog:
-                yield advance
+                yield _ProgressHandle(advance, set_desc)
         finally:
             self._active_progress = None
             self._progress_task_id = None

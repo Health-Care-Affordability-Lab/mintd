@@ -221,6 +221,27 @@ def test_head_without_stored_checksum_reports_none() -> None:
     assert info.checksum_sha256 is None
 
 
+def test_head_returns_user_metadata() -> None:
+    # A1: RemoteObjectInfo must surface the object's x-amz-meta-* metadata so
+    # mintd cache can read its ``mintd-sha256`` for the skip compare / verify.
+    class _C:
+        def head_object(self, **k):
+            return {"ContentLength": 7, "Metadata": {"mintd-sha256": "abc123"}}
+
+    info = head_remote_object(_C(), "b", "k")
+    assert info.metadata == {"mintd-sha256": "abc123"}
+    assert info.metadata.get("mintd-sha256") == "abc123"
+
+
+def test_head_metadata_defaults_empty_when_absent() -> None:
+    class _C:
+        def head_object(self, **k):
+            return {"ContentLength": 7}
+
+    info = head_remote_object(_C(), "b", "k")
+    assert info.metadata == {}
+
+
 def test_head_sends_checksum_mode_enabled() -> None:
     seen: dict = {}
 

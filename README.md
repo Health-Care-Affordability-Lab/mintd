@@ -195,12 +195,58 @@ The manifest's `transferred[]` section is append-only by construction —
 `EnclaveManifest.save()` refuses to write if an existing entry was
 mutated, so the audit trail can't be silently rewritten.
 
+## Example: files that aren't data products
+
+Not everything is a versioned, citable output. For **untracked** files —
+scratch intermediates, a large input you don't want in git, a one-off
+handoff to a teammate — `mintd` has two lighter lanes that reuse the same
+S3 storage but skip the pin/registry machinery.
+
+**`cache`** — a durable file cache on your project's own S3 prefix. Push
+*any* working-tree file that isn't DVC-tracked; a teammate on the same repo
+pulls it back to the same path. Use it for expensive intermediates you'd
+rather recompute-once-and-share than commit.
+
+```bash
+# Push any untracked path (a file or a whole directory):
+mintd cache push data/scratch/isochrones
+mintd cache push results/model.pkl notes/scratch.csv
+
+# See what's cached, then pull it back on another clone:
+mintd cache ls
+mintd cache pull                       # everything
+mintd cache pull --prefix data/scratch/    # just one subtree
+```
+
+A DVC-tracked path is refused (it belongs to `mintd data push`), as is
+anything under `.git/` or `.dvc/`. Pull reconstructs each file at its repo
+path and won't clobber a local file that differs unless you pass `--force`.
+Transfers are size-first, hash-verified: an unchanged file is skipped.
+
+**`share`** — an ephemeral drop-zone keyed by user, for a quick handoff that
+isn't tied to any repo:
+
+```bash
+# Producer drops a file; the command prints the ref to send:
+mintd share put ./quarterly.xlsx
+mintd share put ./plot.png --as figures/     # into a sub-folder
+
+# Recipient fetches it by ref:
+mintd share get alice/quarterly.xlsx
+mintd share get alice/figures/plot.png --out ./downloads/
+```
+
+Rule of thumb: **`data push`** for versioned, citable outputs; **`cache`**
+for durable-but-unpinned repo files; **`share`** for a one-off handoff.
+
 ## Command reference
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
 mintd check    [path] [--upgrades]                Validate metadata + (optionally) pins
 mintd data     import|clone|pull|push|add|verify|remove|list|ls
+mintd cache    push|pull|ls                        Durable file cache for untracked repo files
+mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list
 mintd registry register|update|status|sync        Catalog operations
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
