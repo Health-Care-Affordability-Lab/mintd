@@ -69,6 +69,13 @@ from ._s3_listing_ops import (
     list_product_objects,
 )
 from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
+from ._share_ops import (
+    ShareError,
+    TransferError,
+    resolve_share_user,
+    share_get,
+    share_put,
+)
 from .enclave import (
     AlreadyApproved,
     AppendOnlyViolation,
@@ -386,6 +393,33 @@ def _build_parser() -> argparse.ArgumentParser:
     p_data_ls.add_argument("--versions", dest="versions", action="store_true",
                            help="Show per-key version count (version_aware buckets only)")
     p_data_ls.set_defaults(_handler=_handle_data_ls, _parser=p_data_ls, recursive=True)
+
+    p_share = subs.add_parser("share", help="Ephemeral handoff lane (drop-zone)")
+    p_share_sub = p_share.add_subparsers(dest="share_command")
+    p_share_put = p_share_sub.add_parser(
+        "put", help="Upload a file to the share drop-zone"
+    )
+    p_share_put.add_argument("file", type=Path, help="Local file to share")
+    p_share_put.add_argument(
+        "--as", dest="as_value", metavar="SUBPATH",
+        help="Sub-path or target name under share/<user>/ "
+             "(trailing '/' drops the file into that folder)",
+    )
+    p_share_put.set_defaults(_handler=_handle_share_put)
+    p_share_get = p_share_sub.add_parser(
+        "get", help="Download a shared file by ref"
+    )
+    p_share_get.add_argument("ref", help="Share ref: <user>/<sub>/<file>")
+    p_share_get.add_argument(
+        # Plain str (not type=Path): pathlib strips a trailing separator at
+        # construction, so type=Path would silently discard the "into this
+        # folder" intent of e.g. --out inbox/. _resolve_get_dest tests the raw
+        # string for a trailing separator before converting to Path.
+        "--out", default=None, metavar="PATH",
+        help="Destination file or directory (trailing '/' drops the file into "
+             "that directory; default: current directory)",
+    )
+    p_share_get.set_defaults(_handler=_handle_share_get)
 
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
     p_enclave_sub = p_enclave.add_subparsers(dest="enclave_command")
@@ -818,6 +852,103 @@ def _handle_data_push(args: argparse.Namespace) -> int:
             reporter.success(
                 f"✓ pushed{count_clause}{size_clause}{remote_clause} in {duration}"
             )
+    return 0
+
+
+def _share_boto3_available(reporter: Reporter) -> bool:
+    """Probe for ``boto3`` with the same posture as ``_resolve_fast_sync_ops``:
+    a clean ``reporter.error`` + exit 2, never a traceback from a later
+    ``_create_s3_client`` call whose ``boto3`` is ``None``."""
+    try:
+        import boto3  # noqa: F401 — availability probe only
+    except ImportError as exc:
+        logger.warning("share unavailable (boto3 not importable): %s", exc)
+        reporter.error(
+            "share requires boto3, which is not installed",
+            hint="install it: pip install 'dvc[s3]' (see notes/INSTALL.md)",
+        )
+        return False
+    return True
+
+
+def _handle_share_put(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    config = Config.load()
+    if not _share_boto3_available(reporter):
+        return 2
+    try:
+        user, source = resolve_share_user(config)
+    except ShareError as e:
+        reporter.error(str(e), hint=e.hint)
+        return 1
+    if source == "author":
+        reporter.info(
+            f"💡 sharing as '{user}' — set share_user in "
+            "~/.config/mintd/config.yaml to pin this"
+        )
+    try:
+        result = share_put(
+            local_path=args.file,
+            user=user,
+            config=config,
+            reporter=reporter,
+            as_value=args.as_value,
+        )
+    except (ShareError, TransferError) as e:
+        reporter.error(str(e), hint=e.hint)
+        return 1
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "shared": result.name,
+                "key": result.key,
+                "ref": result.ref,
+                "bytes": result.bytes,
+                "elapsed_s": round(result.elapsed_s, 2),
+            }
+        )
+    else:
+        reporter.success(
+            f"✓ shared {result.name} ({_human_bytes(result.bytes)}) → "
+            f"{result.key} in {_format_duration(result.elapsed_s)}"
+        )
+        # The line a teammate runs to grab it — the point of the share.
+        # reporter.success (not info): visible at default verbosity, still
+        # suppressed under --json (the ref rides the json payload above).
+        reporter.success(f"  fetch it with: mintd share get {result.ref}")
+    return 0
+
+
+def _handle_share_get(args: argparse.Namespace) -> int:
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    config = Config.load()
+    if not _share_boto3_available(reporter):
+        return 2
+    try:
+        result = share_get(
+            ref=args.ref,
+            config=config,
+            reporter=reporter,
+            out=args.out,
+        )
+    except (ShareError, TransferError) as e:
+        reporter.error(str(e), hint=e.hint)
+        return 1
+    if reporter.json_mode:
+        reporter.result(
+            {
+                "got": result.name,
+                "ref": result.ref,
+                "dest": str(result.dest),
+                "bytes": result.bytes,
+                "elapsed_s": round(result.elapsed_s, 2),
+            }
+        )
+    else:
+        reporter.success(
+            f"✓ got {result.name} ({_human_bytes(result.bytes)}) → "
+            f"{result.dest} in {_format_duration(result.elapsed_s)}"
+        )
     return 0
 
 

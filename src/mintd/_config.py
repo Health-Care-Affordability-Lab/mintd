@@ -35,6 +35,9 @@ class Config(BaseModel):
     # User identity — surfaces in generated scaffolds (READMEs, R DESCRIPTION,
     # citations.md, etc.). Absent → templates render empty strings.
     author: str | None = None
+    # Pins the identity used by `mintd share put` keys. Falls back to a
+    # slugified `author` when unset (the CLI prints the nudge).
+    share_user: str | None = None
     organization: str | None = None
 
     # Registry conventions — used by the registry PR flow and by scaffold

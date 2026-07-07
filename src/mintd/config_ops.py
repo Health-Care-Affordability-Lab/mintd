@@ -439,6 +439,11 @@ def _prompt_field(name: str, current: object, *, prompt_fn=input) -> str:
     return prompt_fn(f"  {name} [{current_display}]: ").strip()
 
 
+# Config fields the interactive walkthrough does not prompt for (S1 polish
+# debt); still settable via `config setup --set` or the YAML directly.
+_SETUP_SKIP_FIELDS = frozenset({"share_user"})
+
+
 def interactive_setup(
     config_path: Path | None,
     *,
@@ -500,6 +505,10 @@ def interactive_setup(
     data = dict(existing)
     try:
         for field_name in Config.model_fields:
+            if field_name in _SETUP_SKIP_FIELDS:
+                # share_user prompting is deferred (S1 polish); it is still
+                # settable via `config setup --set share_user=` or the YAML.
+                continue
             current = data.get(field_name)
             raw = _prompt_field(field_name, current, prompt_fn=prompt_fn)
             if raw == "":

@@ -153,18 +153,6 @@ def _write_dvc_config(tmp_path: Path, bucket: str, prefix: str = "") -> None:
     )
 
 
-@pytest.fixture
-def s3_versioned():
-    with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
-        bucket = "test-bucket"
-        client.create_bucket(Bucket=bucket)
-        client.put_bucket_versioning(
-            Bucket=bucket, VersioningConfiguration={"Status": "Enabled"}
-        )
-        yield client, bucket
-
-
 # ---------- parsing (6) ----------
 
 def test_parse_dvc_outs_standard_md5(tmp_path: Path) -> None:
