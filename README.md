@@ -173,6 +173,27 @@ mintd check --upgrades
 mintd data import my-cleaned-survey --bump
 ```
 
+## Example: hand a file to a teammate
+
+For a quick handoff that isn't worth a curated data product — a draft, an
+intermediate, a "sanity-check this by EOD" file too big for Slack — `share`
+drops it into an ephemeral lane on the lab bucket, no `init`/classify/publish:
+
+```bash
+# Share a file. Identity comes from share_user (or your config author);
+# receiving needs no setup — the sender is in the ref.
+mintd share put model_run.parquet --as grant-2026/
+# ✓ shared model_run.parquet (191 MB) → share/alice/grant-2026/model_run.parquet in 14s
+#   fetch it with: mintd share get alice/grant-2026/model_run.parquet
+
+# A teammate (or you, on another machine) grabs it by that ref:
+mintd share get alice/grant-2026/model_run.parquet --out ./inbox/
+```
+
+The `put` line prints the exact `get` command to paste into chat. `share` is a
+handoff lane, not a system of record: files here are uncatalogued, unpinned, and
+not lineage-tracked — for anything durable or citable, use `mintd data push`.
+
 ## Example: enclave workflow
 
 For air-gapped / governed-access environments where data leaves a secure
@@ -201,6 +222,7 @@ mutated, so the audit trail can't be silently rewritten.
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
 mintd check    [path] [--upgrades]                Validate metadata + (optionally) pins
 mintd data     import|clone|pull|push|add|verify|remove|list|ls
+mintd share    put <file> [--as SUB] | get <ref> [--out PATH]   Ephemeral handoff lane
 mintd enclave  add|remove|bump|pull|package|verify|list
 mintd registry register|update|status|sync        Catalog operations
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
