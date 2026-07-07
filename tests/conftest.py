@@ -10,7 +10,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import boto3
 import pytest
+from moto import mock_aws
 
 
 def _git(args: list[str], cwd: Path | None = None) -> None:
@@ -71,3 +73,19 @@ def remote_registry_empty(tmp_path: Path) -> Path:
     seeded entries. Use for parameterized client tests where the test
     controls all visible entries."""
     return _init_remote(tmp_path, with_seed=False)
+
+
+@pytest.fixture
+def s3_versioned():
+    """A moto-backed, versioning-enabled S3 bucket (matches the real bucket).
+
+    Yields ``(client, bucket)``. Shared home for fast-sync and share/transport
+    tests — one moto bucket definition, not two."""
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        bucket = "test-bucket"
+        client.create_bucket(Bucket=bucket)
+        client.put_bucket_versioning(
+            Bucket=bucket, VersioningConfiguration={"Status": "Enabled"}
+        )
+        yield client, bucket
