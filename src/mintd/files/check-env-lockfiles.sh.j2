@@ -6,10 +6,13 @@ set -e
 
 errors=0
 
-# Python: if requirements.txt exists, requirements-lock.txt should too
+# Python: if requirements.txt exists, requirements-lock.txt must exist AND
+# contain at least one non-whitespace character. A failed `pip install` followed
+# by the documented `pip freeze > requirements-lock.txt` recovery writes an
+# empty file, which a plain existence test would wrongly accept.
 if [ -f "requirements.txt" ]; then
-    if [ ! -f "requirements-lock.txt" ]; then
-        echo "ERROR: requirements.txt exists but requirements-lock.txt is missing"
+    if ! grep -q '[^[:space:]]' requirements-lock.txt 2>/dev/null; then
+        echo "ERROR: requirements-lock.txt is missing or empty"
         echo "  Run: pip freeze > requirements-lock.txt"
         errors=$((errors + 1))
     fi

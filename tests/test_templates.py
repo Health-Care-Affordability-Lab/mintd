@@ -48,7 +48,9 @@ def test_data_python_renders_all_files(tmp_path: Path) -> None:
     assert "requirements.txt" in rel
     assert "code/fetch.py" in rel
     assert "code/ingest.py" in rel
-    assert "code/clean.py" in rel
+    # Slice: the clean.* stub was deleted (demoted into ingest's parse_and_clean
+    # helper); the scaffold must no longer emit it.
+    assert "code/clean.py" not in rel
     assert "code/validate.py" in rel
     # Slice 41: scaffold no longer ships generate_schema.py; the CLI
     # (`mintd data schema generate`) replaces the vendored script.
@@ -127,7 +129,7 @@ def test_data_r_renders_r_sources(tmp_path: Path) -> None:
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
     assert "code/fetch.R" in rel
     assert "code/ingest.R" in rel
-    assert "code/clean.R" in rel
+    assert "code/clean.R" not in rel
     assert "DESCRIPTION" in rel
     assert "renv.lock" in rel
     assert "code/ingest.py" not in rel
@@ -140,7 +142,7 @@ def test_data_stata_renders_do_sources(tmp_path: Path) -> None:
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
     assert "code/fetch.do" in rel
     assert "code/ingest.do" in rel
-    assert "code/clean.do" in rel
+    assert "code/clean.do" not in rel
     assert "stata-packages.txt" in rel
     assert "code/ingest.py" not in rel
 
@@ -208,6 +210,65 @@ def test_validate_stubs_no_stale_clean_reference(
     )
     assert "dvc repro ingest" in validate_script, (
         f"validate.{ext} empty-dir message must point to `dvc repro ingest`"
+    )
+
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_data_scaffold_has_no_clean_stub_reference(
+    tmp_path: Path, language: str
+) -> None:
+    """The `clean.*` stub was deleted; no rendered data-scaffold file may point
+    back at it. Generalizes the per-file validate check to the whole tree, so a
+    reintroduced pointer to the removed stub is caught anywhere it lands."""
+    import re
+
+    written = render_scaffold(
+        project_type="data", name="foo", language=language, target_dir=tmp_path
+    )
+    pattern = re.compile(r"clean\.(py|R|do)")
+    offenders = [
+        p.relative_to(tmp_path).as_posix()
+        for p in written
+        if pattern.search(p.read_text(encoding="utf-8"))
+    ]
+    assert not offenders, (
+        f"{language}: rendered files still reference the deleted clean stub: "
+        f"{offenders}"
+    )
+
+
+def test_run_all_do_fails_loud_on_missing_config(tmp_path: Path) -> None:
+    """F5: run_all.do must guard `code/config.do` with `capture confirm file`
+    + `exit 601`, so a missing config names the path instead of failing with a
+    bare `r(601)`. A revert to a silent/unguarded load leaves this red."""
+    render_scaffold(
+        project_type="project", name="foo", language="stata", target_dir=tmp_path
+    )
+    run_all = (tmp_path / "run_all.do").read_text(encoding="utf-8")
+    assert "capture confirm file" in run_all, (
+        "run_all.do must probe for config with `capture confirm file`"
+    )
+    assert "exit 601" in run_all, (
+        "run_all.do must `exit 601` on a missing config, not fall through"
+    )
+    assert 'do "`project_root\'/code/00_setup/config.do"' not in run_all, (
+        "run_all.do must not reference the phantom code/00_setup/ dir"
+    )
+
+
+def test_run_all_r_fails_loud_on_missing_config(tmp_path: Path) -> None:
+    """F5-R: run_all.R must `stop()` when `code/config.R` is missing rather than
+    silently skipping the config load. A revert to the old
+    `if (file.exists(config_path))` swallow leaves this red."""
+    render_scaffold(
+        project_type="project", name="foo", language="r", target_dir=tmp_path
+    )
+    run_all = (tmp_path / "run_all.R").read_text(encoding="utf-8")
+    assert 'stop("Configuration not found' in run_all, (
+        "run_all.R must stop() when config.R is missing"
+    )
+    assert '"00_setup"' not in run_all, (
+        "run_all.R must not reference the phantom code/00_setup/ dir"
     )
 
 
@@ -307,19 +368,15 @@ def test_gitignore_negates_dvc_pointers_under_downloads(tmp_path: Path) -> None:
     refuses to write into the enclave staging tree (slice 47, Failure 2)."""
     import subprocess
 
+    from tests.scaffold_contract import is_ignored
+
     render_scaffold(
         project_type="enclave", name="foo", language="python", target_dir=tmp_path
     )
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
-    def is_ignored(rel: str) -> bool:
-        # `git check-ignore -q` exits 0 when the path is ignored, 1 when not.
-        return subprocess.run(
-            ["git", "-C", str(tmp_path), "check-ignore", "-q", rel]
-        ).returncode == 0
-
-    assert not is_ignored("downloads/provider-x/_staging/outputs.dvc")
-    assert is_ignored("downloads/provider-x/_staging/outputs/part.parquet")
+    assert not is_ignored(tmp_path, "downloads/provider-x/_staging/outputs.dvc")
+    assert is_ignored(tmp_path, "downloads/provider-x/_staging/outputs/part.parquet")
 
 
 @pytest.mark.parametrize("template_name", ["transfer.py.j2", "package.py.j2"])

@@ -16,6 +16,11 @@ stages:
 #    outs:
 #      - ../data/raw/
 # ---------------------------------------------------------------------------
+# These stages are a starting point, not a fixed set. Add your own stage
+# (e.g. a `clean`/`harmonize` step between ingest and validate) whenever the
+# ingest logic grows — just keep each stage's `deps`/`outs` chain connected so
+# `dvc repro` can order the DAG.
+# ---------------------------------------------------------------------------
 
   ingest:
     wdir: {{ source_dir }}
@@ -60,13 +65,12 @@ stages:
       - ../data/intermediate/
     outs:
       - ../data/final/
-      - ../data/schema_validation_log.txt
 {% if language != "stata" %}      - ../schemas/v1/schema.json
 {% endif %}
 {% if language == "stata" %}
   schema:
     wdir: {{ source_dir }}
-    cmd: mintd schema generate --project-dir ..
+    cmd: mintd data schema generate --project-dir ..
     deps:
       - ../data/final/
     outs:

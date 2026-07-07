@@ -12,7 +12,9 @@
 #'
 #' For large datasets with expensive parsing, consider separating `parse_*`
 #' functions (raw formats -> data frames) from `clean_*` functions
-#' (business-logic standardization). The helpers in clean.R can be sourced here.
+#' (business-logic standardization). If the clean_* helpers grow, split them
+#' into their own file — and into their own dvc.yaml stage between ingest and
+#' validate.
 
 # Import mint utilities (located in same code/ directory)
 source("_mintd_utils.R")
