@@ -1693,6 +1693,25 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
     except AppendOnlyViolation as exc:
         reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
         return 1
+    except CatalogNotFound as exc:
+        # `--force` resolves the producer's catalog entry directly (bypassing
+        # check_project, which folds this into a BumpBlocked finding), so a
+        # removed/offline entry surfaces here. Render clean, not a traceback.
+        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
+        return 1
+    except ValidationError as exc:
+        # pydantic ValidationError subclasses ValueError, so it would otherwise
+        # be swallowed by the producer/catalog clause below with a misleading
+        # hint. The manifest is human-editable — point at the local file.
+        reporter.error(str(exc), hint="enclave_manifest.yaml is malformed; fix the reported field")
+        return 1
+    except (ProducerError, ValueError) as exc:
+        # `--force` skips the check_project reachability gate and resolves the
+        # producer's HEAD directly, so an unreachable/broken producer or a
+        # malformed catalog entry (no github_url) surfaces here rather than as a
+        # BumpBlocked finding. Render it as a clean error instead of a traceback.
+        reporter.error(str(exc), hint="check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD")
+        return 1
     if result is None:
         print("up to date")
     else:
@@ -1786,9 +1805,9 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
                 "(it initializes DVC automatically) or run `dvc init` once"
             )
         elif isinstance(exc.cause, DvcImportPathNotFound):
-            hint = f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull --repo {exc.repo}"
+            hint = f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull {exc.repo}"
         else:
-            hint = f"retry: mintd enclave pull --repo {exc.repo}"
+            hint = f"retry: mintd enclave pull {exc.repo}"
         reporter.error(str(exc), hint=hint)
         return 1
     except (
