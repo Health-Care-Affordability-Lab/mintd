@@ -221,6 +221,35 @@ def enclave_add(
     new_manifest.save(manifest_path)
     return manifest_path
 
+def _validated_head_sha(
+    client: CatalogClient,
+    target: ApprovedProduct,
+    name: str,
+    producer_view_factory: Callable[[str], tuple[ProducerView, str]] | None,
+) -> str:
+    """Resolve the producer's HEAD SHA and confirm its primary still exists.
+
+    Pure: resolves the repo URL, fetches the HEAD view via the injected
+    factory (or `ProducerView.at_head`), and maps a missing primary to
+    `PrimaryRemovedAtHead`. Returns the resolved SHA only — no manifest
+    mutation. Shared by the `--force` and drift paths so both keep the exact
+    same resolve→validate semantics.
+    """
+    repo_url = _resolve_approved_product_url(client, target)
+    factory = producer_view_factory or ProducerView.at_head
+    head_view, head_sha = factory(repo_url)
+    # Only primary-output subscriptions depend on data_products.primary;
+    # source_path/all subscriptions do not (mirrors enclave_add, which skips
+    # this check for them). Validating primary for those would wrongly block a
+    # repin to a producer that legitimately has no primary.
+    if target.source_path is None and not target.all:
+        try:
+            head_view.primary_or_raise()
+        except MissingPrimaryDataProduct as e:
+            raise PrimaryRemovedAtHead(name, repo_url) from e
+    return head_sha
+
+
 def enclave_bump(
     client: CatalogClient,
     *,
@@ -241,6 +270,20 @@ def enclave_bump(
             break
     if target is None:
         raise ImportNotFound(f"{name!r} not in approved_products[] in {manifest_path}")
+    # `--force` repins straight to the producer's validated HEAD, bypassing the
+    # check_project finding gate entirely (which returns None on `up_to_date`
+    # before HEAD is ever resolved). Placed AFTER the ImportNotFound guard so a
+    # missing repo still errors, and BEFORE the findings computation so the
+    # up_to_date early-return can't pre-empt a forced repin. Only the primary is
+    # validated at HEAD — the BumpBlocked-class gates (pin_missing, drift,
+    # schema/metadata) are deliberately skipped under force.
+    if force:
+        head_sha = _validated_head_sha(client, target, name, producer_view_factory)
+        if target.pin == head_sha:
+            return None
+        new_manifest = manifest.apply_pin_bump(repo=name, new_pin=head_sha)
+        new_manifest.save(manifest_path)
+        return manifest_path
     findings = (
         check_findings
         if check_findings is not None
@@ -257,14 +300,7 @@ def enclave_bump(
         return None
     if finding.kind != "drift":
         raise BumpBlocked(name, finding)
-    repo_url = _resolve_approved_product_url(client, target)
-    factory = producer_view_factory or ProducerView.at_head
-    head_view, head_sha = factory(repo_url)
-    try:
-        head_view.primary_or_raise()
-    except MissingPrimaryDataProduct as e:
-        raise PrimaryRemovedAtHead(name, repo_url) from e
-    del force
+    head_sha = _validated_head_sha(client, target, name, producer_view_factory)
     new_manifest = manifest.apply_pin_bump(repo=name, new_pin=head_sha)
     new_manifest.save(manifest_path)
     return manifest_path

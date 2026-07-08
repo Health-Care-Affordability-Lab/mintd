@@ -2073,7 +2073,11 @@ def test_cli_enclave_pull_dvc_op_error_names_producer(
     rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
     assert rc == 1
     errs = recording_reporter.events_of("error")
-    assert errs and "repo-b" in (errs[0][2] or "")
+    hint = errs[0][2] or ""
+    assert errs and "repo-b" in hint
+    # `pull` takes a positional repo, not --repo — the retry hint must be runnable.
+    assert "--repo" not in hint
+    assert "mintd enclave pull repo-b" in hint
     assert "Traceback" not in capsys.readouterr().err
 
 
@@ -2111,6 +2115,87 @@ def test_cli_enclave_pull_path_not_found_keeps_pin_repo_hint(
     assert rc == 1
     hint = recording_reporter.events_of("error")[0][2] or ""
     assert "pin/repo" in hint
+    # `pull` takes a positional repo, not --repo — the retry hint must be runnable.
+    assert "--repo" not in hint
+    assert "mintd enclave pull repo-b" in hint
+
+
+def test_cli_enclave_bump_force_producer_error_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`bump --force` reaches ProducerView.at_head without the check_project
+    reachability gate, so an unreachable producer surfaces as ProducerError.
+    The handler must render it as a clean error, not a traceback."""
+    from mintd.producer import ProducerError
+    monkeypatch.setattr(
+        "mintd.cli.enclave_bump",
+        _raises(ProducerError.unreachable("provider-xw", "a" * 40)),
+    )
+    rc = cli.main(
+        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+    )
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and errs[0][2]  # has a non-empty hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_enclave_bump_force_catalog_not_found_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`bump --force` resolves the catalog entry directly (bypassing
+    check_project), so a removed/offline entry raises CatalogNotFound. The
+    handler must render it cleanly, not as a traceback."""
+    from mintd.catalog import CatalogNotFound
+    monkeypatch.setattr(
+        "mintd.cli.enclave_bump",
+        _raises(CatalogNotFound("provider-xw not in registry")),
+    )
+    rc = cli.main(
+        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+    )
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and errs[0][2]  # has a non-empty hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_enclave_bump_force_missing_repo_url_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
+    recording_reporter, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A catalog entry with no repository.github_url raises ValueError on the
+    force path; the handler must render it cleanly, not as a traceback."""
+    monkeypatch.setattr(
+        "mintd.cli.enclave_bump",
+        _raises(ValueError("catalog entry 'provider-xw' has no repository.github_url")),
+    )
+    rc = cli.main(
+        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+    )
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert errs and errs[0][2]  # has a non-empty hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_enclave_bump_malformed_manifest_points_at_manifest(
+    tmp_path: Path, patched_clients, recording_reporter,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A malformed enclave_manifest.yaml raises pydantic ValidationError (a
+    ValueError subclass) at load; the handler must point at the local manifest,
+    not misattribute it to the producer/catalog, and not traceback."""
+    m_path = tmp_path / "m.yaml"
+    m_path.write_text("enclave_name: test\napproved_products: notalist\n")
+    rc = cli.main(["enclave", "bump", "provider-xw", "--manifest", str(m_path)])
+    assert rc == 1
+    hint = recording_reporter.events_of("error")[0][2] or ""
+    assert "manifest" in hint.lower()
+    assert "producer" not in hint.lower()
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_cli_registry_sync_shows_refresh_status(

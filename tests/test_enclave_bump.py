@@ -243,6 +243,123 @@ def test_bump_default_uses_producer_view_at_head(tmp_path, monkeypatch):
     assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
 
 
+def _must_not_call_check_project(*args: Any, **kwargs: Any) -> Any:
+    pytest.fail("check_project must not be called on the --force path")
+
+
+def test_bump_force_repins_to_head_skipping_finding_gate(tmp_path, monkeypatch):
+    """`--force` bypasses check_project entirely and repins to HEAD."""
+    p = _make_manifest(tmp_path)
+    client = InMemoryCatalogClient()
+    client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
+
+    def factory(url):
+        view = ProducerView(repo="provider-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        return view, HEAD_SHA
+
+    result = enclave_bump(
+        client, manifest_path=p, name="provider-xw", force=True, producer_view_factory=factory
+    )
+
+    assert result == p
+    assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
+
+
+def test_bump_force_already_at_head_is_noop(tmp_path, monkeypatch):
+    """When the pin already equals HEAD, `--force` is a no-op (returns None)."""
+    p = _make_manifest(tmp_path)
+    client = InMemoryCatalogClient()
+    client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
+
+    def factory(url):
+        # HEAD == the manifest's current pin (PIN_SHA).
+        view = ProducerView(repo="provider-xw", pin=PIN_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        return view, PIN_SHA
+
+    result = enclave_bump(
+        client, manifest_path=p, name="provider-xw", force=True, producer_view_factory=factory
+    )
+
+    assert result is None
+    assert EnclaveManifest.load(p).approved_products[0].pin == PIN_SHA
+
+
+def test_bump_force_primary_removed_raises(tmp_path, monkeypatch):
+    """`--force` still validates the primary at HEAD."""
+    p = _make_manifest(tmp_path)
+    client = InMemoryCatalogClient()
+    client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
+
+    broken_meta = FULL_METADATA.copy()
+    broken_meta["data_products"] = {}
+
+    def broken_factory(url):
+        view = ProducerView(repo="p", pin=HEAD_SHA, metadata=Metadata.model_validate(broken_meta))
+        return view, HEAD_SHA
+
+    with pytest.raises(PrimaryRemovedAtHead):
+        enclave_bump(
+            client, manifest_path=p, name="provider-xw", force=True, producer_view_factory=broken_factory
+        )
+
+
+def test_bump_force_validates_primary_even_when_already_at_head(tmp_path, monkeypatch):
+    """Primary validation runs BEFORE the pin==HEAD no-op check: an
+    already-at-HEAD product whose primary was removed at HEAD raises
+    PrimaryRemovedAtHead rather than silently no-op'ing."""
+    p = _make_manifest(tmp_path)
+    client = InMemoryCatalogClient()
+    client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
+
+    broken_meta = FULL_METADATA.copy()
+    broken_meta["data_products"] = {}
+
+    def broken_factory(url):
+        # HEAD == the manifest's current pin (PIN_SHA), but primary removed.
+        view = ProducerView(repo="p", pin=PIN_SHA, metadata=Metadata.model_validate(broken_meta))
+        return view, PIN_SHA
+
+    with pytest.raises(PrimaryRemovedAtHead):
+        enclave_bump(
+            client, manifest_path=p, name="provider-xw", force=True, producer_view_factory=broken_factory
+        )
+
+
+def test_bump_force_source_path_subscription_skips_primary_validation(tmp_path, monkeypatch):
+    """A source_path/all subscription does not depend on data_products.primary,
+    so `--force` must repin it even when the producer has no primary at HEAD —
+    validating primary would wrongly block the repin."""
+    m = EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA, source_path="data/custom/")
+        ],
+    )
+    p = tmp_path / "enclave_manifest.yaml"
+    m.save(p)
+    client = InMemoryCatalogClient()
+    client.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
+
+    primary_less = FULL_METADATA.copy()
+    primary_less["data_products"] = {}
+
+    def factory(url):
+        view = ProducerView(repo="provider-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(primary_less))
+        return view, HEAD_SHA
+
+    result = enclave_bump(
+        client, manifest_path=p, name="provider-xw", force=True, producer_view_factory=factory
+    )
+
+    assert result == p
+    assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
+
+
 def test_enclave_bump_missing_kind_raises_bump_blocked(tmp_path):
     """A consumer-section finding without `kind` is a regression contract
     violation post-slice-9; `enclave_bump` must raise `BumpBlocked` rather
