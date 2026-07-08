@@ -1,6 +1,7 @@
 import pytest
 from pathlib import Path
 from datetime import date, datetime
+from mintd._dvc_ops import DvcPullError
 from mintd.enclave import enclave_pull, ApprovedProduct, DownloadedItem, EnclaveManifest, ImportNotFound
 
 class _Client:
@@ -344,3 +345,176 @@ def test_pull_skips_init_when_dvc_dir_exists(tmp_path):
     dvc = _FakeDvcOps()
     enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=_single_out_factory)
     assert dvc.init_calls == []
+
+
+class _PartialFailDvc:
+    """dvc_ops double that fetches every repo except `fail_repo`, which raises.
+
+    Derives the repo from the dest layout (downloads/<repo>/_staging/<name>) so
+    no catalog wiring is needed. Mirrors _FakeDvcOps, including the
+    stage-working-dir existence guard.
+    """
+
+    def __init__(self, fail_repo):
+        self.fail_repo = fail_repo
+        self.calls = []
+
+    def init(self, *, cwd=None):
+        pass
+
+    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+        self.calls.append((repo_url, path, dest, rev, force))
+        repo = dest.parent.parent.name
+        if repo == self.fail_repo:
+            raise DvcPullError("boom")
+        assert dest.parent.exists(), f"stage working dir {dest.parent} does not exist"
+        dest.write_text("dummy-data")
+        dvc_path = dest.parent / (dest.name + ".dvc")
+        dvc_path.write_text("outs:\n- md5: ffffffffffffffffffffffffffffffff\n")
+        return dvc_path
+
+
+def test_pull_partial_run_persists_completed_products(tmp_path):
+    """Defect 1: a later producer's failure must not discard the earlier
+    products' downloaded[] rows. The completed product is persisted and a
+    re-run skips it — while the bad producer still aborts loudly."""
+    from mintd.enclave import EnclavePullError
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="good", registry_entry="e", pin="1", source_path="ok"),
+        ApprovedProduct(repo="bad", registry_entry="e", pin="1", source_path="boom"),
+    ]).save(m_path)
+    downloads = tmp_path / "downloads"
+
+    # Run 1: aborts on `bad`, but `good` was already fetched+moved.
+    dvc1 = _PartialFailDvc("bad")
+    with pytest.raises(EnclavePullError) as ei:
+        enclave_pull(_Client(), dvc1, manifest_path=m_path,
+                     downloads_root=downloads, today=date(2026, 5, 20))
+    assert ei.value.repo == "bad"
+    m1 = EnclaveManifest.load(m_path)
+    assert [d.repo for d in m1.downloaded] == ["good"]
+
+    # Run 2: `good` is fast-skipped (not re-imported); `bad` still aborts.
+    dvc2 = _PartialFailDvc("bad")
+    with pytest.raises(EnclavePullError):
+        enclave_pull(_Client(), dvc2, manifest_path=m_path,
+                     downloads_root=downloads, today=date(2026, 5, 20))
+    imported_repos = [Path(c[2]).parent.parent.name for c in dvc2.calls]
+    assert imported_repos == ["bad"]  # `good` skipped, only `bad` attempted
+    assert [d.repo for d in EnclaveManifest.load(m_path).downloaded] == ["good"]
+
+
+def test_all_already_downloaded_fires_for_primary(tmp_path):
+    """Defect 2: a recorded primary product (stored output is a RESOLVED path,
+    not the dead 'primary' sentinel) fast-skips on re-run with no catalog fetch
+    and no dvc import."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1"),
+    ], downloaded=[
+        DownloadedItem(repo="a", output="data/final/", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(), local_path="lp"),
+    ]).save(m_path)
+
+    class _NoFetchClient:
+        def fetch(self, name):
+            raise AssertionError("catalog fetch must not happen on re-run")
+
+    def factory(url, pin):
+        raise AssertionError("producer resolve must not happen on re-run")
+
+    dvc = _FakeDvcOps()
+    _, written = enclave_pull(_NoFetchClient(), dvc, manifest_path=m_path,
+                              producer_view_factory=factory)
+    assert dvc.calls == []
+    assert written == []
+
+
+def test_pull_force_failure_preserves_failing_products_row(tmp_path):
+    """Under --force a row is pruned+re-appended atomically on success; if a
+    product's re-import FAILS, its pre-existing downloaded[] row must survive
+    the failure flush (not be dropped, which would orphan its on-disk data)."""
+    from mintd.enclave import EnclavePullError
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="good", registry_entry="e", pin="1", source_path="ok"),
+        ApprovedProduct(repo="bad", registry_entry="e", pin="1", source_path="boom"),
+    ], downloaded=[
+        DownloadedItem(repo="good", output="ok", contract_pin="1", artifact_pin="oldg",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(), local_path="lpg"),
+        DownloadedItem(repo="bad", output="boom", contract_pin="1", artifact_pin="oldb",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(), local_path="lpb"),
+    ]).save(m_path)
+    downloads = tmp_path / "downloads"
+
+    dvc = _PartialFailDvc("bad")
+    with pytest.raises(EnclavePullError) as ei:
+        enclave_pull(_Client(), dvc, manifest_path=m_path, force=True,
+                     downloads_root=downloads, today=date(2026, 5, 20))
+    assert ei.value.repo == "bad"
+
+    m = EnclaveManifest.load(m_path)
+    # `bad`'s pre-existing row survives (import failed, prune never ran); `good`
+    # was re-imported so its row is replaced (not duplicated).
+    assert sorted(d.repo for d in m.downloaded) == ["bad", "good"]
+    bad_rows = [d for d in m.downloaded if d.repo == "bad"]
+    assert len(bad_rows) == 1 and bad_rows[0].artifact_pin == "oldb"
+    good_rows = [d for d in m.downloaded if d.repo == "good"]
+    assert len(good_rows) == 1 and good_rows[0].artifact_pin == "f" * 32
+
+
+class _FailOnOutputDvc:
+    """dvc_ops double that fails on one specific output path."""
+
+    def __init__(self, fail_output):
+        self.fail_output = fail_output
+        self.calls = []
+
+    def init(self, *, cwd=None):
+        pass
+
+    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+        self.calls.append(path)
+        if path == self.fail_output:
+            raise DvcPullError("boom")
+        assert dest.parent.exists(), f"stage working dir {dest.parent} does not exist"
+        dest.write_text("dummy-data")
+        dvc_path = dest.parent / (dest.name + ".dvc")
+        dvc_path.write_text("outs:\n- md5: ffffffffffffffffffffffffffffffff\n")
+        return dvc_path
+
+
+def test_pull_all_product_partial_outputs_persist_before_failure(tmp_path):
+    """Defect 1 (intra-`all`): when a multi-output `all` product fails on a
+    later output, the earlier outputs already fetched are persisted before the
+    abort, and a re-run inner-skips them and retries only the missing output."""
+    from mintd.enclave import EnclavePullError
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", all=True),
+    ]).save(m_path)
+    downloads = tmp_path / "downloads"
+
+    def factory(url, pin):
+        class View:
+            def output_paths(self): return ["o1", "o2"]
+        return View()
+
+    # Run 1: o1 succeeds, o2 aborts. o1's row must persist despite the abort.
+    dvc1 = _FailOnOutputDvc("o2")
+    with pytest.raises(EnclavePullError):
+        enclave_pull(_Client(), dvc1, manifest_path=m_path, downloads_root=downloads,
+                     producer_view_factory=factory, today=date(2026, 5, 20))
+    m = EnclaveManifest.load(m_path)
+    assert [d.output for d in m.downloaded] == ["o1"]
+
+    # Run 2: o1 inner-skipped (already downloaded), only o2 retried.
+    dvc2 = _FailOnOutputDvc("o2")
+    with pytest.raises(EnclavePullError):
+        enclave_pull(_Client(), dvc2, manifest_path=m_path, downloads_root=downloads,
+                     producer_view_factory=factory, today=date(2026, 5, 20))
+    assert dvc2.calls == ["o2"]

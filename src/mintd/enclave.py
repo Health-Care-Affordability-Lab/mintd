@@ -15,6 +15,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ._archive_ops import ArchiveOps, TarGzArchiveOps
+from ._atomic import _try_fsync_parent_dir
 from .catalog import CatalogClient
 from .data import (
     BumpBlocked,
@@ -160,10 +161,18 @@ class EnclaveManifest(BaseModel):
             changed = _diff_transferred(existing.transferred, self.transferred)
             if changed:
                 raise AppendOnlyViolation(path, changed)
-        path.write_text(
-            yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False),
-            encoding="utf-8",
-        )
+        content = yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False)
+        # Atomic write (tmp -> fsync -> replace). enclave_pull now flushes this
+        # manifest from its BaseException handler, so a crashed/interrupted write
+        # (e.g. a second Ctrl-C mid-write) must never leave a truncated file —
+        # transferred[] provenance is append-only and not re-derivable.
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(content, encoding="utf-8")
+        with open(tmp, "r+") as f:
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(path)
+        _try_fsync_parent_dir(path)
 
     def apply_pin_bump(self, *, repo: str, new_pin: str) -> "EnclaveManifest":
         for i, ap in enumerate(self.approved_products):
@@ -379,6 +388,17 @@ def enclave_pull(
     new_downloaded: list[DownloadedItem] = list(manifest.downloaded)
     written: list[DownloadedItem] = []
     created_target_dirs: set[Path] = set()
+
+    def _save_downloaded() -> None:
+        # Persist downloaded[] progress. Safe to call repeatedly:
+        # EnclaveManifest.save's append-only guard (_diff_transferred) protects
+        # transferred[] ONLY, and enclave_pull never mutates transferred[] — so
+        # incremental saves of downloaded[] can never raise AppendOnlyViolation.
+        # Reads new_downloaded at call time, so it sees the force-prune rebind
+        # below (enclosing-scope late binding); a coder promoting this to a
+        # module helper must pass new_downloaded in.
+        manifest.model_copy(update={"downloaded": new_downloaded}).save(manifest_path)
+
     for i, ap in enumerate(targets, 1):
         # Per-producer feedback (slice 38a). Fired BEFORE the idempotence
         # skip so the (i/N) count reflects every producer, not just the
@@ -386,76 +406,101 @@ def enclave_pull(
         if reporter is not None:
             reporter.update_status(f"Fetching {ap.repo}... ({i}/{len(targets)})")
         # Idempotence: skip resolving if all outputs are already present.
+        # A skip mutates nothing, so it stays outside the try/save below.
         if not force and _all_already_downloaded(manifest.downloaded, ap):
              continue
 
-        entry = client.fetch(ap.repo)
-        repo_url = entry.repo_url
-        if not repo_url:
-            raise ValueError(f"catalog entry {ap.repo!r} has no repository.github_url")
-        outputs = _resolve_outputs(ap, repo_url, factory)
-        for output in outputs:
-            if not force and _already_downloaded(manifest.downloaded, ap.repo, output, ap.pin):
-                continue
-            if force:
-                new_downloaded = [
-                    d for d in new_downloaded
-                    if not (d.repo == ap.repo and d.output == output and d.contract_pin == ap.pin)
-                ]
-            staging_dir = downloads_root / ap.repo / "_staging"
-            # Defensive: clear stale _staging from a prior interrupted run.
-            # Without this, dvc_ops.import_ would refuse to overwrite the
-            # existing dest, breaking future pulls until manual cleanup.
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir, ignore_errors=True)
-            # `dvc import` writes its stage pointer into staging_dir and
-            # requires that working dir to already exist (it won't auto-create
-            # it) — else it fails with "stage working dir ... does not exist".
-            # Mirror the consumer-import path (data.import_product).
-            staging_dir.mkdir(parents=True, exist_ok=True)
-            dest = staging_dir / Path(output.rstrip("/")).name
-            try:
-                dvc_path = dvc_ops.import_(
-                    repo_url=repo_url,
-                    path=output,
-                    dest=dest,
-                    rev=ap.pin,
-                    force=force,
+        try:
+            entry = client.fetch(ap.repo)
+            repo_url = entry.repo_url
+            if not repo_url:
+                raise ValueError(f"catalog entry {ap.repo!r} has no repository.github_url")
+            outputs = _resolve_outputs(ap, repo_url, factory)
+            for output in outputs:
+                if not force and _already_downloaded(manifest.downloaded, ap.repo, output, ap.pin):
+                    continue
+                staging_dir = downloads_root / ap.repo / "_staging"
+                # Defensive: clear stale _staging from a prior interrupted run.
+                # Without this, dvc_ops.import_ would refuse to overwrite the
+                # existing dest, breaking future pulls until manual cleanup.
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                # `dvc import` writes its stage pointer into staging_dir and
+                # requires that working dir to already exist (it won't auto-create
+                # it) — else it fails with "stage working dir ... does not exist".
+                # Mirror the consumer-import path (data.import_product).
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                dest = staging_dir / Path(output.rstrip("/")).name
+                try:
+                    dvc_path = dvc_ops.import_(
+                        repo_url=repo_url,
+                        path=output,
+                        dest=dest,
+                        rev=ap.pin,
+                        force=force,
+                    )
+                except DvcOpError as exc:
+                    raise EnclavePullError(ap.repo, exc) from exc
+                artifact_pin = _read_artifact_pin(dvc_path)
+                target_dir = downloads_root / ap.repo / f"{artifact_pin[:7]}-{today_iso}"
+                if force and target_dir.exists() and target_dir not in created_target_dirs:
+                    shutil.rmtree(target_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                created_target_dirs.add(target_dir)
+                # Defensive: clear any stale destination from a previous interrupted
+                # run. Without this, shutil.move would nest dest inside the existing
+                # target (e.g., target/dest/dest) when the prior run died after the
+                # move but before manifest.save.
+                final_dest = target_dir / dest.name
+                if final_dest.exists():
+                    if final_dest.is_dir():
+                        shutil.rmtree(final_dest)
+                    else:
+                        final_dest.unlink()
+                shutil.move(str(dest), str(final_dest))
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+                # Force replaces the existing (repo, output, pin) row. Prune it
+                # ONLY now — after the import succeeded — and append the new row
+                # in the same step, so prune+append are atomic. Pruning earlier
+                # would let the failure flush below persist a manifest missing
+                # the row of a product whose re-import failed, silently dropping
+                # its provenance record while its old data lingers on disk.
+                if force:
+                    new_downloaded = [
+                        d for d in new_downloaded
+                        if not (d.repo == ap.repo and d.output == output and d.contract_pin == ap.pin)
+                    ]
+                item = DownloadedItem(
+                    repo=ap.repo,
+                    output=output,
+                    contract_pin=ap.pin,
+                    artifact_pin=artifact_pin,
+                    fetch_strategy="dvc-import",
+                    downloaded_at=datetime.now(),
+                    local_path=str(target_dir),
                 )
-            except DvcOpError as exc:
-                raise EnclavePullError(ap.repo, exc) from exc
-            artifact_pin = _read_artifact_pin(dvc_path)
-            target_dir = downloads_root / ap.repo / f"{artifact_pin[:7]}-{today_iso}"
-            if force and target_dir.exists() and target_dir not in created_target_dirs:
-                shutil.rmtree(target_dir)
-            target_dir.mkdir(parents=True, exist_ok=True)
-            created_target_dirs.add(target_dir)
-            # Defensive: clear any stale destination from a previous interrupted
-            # run. Without this, shutil.move would nest dest inside the existing
-            # target (e.g., target/dest/dest) when the prior run died after the
-            # move but before manifest.save.
-            final_dest = target_dir / dest.name
-            if final_dest.exists():
-                if final_dest.is_dir():
-                    shutil.rmtree(final_dest)
-                else:
-                    final_dest.unlink()
-            shutil.move(str(dest), str(final_dest))
-            if staging_dir.exists():
-                shutil.rmtree(staging_dir, ignore_errors=True)
-            item = DownloadedItem(
-                repo=ap.repo,
-                output=output,
-                contract_pin=ap.pin,
-                artifact_pin=artifact_pin,
-                fetch_strategy="dvc-import",
-                downloaded_at=datetime.now(),
-                local_path=str(target_dir),
-            )
-            new_downloaded.append(item)
-            written.append(item)
-    new_manifest = manifest.model_copy(update={"downloaded": new_downloaded})
-    new_manifest.save(manifest_path)
+                new_downloaded.append(item)
+                written.append(item)
+        except BaseException:
+            # A producer raised (bad pin, missing repo_url ValueError, missing
+            # primary via _resolve_outputs, catalog/network, dvc import ->
+            # EnclavePullError) or the run was interrupted. Flush the manifest
+            # reflecting every product completed so far — plus any outputs of THIS
+            # product already fetched and moved — before propagating, so a partial
+            # run's on-disk data is recorded and the next run skips it. Fail-loud
+            # is preserved: we always re-raise UNCHANGED, so cli.py's
+            # EnclavePullError hint still fires and exit codes are unchanged.
+            # BaseException (not Exception) so a KeyboardInterrupt/SystemExit
+            # mid-pull also flushes; the bare `raise` guarantees it is never
+            # swallowed.
+            _save_downloaded()
+            raise
+        # A fully-fetched product is persisted NOW so a later producer's failure
+        # or an interrupt can't discard it (the primary Defect-1 fix:
+        # SAVE-PER-PRODUCT). Covers every mutation path above, including the
+        # force-prune branch that rebinds new_downloaded.
+        _save_downloaded()
     return manifest_path, written
 
 def _resolve_outputs(
@@ -479,9 +524,26 @@ def _already_downloaded(
     )
 
 def _all_already_downloaded(downloaded: list[DownloadedItem], ap: ApprovedProduct) -> bool:
+    # An `all` product's output set can GROW (the producer may add outputs
+    # later), so it must never be fast-skipped here — the inner
+    # _already_downloaded check governs per-output re-fetch instead.
     if ap.all:
         return False
-    return any(d.repo == ap.repo and d.output == (ap.source_path or "primary") and d.contract_pin == ap.pin for d in downloaded)
+    if ap.source_path is not None:
+        # source_path IS the resolved output the write path records, so reuse the
+        # exact-output check the inner loop uses — both idempotence checks now
+        # agree on one key representation.
+        return _already_downloaded(downloaded, ap.repo, ap.source_path, ap.pin)
+    # Primary product: the resolved output path is unknowable without the catalog
+    # fetch + producer-view resolve this fast-path exists to AVOID, so key on
+    # (repo, contract_pin). Correct because enclave_add rejects duplicate repos
+    # (AlreadyApproved) — a repo is unique in approved_products — and a non-`all`
+    # primary resolves to exactly one output; a pin bump changes ap.pin so
+    # stale-pin rows correctly miss. Known low-severity gap: a stale downloaded[]
+    # row recorded for this repo+pin under a source_path output (from a prior
+    # reconfiguration without a pin bump) could wrongly fast-skip this primary;
+    # the heavier dvc import stays guarded by the inner _already_downloaded check.
+    return any(d.repo == ap.repo and d.contract_pin == ap.pin for d in downloaded)
 
 def _read_artifact_pin(dvc_path: Path) -> str:
     data = yaml.safe_load(dvc_path.read_text(encoding="utf-8"))
