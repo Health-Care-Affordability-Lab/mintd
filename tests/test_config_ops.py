@@ -138,7 +138,7 @@ def test_apply_from_stdin_success_and_tty_guard(
         apply_from_file(target, None)
 
 
-# --- validate (4) ---------------------------------------------------------
+# --- validate (7) ---------------------------------------------------------
 
 
 def test_validate_schema_only_when_config_invalid(tmp_path: Path) -> None:
@@ -187,6 +187,88 @@ def test_validate_s3_head_bucket_failure(tmp_path: Path) -> None:
     s3_step = next(s for s in steps if s.name == "s3")
     assert s3_step.status == "fail"
     assert "missing-bucket" in s3_step.message
+
+
+def test_validate_s3_client_uses_config_storage_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The head_bucket client is built against the configured storage_endpoint."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("registry_url: x\nstorage_endpoint: https://s3.wasabisys.com\n")
+    captured: dict = {}
+
+    class _Client:
+        def head_bucket(self, Bucket: str) -> dict:
+            return {}
+
+    def spy_client(service: str, **kwargs: object) -> _Client:
+        captured.update(kwargs)
+        return _Client()
+
+    monkeypatch.setattr("boto3.client", spy_client)
+    steps = validate_config(cfg, bucket="b")
+    s3_step = next(s for s in steps if s.name == "s3")
+    assert captured["endpoint_url"] == "https://s3.wasabisys.com"
+    assert s3_step.status == "ok"
+    assert "via https://s3.wasabisys.com" in s3_step.message
+
+
+def test_validate_s3_profile_branch_uses_config_storage_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The profile-based Session client also gets the configured storage_endpoint."""
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("[mintd]\naws_access_key_id = 123\n")
+    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("registry_url: x\nstorage_endpoint: https://s3.wasabisys.com\n")
+    captured: dict = {}
+
+    class _Client:
+        def head_bucket(self, Bucket: str) -> dict:
+            return {}
+
+    class _Session:
+        def __init__(self, profile_name: str | None = None) -> None:
+            captured["profile_name"] = profile_name
+
+        def client(self, service: str, **kwargs: object) -> _Client:
+            captured.update(kwargs)
+            return _Client()
+
+    monkeypatch.setattr("boto3.Session", _Session)
+    steps = validate_config(cfg, bucket="b")
+    s3_step = next(s for s in steps if s.name == "s3")
+    assert captured["profile_name"] == "mintd"
+    assert captured["endpoint_url"] == "https://s3.wasabisys.com"
+    assert s3_step.status == "ok"
+
+
+def test_validate_s3_client_endpoint_none_without_storage_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without storage_endpoint the client gets endpoint_url=None (AWS default)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("registry_url: x\n")
+    captured: dict = {}
+
+    class _Client:
+        def head_bucket(self, Bucket: str) -> dict:
+            return {}
+
+    def spy_client(service: str, **kwargs: object) -> _Client:
+        captured.update(kwargs)
+        return _Client()
+
+    monkeypatch.setattr("boto3.client", spy_client)
+    steps = validate_config(cfg, bucket="b")
+    s3_step = next(s for s in steps if s.name == "s3")
+    assert captured["endpoint_url"] is None
+    assert s3_step.status == "ok"
+    assert "via" not in s3_step.message
 
 
 # --- helpers --------------------------------------------------------------

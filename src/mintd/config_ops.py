@@ -278,12 +278,14 @@ def validate_config(
             message="no --bucket provided (auto-discovery is slice-22+)",
         )
     else:
-        s3_step = _check_bucket(bucket, profile)
+        s3_step = _check_bucket(bucket, profile, config.storage_endpoint)
 
     return [schema_step, profile_step, s3_step]
 
 
-def _check_bucket(bucket: str, profile: str | None) -> ValidationStep:
+def _check_bucket(
+    bucket: str, profile: str | None, endpoint_url: str | None = None
+) -> ValidationStep:
     try:
         import boto3
         from botocore.exceptions import (
@@ -300,15 +302,16 @@ def _check_bucket(bucket: str, profile: str | None) -> ValidationStep:
     try:
         if profile:
             session = boto3.Session(profile_name=profile)
-            client = session.client("s3")
+            client = session.client("s3", endpoint_url=endpoint_url)
         else:
-            client = boto3.client("s3")
+            client = boto3.client("s3", endpoint_url=endpoint_url)
     except Exception as e:
         return ValidationStep(
             name="s3",
             status="fail",
             message=f"failed to create S3 client: {type(e).__name__}: {e}",
         )
+    via = f" via {endpoint_url}" if endpoint_url else ""
     start = time.monotonic()
     try:
         client.head_bucket(Bucket=bucket)
@@ -317,7 +320,7 @@ def _check_bucket(bucket: str, profile: str | None) -> ValidationStep:
         return ValidationStep(
             name="s3",
             status="fail",
-            message=f"head_bucket on s3://{bucket} — failed: {code}",
+            message=f"head_bucket on s3://{bucket}{via} — failed: {code}",
         )
     except (NoCredentialsError, EndpointConnectionError) as e:
         return ValidationStep(
@@ -335,7 +338,7 @@ def _check_bucket(bucket: str, profile: str | None) -> ValidationStep:
     return ValidationStep(
         name="s3",
         status="ok",
-        message=f"head_bucket on s3://{bucket} — 200 OK (latency {ms}ms)",
+        message=f"head_bucket on s3://{bucket}{via} — 200 OK (latency {ms}ms)",
         latency_ms=ms,
     )
 
