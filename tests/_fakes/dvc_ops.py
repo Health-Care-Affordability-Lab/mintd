@@ -67,6 +67,11 @@ class _FakeDvcOps:
         self.push_result: DvcPushResult = DvcPushResult(pushed=1, up_to_date=False)
         self.pull_calls: list[DvcPullCall] = []
         self.pull_raises: Exception | None = None
+        # Per-target pull failure: raised (before recording) when a pull's
+        # ``targets`` argv contains a matching key. Models dvc's field
+        # behavior where a specific import cannot be materialized while other
+        # targets pull fine. ``pull_raises`` (global) semantics are untouched.
+        self.pull_raises_for: dict[str, Exception] = {}
         self.add_calls: list[DvcAddCall] = []
         self.add_raises: Exception | None = None
         self.status_calls: list[DvcStatusCall] = []
@@ -158,6 +163,9 @@ class _FakeDvcOps:
     ) -> None:
         if self.pull_raises:
             raise self.pull_raises
+        for t in targets or []:
+            if t in self.pull_raises_for:
+                raise self.pull_raises_for[t]
         self.pull_calls.append(
             DvcPullCall(
                 targets=targets, remote=remote, jobs=jobs, extra_args=extra_args,
@@ -210,8 +218,10 @@ class _FakeDvcOps:
         the stand-in file CONTENT below is fake-specific."""
         from mintd._fast_sync_ops import (
             EMPTY_DIR_MD5,
+            cache_path_for,
             outs_for_target,
             parse_dvc_lock_outs,
+            read_cached_dir_manifest,
             workspace_path_for,
         )
 
@@ -236,8 +246,23 @@ class _FakeDvcOps:
                 elif out.md5 == EMPTY_DIR_MD5:
                     rels = []  # empty-manifest md5 dir: real dvc makes it empty
                 else:
-                    # md5-keyed dir: the fake can't read the cached .dir
-                    # manifest, so stand in one file for "non-empty content".
+                    # md5-keyed dir. When the cached .dir manifest IS present
+                    # (e.g. the import-rescue lane seeded it plus the blobs),
+                    # materialize the REAL entries by copying each cached blob
+                    # to dest/relpath — byte-correct, like real dvc over a
+                    # populated cache. Otherwise stand in one file.
+                    cache_dir = root / ".dvc" / "cache"
+                    manifest = read_cached_dir_manifest(cache_dir, out.md5)
+                    if manifest:
+                        for fe in manifest:
+                            blob = cache_path_for(cache_dir, fe.md5)
+                            p = dest / fe.relpath
+                            p.parent.mkdir(parents=True, exist_ok=True)
+                            if blob.is_file():
+                                p.write_bytes(blob.read_bytes())
+                            else:
+                                p.write_text("materialized")
+                        continue
                     rels = [".materialized"]
                 for rel in rels:
                     p = dest / rel

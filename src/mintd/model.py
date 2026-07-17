@@ -199,7 +199,11 @@ class FastPullResult(BaseModel):
 
     - ``fallback_targets`` — plain ``dvc pull`` can serve these (dvc-imports,
       md5-keyed outs, unparseable/hash-missing targets). Caller checks out any
-      that are already fully cached, pulls the rest, counts all as pulled.
+      that are already fully cached, pulls the rest, counts all as pulled. A
+      dvc-import here whose fallback ``dvc pull`` still fails to materialize
+      it (version-aware producer bucket with no recorded version_id) is
+      handed to the consumer-side import-rescue lane (``_import_rescue_ops``,
+      via ``data_ops._checkout_pull_verify``) before it counts as an error.
     - ``blocked_targets`` — version-aware outs fast-sync could not serve at
       all (a guard fired, spot-check found drift, or the fetch errored):
       nothing was fetched for them. Never fed to ``dvc pull`` (documented

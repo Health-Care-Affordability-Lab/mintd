@@ -306,6 +306,59 @@ def test_get_remote_config_missing_raises(tmp_path: Path) -> None:
         get_remote_config(tmp_path, "origin")
 
 
+# ---------- parse_remote_config_text (text-level parser) ----------
+
+def test_parse_remote_config_text_quoted_section() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = "['remote \"storage\"']\n    url = s3://b/p\n"
+    assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
+
+
+def test_parse_remote_config_text_double_quoted_section() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = '[remote "storage"]\n    url = s3://b/p\n'
+    assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
+
+
+def test_parse_remote_config_text_unquoted_section() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = "[remote storage]\n    url = s3://b/p\n"
+    assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
+
+
+def test_parse_remote_config_text_default_from_core() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = (
+        "[core]\n    remote = storage\n"
+        "['remote \"storage\"']\n    url = s3://b/p\n"
+        "['remote \"other\"']\n    url = s3://b/q\n"
+    )
+    assert parse_remote_config_text(text, None)["url"] == "s3://b/p"
+
+
+def test_parse_remote_config_text_default_single_remote() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = "['remote \"only\"']\n    url = s3://b/p\n"
+    assert parse_remote_config_text(text, None)["url"] == "s3://b/p"
+
+
+def test_parse_remote_config_text_default_ambiguous_raises() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = (
+        "['remote \"a\"']\n    url = s3://b/p\n"
+        "['remote \"b\"']\n    url = s3://b/q\n"
+    )
+    with pytest.raises(KeyError):
+        parse_remote_config_text(text, None)
+
+
+def test_parse_remote_config_text_named_absent_raises() -> None:
+    from mintd._fast_sync_ops import parse_remote_config_text
+    text = "['remote \"storage\"']\n    url = s3://b/p\n"
+    with pytest.raises(KeyError):
+        parse_remote_config_text(text, "nope")
+
+
 # ---------- versioning + spot check (4) ----------
 
 def test_check_bucket_versioning_enabled(s3_versioned) -> None:

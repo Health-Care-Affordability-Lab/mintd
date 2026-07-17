@@ -341,6 +341,7 @@ def clone_and_pull_product(
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
+    aws_profile_name: str | None = None,
 ) -> "CloneResult":
     """Clone a published data product into a working directory + dvc pull it.
 
@@ -474,6 +475,7 @@ def clone_and_pull_product(
             jobs=jobs,
             extra_dvc_args=extra_dvc_args,
             reporter=reporter,
+            aws_profile_name=aws_profile_name,
         )
     finally:
         os.chdir(prev_cwd)
