@@ -19,9 +19,15 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
-from ._dvc_ops import DvcOps, DvcPushResult, pull_retry_hint
+from ._dvc_ops import (
+    DvcOps,
+    DvcPullError,
+    DvcPushResult,
+    DvcStorageKeyError,
+    pull_retry_hint,
+)
 from ._fast_sync_ops import (
     DvcOut,
     FastSyncOps,
@@ -32,6 +38,7 @@ from ._fast_sync_ops import (
     partition_pipeline_outs,
     resolve_target_outs,
 )
+from ._import_rescue_ops import RescueResult, rescue_import_pull
 from .model import FastPullResult
 
 if TYPE_CHECKING:
@@ -39,6 +46,11 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# Injectable seam for the consumer-side import-rescue lane (see
+# ``_import_rescue_ops.rescue_import_pull``). Kept as a loose alias so tests
+# can pass a sentinel/spy without matching the full keyword-only signature.
+ImportRescueFn = Callable[..., RescueResult]
 
 
 @dataclass(frozen=True)
@@ -222,12 +234,21 @@ def _verify_and_retry_checkout(
     return still_missing
 
 
-def _report_pull_failure(reporter: "Reporter", target: str, why: str) -> None:
+def _report_pull_failure(
+    reporter: "Reporter", target: str, why: str, *, hint: str | None = None
+) -> None:
     """THE composition site for the per-target pull-failure error: every
     lane that leaves a target absent from the workspace emits the same
     ``cannot pull <target>: <why>`` frame with the targeted-retry hint
-    (``pull_retry_hint``); only ``why`` is lane-specific."""
-    reporter.error(f"cannot pull {target}: {why}", hint=pull_retry_hint(target))
+    (``pull_retry_hint``); only ``why`` is lane-specific.
+
+    ``hint`` overrides the default ``pull_retry_hint(target)`` — the import
+    rescue lane passes its own actionable hint (e.g. "ask the producer to
+    re-push") when a plain retry would not help."""
+    reporter.error(
+        f"cannot pull {target}: {why}",
+        hint=hint if hint is not None else pull_retry_hint(target),
+    )
 
 
 def _report_not_materialized(reporter: "Reporter", targets: list[str]) -> None:
@@ -254,6 +275,8 @@ def _checkout_pull_verify(
     jobs: int | None,
     extra_dvc_args: list[str] | None,
     reporter: "Reporter | None",
+    aws_profile_name: str | None = None,
+    import_rescue: "ImportRescueFn" = rescue_import_pull,
 ) -> list[str]:
     """The degraded-path materialization contract, stated once for both the
     fast-sync result branch and crash recovery:
@@ -261,11 +284,16 @@ def _checkout_pull_verify(
     1. grouped ``dvc checkout`` of the fully-cached ``checkout_targets`` —
        BEFORE the pull, so a hanging/crashing ``dvc pull`` can never leave
        a fresh clone with zero workspace data;
-    2. ``dvc pull`` of ``pull_targets`` (the uncached rest);
+    2. ``dvc pull`` of ``pull_targets`` — non-imports in one batched fatal
+       pull (today's behavior); each dvc-import pulled one-target-per-argv
+       with its ``dvc pull`` failure absorbed and the import-rescue lane
+       (direct producer-bucket fetch) tried when the import did not
+       materialize (see ``_import_rescue_ops``);
     3. verify-and-retry every checkout target — AFTER the pull, so the
        checkout-before-pull ordering above is unchanged;
     4. report the still-missing (when a reporter exists) and return them
-       for the caller's error accounting.
+       for the caller's error accounting — checkout misses plus any import
+       whose rescue also failed.
 
     ``pipeline_outs`` must be the same out list the checkout candidates
     were resolved against: ``all_pipeline`` on the crash path (candidates =
@@ -275,20 +303,112 @@ def _checkout_pull_verify(
     """
     if checkout_targets:
         _checkout_grouped(dvc_ops, checkout_targets)
-    if pull_targets:
-        dvc_ops.pull(
-            targets=pull_targets,
-            remote=remote, jobs=jobs, extra_args=extra_dvc_args,
-        )
+
+    rescue_failed = _pull_targets_with_import_rescue(
+        project_path, pull_targets, remote_name,
+        dvc_ops=dvc_ops, remote=remote, jobs=jobs,
+        extra_dvc_args=extra_dvc_args, reporter=reporter,
+        aws_profile_name=aws_profile_name, import_rescue=import_rescue,
+    )
+
     not_materialized: list[str] = []
     if checkout_targets:
         not_materialized = _verify_and_retry_checkout(
             project_path, checkout_targets, remote_name, pipeline_outs,
             dvc_ops=dvc_ops,
         )
+        # _report_not_materialized fires ONLY for the checkout-target verify
+        # list; rescue failures were already reported at the hook site with
+        # their own (producer-specific) hint. Keep the two lanes disjoint so
+        # no target is double-reported.
         if not_materialized and reporter is not None:
             _report_not_materialized(reporter, not_materialized)
-    return not_materialized
+    return not_materialized + rescue_failed
+
+
+def _pull_targets_with_import_rescue(
+    project_path: Path,
+    pull_targets: list[str],
+    remote_name: str,
+    *,
+    dvc_ops: DvcOps,
+    remote: str | None,
+    jobs: int | None,
+    extra_dvc_args: list[str] | None,
+    reporter: "Reporter | None",
+    aws_profile_name: str | None,
+    import_rescue: "ImportRescueFn",
+) -> list[str]:
+    """Pull ``pull_targets``: non-imports in one batched fatal ``dvc pull``,
+    each dvc-import serialized with the rescue lane behind a failed/non-
+    materializing pull. Returns the imports whose rescue also failed (already
+    reported); each was left absent from the workspace and drives the
+    caller's non-zero exit."""
+    if not pull_targets:
+        return []
+
+    import_targets: list[str] = []
+    non_import_targets: list[str] = []
+    for t in pull_targets:
+        outs = outs_for_target(project_path, t, remote_name)
+        if outs and outs[0].is_import:
+            import_targets.append(t)
+        else:
+            non_import_targets.append(t)
+
+    # Non-imports keep today's single batched fatal pull (a failure raises
+    # and aborts the whole pull, unchanged).
+    if non_import_targets:
+        dvc_ops.pull(
+            targets=non_import_targets,
+            remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+        )
+
+    # One producer-resolution cache shared across every import in this pull
+    # run so several imports from one producer fetch its config once.
+    producer_cache: dict[tuple[str, str], object] = {}
+    rescue_failed: list[str] = []
+    for t in import_targets:
+        pull_raised = False
+        try:
+            dvc_ops.pull(
+                targets=[t], remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+            )
+        except (DvcPullError, DvcStorageKeyError) as exc:
+            # The documented import failure shape: dvc pull cannot materialize
+            # a version-aware import whose producer lock recorded no
+            # version_id. Absorb it; the rescue lane below completes the pull.
+            pull_raised = True
+            logger.info(
+                "import %r: dvc pull did not materialize it (%s); "
+                "trying the import-rescue lane", t, exc,
+            )
+        # A healthy import that dvc pull materialized (the pull returned
+        # cleanly) never touches the rescue lane: the stat probe confirms it.
+        # But a RAISED pull cannot be trusted to the stat probe — legacy
+        # producers' git-tracked riders (readme, .gitkeep) ride in via the
+        # erepo git clone and leave the out dir non-empty while every
+        # dvc-tracked file is still missing, so ``outs_materialized`` would
+        # wrongly report the import materialized, skip the rescue, and turn the
+        # absorbed failure into a silent exit-0 success with the payload gone.
+        # When the pull raised, always run the rescue (it skips already-cached
+        # blobs and re-runs checkout, so a genuinely-materialized import is
+        # cheap and still verified).
+        outs = outs_for_target(project_path, t, remote_name)
+        if not pull_raised and outs and outs_materialized(project_path, outs):
+            continue
+        result: RescueResult = import_rescue(
+            project_path, t,
+            dvc_ops=dvc_ops,
+            aws_profile_name=aws_profile_name,
+            reporter=reporter,
+            _producer_cache=producer_cache,  # type: ignore[arg-type]
+        )
+        if not result.ok:
+            rescue_failed.append(t)
+            if reporter is not None:
+                _report_pull_failure(reporter, t, result.reason, hint=result.hint)
+    return rescue_failed
 
 
 def _finish_after_crash_recovery(
@@ -304,6 +424,8 @@ def _finish_after_crash_recovery(
     jobs: int | None,
     extra_dvc_args: list[str] | None,
     reporter: "Reporter | None",
+    aws_profile_name: str | None = None,
+    import_rescue: "ImportRescueFn" = rescue_import_pull,
 ) -> PullSummary:
     """Fast-sync raised mid-run: materialize what it already paid for,
     ``dvc pull`` the rest, and build the crash-branch ``PullSummary``.
@@ -331,6 +453,7 @@ def _finish_after_crash_recovery(
         project_path, cached, rest, all_pipeline, remote_name,
         dvc_ops=dvc_ops, remote=remote, jobs=jobs,
         extra_dvc_args=extra_dvc_args, reporter=reporter,
+        aws_profile_name=aws_profile_name, import_rescue=import_rescue,
     )
     requested = set(targets)
     missing_requested = [t for t in not_materialized if t in requested]
@@ -346,6 +469,9 @@ def _report_unserved_targets(
     reporter: "Reporter",
     result: FastPullResult,
     hard_blocked_targets: list[str],
+    *,
+    project_path: Path,
+    remote_name: str,
 ) -> None:
     """One ``reporter.error`` per target left absent from the workspace,
     each with the targeted-retry hint.
@@ -375,11 +501,19 @@ def _report_unserved_targets(
         count = f"{n_failed} file(s)" if n_failed else "file(s)"
         unserved.append((t, f"{count} failed to download after retries"))
     for t, why in unserved:
-        _report_pull_failure(
-            reporter, t,
-            f"{why} — version-aware output, "
-            "so the plain `dvc pull` fallback was not attempted",
+        # The version-aware "fallback not attempted" suffix is true only for
+        # non-imports: imports are routed to the fallback pull (and then the
+        # rescue lane) at classify time, so they never reach this path. Guard
+        # defensively so the misleading suffix can never attach to an import.
+        outs = outs_for_target(project_path, t, remote_name)
+        is_import = bool(outs and outs[0].is_import)
+        suffix = (
+            ""
+            if is_import
+            else " — version-aware output, so the plain `dvc pull` "
+            "fallback was not attempted"
         )
+        _report_pull_failure(reporter, t, f"{why}{suffix}")
 
 
 @dataclass(frozen=True)
@@ -413,6 +547,8 @@ def _materialize_fast_sync_result(
     jobs: int | None,
     extra_dvc_args: list[str] | None,
     reporter: "Reporter | None",
+    aws_profile_name: str | None = None,
+    import_rescue: "ImportRescueFn" = rescue_import_pull,
 ) -> _Materialized:
     """Route a completed ``FastPullResult`` onto disk: split the blocked and
     fallback buckets by the local-cache probe, report the hard-blocked, then
@@ -441,7 +577,10 @@ def _materialize_fast_sync_result(
         project_path, result.blocked_targets, remote_name, pipeline_outs,
     )
     if reporter is not None:
-        _report_unserved_targets(reporter, result, hard_blocked)
+        _report_unserved_targets(
+            reporter, result, hard_blocked,
+            project_path=project_path, remote_name=remote_name,
+        )
 
     # Every unserved target is excluded from checkout: fallback targets
     # aren't in cache yet (unless the probe below rescues them),
@@ -463,7 +602,9 @@ def _materialize_fast_sync_result(
     # plain dvc pull. Covers the all-fallback guards where
     # synced_targets is empty and checkout used to be skipped entirely.
     # dvc-imports never qualify (ensure_out_cached), so slice 29's
-    # route-to-dvc-pull holds.
+    # route-to-dvc-pull holds — and when that plain dvc pull cannot
+    # materialize the import, _checkout_pull_verify's per-import rescue lane
+    # (direct producer-bucket fetch) completes it.
     cached_fallback, remaining_fallback = _split_cached(
         project_path, result.fallback_targets, remote_name, pipeline_outs,
     )
@@ -473,6 +614,7 @@ def _materialize_fast_sync_result(
         project_path, checkout_targets, remaining_fallback, pipeline_outs,
         remote_name, dvc_ops=dvc_ops, remote=remote, jobs=jobs,
         extra_dvc_args=extra_dvc_args, reporter=reporter,
+        aws_profile_name=aws_profile_name, import_rescue=import_rescue,
     )
     return _Materialized(
         cached_blocked=cached_blocked,
@@ -491,6 +633,8 @@ def data_pull(
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
+    aws_profile_name: str | None = None,
+    import_rescue: "ImportRescueFn" = rescue_import_pull,
 ) -> PullSummary:
     """Pull dvc-tracked data via fast-sync (boto3 → cache) when available;
     fall back to ``dvc pull`` for anything fast-sync can't handle.
@@ -591,6 +735,7 @@ def data_pull(
             total_bytes, start_t,
             dvc_ops=dvc_ops, remote=remote, jobs=jobs,
             extra_dvc_args=extra_dvc_args, reporter=reporter,
+            aws_profile_name=aws_profile_name, import_rescue=import_rescue,
         )
 
     mat = _Materialized(cached_blocked=[], hard_blocked=[], not_materialized=[])
@@ -599,6 +744,7 @@ def data_pull(
             project_path, result, targets or [], pipeline_outs, remote_name,
             dvc_ops=dvc_ops, remote=remote, jobs=jobs,
             extra_dvc_args=extra_dvc_args, reporter=reporter,
+            aws_profile_name=aws_profile_name, import_rescue=import_rescue,
         )
 
     # Pipeline-stage outputs fast-sync couldn't serve (no usable
@@ -663,9 +809,14 @@ def _default_dvc_remote(project_path: Path) -> str | None:
          (covers freshly-cloned data products: their .dvc/config typically
          declares one remote per product and no [core] default).
       3. None — caller defaults to "origin".
+
+    Name-resolution logic is hoisted into
+    ``_fast_sync_ops._default_remote_name_from_config`` so it is written once
+    (shared with ``parse_remote_config_text``'s default-remote path).
     """
     import configparser
-    import re
+
+    from ._fast_sync_ops import _default_remote_name_from_config
     config_file = project_path / ".dvc" / "config"
     if not config_file.is_file():
         return None
@@ -674,20 +825,7 @@ def _default_dvc_remote(project_path: Path) -> str | None:
         cp.read(config_file)
     except configparser.Error:
         return None
-    if cp.has_section("core") and cp.has_option("core", "remote"):
-        return cp.get("core", "remote")
-    # Fallback: extract remote names from section headers. DVC has shipped
-    # three formats: 'remote "name"' (single-quoted, the modern default),
-    # 'remote "name"' (double-quoted only), 'remote name' (unquoted).
-    # Same probes as get_remote_config in _fast_sync_ops.py.
-    remote_names: list[str] = []
-    for section in cp.sections():
-        m = re.fullmatch(r"""'?remote\s+"?(?P<name>[^"']+)"?'?""", section)
-        if m:
-            remote_names.append(m.group("name"))
-    if len(remote_names) == 1:
-        return remote_names[0]
-    return None
+    return _default_remote_name_from_config(cp)
 
 
 def data_push(

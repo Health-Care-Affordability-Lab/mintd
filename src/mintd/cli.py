@@ -840,6 +840,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             jobs=args.jobs,
             extra_dvc_args=args.dvc_args or None,
             reporter=reporter,
+            aws_profile_name=config.aws_profile_name,
         )
     except DvcNotInstalled as e:
         print(f"error: {e}", file=sys.stderr)
@@ -1584,6 +1585,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             jobs=args.jobs,
             extra_dvc_args=args.dvc_args or None,
             reporter=reporter,
+            aws_profile_name=config.aws_profile_name,
         )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")

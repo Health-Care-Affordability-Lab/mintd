@@ -191,7 +191,12 @@ def dvc_pull_can_serve(out: "DvcOut") -> bool:
 
     - dvc-imports: yes, always — their data lives in the source repo's
       bucket, which ``dvc pull`` reaches and fast-sync cannot (slice 29).
-      A pinned version_id on an import does not change that.
+      A pinned version_id on an import does not change that. When even plain
+      ``dvc pull`` cannot materialize an import (a version-aware producer
+      bucket whose committed lock recorded no version_id), the downstream
+      consumer-side rescue lane (``_import_rescue_ops``) fetches the
+      producer's objects directly — this routing is unchanged; the rescue
+      fires only after the fallback pull has already failed.
     - version-aware outs: no — plain ``dvc pull`` is documented broken on
       these (rehash-on-pull re-downloads, StorageKeyError tuple crashes;
       see the fallback-scope comments in data_ops.py). When fast-sync
@@ -879,21 +884,59 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
     return all_outs, fallback, hash_missing
 
 
-def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
-    """Read a DVC remote section from .dvc/config.
+def _default_remote_name_from_config(cp: "configparser.ConfigParser") -> str | None:
+    """Resolve the *default* DVC remote name from a parsed config.
 
-    DVC has shipped two formats for remote sections in its config files:
-    the older quoted form ``['remote "origin"']`` (literal single quotes
-    in the section header) and the unquoted form ``[remote "origin"]`` /
-    ``[remote origin]``. Probe all three so the slice works across DVC
-    versions.
+    Order (the same logic ``data_ops._default_dvc_remote`` delegates here so
+    it is written once):
+      1. ``[core] remote = <name>`` if present (DVC's standard default);
+      2. the single ``[remote "..."]`` section if there's exactly one
+         (covers freshly-cloned products whose ``.dvc/config`` declares one
+         remote and no ``[core]`` default);
+      3. ``None`` — ambiguous (multiple remotes, no default) or no remote.
+
+    DVC has shipped three section-header spellings: ``'remote "name"'``
+    (single-quoted, the modern default), ``remote "name"`` (double-quoted),
+    and ``remote name`` (unquoted); all three are matched.
     """
-    config_path = project_path / ".dvc" / "config"
-    if not config_path.exists():
-        raise FileNotFoundError(f"no .dvc/config at {config_path}")
+    import re
+    if cp.has_section("core") and cp.has_option("core", "remote"):
+        return cp.get("core", "remote")
+    remote_names: list[str] = []
+    for section in cp.sections():
+        m = re.fullmatch(r"""'?remote\s+"?(?P<name>[^"']+)"?'?""", section)
+        if m:
+            remote_names.append(m.group("name"))
+    if len(remote_names) == 1:
+        return remote_names[0]
+    return None
 
+
+def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, str]:
+    """Parse a DVC ``.dvc/config`` (given as text) into one remote's key/value map.
+
+    DVC has shipped two formats for remote sections: the older quoted form
+    ``['remote "origin"']`` (literal single quotes in the section header)
+    and the unquoted forms ``[remote "origin"]`` / ``[remote origin]``.
+    Probe all three so the parser works across DVC versions.
+
+    When ``remote_name is None`` the default remote is resolved via
+    :func:`_default_remote_name_from_config`; an ambiguous config (multiple
+    remotes and no ``[core]`` default) raises ``KeyError`` so callers can map
+    it to an actionable hint. A named-but-absent remote also raises
+    ``KeyError``.
+    """
     cp = configparser.ConfigParser()
-    cp.read(config_path)
+    cp.read_string(text)
+
+    if remote_name is None:
+        resolved = _default_remote_name_from_config(cp)
+        if resolved is None:
+            raise KeyError(
+                "no default DVC remote: config has no [core] remote and not "
+                "exactly one remote section"
+            )
+        remote_name = resolved
 
     candidates = (
         f"'remote \"{remote_name}\"'",
@@ -904,7 +947,19 @@ def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
         if cp.has_section(section):
             return dict(cp[section])
 
-    raise KeyError(f"remote {remote_name} not found in {config_path}")
+    raise KeyError(f"remote {remote_name} not found in DVC config")
+
+
+def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
+    """Read a DVC remote section from ``.dvc/config`` (path wrapper over
+    :func:`parse_remote_config_text`)."""
+    config_path = project_path / ".dvc" / "config"
+    if not config_path.exists():
+        raise FileNotFoundError(f"no .dvc/config at {config_path}")
+    try:
+        return parse_remote_config_text(config_path.read_text(), remote_name)
+    except KeyError as exc:
+        raise KeyError(f"{exc.args[0]} ({config_path})") from exc
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
