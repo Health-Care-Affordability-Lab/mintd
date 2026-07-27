@@ -68,6 +68,15 @@ class PRConflictError(Exception):
         self.existing_pr = existing_pr
 
 
+class RegistryBranchExists(GitOpError):
+    """`git push` was rejected: the remote branch has commits we do not have
+    (an earlier catalog PR is still open on it)."""
+
+    def __init__(self, command: list[str], stderr: str, branch: str) -> None:
+        super().__init__(command, stderr)
+        self.branch = branch
+
+
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
@@ -95,6 +104,8 @@ class RegistryGitOps(Protocol):
     def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
     def checkout(self, repo_dir: Path, ref: str, *, force: bool = False) -> None: ...
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool: ...
+    def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
     def tag(self, work_dir: Path, name: str, message: str) -> None: ...
@@ -207,12 +218,51 @@ class SubprocessRegistryGitOps:
         # origin/main baseline.
         self._git(["checkout", "-B", branch], cwd=repo_dir)
 
+    def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool:
+        """Whether the registry already has ``branch``.
+
+        Asked of the remote, not of local refs: the registry cache is a
+        ``--depth=1`` (single-branch) clone, so local refs only ever know
+        about ``main``.
+        """
+        out = self._git(
+            ["ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
+            cwd=repo_dir,
+        )
+        return bool(out.strip())
+
+    def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None:
+        """Point the local ``branch`` at the registry's copy of it.
+
+        The refspec is explicit on purpose: the registry cache is a
+        ``--depth=1`` clone (see ``clone``), which implies ``--single-branch``,
+        so a plain ``fetch origin`` only ever updates ``origin/main`` and a
+        branch an earlier publish pushed is invisible locally.
+
+        ``reset --hard`` rather than ``checkout -B <branch> FETCH_HEAD``: the
+        cache carries an untracked ``.mintd_pending.json`` that the branch
+        tracks, and checkout refuses to overwrite untracked files while reset
+        clobbers them (the same trade ``ensure_fresh`` already makes).
+        """
+        self._git(["fetch", "origin", branch], cwd=repo_dir)
+        self._git(["checkout", "-B", branch], cwd=repo_dir)
+        self._git(["reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
+
     def commit_all(self, repo_dir: Path, message: str) -> None:
         self._git(["add", "-A"], cwd=repo_dir)
         self._git(["commit", "-m", message], cwd=repo_dir)
 
     def push_branch(self, repo_dir: Path, branch: str) -> None:
-        self._git(["push", "-u", "origin", branch], cwd=repo_dir)
+        try:
+            self._git(["push", "-u", "origin", branch], cwd=repo_dir)
+        except GitOpError as e:
+            # Two wordings for the same thing: full clones say
+            # "(non-fast-forward)", shallow/single-branch clones (which the
+            # registry cache is) say "(fetch first)". Deliberately narrow —
+            # hook / protected-branch rejections stay plain GitOpErrors.
+            if "non-fast-forward" in e.stderr or "fetch first" in e.stderr:
+                raise RegistryBranchExists(e.command, e.stderr, branch) from e
+            raise
 
     def tag(self, work_dir: Path, name: str, message: str) -> None:
         try:
@@ -251,7 +301,11 @@ class SubprocessRegistryGitOps:
         args = ["pr", "create", "--title", title, "--body", body, "--base", base]
         if head is not None:
             args.extend(["--head", head])
-        result = self._gh(args, cwd=repo_dir)
+        try:
+            result = self._gh(args, cwd=repo_dir)
+        except PRConflictError as e:
+            # `_gh` is generic and cannot know the branch; this call site can.
+            raise PRConflictError(branch=head or "(unknown)", existing_pr=e.existing_pr) from e
         # `gh pr create` prints the PR URL on success. Extract the trailing integer.
         url = result.strip().splitlines()[-1]
         try:
@@ -286,6 +340,8 @@ class SubprocessRegistryGitOps:
             )
         except FileNotFoundError as e:
             raise GitOpError(cmd, "git not installed") from e
+        except subprocess.TimeoutExpired as e:
+            raise GitOpError(cmd, f"timed out after {self._fast_timeout}s") from e
         except subprocess.CalledProcessError as e:
             raise GitOpError(cmd, e.stderr or e.stdout or "")
         return result.stdout
@@ -303,6 +359,8 @@ class SubprocessRegistryGitOps:
             )
         except FileNotFoundError as e:
             raise GhNotInstalled(str(e)) from e
+        except subprocess.TimeoutExpired as e:
+            raise GitOpError(cmd, f"timed out after {self._fast_timeout}s") from e
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or "") + (e.stdout or "")
             if "not authenticated" in stderr.lower() or "authentication" in stderr.lower():

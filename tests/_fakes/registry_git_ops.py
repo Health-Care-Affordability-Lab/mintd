@@ -16,6 +16,10 @@ This means: after `client.register(m)` against a fake-backed
 `GitCatalogClient`, a subsequent `client.fetch(m.project.name)` succeeds
 (the entry is on main). In production, the entry would not be visible
 until the human merged the PR.
+
+Set `auto_merge_pr=False` to model production instead — the PR stays open
+and `main` does not carry the entry, which is the state that exercises the
+reuse-the-open-PR path in `GitCatalogClient.update`.
 """
 
 from __future__ import annotations
@@ -64,6 +68,8 @@ class _FakeRegistryGitOps:
     tag_calls: list[FakeTag] = field(default_factory=list)
     reset_hard_calls: list[ResetHardCall] = field(default_factory=list)
     clone_calls: list[CloneCall] = field(default_factory=list)
+    auto_merge_pr: bool = True
+    pr_exists_calls: list[str] = field(default_factory=list)
     tag_raises: Exception | None = None
     commit_all_raises: Exception | None = None
     force_dirty: bool = False
@@ -105,6 +111,18 @@ class _FakeRegistryGitOps:
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None:
         # Mirrors production: -B force-creates-or-resets so retries work.
         self._git(["checkout", "-B", branch], cwd=repo_dir)
+
+    def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool:
+        out = self._git(
+            ["ls-remote", "--heads", "origin", f"refs/heads/{branch}"], cwd=repo_dir,
+        )
+        return bool(out.strip())
+
+    def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None:
+        # Same three commands as production.
+        self._git(["fetch", "origin", branch], cwd=repo_dir)
+        self._git(["checkout", "-B", branch], cwd=repo_dir)
+        self._git(["reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
 
     def commit_all(self, repo_dir: Path, message: str) -> None:
         if self.commit_all_raises:
@@ -153,10 +171,12 @@ class _FakeRegistryGitOps:
         self._next_pr += 1
         # Auto-merge: fast-forward the remote's `base` to this branch's tip
         # so subsequent `ensure_fresh()` calls see the new content.
-        self._git(["push", "origin", f"{branch}:{base}"], cwd=repo_dir)
+        if self.auto_merge_pr:
+            self._git(["push", "origin", f"{branch}:{base}"], cwd=repo_dir)
         return pr.number
 
     def pr_exists_for_branch(self, repo_dir: Path, branch: str) -> int | None:
+        self.pr_exists_calls.append(branch)
         pr = self.open_prs.get(branch)
         return pr.number if pr else None
 

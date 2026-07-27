@@ -12,7 +12,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from ._dvc_ops import DvcOpError, DvcOps
-from ._registry_git_ops import GitOpError, GitTagAlreadyExists, RegistryGitOps
+from ._registry_git_ops import (
+    GhAuthError,
+    GhNotInstalled,
+    GitOpError,
+    GitTagAlreadyExists,
+    PRConflictError,
+    RegistryBranchExists,
+    RegistryGitOps,
+)
 from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
 from .check import check_project
 from .model import DataProductOutput, Metadata
@@ -95,6 +103,7 @@ class PublishResult:
     catalog_updated: bool
     preview: PublishPreview | None = None
     pr_url: str | None = None
+    pr_reused: bool = False
 
 
 def prepare_publish(
@@ -243,11 +252,47 @@ def _apply_publish(
             pushed=True, tagged=True,
             recovery_hint="DVC + tag completed. Run `mintd registry register` first, then rerun `mintd publish` (idempotent retry).",
         ) from exc
+    except (GitOpError, PRConflictError, GhAuthError, GhNotInstalled) as exc:
+        # Broad on purpose. `update` now asks `gh pr list` before branching and
+        # fetches the remote branch explicitly, so this path covers a missing/
+        # unauthenticated `gh` and the race where the PR is merged and its
+        # branch deleted between the two calls. Anything uncaught here reaches
+        # the user as the raw traceback this handler exists to prevent.
+        # These two look similar and mean opposite things: a rejected push
+        # (our commits never landed) vs. a refused `gh pr create` (they did,
+        # and a PR is already open on them). Telling someone to delete the
+        # branch in the second case would close a live PR.
+        if isinstance(exc, RegistryBranchExists):
+            branch_line = (
+                f"The registry branch {exc.branch} already has commits mintd does not "
+                "have; ask a registry admin to merge or delete it, then retry.\n"
+            )
+        elif isinstance(exc, PRConflictError):
+            branch_line = (
+                f"The entry was pushed to {exc.branch}, but a pull request is already "
+                f"open on it — check `gh pr list --head {exc.branch}` on the registry; "
+                "your changes are most likely already on that PR.\n"
+            )
+        else:
+            branch_line = ""
+        raise CatalogUpdateFailed(
+            f"catalog update failed: {exc}",
+            pushed=True, tagged=True,
+            recovery_hint=(
+                branch_line
+                + f"DVC push, the metadata.json commit, and tag v{preview.new_version} "
+                "all completed — only the catalog PR is missing.\n"
+                f"To retry: `git tag -d v{preview.new_version}` (it was created by the "
+                f"run that failed), then rerun `mintd publish {preview.new_version}`.\n"
+                "Or, to skip the data steps entirely: `mintd registry update`."
+            ),
+        ) from exc
 
     return PublishResult(
         version=preview.new_version, dry_run=False, diff=preview.local_diff,
         pushed=True, tagged=True, catalog_updated=True, preview=preview,
         pr_url=getattr(update_result, "pr_url", None),
+        pr_reused=getattr(update_result, "pr_reused", False),
     )
 
 
