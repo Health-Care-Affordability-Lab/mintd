@@ -4,10 +4,14 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 from mintd.publish import (
-    publish_project, DvcPushFailed, TagFailed, PublishError, VersionNotIncreasing
+    publish_project, CatalogUpdateFailed, DvcPushFailed, TagFailed, PublishError,
+    VersionNotIncreasing
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
-from mintd._registry_git_ops import GitOpError, GitTagAlreadyExists
+from mintd._registry_git_ops import (
+    GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
+    RegistryBranchExists,
+)
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
@@ -517,3 +521,100 @@ def test_apply_publish_updates_status_between_phases(tmp_path):
         "Tagging release...",
         "Updating catalog entry...",
     ]
+
+# --- Step 5 (catalog update) must never leak a traceback -------------------
+# The failure lands after dvc push, the metadata commit, and the tag have all
+# succeeded, so the recovery hint has to say so.
+
+class _FailingCatalogClient(_FakeCatalogClient):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+
+    def update(self, metadata, *, dry_run=False, reporter=None):
+        raise self._exc
+
+
+@pytest.mark.parametrize("exc", [
+    RegistryBranchExists(["git", "push"], "! [rejected] update/x (fetch first)", "update/x"),
+    PRConflictError(branch="update/x", existing_pr=42),
+])
+def test_publish_catalog_branch_collision_reports_partial_state(tmp_path, exc):
+    proj = _seed_project(tmp_path)
+
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=proj,
+            client=_FailingCatalogClient(exc),
+            dvc_ops=_FakeDvcOps(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+    err = raised.value
+    assert err.pushed is True
+    assert err.tagged is True
+    hint = err.recovery_hint or ""
+    assert "update/x" in hint
+    assert "DVC push" in hint
+    assert "tag v0.1.1" in hint
+    assert "mintd publish 0.1.1" in hint
+    # The failing run already created the tag; a bare rerun would die at step 4.
+    assert "git tag -d v0.1.1" in hint
+
+
+def test_publish_catalog_gh_missing_reports_partial_state(tmp_path):
+    """`update` now shells out to `gh pr list` before branching, so a missing
+    or unauthenticated gh surfaces one call earlier than it used to."""
+    proj = _seed_project(tmp_path)
+
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=proj,
+            client=_FailingCatalogClient(GhNotInstalled("gh not found")),
+            dvc_ops=_FakeDvcOps(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+    assert raised.value.pushed is True
+    assert "mintd publish 0.1.1" in (raised.value.recovery_hint or "")
+
+
+def test_publish_pr_conflict_hint_does_not_advise_deleting_a_live_branch(tmp_path):
+    """`PRConflictError` means the push SUCCEEDED and only `gh pr create` was
+    refused. The rejected-push advice ("ask an admin to delete the branch")
+    would close a live PR and discard what was just pushed."""
+    proj = _seed_project(tmp_path)
+
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=proj,
+            client=_FailingCatalogClient(
+                PRConflictError(branch="update/x", existing_pr=42)
+            ),
+            dvc_ops=_FakeDvcOps(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+    hint = raised.value.recovery_hint or ""
+    assert "gh pr list --head update/x" in hint
+    assert "delete" not in hint
+    assert "already has commits mintd does not have" not in hint
+
+
+def test_publish_registry_branch_exists_hint_does_advise_merge_or_delete(tmp_path):
+    """The mirror case: the push was rejected, so nothing of ours is on the
+    branch and clearing it is the right remedy."""
+    proj = _seed_project(tmp_path)
+
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=proj,
+            client=_FailingCatalogClient(
+                RegistryBranchExists(["git", "push"], "! [rejected] (fetch first)", "update/x")
+            ),
+            dvc_ops=_FakeDvcOps(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+    hint = raised.value.recovery_hint or ""
+    assert "merge or delete it" in hint

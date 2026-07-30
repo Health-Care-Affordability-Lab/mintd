@@ -2685,3 +2685,184 @@ def test_cli_data_clone_zero_pull_errors_keeps_success_line(
         "cloned provider-xw" in msg
         for _, msg in recording_reporter.events_of("success")
     )
+
+
+# --- registry branch collisions never reach the user as a traceback --------
+
+
+def _publishable_project(tmp_path: Path, client) -> None:
+    metadata = _register_provider_xw(client)
+    metadata.data_products.primary = "data/final/"
+    (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
+    _init_git_in(tmp_path)
+    subprocess.run(["git", "add", "metadata.json"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
+         "commit", "-q", "-m", "add metadata"],
+        cwd=tmp_path, check=True,
+    )
+
+
+def test_cli_publish_registry_branch_exists_exits_one_with_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    """The field crash: a push rejected because the branch already carries an
+    open PR must surface as one error + hint naming what already landed."""
+    from mintd._registry_git_ops import RegistryBranchExists
+
+    client, _ = patched_clients
+    _publishable_project(tmp_path, client)
+
+    def _raise(*a: Any, **kw: Any) -> None:
+        raise RegistryBranchExists(
+            ["git", "push"], "! [rejected] update/provider-xw (fetch first)",
+            "update/provider-xw",
+        )
+
+    monkeypatch.setattr(client, "update", _raise)
+
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
+
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert len(errs) == 1
+    _, msg, hint = errs[0]
+    assert hint is not None
+    assert "update/provider-xw" in hint
+    assert "tag v" in hint
+    # The retry advice must be runnable: the failing run already made the tag.
+    assert "git tag -d v" in hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_registry_update_branch_exists_names_branch(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+) -> None:
+    """`mintd registry update` is guarded the same way as publish."""
+    from mintd._registry_git_ops import RegistryBranchExists
+
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+
+    def _raise(*a: Any, **kw: Any) -> None:
+        raise RegistryBranchExists(
+            ["git", "push"], "! [rejected] (fetch first)", "update/test_project",
+        )
+
+    monkeypatch.setattr(client, "update", _raise)
+
+    rc = cli.main(["registry", "update", str(tmp_path)])
+
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert len(errs) == 1
+    _, msg, hint = errs[0]
+    assert "update/test_project" in msg
+    assert hint is not None and "gh pr list" in hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_publish_success_names_reused_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    """The exit-0 half: publishing onto an already-open PR says so, and links
+    the PR that was updated rather than implying a new one was opened."""
+    from mintd.catalog import FieldChange, UpdateResult
+
+    client, _ = patched_clients
+    _publishable_project(tmp_path, client)
+
+    monkeypatch.setattr(
+        client, "update",
+        lambda *a, **kw: UpdateResult(
+            name="provider-xw",
+            changes=[FieldChange(field_path="mint.version", before="0.1.0", after="0.1.1")],
+            dry_run=False,
+            pr_number=42,
+            pr_url="https://github.com/example-org/registry/pull/42",
+            pr_reused=True,
+        ),
+    )
+
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
+
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "updated PR" in msg
+    assert "/pull/42" in msg
+
+
+def test_cli_registry_update_gh_unavailable_exits_one_with_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+) -> None:
+    """`update` now asks `gh pr list` before branching, so a missing or
+    unauthenticated gh surfaces one call earlier than it used to — and must
+    still be an error + hint, not a traceback."""
+    from mintd._registry_git_ops import GhAuthError
+
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+
+    def _raise(*a: Any, **kw: Any) -> None:
+        raise GhAuthError("gh: not authenticated")
+
+    monkeypatch.setattr(client, "update", _raise)
+
+    rc = cli.main(["registry", "update", str(tmp_path)])
+
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert len(errs) == 1
+    _, msg, hint = errs[0]
+    assert hint is not None and "gh auth status" in hint
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_cli_registry_update_success_names_reused_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+) -> None:
+    """AC2's other half: `mintd registry update` must also say the PR was
+    updated rather than implying it opened a fresh one."""
+    from mintd.catalog import FieldChange, UpdateResult
+
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+
+    monkeypatch.setattr(
+        client, "update",
+        lambda *a, **kw: UpdateResult(
+            name="test_project",
+            changes=[FieldChange(field_path="metadata.description", before="", after="x")],
+            dry_run=False,
+            pr_number=42,
+            pr_url="https://github.com/example-org/registry/pull/42",
+            pr_reused=True,
+        ),
+    )
+
+    rc = cli.main(["registry", "update", str(tmp_path)])
+
+    assert rc == 0
+    msg = recording_reporter.events_of("success")[-1][1]
+    assert "updated PR" in msg
+    assert "/pull/42" in msg

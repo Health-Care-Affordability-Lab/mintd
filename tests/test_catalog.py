@@ -384,3 +384,173 @@ def test_catalog_update_updates_status_between_phases(
         "Pushing to registry...",
         "Opening PR...",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Reusing an already-open update PR (git backend only — InMemoryCatalogClient
+# has no PR lifecycle). Setup shape: register with the fake's default
+# auto_merge_pr=True so the entry lands on main, then flip it off so the
+# update PR stays genuinely open, the way production looks while a registry
+# admin has not merged yet.
+# ---------------------------------------------------------------------------
+
+
+def _pr_open_client(
+    tmp_path: Path, remote: Path,
+) -> tuple[GitCatalogClient, _FakeRegistryGitOps]:
+    git_ops = _FakeRegistryGitOps()
+    client = GitCatalogClient(
+        registry_repo_url=str(remote),
+        work_dir=tmp_path / "cache",
+        git_ops=git_ops,
+    )
+    client.register(_load_metadata(name="proj"))
+    git_ops.auto_merge_pr = False
+    git_ops.pr_exists_calls.clear()
+    return client, git_ops
+
+
+def _desc(text: str) -> Callable[[dict[str, Any]], None]:
+    def mutate(data: dict[str, Any]) -> None:
+        data["metadata"]["description"] = text
+    return mutate
+
+
+def _remote_show(remote: Path, ref: str) -> str:
+    import subprocess
+    return subprocess.run(
+        ["git", f"--git-dir={remote}", "show", ref],
+        capture_output=True, text=True, check=True,
+    ).stdout
+
+
+def test_update_asks_registry_for_open_pr_before_branching(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """AC5: `pr_exists_for_branch` is called from src/ — the authoritative,
+    machine-independent check that replaces per-machine `.mintd_pending.json`
+    for the update path.
+
+    Only once the branch exists, though: no branch means no PR can be open on
+    it, so the first update spends no `gh` call at all.
+    """
+    client, git_ops = _pr_open_client(tmp_path, remote_registry_empty)
+
+    client.update(_load_metadata(name="proj", mutate=_desc("one")))
+    assert git_ops.pr_exists_calls == []
+
+    client.update(_load_metadata(name="proj", mutate=_desc("two")))
+    assert git_ops.pr_exists_calls == ["update/proj"]
+
+
+def test_update_reuses_open_pr_instead_of_opening_a_second(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """AC6: publishing twice before an admin merges reuses the open PR.
+
+    Fails at HEAD~ with a non-fast-forward GitOpError from `push_branch` —
+    this is the crash the issue is about.
+    """
+    client, git_ops = _pr_open_client(tmp_path, remote_registry_empty)
+
+    r1 = client.update(_load_metadata(name="proj", mutate=_desc("one")))
+    r2 = client.update(_load_metadata(name="proj", mutate=_desc("two")))
+
+    assert r1.pr_reused is False
+    assert r2.pr_reused is True
+    assert r2.pr_number == r1.pr_number
+    # No second PR was opened for the same product.
+    assert sorted(git_ops.open_prs) == ["register/proj", "update/proj"]
+
+
+def test_update_stacks_onto_remote_branch_tip(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """The reused PR carries the NEWER entry, and the branch is the old tip
+    plus one commit — not a rival history forked off main."""
+    client, _ = _pr_open_client(tmp_path, remote_registry_empty)
+
+    client.update(_load_metadata(name="proj", mutate=_desc("one")))
+    client.update(_load_metadata(name="proj", mutate=_desc("two")))
+
+    # project.type in the minimal fixture is `data`, hence catalog/data/.
+    on_branch = _remote_show(
+        remote_registry_empty, "update/proj:catalog/data/proj.yaml",
+    )
+    assert "two" in on_branch
+    assert "one" not in on_branch
+
+    import subprocess
+    count = subprocess.run(
+        ["git", f"--git-dir={remote_registry_empty}", "rev-list", "--count",
+         "main..update/proj"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert count == "2"
+
+
+def test_update_reuse_path_skips_commit_when_branch_already_current(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """The idempotent retry the recovery hint tells users to run must not
+    reach `git commit` — it exits 1 on a clean tree. Guarded by comparing the
+    entry already on the branch, not `is_working_tree_clean` (the cache tree
+    is never reliably clean: `.mintd_pending.json` is untracked)."""
+    import subprocess
+    client, _ = _pr_open_client(tmp_path, remote_registry_empty)
+
+    client.update(_load_metadata(name="proj", mutate=_desc("one")))
+    r2 = client.update(_load_metadata(name="proj", mutate=_desc("two")))
+
+    def tip() -> str:
+        return subprocess.run(
+            ["git", f"--git-dir={remote_registry_empty}", "rev-parse", "update/proj"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    before = tip()
+    # Third update with metadata identical to the second.
+    r3 = client.update(_load_metadata(name="proj", mutate=_desc("two")))
+    assert r3.pr_number == r2.pr_number
+    assert tip() == before, "an empty commit was pushed onto the open PR branch"
+
+
+def test_update_stacks_onto_a_leftover_branch_with_no_open_pr(
+    tmp_path: Path, remote_registry_empty: Path,
+) -> None:
+    """A squash-merged PR leaves its branch behind, and `gh pr list --state
+    open` reports nothing for it. Keying the branching decision on the PR
+    rather than the branch would put us back on a main-based branch whose push
+    can never fast-forward — wedging every later publish of that product.
+
+    Shape reproduced here: the branch keeps a commit that main does not carry,
+    the PR is gone, and the next update must still land.
+    """
+    import subprocess
+    client, git_ops = _pr_open_client(tmp_path, remote_registry_empty)
+
+    client.update(_load_metadata(name="proj", mutate=_desc("one")))
+
+    # Squash-merge: main gains an equivalent commit with a different sha, and
+    # nobody deletes the branch. Then the PR closes.
+    seed = tmp_path / "squash"
+    subprocess.run(["git", "clone", str(remote_registry_empty), str(seed)], check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@m", "-c", "user.name=t", "merge",
+                    "--squash", "origin/update/proj"], cwd=seed, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@m", "-c", "user.name=t", "commit",
+                    "-m", "Update proj (#1)"], cwd=seed, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True,
+                   capture_output=True)
+    git_ops.open_prs.pop("update/proj")
+
+    result = client.update(_load_metadata(name="proj", mutate=_desc("three")))
+
+    # A fresh PR — there was none to reuse — but on the SURVIVING branch.
+    assert result.pr_reused is False
+    assert result.pr_number is not None
+    on_branch = _remote_show(
+        remote_registry_empty, "update/proj:catalog/data/proj.yaml",
+    )
+    assert "three" in on_branch

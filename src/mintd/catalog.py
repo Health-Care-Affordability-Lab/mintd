@@ -84,6 +84,9 @@ class UpdateResult:
     dry_run: bool
     pr_number: int | None = None
     pr_url: str | None = None
+    # True when the entry was stacked onto an already-open PR rather than
+    # opening a new one.
+    pr_reused: bool = False
 
 
 @dataclass(frozen=True)
@@ -335,6 +338,7 @@ class GitCatalogClient:
         pr = self._commit_and_pr(
             branch=branch,
             entry=entry,
+            entry_name=name,
             content=content,
             commit_message=f"Register {name}",
             pr_title=f"Register {name}",
@@ -373,20 +377,43 @@ class GitCatalogClient:
             return UpdateResult(name=name, changes=changes, dry_run=True)
 
         branch = f"update/{name}"
+        # Two separate questions, deliberately not conflated:
+        #
+        #   does the branch exist?  -> decides where we commit. Anything on the
+        #       registry's copy of the branch that we don't have makes a push
+        #       from a fresh main-based branch a non-fast-forward, forever.
+        #       A squash-merged PR whose branch was never deleted looks exactly
+        #       like this and has NO open PR.
+        #   is a PR open on it?     -> decides whether to reuse or open one.
+        #
+        # Both are asked of the registry rather than of `.mintd_pending.json`,
+        # which is per-machine local state (a PR opened from a laptop is
+        # invisible on the cluster). Both are AFTER the no-changes and dry-run
+        # early returns above, so neither path touches the network.
+        branch_exists = self._git_ops.remote_branch_exists(self._work_dir, branch)
+        # No branch means no PR can be open on it — skip the `gh` call entirely.
+        existing_pr = (
+            self._git_ops.pr_exists_for_branch(self._work_dir, branch)
+            if branch_exists else None
+        )
         pr = self._commit_and_pr(
             branch=branch,
             entry=new_entry,
+            entry_name=name,
             content=new_content,
             commit_message=f"Update {name}",
             pr_title=f"Update {name}",
             pr_body=f"Update for catalog entry `{name}`.",
             reporter=reporter,
+            branch_exists=branch_exists,
+            existing_pr=existing_pr,
         )
         self._record_pending(name=name, pr_number=pr, kind="update")
         return UpdateResult(
             name=name, changes=changes, dry_run=False,
             pr_number=pr,
             pr_url=_pr_url(self._registry_repo_url, pr),
+            pr_reused=existing_pr is not None,
         )
 
     # ------------------------------------------------------------------
@@ -416,22 +443,53 @@ class GitCatalogClient:
         *,
         branch: str,
         entry: CatalogEntry,
+        entry_name: str,
         content: str,
         commit_message: str,
         pr_title: str,
         pr_body: str,
         reporter: Optional["Reporter"] = None,
+        branch_exists: bool = False,
+        existing_pr: int | None = None,
     ) -> int:
-        self._git_ops.checkout_new_branch(self._work_dir, branch)
-        if reporter:
-            reporter.update_status("Writing catalog entry...")
-        self._cache.write_entry(entry, content)
-        if reporter:
-            reporter.update_status("Committing to registry...")
-        self._git_ops.commit_all(self._work_dir, commit_message)
-        if reporter:
-            reporter.update_status("Pushing to registry...")
-        self._git_ops.push_branch(self._work_dir, branch)
+        """Commit `entry` on `branch` and return the PR number carrying it.
+
+        `branch_exists` decides WHERE the commit lands: on the registry's copy
+        of the branch (stacked on its tip) or on a new branch off the
+        freshly-reset origin/main. `existing_pr` decides whether a PR is
+        opened afterwards or an already-open one is reused. They are
+        independent — a squash-merged PR leaves its branch behind with no open
+        PR, and branching off main there can never fast-forward the remote.
+        """
+        if branch_exists:
+            if reporter and existing_pr is not None:
+                reporter.update_status(f"Updating open PR #{existing_pr}...")
+            self._git_ops.checkout_remote_branch(self._work_dir, branch)
+            on_branch: CatalogEntry | None = self._cache.read_entry(entry_name)
+        else:
+            self._git_ops.checkout_new_branch(self._work_dir, branch)
+            on_branch = None
+
+        # Nothing to commit when the branch already carries exactly this entry
+        # — the idempotent `mintd publish <same version>` retry the recovery
+        # hint tells users to run. `git commit` exits 1 on a clean tree.
+        #
+        # Content comparison rather than `is_working_tree_clean`: the cache
+        # tree is never reliably clean (untracked `.mintd_pending.json`), and
+        # this compares the thing we actually care about.
+        if on_branch is None or _diff_entries(on_branch, entry):
+            if reporter:
+                reporter.update_status("Writing catalog entry...")
+            self._cache.write_entry(entry, content)
+            if reporter:
+                reporter.update_status("Committing to registry...")
+            self._git_ops.commit_all(self._work_dir, commit_message)
+            if reporter:
+                reporter.update_status("Pushing to registry...")
+            self._git_ops.push_branch(self._work_dir, branch)
+
+        if existing_pr is not None:
+            return existing_pr
         if reporter:
             reporter.update_status("Opening PR...")
         return self._git_ops.open_pr(

@@ -40,7 +40,13 @@ from ._dvc_ops import (
     SubprocessDvcOps,
 )
 from ._subprocess import WallTimeoutExceeded
-from ._registry_git_ops import GitOpError
+from ._registry_git_ops import (
+    GhAuthError,
+    GhNotInstalled,
+    GitOpError,
+    PRConflictError,
+    RegistryBranchExists,
+)
 from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps  # noqa: F401
 from ._init_ops import InitOpError
@@ -2290,6 +2296,26 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
                 hint="run 'mintd registry register' first to register this project",
             )
             return 1
+        # Specific clause first — RegistryBranchExists is a GitOpError.
+        except (RegistryBranchExists, PRConflictError) as exc:
+            reporter.error(
+                f"the registry rejected branch {exc.branch} for {metadata.project.name!r}",
+                hint=(
+                    "an earlier catalog PR is probably still open on it — check "
+                    f"`gh pr list --head {exc.branch}` on the registry, then rerun "
+                    "`mintd registry update` (safe to retry; nothing in this project changed)"
+                ),
+            )
+            return 1
+        except (GitOpError, GhAuthError, GhNotInstalled) as exc:
+            reporter.error(
+                f"could not update the registry entry for {metadata.project.name!r}: {exc}",
+                hint=(
+                    "check `gh auth status` and network access to the registry, then rerun "
+                    "`mintd registry update` — nothing in this project changed"
+                ),
+            )
+            return 1
     if not result.changes:
         reporter.info("No changes to publish." + (" (dry-run)" if result.dry_run else ""))
         return 0
@@ -2302,10 +2328,11 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
     n = len(field_names)
     shown = ", ".join(field_names[:3]) + (f", +{n - 3} more" if n > 3 else "")
     name = metadata.project.name
+    pr_label = "updated PR" if result.pr_reused else "PR"
     if result.pr_url:
-        pr_clause = f" → PR {result.pr_url}"
+        pr_clause = f" → {pr_label} {result.pr_url}"
     elif result.pr_number is not None:
-        pr_clause = f" → PR #{result.pr_number}"
+        pr_clause = f" → {pr_label} #{result.pr_number}"
     else:
         pr_clause = ""
     reporter.success(f"✓ updated {name} — {n} field(s): {shown}{pr_clause}")
@@ -2411,7 +2438,8 @@ def _handle_publish(args: argparse.Namespace) -> int:
     if storage is not None and getattr(storage, "bucket", None):
         prefix = (getattr(storage, "prefix", None) or "").strip("/")
         prefix_clause = f", s3://{storage.bucket}/{prefix}/" if prefix else f", s3://{storage.bucket}/"
-    pr_clause = f", PR {result.pr_url}" if result.pr_url else ", PR (local)"
+    pr_label = "updated PR" if result.pr_reused else "PR"
+    pr_clause = f", {pr_label} {result.pr_url}" if result.pr_url else ", PR (local)"
     if reporter.json_mode:
         reporter.result(
             {
