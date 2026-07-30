@@ -1628,9 +1628,9 @@ def test_cli_package_creates_archive(
 
     captured: dict[str, Any] = {}
 
-    def fake_package(*args: Any, **kwargs: Any) -> Path:
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         captured.update(kwargs)
-        return archive
+        return archive, []
 
     monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
 

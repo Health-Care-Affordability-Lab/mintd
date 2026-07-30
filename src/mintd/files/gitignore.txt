@@ -137,6 +137,15 @@ renv/python/
 !/data/**/.gitkeep
 !/data/**/*.dvc
 
+# Enclave transfer archives and the extraction staging dir. Restricted data
+# crosses the air gap through here; it must never reach git. Landing receipts
+# under transfers/received/ ARE tracked — they are the audit record when a
+# transfer is landed without mintd.
+/transfers/**
+!/transfers/**/
+!/transfers/received/**
+/incoming/
+
 # Results (let DVC handle these)
 /results/**
 !/results/**/

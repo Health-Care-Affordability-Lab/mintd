@@ -16,6 +16,7 @@ from mintd._archive_ops import (
 from mintd.enclave import (
     DownloadedItem,
     EnclaveManifest,
+    NothingNewToPackage,
     NothingToPackage,
     TransferredItem,
     enclave_package,
@@ -58,7 +59,7 @@ def test_package_creates_archive(tmp_path: Path) -> None:
     _stage_download(tmp_path, m_path)
     fake = _FakeArchiveOps()
     out_dir = tmp_path / "out"
-    archive = enclave_package(
+    archive, _skipped = enclave_package(
         manifest_path=m_path,
         downloads_root=tmp_path / "downloads",
         output_dir=out_dir,
@@ -174,7 +175,7 @@ def test_package_transfer_id_sequence(tmp_path: Path) -> None:
     _stage_download(tmp_path, m_path, pre_seeded_transferred=[pre_seeded])
 
     fake = _FakeArchiveOps()
-    archive = enclave_package(
+    archive, _skipped = enclave_package(
         manifest_path=m_path,
         downloads_root=tmp_path / "downloads",
         output_dir=tmp_path / "transfers",
@@ -186,6 +187,293 @@ def test_package_transfer_id_sequence(tmp_path: Path) -> None:
     # Original entry preserved + 1 new entry appended.
     assert len(reloaded.transferred) == 2
     assert reloaded.transferred[1].transfer_id == "transfer-2026-05-15-000001"
+
+
+def _seed(
+    tmp_path: Path,
+    manifest_path: Path,
+    downloaded: list[tuple[str, str]],
+    transferred: list[tuple[str, str]] = [],
+    *,
+    day: str = "2026-05-15",
+    contract_pins: dict[tuple[str, str], str] | None = None,
+) -> None:
+    """Stage `(repo, artifact_pin_seed)` downloads on disk + in the manifest.
+
+    `transferred` seeds `(repo, artifact_pin_seed)` rows so a test can express
+    "these bytes already crossed the gap" without restating the whole model.
+    """
+    items: list[DownloadedItem] = []
+    for repo, seed in downloaded:
+        pin = seed * 5
+        vf = f"{pin[:7]}-{day}"
+        dl_dir = tmp_path / "downloads" / repo / vf
+        dl_dir.mkdir(parents=True, exist_ok=True)
+        (dl_dir / "data.csv").write_text("x\n")
+        items.append(
+            DownloadedItem(
+                repo=repo,
+                output="data.csv",
+                contract_pin=(contract_pins or {}).get((repo, seed), "c" * 40),
+                artifact_pin=pin,
+                fetch_strategy="dvc-import",
+                downloaded_at=datetime(2026, 5, 15),
+                local_path=str(dl_dir),
+            )
+        )
+    EnclaveManifest(
+        enclave_name="test-enclave",
+        downloaded=items,
+        transferred=[
+            TransferredItem(
+                repo=repo,
+                contract_pin="c" * 40,
+                artifact_pin=seed * 5,
+                transfer_date=date(2026, 5, 14),
+                transfer_id="transfer-2026-05-14-000000",
+                local_path=f"/prior/{repo}",
+            )
+            for repo, seed in transferred
+        ],
+    ).save(manifest_path)
+
+
+def test_package_skips_already_shipped_bytes(tmp_path: Path) -> None:
+    """The core incremental contract: bytes already in transferred[] don't re-ship."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1"), ("ds-beta", "bbbccc2")],
+        transferred=[("ds-alpha", "aaabbb1")],
+    )
+    fake = _FakeArchiveOps()
+    _archive, skipped = enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    staged = fake.staged[0]
+    assert any(p.startswith("ds-beta") for p in staged)
+    assert not any(p.startswith("ds-alpha") for p in staged)
+    assert [d.repo for d in skipped] == ["ds-alpha"]
+    reloaded = EnclaveManifest.load(m_path)
+    # Prior row preserved, exactly one appended — for ds-beta only.
+    assert len(reloaded.transferred) == 2
+    assert reloaded.transferred[1].repo == "ds-beta"
+
+
+def test_package_all_shipped_raises_nothing_new(tmp_path: Path) -> None:
+    """Nothing new is a routine no-op, not an error, and must not touch state."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1")],
+        transferred=[("ds-alpha", "aaabbb1")],
+    )
+    before = m_path.read_bytes()
+    fake = _FakeArchiveOps()
+    with pytest.raises(NothingNewToPackage):
+        enclave_package(
+            manifest_path=m_path,
+            downloads_root=tmp_path / "downloads",
+            output_dir=tmp_path / "out",
+            archive_ops=fake,
+            today=date(2026, 5, 15),
+        )
+    assert fake.calls == []
+    # No transfer id minted, no save: byte-identical.
+    assert m_path.read_bytes() == before
+
+
+def test_nothing_new_is_a_nothing_to_package(tmp_path: Path) -> None:
+    """Subclassing keeps every pre-existing `except NothingToPackage` correct."""
+    assert issubclass(NothingNewToPackage, NothingToPackage)
+
+
+def test_package_resend_reships(tmp_path: Path) -> None:
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1")],
+        transferred=[("ds-alpha", "aaabbb1")],
+    )
+    fake = _FakeArchiveOps()
+    archive, skipped = enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+        resend=True,
+    )
+    assert archive.exists()
+    assert skipped == []
+    reloaded = EnclaveManifest.load(m_path)
+    assert len(reloaded.transferred) == 2
+    assert reloaded.transferred[1].artifact_pin == "aaabbb1" * 5
+    assert (
+        reloaded.transferred[0].transfer_id != reloaded.transferred[1].transfer_id
+    )
+
+
+def test_package_dedupes_same_bytes_under_two_contract_pins(tmp_path: Path) -> None:
+    """D4: a same-day pin bump yields two downloaded[] rows sharing one
+    local_path (the folder name omits contract_pin). Copying both crashes
+    `copytree` with FileExistsError. Copy once instead."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1"), ("ds-alpha", "aaabbb1")],
+        contract_pins={("ds-alpha", "aaabbb1"): "c" * 40},
+    )
+    # Second row carries a different contract pin, same bytes/folder.
+    man = EnclaveManifest.load(m_path)
+    man.downloaded[1] = man.downloaded[1].model_copy(
+        update={"contract_pin": "d" * 40}
+    )
+    man.save(m_path)
+
+    fake = _FakeArchiveOps()
+    _archive, _skipped = enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    reloaded = EnclaveManifest.load(m_path)
+    # One copy crossed, so exactly one audit row — carrying the newer pin.
+    assert len(reloaded.transferred) == 1
+    assert reloaded.transferred[0].contract_pin == "d" * 40
+
+
+def test_package_dedup_key_ignores_contract_pin(tmp_path: Path) -> None:
+    """D6/BQ#4: same bytes under a NEW contract pin must not re-ship."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1")],
+        transferred=[("ds-alpha", "aaabbb1")],
+        contract_pins={("ds-alpha", "aaabbb1"): "z" * 40},  # bumped since transfer
+    )
+    with pytest.raises(NothingNewToPackage):
+        enclave_package(
+            manifest_path=m_path,
+            downloads_root=tmp_path / "downloads",
+            output_dir=tmp_path / "out",
+            archive_ops=_FakeArchiveOps(),
+            today=date(2026, 5, 15),
+        )
+
+
+def test_package_dedup_key_is_not_the_pull_date(tmp_path: Path) -> None:
+    """The key must not be local_path/version_folder: both embed the PULL date,
+    so a re-pull on another day would silently re-ship gigabytes."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1")],
+        transferred=[("ds-alpha", "aaabbb1")],
+        day="2026-07-28",  # re-pulled on a later day -> different version_folder
+    )
+    with pytest.raises(NothingNewToPackage):
+        enclave_package(
+            manifest_path=m_path,
+            downloads_root=tmp_path / "downloads",
+            output_dir=tmp_path / "out",
+            archive_ops=_FakeArchiveOps(),
+            today=date(2026, 7, 28),
+        )
+
+
+def test_package_empty_selection_still_raises_nothing_to_package(
+    tmp_path: Path,
+) -> None:
+    """An unknown --repo is a different failure from 'nothing new', and keeps
+    the pre-existing hint ('run mintd enclave pull first') correct."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(tmp_path, m_path, downloaded=[("ds-alpha", "aaabbb1")])
+    with pytest.raises(NothingToPackage) as ei:
+        enclave_package(
+            manifest_path=m_path,
+            name="ds-nope",
+            downloads_root=tmp_path / "downloads",
+            output_dir=tmp_path / "out",
+            archive_ops=_FakeArchiveOps(),
+            today=date(2026, 5, 15),
+        )
+    assert not isinstance(ei.value, NothingNewToPackage)
+
+
+# --- S4b: the generated per-transfer README ----------------------------------
+
+
+def test_bundle_contains_readme(tmp_path: Path) -> None:
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(tmp_path, m_path, downloaded=[("ds-alpha", "aaabbb1")])
+    fake = _FakeArchiveOps()
+    enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    assert "README.md" in fake.staged[0]
+    text = fake.staged_text("README.md")
+    assert "transfer-2026-05-15-000000" in text
+    assert "test-enclave" in text
+    assert "ds-alpha" in text
+    assert f"{'aaabbb1' * 5}"[:7] in text
+
+
+def test_bundle_readme_lists_only_packaged_products(tmp_path: Path) -> None:
+    """The one way this README could still lie: naming a product the
+    incremental filter excluded."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1"), ("ds-beta", "bbbccc2")],
+        transferred=[("ds-alpha", "aaabbb1")],
+    )
+    fake = _FakeArchiveOps()
+    enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    text = fake.staged_text("README.md")
+    assert "ds-beta" in text
+    assert "ds-alpha" not in text
+
+
+def test_bundle_readme_destination_matches_verify(tmp_path: Path) -> None:
+    """The destination the README prints must be the one `enclave_verify`
+    actually computes — prose/code drift here misplaces real data."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(tmp_path, m_path, downloaded=[("ds-alpha", "aaabbb1")])
+    fake = _FakeArchiveOps()
+    enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    version_folder = f"{('aaabbb1' * 5)[:7]}-2026-05-15"
+    # `enclave_verify` moves to data_root/<repo>/<version_folder> (enclave.py).
+    assert f"data/ds-alpha/{version_folder}" in fake.staged_text("README.md")
 
 
 def test_package_rejects_unsafe_symlink_in_downloads(tmp_path: Path) -> None:

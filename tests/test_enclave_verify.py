@@ -16,9 +16,11 @@ import pytest
 import yaml
 
 from mintd.enclave import (
+    DestinationExists,
     EnclaveManifest,
     InvalidTransferManifest,
     PathTraversalDetected,
+    TransferManifestNotFound,
     TransferredItem,
     enclave_verify,
 )
@@ -92,6 +94,34 @@ def test_verify_happy_path(tmp_path: Path) -> None:
     assert returned_path == m_path
     assert len(written) == 1
     assert written[0].repo == "ds-alpha"
+
+
+def test_verify_missing_manifest_raises_specific_subclass(tmp_path: Path) -> None:
+    """Pointing at an un-extracted dir has one cause and one fix; it must be
+    distinguishable from a malformed archive, whose hint sends the user back
+    across the air gap."""
+    empty = tmp_path / "not_extracted"
+    empty.mkdir()
+    m_path = _new_inside_manifest(tmp_path)
+    with pytest.raises(TransferManifestNotFound):
+        enclave_verify(extracted_dir=empty, manifest_path=m_path)
+    # Still an InvalidTransferManifest, so pre-existing handlers stay correct.
+    assert issubclass(TransferManifestNotFound, InvalidTransferManifest)
+
+
+def test_verify_dest_collision_raises_specific_subclass(tmp_path: Path) -> None:
+    """A hand-landed product (no transferred[] row) collides on dest. That is a
+    different failure from a malformed archive and needs a different fix."""
+    extracted = _make_extracted(tmp_path)
+    m_path = _new_inside_manifest(tmp_path)
+    data_root = tmp_path / "data"
+    # Simulate the documented by-hand landing: files in place, no audit row.
+    (data_root / "ds-alpha" / "aaabbb1-2026-05-15").mkdir(parents=True)
+    with pytest.raises(DestinationExists):
+        enclave_verify(
+            extracted_dir=extracted, manifest_path=m_path, data_root=data_root
+        )
+    assert issubclass(DestinationExists, InvalidTransferManifest)
 
 
 def test_verify_moves_data_to_data_root(tmp_path: Path) -> None:

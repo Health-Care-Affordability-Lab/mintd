@@ -28,79 +28,110 @@ mintd enclave add data_cms-provider-data-service
 approved_products:
   - repo: "data_cms-provider-data-service"
     registry_entry: "catalog/data/data_cms-provider-data-service.yaml"
-    stage: "final"
+    pin: "4f7c2a1..."          # producer git commit; required
 ```
 
 ### 2. Pull Data (Networked Machine)
 
-Pull latest versions of data products:
-
 ```bash
-# Pull all approved products
-mintd enclave pull --all
+# Pull every approved product
+mintd enclave pull
 
-# Pull specific product (warns if already exists)
+# Pull one product
 mintd enclave pull data_cms-provider-data-service
 ```
 
+Data you already have is not re-fetched. Pass `--force` to re-download.
+
 ### 3. Package for Transfer (Networked Machine)
 
-Create transfer archive with checksums:
+```bash
+mintd enclave package
+# Creates transfers/transfer-YYYY-MM-DD-NNNNNN.tar.gz
+```
+
+Bundles are **incremental**: products already recorded in `transferred[]` are
+skipped, so each archive carries only what has not yet crossed the gap. If
+everything has already crossed, `package` says so and exits 0 without building
+an archive.
+
+A bundle is recorded as transferred when it is *built*, not when it arrives. If
+an archive is lost in transit, re-ship it with:
 
 ```bash
-mint enclave package
-# Creates transfers/transfer-YYYY-MM-DD.tar.gz
+mintd enclave package --resend data_cms-provider-data-service
 ```
 
 ### 4. Physical Transfer
 
 Copy the transfer archive to the enclave via USB, secure file transfer, etc.
 
-### 5. Unpack and Verify (Enclave)
+### 5. Land the Data (Enclave)
+
+Every archive contains its own `README.md` describing exactly what is inside and
+where it goes, plus `land.py`, which does the placement for you:
 
 ```bash
-# On enclave machine (works on Windows/Linux/Mac)
-python enclave_cli.py unpack transfer-YYYY-MM-DD.tar.gz
-python enclave_cli.py verify transfer_dir/
+cd /path/to/this-repo
+mkdir -p incoming && tar -xzf transfer-YYYY-MM-DD-NNNNNN.tar.gz -C incoming
+python3 incoming/land.py
 ```
+
+`land.py` needs **only python3** — no pip, no network, no DVC, no mintd. It
+moves each product into `data/<product>/<version folder>/` and appends the
+audit row to `enclave_manifest.yaml`. Running it twice does nothing the second
+time. Use `--dry-run` to preview, and `--repo <path>` if you extracted the
+archive somewhere outside this repo.
+
+If this enclave happens to have mintd installed (it needs Python 3.11+, which
+many air-gapped hosts do not have), `mintd enclave verify incoming` does the
+same job.
 
 ## Data Organization
 
 ```
 data/
 └── {repo_name}/
-    └── {dvc_hash}-{transfer_date}/
-        ├── _checksums.sha256
+    └── {artifact_pin}-{pull_date}/
         └── final/
             └── *.dta, *.csv, etc.
 ```
+
+The date in the folder name is the date the data was **pulled from the
+producer**, not the date it was transferred into the enclave. A folder dated
+months ago is not stale — it is the pinned version you asked for.
 
 ## Manifest Structure
 
 The `enclave_manifest.yaml` tracks all data operations:
 
 - **approved_products**: Data products this enclave can access
-- **downloaded**: Versions pulled to networked repo
+- **downloaded**: Versions pulled to the networked repo
 - **transferred**: Versions verified on enclave
 
 ## Security Notes
 
 - Data transfers require physical media (no network on enclave)
-- All transfers are verified with SHA256 checksums
-- Complete audit trail maintained in manifest
+- Every product is pinned by producer commit (`contract_pin`) and content hash
+  (`artifact_pin`); both travel with the archive
+- Complete audit trail maintained in `transferred[]`, which is append-only
 - Registry approval required before data can be accessed
+- `transfers/` and `incoming/` are git-ignored so restricted data cannot be
+  committed by accident
 
 ## Requirements
 
-- Python 3.9+
-- Network access (for pulling data)
-- Physical transfer capability (USB, secure file transfer)
+**Networked machine:** mintd (Python 3.11+), network access.
+
+**Enclave machine:** python3 only. `land.py` ships inside each transfer archive
+and uses nothing outside the standard library, so there is nothing to install
+across the air gap.
 
 ## Getting Help
 
 ```bash
-mint enclave --help          # Show enclave commands
-mint enclave list           # Show approved products
+mintd enclave --help         # Show enclave commands
+mintd enclave list           # Show approved products
 ```
 
 ---

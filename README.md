@@ -178,6 +178,8 @@ mintd data import my-cleaned-survey --bump
 For air-gapped / governed-access environments where data leaves a secure
 machine via a manifest + archive instead of S3:
 
+On the networked machine:
+
 ```bash
 mintd init enclave my-restricted-analysis
 cd enclave_my-restricted-analysis
@@ -185,15 +187,49 @@ cd enclave_my-restricted-analysis
 mintd enclave add producer-repo --pin <git-sha>
 mintd enclave pull                          # fetch outside the enclave
 mintd enclave package                       # bundle into a transfer archive
-
-# Inside the enclave, after the archive is delivered:
-mintd enclave verify ./extracted/
-mintd enclave list
 ```
+
+**Bundles are incremental.** `package` skips products already recorded in
+`transferred[]`, so each archive carries only what hasn't crossed the gap yet.
+When there's nothing new it says so and exits 0 without building an archive:
+
+```
+$ mintd enclave package
+skipped 2 already-transferred products: claims, prices (pass --resend to ship them again)
+packaged: transfers/transfer-2026-07-28-000001.tar.gz
+```
+
+A bundle counts as transferred when it's *built*, not when it arrives. If an
+archive is lost in transit, re-ship it with `mintd enclave package --resend
+<repo>`.
+
+Inside the enclave, after the archive is delivered:
+
+```bash
+mkdir -p incoming && tar -xzf transfer-2026-07-28-000001.tar.gz -C incoming
+python3 incoming/land.py
+```
+
+Every archive ships with its own generated `README.md` — listing exactly which
+products, pins and version folders it carries, and where they go — plus
+`land.py`, which does the placement. `land.py` uses **only the Python standard
+library**: no pip, no network, no DVC, no mintd, no PyYAML. It moves each
+product into `data/<repo>/<version-folder>/`, appends the audit row, refuses to
+run against the wrong enclave, and does nothing on a second run. `--dry-run`
+previews; `--repo <path>` points it at the repo if you extracted elsewhere.
+
+This matters because mintd itself generally *can't* be installed inside the gap
+— it needs Python 3.11+, network access and DVC. If the enclave does happen to
+have mintd, `mintd enclave verify incoming` does the same job, and running it
+after `land.py` correctly reports nothing left to do.
 
 The manifest's `transferred[]` section is append-only by construction —
 `EnclaveManifest.save()` refuses to write if an existing entry was
 mutated, so the audit trail can't be silently rewritten.
+
+> **Not yet verified:** neither landing path checksums the delivered files
+> against the recorded `artifact_pin`, so in-flight corruption is not currently
+> detected. Treat the audit trail as a record of provenance, not of integrity.
 
 ## Example: files that aren't data products
 
@@ -247,7 +283,7 @@ mintd check    [path] [--upgrades]                Validate metadata + (optionall
 mintd data     import|clone|pull|push|add|verify|remove|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
-mintd enclave  add|remove|bump|pull|package|verify|list
+mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
 mintd registry register|update|status|sync        Catalog operations
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
 mintd config   show|setup|validate

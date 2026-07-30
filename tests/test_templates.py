@@ -113,9 +113,19 @@ def test_enclave_renders_transfer_scripts(tmp_path: Path) -> None:
     )
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
     assert "enclave_manifest.yaml" in rel
-    assert "enclave_cli.py" in rel
     assert "scripts/pull_data.sh" in rel
     assert "src/registry.py" in rel
+    # The v1 inside-enclave path is gone: all four failed against a real v2
+    # archive. Landing is `land.py`, shipped inside each transfer instead.
+    assert "enclave_cli.py" not in rel
+    assert "src/transfer.py" not in rel
+    assert "scripts/unpack_transfer.sh" not in rel
+    assert "scripts/verify_transfer.sh" not in rel
+    # Orphaned by deleting src/transfer.py: its last line is
+    # `python -m src.transfer package`.
+    assert "scripts/package_transfer.sh" not in rel
+    # requirements.txt told an air-gapped user to pip install.
+    assert "requirements.txt" not in rel
     # enclave does NOT get the language-specific data files.
     assert "code/ingest.py" not in rel
 
@@ -324,12 +334,7 @@ def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
     render_scaffold(
         project_type="enclave", name="foo", language="python", target_dir=tmp_path
     )
-    for rel in (
-        "scripts/pull_data.sh",
-        "scripts/package_transfer.sh",
-        "scripts/unpack_transfer.sh",
-        "scripts/verify_transfer.sh",
-    ):
+    for rel in ("scripts/pull_data.sh",):
         mode = (tmp_path / rel).stat().st_mode
         assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
 
@@ -379,7 +384,7 @@ def test_gitignore_negates_dvc_pointers_under_downloads(tmp_path: Path) -> None:
     assert is_ignored(tmp_path, "downloads/provider-x/_staging/outputs/part.parquet")
 
 
-@pytest.mark.parametrize("template_name", ["transfer.py.j2", "package.py.j2"])
+@pytest.mark.parametrize("template_name", ["package.py.j2"])
 def test_transfer_manifest_default_schema_version_validates(
     template_name: str, tmp_path: Path
 ) -> None:
