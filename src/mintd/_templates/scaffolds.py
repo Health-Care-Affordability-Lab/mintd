@@ -114,19 +114,29 @@ def scaffold_enclave(language: str, name: str, full_name: str, source_dir: str =
         ("README.md", "README_enclave.md.j2"),
         ("metadata.json", "metadata.json.j2"),
         ("enclave_manifest.yaml", "enclave_manifest.yaml.j2"),
-        ("requirements.txt", "requirements_enclave.txt.j2"),
-        ("enclave_cli.py", "enclave_cli.py.j2"),
         (".gitignore", "gitignore.txt"),
         (".dvcignore", "dvcignore.txt"),
         ("src/__init__.py", "__init__.py.j2"),
         ("src/registry.py", "registry.py.j2"),
         ("src/download.py", "download.py.j2"),
-        ("src/transfer.py", "transfer.py.j2"),
         ("scripts/pull_data.sh", "pull_data.sh.j2"),
-        ("scripts/package_transfer.sh", "package_transfer.sh.j2"),
-        ("scripts/unpack_transfer.sh", "unpack_transfer.sh.j2"),
-        ("scripts/verify_transfer.sh", "verify_transfer.sh.j2"),
     ]
+    # Removed: enclave_cli.py, src/transfer.py, scripts/unpack_transfer.sh,
+    # scripts/verify_transfer.sh, requirements.txt. All five were v1 leftovers
+    # on the INSIDE-enclave path and all five failed against a real v2 archive
+    # — unpack_transfer.sh went as far as `rm -rf`ing the directory it had just
+    # extracted, and requirements.txt told an air-gapped user to `pip install`.
+    # Landing is now `land.py`, shipped inside each transfer archive by
+    # `enclave_package` (which keeps lander and archive format version-locked).
+    #
+    # scripts/package_transfer.sh went with them, not on its own merits but
+    # because deleting src/transfer.py orphaned it: its last line is
+    # `python -m src.transfer package`.
+    #
+    # Still here and still stale: scripts/pull_data.sh and src/{registry,
+    # download}.py, all superseded by `mintd enclave pull`. download.py also
+    # reads the v1 `dvc_hash` field, which v2 manifests do not have. They are
+    # merely stale rather than broken-by-this-change — BACKLOG, not this diff.
     return dirs, files
 
 

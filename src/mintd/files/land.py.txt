@@ -1,0 +1,252 @@
+#!/usr/bin/env python3
+"""Land an extracted mintd transfer into this enclave repo.
+
+Ships INSIDE every transfer archive, not scaffolded into the repo, so the
+lander and the archive format are version-locked by construction and an enclave
+cloned months ago gets a working lander with its next bundle.
+
+Runs on a bare air-gapped box: standard library only, no pip, no network, no
+DVC, no PyYAML, no mintd. Reads `_transfer_manifest.json` (written next to the
+YAML by `enclave_package`) so it never needs a YAML parser to *read*.
+
+Usage:
+    python3 land.py [--repo PATH] [--dry-run]
+"""
+
+# Kept Python 3.8-compatible on purpose: enclave boxes run old interpreters.
+# No walrus, no `X | Y` annotations, no Path.is_relative_to.
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+MANIFEST_NAME = "enclave_manifest.yaml"
+
+
+def fail(msg, *hints):
+    print("error: " + msg, file=sys.stderr)
+    for h in hints:
+        print("  hint: " + h, file=sys.stderr)
+    return 1
+
+
+def find_repo_root(explicit):
+    """Locate the enclave repo. Explicit wins; else search cwd's ancestors,
+    then this script's — so it works whether you extracted inside the repo or
+    somewhere else entirely."""
+    if explicit is not None:
+        root = Path(explicit).resolve()
+        if not (root / MANIFEST_NAME).is_file():
+            return None
+        return root
+    for start in (Path.cwd().resolve(), HERE):
+        for cand in [start] + list(start.parents):
+            if (cand / MANIFEST_NAME).is_file():
+                return cand
+    return None
+
+
+def manifest_enclave_name(manifest_path):
+    """Pull `enclave_name` out of the repo manifest without a YAML parser.
+
+    It is a single top-level scalar, so one regex over the raw text is enough
+    and correct. Deliberately NOT a general YAML reader.
+    """
+    text = manifest_path.read_text(encoding="utf-8")
+    m = re.search(r"^enclave_name:\s*(.+?)\s*$", text, re.MULTILINE)
+    if m is None:
+        return None
+    return m.group(1).strip().strip("'\"")
+
+
+def flat_segment_ok(seg):
+    """Mirrors the guards in mintd's `enclave_verify`. These alone make it
+    impossible to write outside `data/<repo>/<version_folder>`."""
+    if not seg or seg == ".":
+        return False
+    if "/" in seg or "\\" in seg:
+        return False
+    if Path(seg).is_absolute():
+        return False
+    if ".." in Path(seg).parts:
+        return False
+    return True
+
+
+def yaml_quote(value):
+    """Single-quoted YAML scalar. In single-quoted style the only escape is a
+    doubled quote, so this is complete."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def render_rows(contents, data_root):
+    lines = []
+    for c in contents:
+        dest = data_root / c["repo"] / c["version_folder"]
+        # Field order matches mintd's TransferredItem model.
+        lines.append("- repo: " + yaml_quote(c["repo"]))
+        lines.append("  contract_pin: " + yaml_quote(c["contract_pin"]))
+        lines.append("  artifact_pin: " + yaml_quote(c["artifact_pin"]))
+        lines.append("  transfer_date: " + yaml_quote(c["_transfer_date"]))
+        lines.append("  transfer_id: " + yaml_quote(c["_transfer_id"]))
+        lines.append("  local_path: " + yaml_quote(str(dest.resolve())))
+    return "\n".join(lines) + "\n"
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Land an extracted mintd transfer.")
+    ap.add_argument("--repo", help="Path to the enclave repo (default: auto-detect)")
+    ap.add_argument("--dry-run", action="store_true", help="Show the plan, change nothing")
+    args = ap.parse_args(argv)
+
+    tm_path = HERE / "_transfer_manifest.json"
+    if not tm_path.is_file():
+        return fail(
+            "no _transfer_manifest.json next to land.py",
+            "extract first: mkdir -p incoming && tar -xzf transfer-*.tar.gz -C incoming",
+            "then: python3 incoming/land.py",
+        )
+    try:
+        tm = json.loads(tm_path.read_text(encoding="utf-8"))
+    except ValueError as e:
+        return fail("_transfer_manifest.json is not valid JSON: %s" % e)
+
+    root = find_repo_root(args.repo)
+    if root is None:
+        return fail(
+            "could not find %s" % MANIFEST_NAME,
+            "run this from inside the enclave repo, or pass --repo /path/to/enclave",
+        )
+    manifest_path = root / MANIFEST_NAME
+    data_root = root / "data"
+
+    # Wrong-repo guard. Two enclaves on one server is the mistake this catches,
+    # and landing product A into enclave B is not something you can undo by
+    # re-running anything.
+    want = tm.get("enclave_name")
+    got = manifest_enclave_name(manifest_path)
+    if want and got and want != got:
+        return fail(
+            "this transfer was built for enclave '%s' but\n       %s is enclave '%s'"
+            % (want, manifest_path, got),
+            "pass --repo /path/to/%s" % want,
+        )
+
+    contents = tm.get("contents") or []
+    transfer_id = tm.get("transfer_id", "")
+    # `enclave_package` writes a tz-aware UTC datetime; the date half is what
+    # mintd's own verify records.
+    transfer_date = str(tm.get("transfer_date", ""))[:10]
+
+    # ---- validation pass: nothing moves until every check has passed --------
+    planned = []
+    for c in contents:
+        repo = c.get("repo", "")
+        vf = c.get("version_folder", "")
+        if not flat_segment_ok(repo) or not flat_segment_ok(vf):
+            return fail("refusing unsafe path in manifest: %r / %r" % (repo, vf))
+        src = HERE / repo / vf
+        dest = data_root / repo / vf
+        if dest.exists():
+            continue  # already landed — idempotent, keyed on observable state
+        if not src.is_dir():
+            return fail(
+                "manifest lists %s/%s but it is not in %s" % (repo, vf, HERE),
+                "re-extract the archive, or check it transferred completely",
+            )
+        c["_transfer_date"] = transfer_date
+        c["_transfer_id"] = transfer_id
+        planned.append((src, dest, c))
+
+    if not planned:
+        print("nothing to land — all %d product(s) are already in %s"
+              % (len(contents), data_root))
+        return 0
+
+    for src, dest, _c in planned:
+        print("would land: %s" % dest if args.dry_run else "landing:   %s" % dest)
+    for c in contents:
+        dest = data_root / c["repo"] / c["version_folder"]
+        if dest.exists() and not any(d == dest for _s, d, _c2 in planned):
+            print("skipping:  %s (already present)" % dest)
+
+    if args.dry_run:
+        return 0
+
+    # Writability probe BEFORE the first move. Without it the lander relocates
+    # the whole dataset and only then fails at the audit write on a read-only
+    # tree, leaving the researcher told to paste YAML into a file they cannot
+    # write. mintd's own ordering (pack fully, then save) is the model.
+    try:
+        with open(str(manifest_path), "a"):
+            pass
+    except OSError as e:
+        return fail(
+            "cannot write %s: %s" % (manifest_path, e),
+            "fix permissions and re-run; nothing has been moved",
+        )
+
+    text = manifest_path.read_text(encoding="utf-8")
+    if not re.search(r"^transferred:", text, re.MULTILINE):
+        return fail(
+            "%s has no transferred: key" % manifest_path,
+            "this does not look like an enclave manifest",
+        )
+    # The block is appended at the end of the file, so `transferred:` must be
+    # the last top-level key. It is: it is the last field of mintd's
+    # EnclaveManifest and save() dumps with sort_keys=False.
+    tail = text[text.index("transferred:"):]
+    for line in tail.splitlines()[1:]:
+        if line and not line[0].isspace() and not line.startswith("-"):
+            return fail(
+                "transferred: is not the last section of %s" % manifest_path,
+                "append the rows by hand, or use 'mintd enclave verify'",
+            )
+
+    for src, dest, _c in planned:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+
+    # Leave nothing restricted behind in the extraction dir.
+    for c in contents:
+        husk = HERE / c["repo"]
+        if husk.is_dir():
+            try:
+                husk.rmdir()
+            except OSError:
+                pass
+
+    rows = render_rows([c for _s, _d, c in planned], data_root)
+    # One write, and it is a pure byte-append except for the single case below:
+    # an empty `transferred: []` must lose its `[]` before rows can follow.
+    try:
+        if re.search(r"^transferred:\s*\[\s*\]\s*$", text, re.MULTILINE):
+            text = re.sub(
+                r"^transferred:\s*\[\s*\]\s*$", "transferred:", text, flags=re.MULTILINE
+            )
+            manifest_path.write_text(text.rstrip("\n") + "\n" + rows, encoding="utf-8")
+        else:
+            with open(str(manifest_path), "a", encoding="utf-8") as fh:
+                if not text.endswith("\n"):
+                    fh.write("\n")
+                fh.write(rows)
+    except OSError as e:
+        print("error: data was landed but the audit rows could not be written: %s" % e,
+              file=sys.stderr)
+        print("Append this to %s by hand:\n" % manifest_path, file=sys.stderr)
+        print(rows, file=sys.stderr)
+        return 1
+
+    print("recorded %d transfer(s) in %s" % (len(planned), manifest_path))
+    print("next: git add %s && git commit -m 'landed %s'" % (MANIFEST_NAME, transfer_id))
+    print("you can delete %s when done" % HERE)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

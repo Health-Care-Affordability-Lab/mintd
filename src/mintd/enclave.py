@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime, timezone
+from importlib.resources import files as _files
+import json
 import os
 from pathlib import Path
 import shutil
@@ -39,10 +41,13 @@ __all__ = [
     "EnclaveManifest",
     "EnclavePullError",
     "InvalidTransferManifest",
+    "NothingNewToPackage",
     "NothingToPackage",
+    "DestinationExists",
     "PathTraversalDetected",
     "TransferContent",
     "TransferManifest",
+    "TransferManifestNotFound",
     "TransferredItem",
     "enclave_add",
     "enclave_bump",
@@ -85,8 +90,35 @@ class NothingToPackage(Exception):
     """`enclave_package` filtered `downloaded[]` to an empty set."""
 
 
+class NothingNewToPackage(NothingToPackage):
+    """Every selected `downloaded[]` product has already crossed the gap.
+
+    A routine, expected outcome — not a failure. Subclasses `NothingToPackage`
+    so every pre-existing `except NothingToPackage` stays correct, while the CLI
+    can catch this first and exit 0 with a different message; the base class's
+    "run 'mintd enclave pull' first" hint is only right for a genuinely empty
+    selection."""
+
+
 class InvalidTransferManifest(Exception):
     """`_transfer_manifest.yaml` malformed or references a missing directory."""
+
+
+class TransferManifestNotFound(InvalidTransferManifest):
+    """No `_transfer_manifest.yaml` at the given path.
+
+    Split out because it has one overwhelmingly likely cause — the user pointed
+    `verify` at the `.tar.gz` instead of at the directory they extracted it into
+    — and one specific fix. The base class's "the archive is malformed" hint is
+    wrong for it and sends people back across the air gap for a good archive."""
+
+
+class DestinationExists(InvalidTransferManifest):
+    """`data/<repo>/<version_folder>` exists with no matching `transferred[]` row.
+
+    Almost always means the product was landed by hand (the documented
+    last-resort `tar` path writes no audit row), so verify's idempotence skip
+    — which keys on `transferred[]` — misses and the dest-collision guard fires."""
 
 
 class PathTraversalDetected(Exception):
@@ -587,7 +619,8 @@ def enclave_package(
     output_dir: Path | None = None,
     archive_ops: ArchiveOps | None = None,
     today: date | None = None,
-) -> Path:
+    resend: bool = False,
+) -> tuple[Path, list[DownloadedItem]]:
     """Bundle outside-enclave `downloaded[]` into a `.tar.gz` transfer archive.
 
     Exactly one of `output_archive` / `output_dir` must be provided. When
@@ -602,16 +635,73 @@ def enclave_package(
     is never mutated (pack runs inside the `TemporaryDirectory`; save
     runs only after it exits cleanly).
 
-    Returns the produced archive path.
+    Bundles are **incremental**: products whose `(repo, artifact_pin)` is
+    already in `transferred[]` are skipped, and `NothingNewToPackage` is
+    raised if that leaves nothing. Pass `resend=True` to bundle them anyway
+    (for a bundle that was built but never arrived).
+
+    Every archive carries a generated `README.md` describing its own
+    contents and where to land them — see `_render_bundle_readme`.
+
+    Returns `(archive, skipped)` where `skipped` lists the `downloaded[]`
+    entries left out because they had already crossed the gap.
     """
     if output_archive is None and output_dir is None:
         raise ValueError("Either output_archive or output_dir must be provided")
 
     manifest = EnclaveManifest.load(manifest_path)
-    targets = [d for d in manifest.downloaded if name is None or d.repo == name]
-    if not targets:
+    selected = [d for d in manifest.downloaded if name is None or d.repo == name]
+    if not selected:
         raise NothingToPackage(
             f"no downloaded[] entries{' for ' + name if name else ''} in {manifest_path}"
+        )
+
+    # Incremental selection. The key is (repo, artifact_pin) — "have these bytes
+    # already crossed?" — deliberately NOT the (repo, contract_pin, artifact_pin)
+    # triple that `enclave_verify` keys on. A metadata-only pin bump produces a
+    # new contract_pin over identical bytes; under the triple those bytes ship
+    # again and land inside the gap as a byte-identical duplicate, or collide
+    # with the existing dir and fail verify there — where the only fix is a
+    # physical round trip. Accepted cost: a metadata-only bump ships nothing, so
+    # the inside trail does not record the new producer commit.
+    #
+    # Also NOT local_path/version_folder: both embed the PULL date, so a re-pull
+    # on a later day would silently miss and re-ship gigabytes.
+    shipped = {(t.repo, t.artifact_pin) for t in manifest.transferred}
+    if resend:
+        fresh, skipped = selected, []
+    else:
+        fresh = [d for d in selected if (d.repo, d.artifact_pin) not in shipped]
+        skipped = [d for d in selected if (d.repo, d.artifact_pin) in shipped]
+
+    # Same bytes recorded twice under different contract pins (a same-day pin
+    # bump: the folder name at `enclave_pull` omits contract_pin, so both rows
+    # share one local_path). Copying both raises an uncaught FileExistsError in
+    # `shutil.copytree` below. Copy once; a later row wins, so the newest
+    # contract pin is what crosses. Dict preserves first insertion position, so
+    # bundle order stays stable.
+    by_bytes: dict[tuple[str, str], DownloadedItem] = {}
+    for d in fresh:
+        by_bytes[(d.repo, d.artifact_pin)] = d
+    targets = list(by_bytes.values())
+
+    # Residual guard: distinct artifact pins whose 7-char prefixes collide on the
+    # same day. Astronomically unlikely, but it is the one remaining path to that
+    # same uncaught FileExistsError.
+    folders: dict[tuple[str, str], str] = {}
+    for d in targets:
+        vf = Path(d.local_path).name
+        if folders.setdefault((d.repo, vf), d.artifact_pin) != d.artifact_pin:
+            raise InvalidTransferManifest(
+                f"two downloaded[] entries with different artifact pins share {d.repo}/{vf}"
+            )
+
+    # Raised BEFORE _next_transfer_id and before save(), so an up-to-date
+    # `package` mints no transfer id and leaves the manifest byte-identical.
+    if not targets:
+        raise NothingNewToPackage(
+            f"all {len(selected)} downloaded product(s)"
+            f"{' for ' + name if name else ''} have already crossed the gap"
         )
 
     downloads_root = downloads_root or (manifest_path.parent / "downloads")
@@ -660,6 +750,37 @@ def enclave_package(
             ),
             encoding="utf-8",
         )
+        # Rendered from the same TransferManifest that was just built, so the
+        # README cannot describe a bundle other than this one. The archive is
+        # the only artifact guaranteed to cross the gap, so the answer to
+        # "where do these files go" has to travel inside it.
+        (tmp / "README.md").write_text(
+            _render_bundle_readme(transfer_manifest), encoding="utf-8"
+        )
+        # JSON sibling of the YAML manifest: `land.py` runs on a box with no
+        # PyYAML, so it needs a stdlib-readable copy. Same object, dumped twice
+        # three lines apart, so the two cannot drift.
+        (tmp / "_transfer_manifest.json").write_text(
+            json.dumps(transfer_manifest.model_dump(mode="json"), indent=2) + "\n",
+            encoding="utf-8",
+        )
+        # Shipped inside the archive rather than scaffolded into the enclave
+        # repo: the archive is the only thing guaranteed to cross, so lander and
+        # format stay version-locked and an old enclave clone gets a working
+        # lander with its next bundle.
+        land = tmp / "land.py"
+        land.write_text(
+            (_files("mintd") / "files" / "land.py.txt").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        land.chmod(0o755)
+
+        # The staging root is 0700 (inherited from TemporaryDirectory) and
+        # `pack` adds it as the archive's root member. GNU tar applies that mode
+        # to an existing extraction target, silently stripping group access on a
+        # shared enclave server. Cheaper and more portable than a bsdtar-
+        # incompatible extract flag in the documented command.
+        os.chmod(tmp, 0o755)
 
         ops = archive_ops or TarGzArchiveOps()
         ops.pack(tmp, output_archive)
@@ -684,7 +805,69 @@ def enclave_package(
         )
     new_manifest = manifest.model_copy(update={"transferred": new_transferred})
     new_manifest.save(manifest_path)
-    return output_archive
+    return output_archive, skipped
+
+
+def _render_bundle_readme(tm: TransferManifest) -> str:
+    """Render the per-transfer `README.md` shipped at the archive root.
+
+    Plain markdown, readable with `cat` — the enclave researcher may have no
+    markdown viewer. Pins truncated to 7 chars to keep the table narrow.
+
+    Derived entirely from `tm`, so it cannot describe products this bundle does
+    not carry. Kept as a plain f-string rather than a Jinja template: Jinja is a
+    scaffold-time dependency and `enclave_package` has no template context.
+    """
+    rows = "\n".join(
+        f"| {c.repo} | {c.version_folder} | {c.contract_pin[:7]} | {c.artifact_pin[:7]} |"
+        for c in tm.contents
+    )
+    dests = "\n".join(f"    data/{c.repo}/{c.version_folder}/" for c in tm.contents)
+    n = len(tm.contents)
+    archive = f"{tm.transfer_id}.tar.gz"
+    return f"""# Transfer {tm.transfer_id}
+
+Built {tm.transfer_date.date().isoformat()} for enclave `{tm.enclave_name}`.
+Contains {n} data product{"" if n == 1 else "s"}.
+
+| Product | Version folder | Contract pin | Artifact pin |
+|---------|----------------|--------------|--------------|
+{rows}
+
+The date in each version folder is the date the data was **pulled** from the
+producer, not the date of this transfer. An older date does not mean stale data.
+
+## Where these files go
+
+Each product lands at `data/<product>/<version folder>/` in the enclave repo:
+
+{dests}
+
+## How to land them
+
+    cd /path/to/{tm.enclave_name}
+    mkdir -p incoming && tar -xzf {archive} -C incoming
+    python3 incoming/land.py
+
+`land.py` needs only python3 — no pip, no network, no DVC. It moves each product
+into place and records it in `enclave_manifest.yaml`. Run it twice and the second
+run does nothing. Use `--dry-run` to see what it would do first.
+
+If this enclave has mintd installed (needs Python 3.11+), `mintd enclave verify
+incoming` does the same job.
+
+## If you must do it by hand
+
+    mkdir -p data
+    tar -xzf {archive} -C data
+    mkdir -p transfers/received
+    mv data/_transfer_manifest.yaml transfers/received/{tm.transfer_id}.yaml
+    rm -f data/_transfer_manifest.json data/land.py data/README.md
+
+This places the files but writes **no** `transferred[]` row, so the audit trail
+will be missing this transfer, and a later `mintd enclave verify` on this archive
+will fail with "refusing to overwrite existing dest". Prefer `land.py`.
+"""
 
 
 def enclave_verify(
@@ -712,7 +895,7 @@ def enclave_verify(
     """
     manifest_yaml = extracted_dir / "_transfer_manifest.yaml"
     if not manifest_yaml.is_file():
-        raise InvalidTransferManifest(
+        raise TransferManifestNotFound(
             f"_transfer_manifest.yaml not found at {manifest_yaml}"
         )
 
@@ -831,7 +1014,7 @@ def enclave_verify(
             )
         seen_dests.add(dest)
         if dest.exists():
-            raise InvalidTransferManifest(
+            raise DestinationExists(
                 f"refusing to overwrite existing dest {dest} for new transferred[] entry"
             )
 

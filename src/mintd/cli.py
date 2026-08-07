@@ -99,7 +99,10 @@ from .enclave import (
     EnclaveManifest,
     EnclavePullError,
     InvalidTransferManifest,
+    DestinationExists,
+    NothingNewToPackage,
     NothingToPackage,
+    TransferManifestNotFound,
     PathTraversalDetected,
     enclave_add,
     enclave_bump,
@@ -547,6 +550,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_epkg.add_argument("repo", nargs="?")
     p_epkg.add_argument("--output", type=Path, dest="output_archive")
+    p_epkg.add_argument(
+        "--resend",
+        action="store_true",
+        help="Re-bundle products already recorded in transferred[] (default: "
+             "skip them). Use when a bundle was built but never arrived.",
+    )
     p_epkg.add_argument(
         "--manifest", type=Path, default=Path("enclave_manifest.yaml")
     )
@@ -2168,12 +2177,25 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
     )
     try:
         with reporter.status("Packaging enclave archive..."):
-            archive = enclave_package(
+            archive, skipped = enclave_package(
                 manifest_path=args.manifest,
                 name=args.repo,
                 output_archive=args.output_archive,
                 output_dir=output_dir,
+                resend=args.resend,
             )
+    except NothingNewToPackage as exc:
+        # Everything already crossed the gap — the routine steady state, not a
+        # failure. Exit 0 so a scripted `pull && package` loop is not a red run.
+        # Caught before NothingToPackage, whose hint ("run pull first") is only
+        # right for a genuinely empty selection.
+        reporter.info(f"nothing new to package: {exc}")
+        reporter.info(
+            "a bundle that was built is recorded as transferred even if it never "
+            "arrived — to re-ship:\n"
+            f"  mintd enclave package --resend{' ' + args.repo if args.repo else ''}"
+        )
+        return 0
     except NothingToPackage as exc:
         reporter.error(str(exc), hint="run 'mintd enclave pull' first")
         return 1
@@ -2186,7 +2208,25 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
     except AppendOnlyViolation as exc:
         reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
         return 1
-    print(f"packaged: {archive}")
+    if skipped:
+        names = ", ".join(sorted({d.repo for d in skipped}))
+        reporter.info(
+            f"skipped {len(skipped)} already-transferred product"
+            f"{'' if len(skipped) == 1 else 's'}: {names} "
+            f"(pass --resend to ship {'it' if len(skipped) == 1 else 'them'} again)"
+        )
+    # `result` (not `print`) so the archive path lands on stdout AND is flushed
+    # before the stderr hint below — otherwise a piped stdout is block-buffered
+    # and the hint surfaces first. Also gives --json mode the skipped list.
+    reporter.result(
+        {"archive": str(archive), "skipped": sorted({d.repo for d in skipped})},
+        pretty=lambda p: f"packaged: {p['archive']}",
+    )
+    reporter.info(
+        "land it inside the enclave with:\n"
+        f"  mkdir -p incoming && tar -xzf {archive.name} -C incoming\n"
+        "  python3 incoming/land.py"
+    )
     return 0
 
 
@@ -2199,6 +2239,29 @@ def _handle_enclave_verify(args: argparse.Namespace) -> int:
                 manifest_path=args.manifest,
                 data_root=args.data_root,
             )
+    # Both subclasses are caught BEFORE the InvalidTransferManifest base clause.
+    # One "the archive is malformed" hint is right for one of five causes and
+    # wrong for the other four — including the two most common, which have
+    # nothing to do with the archive.
+    except TransferManifestNotFound as exc:
+        reporter.error(
+            str(exc),
+            hint=(
+                "point at the directory you extracted into, not the .tar.gz:\n"
+                "mkdir -p incoming && tar -xzf <archive>.tar.gz -C incoming\n"
+                "mintd enclave verify incoming"
+            ),
+        )
+        return 1
+    except DestinationExists as exc:
+        reporter.error(
+            str(exc),
+            hint=(
+                "that product is already in data/ but has no transferred[] row — it "
+                "was probably landed by hand; append the row or remove the directory"
+            ),
+        )
+        return 1
     except InvalidTransferManifest as exc:
         reporter.error(str(exc), hint="the archive is malformed; re-export from source")
         return 1
@@ -2207,6 +2270,14 @@ def _handle_enclave_verify(args: argparse.Namespace) -> int:
         return 1
     except AppendOnlyViolation as exc:
         reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
+        return 1
+    except FileNotFoundError:
+        # The enclave manifest itself is missing — mirrors _handle_enclave_list.
+        # Previously leaked a raw traceback.
+        reporter.error(
+            f"enclave_manifest.yaml not found at {args.manifest}",
+            hint="run this from the enclave repo root, or pass --manifest <path>",
+        )
         return 1
     if not written:
         print("nothing to verify (all entries already in transferred[])")
