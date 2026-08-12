@@ -49,6 +49,7 @@ __all__ = [
     "TransferManifest",
     "TransferManifestNotFound",
     "TransferredItem",
+    "WrongEnclave",
     "enclave_add",
     "enclave_bump",
     "enclave_package",
@@ -111,6 +112,16 @@ class TransferManifestNotFound(InvalidTransferManifest):
     `verify` at the `.tar.gz` instead of at the directory they extracted it into
     — and one specific fix. The base class's "the archive is malformed" hint is
     wrong for it and sends people back across the air gap for a good archive."""
+
+
+class WrongEnclave(InvalidTransferManifest):
+    """The transfer was built for a different enclave than this repo.
+
+    Mirrors `land.py`'s wrong-repo guard so the two documented landing paths
+    agree. Two enclave repos on one server is the mistake it catches, and
+    landing product A into enclave B is not undone by re-running anything:
+    `transferred[]` is append-only, so the false row can only be removed by
+    hand-editing the manifest."""
 
 
 class DestinationExists(InvalidTransferManifest):
@@ -755,7 +766,8 @@ def enclave_package(
         # the only artifact guaranteed to cross the gap, so the answer to
         # "where do these files go" has to travel inside it.
         (tmp / "README.md").write_text(
-            _render_bundle_readme(transfer_manifest), encoding="utf-8"
+            _render_bundle_readme(transfer_manifest, output_archive.name),
+            encoding="utf-8",
         )
         # JSON sibling of the YAML manifest: `land.py` runs on a box with no
         # PyYAML, so it needs a stdlib-readable copy. Same object, dumped twice
@@ -808,7 +820,7 @@ def enclave_package(
     return output_archive, skipped
 
 
-def _render_bundle_readme(tm: TransferManifest) -> str:
+def _render_bundle_readme(tm: TransferManifest, archive_name: str) -> str:
     """Render the per-transfer `README.md` shipped at the archive root.
 
     Plain markdown, readable with `cat` — the enclave researcher may have no
@@ -824,7 +836,10 @@ def _render_bundle_readme(tm: TransferManifest) -> str:
     )
     dests = "\n".join(f"    data/{c.repo}/{c.version_folder}/" for c in tm.contents)
     n = len(tm.contents)
-    archive = f"{tm.transfer_id}.tar.gz"
+    # The real filename, not one derived from `transfer_id`: `--output` can
+    # name the archive anything, and the commands below have to name the file
+    # that actually crossed the gap.
+    archive = archive_name
     return f"""# Transfer {tm.transfer_id}
 
 Built {tm.transfer_date.date().isoformat()} for enclave `{tm.enclave_name}`.
@@ -865,8 +880,9 @@ incoming` does the same job.
     rm -f data/_transfer_manifest.json data/land.py data/README.md
 
 This places the files but writes **no** `transferred[]` row, so the audit trail
-will be missing this transfer, and a later `mintd enclave verify` on this archive
-will fail with "refusing to overwrite existing dest". Prefer `land.py`.
+will be missing this transfer. Running `land.py` afterwards will not silently
+paper over that: it refuses, names the product, and prints the row for you to
+append. `mintd enclave verify` refuses too. Prefer `land.py` from the start.
 """
 
 
@@ -911,6 +927,16 @@ def enclave_verify(
     # existence check (the data was moved into `data_root`) — breaking
     # the idempotence contract.
     manifest = EnclaveManifest.load(manifest_path)
+
+    # Wrong-enclave guard, before anything moves. `land.py` refuses the same
+    # mismatch; without this the mintd path would be the less safe of the two
+    # landing paths the README presents as equivalent.
+    if transfer.enclave_name != manifest.enclave_name:
+        raise WrongEnclave(
+            f"transfer was built for enclave {transfer.enclave_name!r} but "
+            f"{manifest_path} is enclave {manifest.enclave_name!r}"
+        )
+
     data_root = data_root or (manifest_path.parent / "data")
     existing_keys = {
         (t.repo, t.contract_pin, t.artifact_pin) for t in manifest.transferred

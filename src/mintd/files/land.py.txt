@@ -51,13 +51,12 @@ def find_repo_root(explicit):
     return None
 
 
-def manifest_enclave_name(manifest_path):
+def manifest_enclave_name(text):
     """Pull `enclave_name` out of the repo manifest without a YAML parser.
 
     It is a single top-level scalar, so one regex over the raw text is enough
     and correct. Deliberately NOT a general YAML reader.
     """
-    text = manifest_path.read_text(encoding="utf-8")
     m = re.search(r"^enclave_name:\s*(.+?)\s*$", text, re.MULTILINE)
     if m is None:
         return None
@@ -65,8 +64,12 @@ def manifest_enclave_name(manifest_path):
 
 
 def flat_segment_ok(seg):
-    """Mirrors the guards in mintd's `enclave_verify`. These alone make it
-    impossible to write outside `data/<repo>/<version_folder>`."""
+    """Reject a manifest path segment that is not a single flat name.
+
+    Mirrors the string guards in mintd's `enclave_verify`. These stop the
+    manifest itself from steering a write outside `data/<repo>/<version_folder>`;
+    they say nothing about what is *inside* a product directory, which is what
+    `symlink_escape` below covers."""
     if not seg or seg == ".":
         return False
     if "/" in seg or "\\" in seg:
@@ -76,6 +79,45 @@ def flat_segment_ok(seg):
     if ".." in Path(seg).parts:
         return False
     return True
+
+
+def escapes_transfer(path):
+    """Return `path`'s resolved target if it lands outside the extraction dir.
+
+    The baseline is the extraction dir, not the product dir, matching what
+    `TarGzArchiveOps.pack` allows and what `enclave_verify` checks: a relative
+    link from one product to another stays inside the transfer and is legal on
+    both paths.
+    """
+    root = str(HERE)
+    prefix = root + os.sep
+    target = str(path.resolve())
+    if target != root and not target.startswith(prefix):
+        return target
+    return None
+
+
+def symlink_escape(product_dir):
+    """Return the first path in `product_dir` that resolves outside the transfer.
+
+    `shutil.move` relocates symlinks intact, so a link planted in a tampered
+    archive would land in `data/` still pointing at, say, `/etc/passwd`, and
+    anything that later reads the product follows it.
+
+    Two checks, mirroring `enclave_verify`'s (d) and (e): the product directory
+    may *itself* be a symlink member — `is_dir()` follows it, so nothing else
+    here would notice — and any symlink inside it may point out. No mintd-built
+    archive can carry either; `TarGzArchiveOps.pack` refuses them at pack time.
+    """
+    target = escapes_transfer(product_dir)
+    if target is not None:
+        return (product_dir, target)
+    for p in sorted(product_dir.rglob("*")):
+        if p.is_symlink():
+            target = escapes_transfer(p)
+            if target is not None:
+                return (p, target)
+    return None
 
 
 def yaml_quote(value):
@@ -124,12 +166,16 @@ def main(argv=None):
         )
     manifest_path = root / MANIFEST_NAME
     data_root = root / "data"
+    # Read once, up front: the enclave-name guard, the already-recorded check
+    # in the validation pass, and the last-key guard all read the same bytes,
+    # and nothing writes to the manifest before the single append at the end.
+    manifest_text = manifest_path.read_text(encoding="utf-8")
 
     # Wrong-repo guard. Two enclaves on one server is the mistake this catches,
     # and landing product A into enclave B is not something you can undo by
     # re-running anything.
     want = tm.get("enclave_name")
-    got = manifest_enclave_name(manifest_path)
+    got = manifest_enclave_name(manifest_text)
     if want and got and want != got:
         return fail(
             "this transfer was built for enclave '%s' but\n       %s is enclave '%s'"
@@ -152,12 +198,43 @@ def main(argv=None):
             return fail("refusing unsafe path in manifest: %r / %r" % (repo, vf))
         src = HERE / repo / vf
         dest = data_root / repo / vf
+        pin = c.get("artifact_pin") or ""
         if dest.exists():
-            continue  # already landed — idempotent, keyed on observable state
+            # Present AND recorded → genuinely landed by an earlier run. Skip;
+            # this is what makes a second run a no-op.
+            #
+            # The pin is a hash, so a substring scan answers "is this in
+            # transferred[]?" without a YAML parser. An entry with no pin at
+            # all falls through to the refusal rather than matching "" against
+            # everything.
+            if pin and pin in manifest_text:
+                continue
+            # Present but NOT recorded. The by-hand `tar` recipe writes no row,
+            # and a first run interrupted mid-move leaves whatever it already
+            # moved without one. Skipping here would drop those products from
+            # the audit trail permanently and silently — on a box with no
+            # mintd, this lander IS the audit trail. `enclave_verify` refuses
+            # the same state (DestinationExists).
+            c["_transfer_date"] = transfer_date
+            c["_transfer_id"] = transfer_id
+            rc = fail(
+                "%s is already in data/ but has no transferred[] row" % dest,
+                "it was placed by hand, or by a run interrupted mid-move",
+                "append the block below to %s, or remove the directory and "
+                "re-run" % manifest_path,
+            )
+            sys.stderr.write("\n" + render_rows([c], data_root))
+            return rc
         if not src.is_dir():
             return fail(
                 "manifest lists %s/%s but it is not in %s" % (repo, vf, HERE),
                 "re-extract the archive, or check it transferred completely",
+            )
+        escape = symlink_escape(src)
+        if escape is not None:
+            return fail(
+                "refusing symlink that escapes the transfer: %s -> %s" % escape,
+                "this archive was not built by mintd; do not land it",
             )
         c["_transfer_date"] = transfer_date
         c["_transfer_id"] = transfer_id
@@ -191,8 +268,9 @@ def main(argv=None):
             "fix permissions and re-run; nothing has been moved",
         )
 
-    text = manifest_path.read_text(encoding="utf-8")
-    if not re.search(r"^transferred:", text, re.MULTILINE):
+    text = manifest_text
+    key = re.search(r"^transferred:", text, re.MULTILINE)
+    if key is None:
         return fail(
             "%s has no transferred: key" % manifest_path,
             "this does not look like an enclave manifest",
@@ -200,7 +278,12 @@ def main(argv=None):
     # The block is appended at the end of the file, so `transferred:` must be
     # the last top-level key. It is: it is the last field of mintd's
     # EnclaveManifest and save() dumps with sort_keys=False.
-    tail = text[text.index("transferred:"):]
+    #
+    # Sliced from the anchored match, not `text.index("transferred:")` — a
+    # plain substring search would land inside a comment or a scalar that
+    # happens to contain the literal and false-fire the guard below on a
+    # perfectly valid hand-annotated manifest.
+    tail = text[key.start():]
     for line in tail.splitlines()[1:]:
         if line and not line[0].isspace() and not line.startswith("-"):
             return fail(

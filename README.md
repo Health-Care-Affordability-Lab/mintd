@@ -190,13 +190,21 @@ mintd enclave package                       # bundle into a transfer archive
 ```
 
 **Bundles are incremental.** `package` skips products already recorded in
-`transferred[]`, so each archive carries only what hasn't crossed the gap yet.
-When there's nothing new it says so and exits 0 without building an archive:
+`transferred[]`, so each archive carries only what hasn't crossed the gap yet:
 
 ```
 $ mintd enclave package
 skipped 2 already-transferred products: claims, prices (pass --resend to ship them again)
 packaged: transfers/transfer-2026-07-28-000001.tar.gz
+```
+
+When nothing is new it says so and exits 0 without building an archive:
+
+```
+$ mintd enclave package
+nothing new to package: all 3 downloaded product(s) have already crossed the gap
+a bundle that was built is recorded as transferred even if it never arrived — to re-ship:
+  mintd enclave package --resend
 ```
 
 A bundle counts as transferred when it's *built*, not when it arrives. If an

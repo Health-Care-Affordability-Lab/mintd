@@ -476,6 +476,54 @@ def test_bundle_readme_destination_matches_verify(tmp_path: Path) -> None:
     assert f"data/ds-alpha/{version_folder}" in fake.staged_text("README.md")
 
 
+def test_bundle_readme_names_the_real_archive(tmp_path: Path) -> None:
+    """--output can name the archive anything. The README travels inside it, so
+    a filename derived from transfer_id would tell the researcher to extract a
+    file that is not on the media."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(tmp_path, m_path, downloaded=[("ds-alpha", "aaabbb1")])
+    fake = _FakeArchiveOps()
+    archive = tmp_path / "out" / "q4-2026-shipment.tar.gz"
+    enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_archive=archive,
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    readme = fake.staged_text("README.md")
+    assert "q4-2026-shipment.tar.gz" in readme
+    assert "transfer-2026-05-15-000000.tar.gz" not in readme
+
+
+def test_package_skips_pruned_downloads(tmp_path: Path) -> None:
+    """Pruning `downloads/` after a transfer is a blessed workflow. A fully
+    transferred product whose dir is gone must not abort the whole bundle."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    _seed(
+        tmp_path,
+        m_path,
+        downloaded=[("ds-alpha", "aaabbb1"), ("ds-beta", "bbbccc2")],
+        transferred=[("ds-alpha", "aaabbb1")],
+    )
+    import shutil
+
+    shutil.rmtree(tmp_path / "downloads" / "ds-alpha")
+    fake = _FakeArchiveOps()
+    archive, skipped = enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+    assert archive.exists()
+    staged = fake.staged[0]
+    assert any("ds-beta" in p for p in staged)
+    assert not any("ds-alpha" in p for p in staged)
+    assert [d.repo for d in skipped] == ["ds-alpha"]
+
+
 def test_package_rejects_unsafe_symlink_in_downloads(tmp_path: Path) -> None:
     """A `src_dir` containing a symlink pointing outside itself must be
     refused by `TarGzArchiveOps.pack`. We exercise the seam directly
