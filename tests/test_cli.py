@@ -1709,6 +1709,305 @@ def test_cli_package_unsafe_symlink_exits_one(
     assert "resolves outside" in err
 
 
+def test_cli_package_resend_flag_forwarded(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--resend is the documented recovery for a bundle that never arrived, so
+    the flag reaching enclave_package is the whole contract at this layer."""
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    captured: dict[str, Any] = {}
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        captured.update(kwargs)
+        return tmp_path / "t.tar.gz", []
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(
+        ["enclave", "package", "--manifest", str(manifest), "--resend"]
+    )
+
+    assert rc == 0
+    assert captured["resend"] is True
+
+
+def test_cli_package_defaults_to_not_resending(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    captured: dict[str, Any] = {}
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        captured.update(kwargs)
+        return tmp_path / "t.tar.gz", []
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    cli.main(["enclave", "package", "--manifest", str(manifest)])
+
+    assert captured["resend"] is False
+
+
+def test_cli_package_nothing_new_exits_zero(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Everything already across the gap is the routine steady state. Exit 1
+    would make a scripted `pull && package` loop a red run forever."""
+    from mintd.enclave import EnclaveManifest, NothingNewToPackage
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        raise NothingNewToPackage("all 2 downloaded product(s) have already crossed")
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(["enclave", "package", "--manifest", str(manifest)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "nothing new to package" in captured.err
+    assert "--resend" in captured.err
+    # No archive was built, so nothing may claim one was.
+    assert "packaged:" not in captured.out
+    assert "error:" not in captured.err
+
+
+def test_cli_package_reports_skipped_and_landing(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silently shipping B while skipping A is the exact operation the user
+    complained about; the skip and the landing commands both have to surface."""
+    from datetime import datetime
+
+    from mintd.enclave import DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    archive = tmp_path / "transfer-2026-05-15-000000.tar.gz"
+    skipped = [
+        DownloadedItem(
+            repo="ds-alpha",
+            output="data.csv",
+            contract_pin="c" * 40,
+            artifact_pin="a" * 32,
+            fetch_strategy="dvc-import",
+            downloaded_at=datetime(2026, 5, 15),
+            local_path=str(tmp_path / "downloads" / "ds-alpha" / "v1"),
+        )
+    ]
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        return archive, skipped
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(["enclave", "package", "--manifest", str(manifest)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "packaged:" in captured.out
+    assert "ds-alpha" in captured.err
+    assert "--resend" in captured.err
+    # The landing instructions travel with the researcher, who walks to a
+    # different machine after running this.
+    assert "tar -xzf" in captured.err
+    assert "land.py" in captured.err
+
+
+def test_cli_package_skipped_count_counts_products_not_rows(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One product with two outputs is two downloaded[] rows. "skipped 2
+    products: ds-alpha" would read as two products sharing a name."""
+    from datetime import datetime
+
+    from mintd.enclave import DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    skipped = [
+        DownloadedItem(
+            repo="ds-alpha",
+            output=out,
+            contract_pin="c" * 40,
+            artifact_pin=pin * 32,
+            fetch_strategy="dvc-import",
+            downloaded_at=datetime(2026, 5, 15),
+            local_path=str(tmp_path / "downloads" / "ds-alpha" / "v1"),
+        )
+        for out, pin in (("a.parquet", "a"), ("b.parquet", "b"))
+    ]
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        return tmp_path / "t.tar.gz", skipped
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    cli.main(["enclave", "package", "--manifest", str(manifest)])
+
+    err = capsys.readouterr().err
+    assert "skipped 1 already-transferred product:" in err
+    assert "skipped 2" not in err
+
+
+def test_cli_package_json_emits_one_object(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--json means one compact object on stdout and no prose anywhere."""
+    import json
+
+    from mintd.enclave import EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    archive = tmp_path / "transfer-2026-05-15-000000.tar.gz"
+
+    def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        return archive, []
+
+    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
+
+    rc = cli.main(["--json", "enclave", "package", "--manifest", str(manifest)])
+
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    assert payload["archive"] == str(archive)
+    # The landing hint is stderr prose and must not pollute machine output.
+    assert "tar -xzf" not in captured.out
+
+
+def test_cli_verify_tarball_hint_says_extract(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pointing verify at the .tar.gz is the likeliest mistake. The old hint
+    ("re-export from source") sends the researcher back across the air gap for
+    an archive that is fine."""
+    from mintd.enclave import EnclaveManifest, TransferManifestNotFound
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        raise TransferManifestNotFound("_transfer_manifest.yaml not found at x.tar.gz")
+
+    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
+
+    rc = cli.main(
+        ["enclave", "verify", str(tmp_path / "x.tar.gz"), "--manifest", str(manifest)]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "tar -xzf" in err
+    assert "re-export from source" not in err
+
+
+def test_cli_verify_wrong_enclave_says_nothing_moved(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mintd.enclave import EnclaveManifest, WrongEnclave
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test").save(manifest)
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+
+    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
+        raise WrongEnclave(
+            "transfer was built for enclave 'enclave-hcup' but x is enclave 'enclave-cms'"
+        )
+
+    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
+
+    rc = cli.main(
+        ["enclave", "verify", str(extracted), "--manifest", str(manifest)]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "built for enclave" in err
+    assert "nothing was moved" in err
+    assert "re-export from source" not in err
+
+
+def test_cli_verify_missing_enclave_manifest_no_traceback(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """Running verify outside the repo root used to raise a raw
+    FileNotFoundError at the user.
+
+    The extracted dir has to be valid: verify checks the transfer manifest
+    before it loads the enclave manifest, so a bare empty dir fails earlier
+    for a different reason.
+    """
+    import yaml
+
+    extracted = tmp_path / "extracted"
+    (extracted / "ds-alpha" / "aaabbb1-2026-05-15").mkdir(parents=True)
+    (extracted / "_transfer_manifest.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": "2.0",
+                "enclave_name": "test",
+                "transfer_date": "2026-05-15T12:00:00+00:00",
+                "transfer_id": "transfer-2026-05-15-000000",
+                "contents": [
+                    {
+                        "repo": "ds-alpha",
+                        "version_folder": "aaabbb1-2026-05-15",
+                        "contract_pin": "c" * 40,
+                        "artifact_pin": "a" * 32,
+                    }
+                ],
+            }
+        )
+    )
+    missing = tmp_path / "nope" / "enclave_manifest.yaml"
+
+    rc = cli.main(
+        ["enclave", "verify", str(extracted), "--manifest", str(missing)]
+    )
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "error:" in err
+    assert "--manifest" in err
+    assert "Traceback" not in err
+
+
 def test_cli_verify_writes_transferred_entries(
     patched_clients,
     capsys: pytest.CaptureFixture[str],

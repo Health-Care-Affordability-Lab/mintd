@@ -22,6 +22,7 @@ from mintd.enclave import (
     PathTraversalDetected,
     TransferManifestNotFound,
     TransferredItem,
+    WrongEnclave,
     enclave_verify,
 )
 
@@ -122,6 +123,27 @@ def test_verify_dest_collision_raises_specific_subclass(tmp_path: Path) -> None:
             extracted_dir=extracted, manifest_path=m_path, data_root=data_root
         )
     assert issubclass(DestinationExists, InvalidTransferManifest)
+
+
+def test_verify_refuses_wrong_enclave_and_moves_nothing(tmp_path: Path) -> None:
+    """Two enclave repos on one server: landing A's data into B is not undone
+    by re-running anything, because transferred[] is append-only. `land.py`
+    refuses the same mismatch — the two landing paths must agree."""
+    extracted = _make_extracted(tmp_path, enclave_name="enclave-hcup")
+    m_path = _new_inside_manifest(tmp_path)  # enclave_name="lab-enclave"
+    data_root = tmp_path / "data"
+    with pytest.raises(WrongEnclave) as exc:
+        enclave_verify(
+            extracted_dir=extracted, manifest_path=m_path, data_root=data_root
+        )
+    assert "enclave-hcup" in str(exc.value)
+    assert "lab-enclave" in str(exc.value)
+    # Nothing moved, nothing recorded.
+    assert not (data_root / "ds-alpha").exists()
+    assert EnclaveManifest.load(m_path).transferred == []
+    assert (extracted / "ds-alpha" / "aaabbb1-2026-05-15" / "data.csv").is_file()
+    # Still an InvalidTransferManifest, so pre-existing handlers stay correct.
+    assert issubclass(WrongEnclave, InvalidTransferManifest)
 
 
 def test_verify_moves_data_to_data_root(tmp_path: Path) -> None:
@@ -364,7 +386,7 @@ def test_verify_rejects_duplicate_dest_in_manifest(tmp_path: Path) -> None:
     # Two contents with identical dest but different pins.
     manifest_data = {
         "schema_version": "2.0",
-        "enclave_name": "lab",
+        "enclave_name": "lab-enclave",
         "transfer_date": "2026-05-15T12:00:00+00:00",
         "transfer_id": "transfer-2026-05-15-000000",
         "contents": [
@@ -440,7 +462,7 @@ def test_verify_multi_repo_extracted_dir(tmp_path: Path) -> None:
         )
     manifest_data = {
         "schema_version": "2.0",
-        "enclave_name": "lab",
+        "enclave_name": "lab-enclave",
         "transfer_date": "2026-05-15T12:00:00+00:00",
         "transfer_id": "transfer-2026-05-15-000000",
         "contents": contents,

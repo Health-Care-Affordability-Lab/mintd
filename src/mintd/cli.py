@@ -104,6 +104,7 @@ from .enclave import (
     NothingToPackage,
     TransferManifestNotFound,
     PathTraversalDetected,
+    WrongEnclave,
     enclave_add,
     enclave_bump,
     enclave_package,
@@ -2209,11 +2210,15 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
         reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
         return 1
     if skipped:
-        names = ", ".join(sorted({d.repo for d in skipped}))
+        # Count repos, not `downloaded[]` rows: one product with several
+        # outputs is several rows, and "skipped 3 products: my-repo" reads as
+        # three products that share a name.
+        repos = sorted({d.repo for d in skipped})
+        names = ", ".join(repos)
         reporter.info(
-            f"skipped {len(skipped)} already-transferred product"
-            f"{'' if len(skipped) == 1 else 's'}: {names} "
-            f"(pass --resend to ship {'it' if len(skipped) == 1 else 'them'} again)"
+            f"skipped {len(repos)} already-transferred product"
+            f"{'' if len(repos) == 1 else 's'}: {names} "
+            f"(pass --resend to ship {'it' if len(repos) == 1 else 'them'} again)"
         )
     # `result` (not `print`) so the archive path lands on stdout AND is flushed
     # before the stderr hint below — otherwise a piped stdout is block-buffered
@@ -2259,6 +2264,15 @@ def _handle_enclave_verify(args: argparse.Namespace) -> int:
             hint=(
                 "that product is already in data/ but has no transferred[] row — it "
                 "was probably landed by hand; append the row or remove the directory"
+            ),
+        )
+        return 1
+    except WrongEnclave as exc:
+        reporter.error(
+            str(exc),
+            hint=(
+                "nothing was moved; run this from the enclave the transfer was "
+                "built for, or pass --manifest /path/to/enclave_manifest.yaml"
             ),
         )
         return 1

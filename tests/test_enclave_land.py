@@ -10,10 +10,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
 
+import pytest
 import yaml
 
 from mintd.enclave import (
@@ -229,6 +232,207 @@ def test_land_finds_repo_from_outside_cwd(tmp_path: Path) -> None:
     proc = _run_land(extracted, elsewhere, "--repo", str(inside))
     assert proc.returncode == 0, proc.stderr
     assert (inside / "data" / "ds-alpha" / "aaabbb1-2026-05-15" / "data.csv").is_file()
+
+
+def test_land_rejects_traversal_in_manifest(tmp_path: Path) -> None:
+    """A hand-edited manifest must not steer a write outside data/. Mirrors the
+    flat-segment guards `enclave_verify` applies on the mintd path."""
+    import json
+
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    tm_path = extracted / "_transfer_manifest.json"
+    tm = json.loads(tm_path.read_text())
+    tm["contents"][0]["repo"] = "../evil"
+    tm_path.write_text(json.dumps(tm))
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 1
+    assert "unsafe path" in proc.stderr
+    assert not (tmp_path / "evil").exists()
+    assert not (inside.parent / "evil").exists()
+    assert EnclaveManifest.load(inside / "enclave_manifest.yaml").transferred == []
+
+
+def test_land_refuses_symlink_that_escapes_the_transfer(tmp_path: Path) -> None:
+    """`shutil.move` relocates symlinks intact, so a link planted in a tampered
+    archive would land in data/ still pointing outside. `enclave_verify` walks
+    each product for exactly this; the lander must agree."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    secret = tmp_path / "secret.txt"
+    secret.write_text("classified\n")
+    (extracted / "ds-alpha" / "aaabbb1-2026-05-15" / "exfil").symlink_to(secret)
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 1
+    assert "symlink" in proc.stderr
+    assert not (inside / "data" / "ds-alpha").exists()
+    assert EnclaveManifest.load(inside / "enclave_manifest.yaml").transferred == []
+
+
+def test_land_refuses_data_present_without_an_audit_row(tmp_path: Path) -> None:
+    """The by-hand `tar` recipe places files and writes no row. Skipping that
+    silently would drop the product from the audit trail forever — on a box
+    with no mintd, this lander IS the trail. `enclave_verify` refuses the same
+    state."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    # Simulate the by-hand path: data in place, transferred[] untouched.
+    landed = inside / "data" / "ds-alpha" / "aaabbb1-2026-05-15"
+    landed.mkdir(parents=True)
+    (landed / "data.csv").write_text("col1,col2\n1,2\n")
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 1
+    assert "no transferred[] row" in proc.stderr
+    # The row to paste travels with the refusal, so the researcher is not stuck.
+    assert "artifact_pin: '" + "aaabbb1" * 5 + "'" in proc.stderr
+    assert EnclaveManifest.load(inside / "enclave_manifest.yaml").transferred == []
+
+
+def test_land_skips_only_when_the_row_is_actually_recorded(tmp_path: Path) -> None:
+    """The idempotence contract still holds: a genuine second run is a no-op,
+    because the first run recorded the pin."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    first = _run_land(extracted, inside)
+    assert first.returncode == 0, first.stderr
+
+    second = _run_land(extracted, inside)
+    assert second.returncode == 0, second.stderr
+    assert "nothing to land" in second.stdout
+    assert len(EnclaveManifest.load(inside / "enclave_manifest.yaml").transferred) == 1
+
+
+def test_land_refuses_product_dir_that_is_itself_a_symlink(tmp_path: Path) -> None:
+    """The easier variant of the same attack: one tar member, no product
+    content needed. `src.is_dir()` follows the link, so nothing else in the
+    validation pass notices. `enclave_verify` rejects the identical layout."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    outside_dir = tmp_path / "secrets"
+    outside_dir.mkdir()
+    (outside_dir / "keys.txt").write_text("classified\n")
+
+    product = extracted / "ds-alpha" / "aaabbb1-2026-05-15"
+    shutil.rmtree(product)
+    product.symlink_to(outside_dir, target_is_directory=True)
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 1
+    assert "symlink" in proc.stderr
+    landed = inside / "data" / "ds-alpha" / "aaabbb1-2026-05-15"
+    assert not landed.exists() and not landed.is_symlink()
+    assert EnclaveManifest.load(inside / "enclave_manifest.yaml").transferred == []
+
+
+def test_land_allows_symlink_across_products_in_one_transfer(tmp_path: Path) -> None:
+    """A relative link from one product to another stays inside the transfer.
+    `TarGzArchiveOps.pack` permits it and `enclave_verify` lands it, so refusing
+    it here would accuse a legitimate mintd-built archive of tampering."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    product = extracted / "ds-alpha" / "aaabbb1-2026-05-15"
+    (product / "sibling.md").symlink_to(Path("..") / ".." / "README.md")
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 0, proc.stderr
+    assert (inside / "data" / "ds-alpha" / "aaabbb1-2026-05-15" / "sibling.md").is_symlink()
+
+
+def test_land_allows_symlink_inside_the_product(tmp_path: Path) -> None:
+    """The guard is escape, not symlinks — a relative link within the product
+    is legitimate and travels with the data."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    product = extracted / "ds-alpha" / "aaabbb1-2026-05-15"
+    (product / "latest.csv").symlink_to("data.csv")
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 0, proc.stderr
+    landed = inside / "data" / "ds-alpha" / "aaabbb1-2026-05-15"
+    assert (landed / "latest.csv").is_symlink()
+
+
+def test_land_refuses_when_transferred_not_last_key(tmp_path: Path) -> None:
+    """The audit write is a byte-append, so `transferred:` must end the file.
+    Refuse before moving anything rather than strand data with no row."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    m_path = inside / "enclave_manifest.yaml"
+    m_path.write_text(m_path.read_text() + "trailing_key: oops\n")
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 1
+    assert "not the last section" in proc.stderr
+    assert not (inside / "data" / "ds-alpha").exists()
+    assert (extracted / "ds-alpha" / "aaabbb1-2026-05-15" / "data.csv").is_file()
+
+
+def test_land_tolerates_a_comment_naming_transferred(tmp_path: Path) -> None:
+    """The last-key guard keys on an anchored match. A plain substring search
+    would hit this comment and refuse a perfectly valid manifest — on a box
+    where the suggested alternative (mintd) is not installed."""
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    m_path = inside / "enclave_manifest.yaml"
+    text = m_path.read_text()
+    m_path.write_text(
+        "# transferred: rows are appended by land.py; do not edit below\n" + text
+    )
+
+    proc = _run_land(extracted, inside)
+    assert proc.returncode == 0, proc.stderr
+    assert len(EnclaveManifest.load(m_path).transferred) == 1
+
+
+def test_land_refuses_when_manifest_not_writable(tmp_path: Path) -> None:
+    """Probe writability before the first move. Otherwise the lander relocates
+    the whole dataset and only then fails at the audit write, telling the
+    researcher to paste YAML into a file they cannot write."""
+    # Both guards are about the read-only bit not meaning what the test needs:
+    # Windows has no geteuid and chmod there does not stop a write, and root
+    # ignores the bit outright.
+    if sys.platform == "win32":
+        pytest.skip("chmod does not make a file unwritable on Windows")
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the read-only bit")
+
+    archive = _outside_repo(tmp_path)
+    inside = _inside_repo(tmp_path)
+    extracted = _extract(archive, inside / "incoming")
+
+    m_path = inside / "enclave_manifest.yaml"
+    m_path.chmod(0o444)
+    try:
+        proc = _run_land(extracted, inside)
+    finally:
+        m_path.chmod(0o644)
+
+    assert proc.returncode == 1
+    assert "cannot write" in proc.stderr
+    assert "nothing has been moved" in proc.stderr
+    assert not (inside / "data" / "ds-alpha").exists()
+    assert (extracted / "ds-alpha" / "aaabbb1-2026-05-15" / "data.csv").is_file()
 
 
 def test_land_leaves_no_data_behind_in_extraction_dir(tmp_path: Path) -> None:

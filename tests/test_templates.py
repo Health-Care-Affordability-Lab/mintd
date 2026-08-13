@@ -384,6 +384,42 @@ def test_gitignore_negates_dvc_pointers_under_downloads(tmp_path: Path) -> None:
     assert is_ignored(tmp_path, "downloads/provider-x/_staging/outputs/part.parquet")
 
 
+def test_enclave_gitignore_covers_transfers(tmp_path: Path) -> None:
+    """Transfer archives carry restricted data and are one `git add -A` from a
+    commit. Landing receipts under `transfers/received/` must stay trackable —
+    a receipt that can never be committed is not a receipt."""
+    import subprocess
+
+    from tests.scaffold_contract import is_ignored
+
+    render_scaffold(
+        project_type="enclave", name="foo", language="python", target_dir=tmp_path
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+
+    assert is_ignored(tmp_path, "transfers/transfer-2026-05-15-000000.tar.gz")
+    assert is_ignored(tmp_path, "incoming/land.py")
+    assert not is_ignored(tmp_path, "transfers/received/transfer-2026-05-15-000000.yaml")
+
+
+def test_enclave_readme_documents_landing(tmp_path: Path) -> None:
+    """The scaffolded README is what points a researcher at a landing path. It
+    used to send them to v1 scripts that failed against every v2 archive."""
+    written = render_scaffold(
+        project_type="enclave", name="foo", language="python", target_dir=tmp_path
+    )
+    readme = next(p for p in written if p.name == "README.md")
+    text = readme.read_text(encoding="utf-8")
+
+    assert "tar -xzf" in text
+    assert "land.py" in text
+    # The deleted v1 path, the wrong binary name, and a flag that never existed.
+    assert "enclave_cli.py" not in text
+    assert "unpack_transfer.sh" not in text
+    assert "mint enclave" not in text
+    assert "pull --all" not in text
+
+
 @pytest.mark.parametrize("template_name", ["package.py.j2"])
 def test_transfer_manifest_default_schema_version_validates(
     template_name: str, tmp_path: Path
