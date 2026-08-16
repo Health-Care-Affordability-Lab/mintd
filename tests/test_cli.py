@@ -55,6 +55,9 @@ def patched_clients(
         "mintd.cli._resolve_clients", lambda cfg, reporter=None, **_: (client, dvc_ops)
     )
     monkeypatch.setattr(
+        "mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: dvc_ops
+    )
+    monkeypatch.setattr(
         "mintd.cli._resolve_catalog_client", lambda cfg, **_: client
     )
     monkeypatch.setattr(
@@ -2538,12 +2541,16 @@ def test_cli_registry_sync_shows_refresh_status(
     assert ("status", "Refreshing registry cache...") in recording_reporter.events
 
 
-def test_spinner_dvc_handlers_thread_reporter_into_resolve_clients(
+def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording_reporter,
 ) -> None:
     """Pins fix #2: every spinner-wrapped dvc handler must pass the reporter
-    into _resolve_clients so dvc subprocess stderr flows through the spinner
-    (passthrough_stderr), not raw to the terminal."""
+    into the factory that builds its DvcOps, so dvc subprocess stderr flows
+    through the spinner (passthrough_stderr), not raw to the terminal.
+
+    Two factories since the issue30 split: `data push`/`data verify` resolve
+    dvc alone, `data import`/`enclave pull` need the catalog too. Both spies
+    append to one list — all four handlers must still thread the reporter."""
     captured: list = []
     client = InMemoryCatalogClient()
     _register_provider_xw(client)
@@ -2555,7 +2562,12 @@ def test_spinner_dvc_handlers_thread_reporter_into_resolve_clients(
         captured.append(reporter)
         return client, fake_dvc
 
+    def dvc_only_spy(config, reporter=None, **_):
+        captured.append(reporter)
+        return fake_dvc
+
     monkeypatch.setattr("mintd.cli._resolve_clients", spy)
+    monkeypatch.setattr("mintd.cli._resolve_dvc_ops", dvc_only_spy)
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
 
     cli.main(["data", "push"])
@@ -3335,3 +3347,97 @@ def test_every_check_project_call_site_passes_a_client() -> None:
         f"check_project call sites missing client=: {sorted(offenders)}"
     )
 
+
+# ---------------------------------------------------------------------------
+# P2b (issue30) — local commands must not demand a registry_url they never use
+# ---------------------------------------------------------------------------
+
+
+def _local_data_argv(verb: str, tmp_path: Path) -> list[str]:
+    target = tmp_path / "raw.csv"
+    target.write_text("data")
+    return {
+        "add": ["data", "add", str(target)],
+        "pull": ["data", "pull", "--path", str(tmp_path)],
+        "push": ["data", "push"],
+        "verify": ["data", "verify"],
+        "remove": ["data", "remove", "raw.csv"],
+    }[verb]
+
+
+@pytest.fixture
+def unconfigured_machine(monkeypatch: pytest.MonkeyPatch) -> _FakeDvcOps:
+    """A laptop with no registry_url: the real `_resolve_catalog_client` raises
+    ConfigError off the default Config. `SubprocessDvcOps` is replaced at the
+    constructor so no dvc subprocess runs, whichever factory builds it."""
+    dvc_ops = _FakeDvcOps()
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli.SubprocessDvcOps", lambda **kwargs: dvc_ops)
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: None)
+    return dvc_ops
+
+
+@pytest.mark.parametrize("verb", ["add", "pull", "push", "verify", "remove"])
+def test_local_data_commands_do_not_require_registry_url(
+    verb: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    unconfigured_machine: _FakeDvcOps,
+) -> None:
+    """All five wrap dvc and never contact the catalog."""
+    (tmp_path / ".dvc").mkdir()
+    dvc_ops = unconfigured_machine
+
+    rc = cli.main(_local_data_argv(verb, tmp_path))
+
+    err = capsys.readouterr().err
+    assert "registry_url" not in err
+    assert rc == 0
+    assert any([
+        dvc_ops.add_calls, dvc_ops.pull_calls, dvc_ops.push_calls,
+        dvc_ops.status_calls, dvc_ops.remove_calls,
+    ]), f"`data {verb}` never reached its DVC work"
+
+
+def test_local_data_handlers_never_build_a_catalog_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unconfigured_machine: _FakeDvcOps,
+) -> None:
+    """The structural twin: not merely tolerating a missing registry_url, but
+    never asking for the collaborator in the first place."""
+    (tmp_path / ".dvc").mkdir()
+
+    def must_not_call(*a: Any, **kw: Any) -> None:
+        pytest.fail("local data handlers must not build a catalog client")
+
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", must_not_call)
+
+    for verb in ("add", "pull", "push", "verify", "remove"):
+        assert cli.main(_local_data_argv(verb, tmp_path)) == 0
+
+
+def test_publish_builds_dvc_ops_with_a_reporter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+) -> None:
+    """`dvc push` is the longest operation mintd performs; without a reporter
+    it streams no progress. Asserted at the SubprocessDvcOps constructor —
+    `patched_clients`' `**_` lambda would swallow the kwarg — and by identity,
+    since a throwaway `Reporter()` would satisfy a not-None check while losing
+    everything `_build_reporter` reads off argv (verbose/quiet/json/no-color)."""
+    captured: dict[str, Any] = {}
+
+    def recorder(**kwargs: Any) -> _FakeDvcOps:
+        captured.update(kwargs)
+        return _FakeDvcOps()
+
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: InMemoryCatalogClient())
+    monkeypatch.setattr("mintd.cli.SubprocessDvcOps", recorder)
+
+    cli.main(["publish", "--path", str(tmp_path), "--dry-run"])
+
+    assert captured, "publish never built a SubprocessDvcOps"
+    assert captured["reporter"] is recording_reporter
