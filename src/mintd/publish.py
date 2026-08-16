@@ -116,7 +116,7 @@ def prepare_publish(
     now: datetime | None = None,
 ) -> PublishPreview:
     metadata_path = project_path / "metadata.json"
-    findings = check_project(project_path, upgrades=False)
+    findings = check_project(project_path, upgrades=False, client=client)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         raise PublishBlocked(error_findings)

@@ -22,9 +22,12 @@ from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from mintd import cli
 from mintd.catalog import CatalogAlreadyExists, CatalogNotFound, InMemoryCatalogClient
 from mintd.check import CheckFinding
+from mintd._config import ConfigError
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
+from mintd._registry_git_ops import GitOpError
+from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -454,6 +457,35 @@ def test_data_import_bump_pin_missing_exits_one(
     err = capsys.readouterr().err
     assert rc == 1
     assert "retry" not in err
+
+
+def test_bump_blocked_catalog_unresolved_prefers_the_findings_own_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog_unresolved` now covers a failed catalog *read* as well as a
+    missing client, so the renderer's fixed "set registry_url" string would
+    misdirect a user whose registry_url is already correct."""
+    finding = CheckFinding(
+        severity="error",
+        section="consumer",
+        message="cannot read the catalog to resolve producer URL for provider-xw: fatal: unable to access",
+        kind="catalog_unresolved",
+        hint="check your network and `registry_url`; if both are fine, delete the local registry cache",
+    )
+
+    def raises(*args: Any, **kwargs: Any) -> Any:
+        raise BumpBlocked("provider-xw", finding)
+
+    monkeypatch.setattr("mintd.cli.bump_import", raises)
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "delete the local registry cache" in err
+    assert "check that registry_url is set" not in err
 
 
 def test_data_import_bump_with_rev_exits_64(
@@ -3165,3 +3197,141 @@ def test_cli_registry_update_success_names_reused_pr(
     msg = recording_reporter.events_of("success")[-1][1]
     assert "updated PR" in msg
     assert "/pull/42" in msg
+
+
+# ---------------------------------------------------------------------------
+# P2a (issue13) — the three check_project gates must be handed a catalog client
+#
+# A project with one approved product in enclave_manifest.yaml is blocked from
+# check, publish AND registry register by a finding about mintd's own wiring.
+# These tests deliberately do NOT patch `mintd.cli.check_project` — the three
+# existing register tests (:663/:688/:706) do, which is why the suite misses it.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_register_with_enclave_manifest_reaches_client_register(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    registered: list[str] = []
+    real_register = client.register
+
+    def spy(metadata: Metadata, **kwargs: Any):
+        registered.append(metadata.project.name)
+        return real_register(metadata, **kwargs)
+
+    monkeypatch.setattr(client, "register", spy)
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+
+    assert rc == 0
+    assert registered == ["test_project"]
+
+
+def test_plain_check_resolves_a_catalog_client(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """Pins fix 3 (the hoist): plain `check` resolves a client best-effort, so
+    an enclave consumer has a default surface that reports it healthy. Stays
+    red after the publish/register fixes alone."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+    _register_provider_xw(client)
+
+    rc = cli.main(["check", str(tmp_path)])
+
+    assert rc == 0
+
+
+def test_plain_check_without_registry_url_still_reports_catalog_unresolved(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard on fix 3: best-effort resolution must not swallow the
+    diagnostic on a machine with no registry_url."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+
+    def _no_registry_url(*a: Any, **kw: Any):
+        raise ConfigError("registry_url required for this command; set it in ...")
+
+    monkeypatch.setattr("mintd.cli._resolve_clients", _no_registry_url)
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", _no_registry_url)
+
+    rc = cli.main(["check", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "catalog client not provided" in out
+
+
+def test_check_upgrades_unreachable_registry_prints_an_error_not_a_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """A registry that cannot be cloned is a documented failure path."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+
+    def _unreachable(name: str):
+        raise GitOpError(
+            ["git", "clone", "--depth=1", "/nonexistent/registry.git"],
+            "fatal: repository '/nonexistent/registry.git' does not exist",
+        )
+
+    monkeypatch.setattr(client, "fetch", _unreachable)
+
+    rc = cli.main(["check", str(tmp_path), "--upgrades"])
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert rc == 1
+    assert "cannot read the catalog" in output
+    assert "does not exist" in output  # git's own words reach the user
+    assert "Traceback" not in output
+
+
+def test_every_check_project_call_site_passes_a_client() -> None:
+    """Meta-test: every `check_project(...)` call in src/mintd passes a
+    `client=` keyword. This is the anti-drift ratchet that keeps "one gate"
+    enforceable without making the parameter keyword-required (unit A owns
+    that migration).
+
+    Allowlist rationale — `data.py`'s import-bump call is inert for this
+    defect: `_find_consumer_finding_for_target` matches on
+    `source == <.dvc file>`, and enclave-manifest findings carry
+    `source=<manifest>`, so they never select a bump target. Asserted by set
+    equality, so the allowlist can only shrink.
+    """
+    import ast
+
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "mintd"
+    offenders: set[str] = set()
+    for path in sorted(src_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "check_project":
+                continue
+            if not any(kw.arg == "client" for kw in node.keywords):
+                offenders.add(path.name)
+
+    assert offenders == {"data.py"}, (
+        f"check_project call sites missing client=: {sorted(offenders)}"
+    )
+

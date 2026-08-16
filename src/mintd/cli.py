@@ -746,13 +746,16 @@ def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> Reg
 def _handle_check(args: argparse.Namespace) -> int:
     config = Config.load()
     client: CatalogClient | None = None
-    if args.upgrades:
-        try:
-            client, _ = _resolve_clients(config)
-        except ConfigError:
-            # Let the manifest walker emit `catalog_unresolved` findings —
-            # surface what's missing without pre-validating.
-            client = None
+    # Resolved for every check, not just --upgrades: an enclave consumer's
+    # approved products need the catalog to validate, and publish/register
+    # already validate them. Leaving plain check weaker would mean "check is
+    # green" and "publish will not be blocked" stop meaning the same thing.
+    try:
+        client, _ = _resolve_clients(config)
+    except ConfigError:
+        # Let the manifest walker emit `catalog_unresolved` findings —
+        # surface what's missing without pre-validating.
+        client = None
     findings = check_project(args.path, upgrades=args.upgrades, client=client)
     return _render_findings(findings, json_out=args.json_out)
 
@@ -2324,7 +2327,7 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
             hint="run 'mintd check' to see field-level details",
         )
         return 1
-    findings = check_project(args.path, upgrades=False)
+    findings = check_project(args.path, upgrades=False, client=client)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         return _render_findings(error_findings, json_out=False)
@@ -2744,8 +2747,16 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
             file=sys.stderr,
         )
     elif kind == "catalog_unresolved":
+        # Prefer the finding's own hint. This kind now covers both "no catalog
+        # client was provided" and "the catalog read failed", and only the
+        # finding knows which — a fixed string would misdirect the second case
+        # at a setting that is already correct. Still `kind` dispatch, not
+        # message parsing.
         print(
-            "hint: check that registry_url is set in ~/.config/mintd/config.yaml",
+            "hint: " + (
+                exc.finding.hint
+                or "check that registry_url is set in ~/.config/mintd/config.yaml"
+            ),
             file=sys.stderr,
         )
     if kind in _RECOVERABLE_KINDS:
