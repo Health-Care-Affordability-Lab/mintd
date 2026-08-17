@@ -137,6 +137,24 @@ def test_extra_fields_allowed_during_transition():
     assert isinstance(m, Metadata)
 
 
+@pytest.mark.xfail(strict=True, reason="scope boundary: catalog projection is unit 11")
+def test_top_level_stray_does_not_reach_the_catalog_entry():
+    """A key the user left at the top level is not only kept, it is published:
+    `CatalogEntry` is extra='allow' and CATALOG_EXCLUDED_PATHS pops only
+    schema_version and mint, so a private note lands in the shared catalog.
+
+    issue28 fixes the nested half (publish no longer deletes those keys); this
+    half is unit 11's. strict=True so the day it is fixed this fails loudly and
+    gets un-xfailed rather than rotting.
+    """
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
+    data["grant_number"] = "R01-INTERNAL-ONLY"
+
+    entry = Metadata.model_validate(data).to_catalog_entry()
+
+    assert "grant_number" not in entry.model_dump()
+
+
 def test_project_type_literal_rejects_unknown():
     """project.type is Literal['data','code','project','enclave'] — anything
     else fails validation with the error pinned to project.type."""

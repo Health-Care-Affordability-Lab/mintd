@@ -5,11 +5,12 @@ DVC failure rolls back metadata.json. Tag/catalog failures leave the
 manifest bumped + DVC pushed; the CLI prints partial-state warnings.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ._dvc_ops import DvcOpError, DvcOps
 from ._registry_git_ops import (
@@ -198,7 +199,20 @@ def _apply_publish(
     if preview.local_diff:
         if reporter is not None:
             reporter.update_status("Writing metadata.json...")
-        _atomic_write_json(metadata_path, new_metadata.model_dump_json(indent=2))
+        try:
+            raw = json.loads(original_metadata_json)
+        except json.JSONDecodeError as exc:
+            # The confirm prompt between prepare and apply is an unbounded
+            # window in which the file can be edited into invalid JSON. Map it
+            # — nothing has been written or pushed yet, so this is recoverable.
+            raise PublishError(
+                f"{metadata_path} is no longer valid JSON: {exc}",
+                recovery_hint="metadata.json changed since the preview was computed; fix the JSON and rerun `mintd publish`.",
+            ) from exc
+        merged = _overlay(raw, json.loads(new_metadata.model_dump_json()))
+        _atomic_write_json(
+            metadata_path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
+        )
 
     # Step 2: dvc push
     if reporter is not None:
@@ -352,6 +366,44 @@ def _semver_tuple(v: str) -> tuple[int, int, int]:
     m = _SEMVER_RE.match(v)
     assert m
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _overlay(raw: Any, dumped: Any) -> Any:
+    """Re-apply the keys the model dropped onto its canonical dump.
+
+    Publish owns the fields `Metadata` declares; every other key in the user's
+    metadata.json is theirs. The sub-models keep pydantic's default
+    ``extra="ignore"``, so a hand-added ``ownership.slack`` is already gone by
+    the time we dump — writing the bare dump back over the file would make the
+    loss durable. Merging first keeps it.
+
+    Dicts keep ``dumped``'s canonical key order and append the user's own keys
+    to the block they were written in — so a file carrying no strays comes out
+    identical to the plain dump this replaced (bar the trailing newline every
+    other metadata.json writer already emits: `_render.py`, `init.py`,
+    `metadata_migrate.py`), and nobody's first publish after this change
+    reshuffles their file. Lists merge by index when both
+    elements are dicts — the ``data_products.outputs[]`` case, same length and
+    order because `prepare_publish` rebuilds them with ``model_copy(update=…)``
+    — and everything else takes the canonical ``dumped`` value.
+
+    Twin of ``metadata_migrate._find_dropped_keys``: same two-tree walk, one
+    reports the drops and this one prevents them. Change them together.
+    """
+    if isinstance(raw, dict) and isinstance(dumped, dict):
+        merged = {
+            key: _overlay(raw[key], val) if key in raw else val
+            for key, val in dumped.items()
+        }
+        merged.update({k: v for k, v in raw.items() if k not in dumped})
+        return merged
+    if isinstance(raw, list) and isinstance(dumped, list):
+        paired = [
+            _overlay(r, d) if isinstance(r, dict) and isinstance(d, dict) else d
+            for r, d in zip(raw, dumped)
+        ]
+        return paired + dumped[len(paired):]
+    return dumped
 
 
 def _atomic_write_json(path: Path, content: str) -> None:
