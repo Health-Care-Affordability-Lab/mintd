@@ -13,7 +13,8 @@ The migration rules:
 - Drop top-level ``language`` (per-scaffold concern handled by slice 19)
 - Drop top-level ``metadata.version`` and ``metadata.mint_version``
   (legacy meta-meta tracking)
-- Drop top-level ``storage`` (lives in ~/.config/mintd/config.yaml)
+- Carry top-level ``storage`` through, deriving ``bucket``/``prefix`` from
+  ``storage.dvc.remote_url`` when the v1 bucket is empty
 - Drop top-level ``schema`` (location is conventional, not stored)
 - Drop top-level ``lifecycle``
 - Default ``status.last_published_version`` to ``""`` when absent
@@ -28,6 +29,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
@@ -55,7 +57,7 @@ class MigrationReport:
     schema_after: str = ""
 
 
-_DROP_TOPLEVEL = ("language", "schema", "lifecycle", "storage")
+_DROP_TOPLEVEL = ("language", "schema", "lifecycle")
 _DROP_PROJECT_SUBKEYS = ("description", "tags", "display_name")
 _DROP_METADATA_SUBKEYS = ("version", "mint_version")
 
@@ -114,6 +116,39 @@ def migrate_v1_to_v2(v1_data: dict) -> tuple[dict, MigrationReport]:
     for key in ("ownership", "access_control", "governance", "repository"):
         if key in v1_data:
             out[key] = v1_data[key]
+
+    # Storage: carry the block through rather than dropping it. v2 still
+    # declares `storage`, `init` writes it on every scaffold, and `check`
+    # errors when .dvc/config has a remote and metadata.json has no block —
+    # so dropping it manufactured a `storage_partial_dvc_only` error on the
+    # very next check, whose repair hint told the user to hand-retype the
+    # object the tool had just deleted (issue27).
+    if "storage" in v1_data:
+        storage_in = v1_data["storage"]
+        if isinstance(storage_in, dict):
+            storage_in = dict(storage_in)
+            # v1's own `dvc.remote_url` is the dvc side of v2's
+            # `s3://{bucket}/{prefix}` invariant, so it can rebuild both
+            # fields. Derive when the bucket is empty — the lab's actual v1
+            # drift mode — and derive BOTH: filling the bucket alone lands
+            # the project in `url_mismatch` whenever the v1 prefix disagrees
+            # with its own remote_url, which in the committed fixture it does.
+            # Never touch a bucket a real v1 file got right.
+            dvc_in = storage_in.get("dvc")
+            remote_url = dvc_in.get("remote_url") if isinstance(dvc_in, dict) else None
+            # isinstance, not `or ""`: a truthy non-string (a hand-mangled file
+            # with a dict/int/list here) would reach urlparse and raise, which
+            # no CLI handler maps — a raw traceback on the messy-v1-input path
+            # this function exists to survive.
+            parsed = urlparse(remote_url) if isinstance(remote_url, str) else urlparse("")
+            if not storage_in.get("bucket") and parsed.scheme == "s3" and parsed.netloc:
+                storage_in["bucket"] = parsed.netloc
+                storage_in["prefix"] = parsed.path.lstrip("/")
+                defaulted.append("storage.bucket (derived from storage.dvc.remote_url)")
+                defaulted.append("storage.prefix (derived from storage.dvc.remote_url)")
+        # A non-dict `storage` is carried as-is so model validation reports it
+        # with a field path, rather than being silently swallowed here.
+        out["storage"] = storage_in
 
     # Status: default last_published_version.
     status_in = dict(v1_data.get("status") or {})
