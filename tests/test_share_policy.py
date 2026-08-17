@@ -10,12 +10,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 
 from mintd._config import Config
 from mintd._share_ops import (
     GetResult,
     PutResult,
     ShareError,
+    TransferError,
     build_put_key,
     file_sha256,
     parse_share_ref,
@@ -472,6 +474,64 @@ def test_share_get_no_stored_checksum_warns(tmp_path: Path) -> None:
     )
     assert got.bytes == 4
     assert any("no stored SHA256" in w for w in rep.warnings)
+
+
+def test_get_failure_path_leaves_a_pre_existing_tmp_intact(tmp_path: Path) -> None:
+    # The success path is covered by tests/test_tmp_name_parity.py; the failure
+    # path destroyed the user's scratch file TWICE — the pre-download unlink and
+    # again the except-BaseException cleanup — while delivering nothing. A 403
+    # also exercises the real mapped-error re-raise, so this proves the scratch
+    # survives the mapped path too.
+    class _RaisesMidDownload:
+        def head_object(self, **k):
+            return {"ContentLength": 22}
+
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+            Path(Filename).write_bytes(b"partial")
+            raise ClientError(
+                {
+                    "Error": {"Code": "AccessDenied"},
+                    "ResponseMetadata": {"HTTPStatusCode": 403},
+                },
+                "GetObject",
+            )
+
+    dest = tmp_path / "report.csv"
+    scratch = tmp_path / "report.csv.tmp"
+    scratch.write_bytes(b"user-scratch-do-not-touch")
+    with pytest.raises(TransferError):
+        share_get(
+            ref="alice/report.csv",
+            config=_cfg(),
+            reporter=_SpyReporter(),
+            out=dest,
+            s3_client_factory=lambda _c, _p: _RaisesMidDownload(),
+        )
+    assert not dest.exists()
+    assert scratch.read_bytes() == b"user-scratch-do-not-touch"
+
+
+def test_get_long_dest_name_is_an_error_not_a_traceback(tmp_path: Path) -> None:
+    # The temp suffix grew from 4 bytes to 43, so a dest name that used to fit
+    # under NAME_MAX can now push its tmp sibling over. That must surface as a
+    # real error line, not an OSError traceback — the cache lane already wraps
+    # download_object in `except OSError`; this is the share half of that parity.
+    class _Stub:
+        def head_object(self, **k):
+            return {"ContentLength": 4}
+
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+            Path(Filename).write_bytes(b"data")
+
+    dest = tmp_path / ("a" * 230 + ".csv")
+    with pytest.raises(TransferError, match="could not write"):
+        share_get(
+            ref="alice/report.csv",
+            config=_cfg(),
+            reporter=_SpyReporter(),
+            out=dest,
+            s3_client_factory=lambda _c, _p: _Stub(),
+        )
 
 
 # ---------- dest resolution ----------

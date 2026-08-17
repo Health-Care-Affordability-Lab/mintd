@@ -25,11 +25,14 @@ and raise ``ShareError(msg, hint)``.
 
 from __future__ import annotations
 
+import fnmatch
+import glob
 import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
+from uuid import uuid4
 
 # Reuse the guarded-import sentinels from _fast_sync_ops rather than
 # paraphrasing its try/except: these are the *same* class objects that
@@ -309,6 +312,44 @@ def upload_object(
         ) from exc
 
 
+_TMP_TOKEN = "[0-9a-f]" * 32  # the shape ``uuid4().hex`` writes, as a glob class
+_STALE_TMPS: dict[Path, list[str]] = {}
+
+
+def _sweep_stale_tmps(dest: Path) -> None:
+    """Remove temps a hard-killed earlier run left behind for ``dest``.
+
+    A predictable tmp name self-healed: ``_attempt``'s unlink removed last
+    run's leftover. An unguessable one cannot, so SIGKILL/SIGTERM (which skips
+    the cleanup handler) would strand a partial file per attempt.
+
+    Two constraints shape this:
+
+    * **One scandir per directory, not per download.** ``cache pull`` runs
+      ``jobs`` downloads into the same tree, so a per-dest glob is O(n^2) in a
+      directory holding n pulled files (~15s of pure scanning at n=5000). The
+      snapshot is taken the first time we touch a directory — before any of our
+      own temps exist — so a sibling's in-flight temp can never enter it.
+    * **``dest.name`` is glob-escaped.** It is server- or user-supplied, so an
+      unescaped ``report [1].csv`` would expand ``[1]`` into a character class
+      and match the *sibling* ``report 1.csv``'s in-flight temp — unlinking it
+      mid-download and failing that pull at ``tmp.replace(dest)``.
+
+    The token class matches only the shape we generate, so a user file merely
+    ending in ``.mintd-tmp`` is never touched.
+    """
+    names = _STALE_TMPS.get(dest.parent)
+    if names is None:
+        names = [p.name for p in dest.parent.glob(f"*.{_TMP_TOKEN}.mintd-tmp")]
+        _STALE_TMPS[dest.parent] = names
+    if not names:
+        return
+    pattern = f"{glob.escape(dest.name)}.{_TMP_TOKEN}.mintd-tmp"
+    for name in names:
+        if fnmatch.fnmatchcase(name, pattern):
+            (dest.parent / name).unlink(missing_ok=True)
+
+
 def download_object(
     s3: Any,
     bucket: str,
@@ -325,18 +366,16 @@ def download_object(
     Borrows ``fetch_to_cache``'s tmp→verify→fsync→replace discipline
     (_fast_sync_ops:1115-1147) with three grounded deviations:
 
-    1. tmp name is ``dest.name + tmp_suffix`` (default ``".tmp"``, the
-       ``write_manifest`` precedent at _fast_sync_ops:1081), NOT
-       ``with_suffix(".tmp")`` — the latter would collapse user-named
-       ``report.parquet`` / ``report.csv`` into one ``report.tmp``. The default
-       suffix is safe for share (single file, dest namespace is share-owned and
-       an existing dest is refused). Consumers whose dest namespace is
-       *user-controlled and concurrent* — e.g. ``mintd cache pull`` mapping
-       server keys straight into the working tree — MUST pass a collision-proof
-       ``tmp_suffix`` (a per-call ``uuid4`` token) so the predictable ``.tmp``
-       path can never (a) clobber a user's own ``<name>.tmp`` scratch file nor
-       (b) equal a sibling task's *final* dest (pulling both ``foo`` and
-       ``foo.tmp`` would otherwise race: ``foo``'s tmp IS ``foo.tmp``);
+    1. tmp name is ``dest.name + tmp_suffix``, NOT ``with_suffix(".tmp")`` —
+       the latter would collapse user-named ``report.parquet`` /
+       ``report.csv`` into one ``report.tmp``. ``tmp_suffix=None`` (the
+       default) generates a per-call ``uuid4`` token, because BOTH lanes aim
+       at user-controlled dests (``share get --out``, ``cache pull`` mapping
+       server keys into the working tree): a predictable ``<name>.tmp`` would
+       (a) clobber a user's own scratch file of that name and (b) equal a
+       sibling task's *final* dest (pulling both ``foo`` and ``foo.tmp``
+       races — ``foo``'s tmp IS ``foo.tmp``). Callers pass an explicit
+       ``tmp_suffix`` only to pin a fixed name (the symlink-guard test does);
     2. no md5-pin verify — share has no pin; integrity rides
        ``ChecksumMode="ENABLED"`` (botocore verifies the stored SHA256 on the
        response, raising on mismatch). ``verify_tmp`` is the policy-free
@@ -347,13 +386,18 @@ def download_object(
        orphan tmp.
 
     Returns the downloaded byte count."""
-    tmp = dest.with_name(dest.name + (tmp_suffix if tmp_suffix is not None else ".tmp"))
+    # Generated ONCE here, not inside _attempt: retry_transient re-invokes
+    # _attempt, and a per-attempt token would leave the earlier attempts' temps
+    # orphaned in the user's directory (the cleanup below unlinks only ``tmp``).
+    suffix = tmp_suffix if tmp_suffix is not None else f".{uuid4().hex}.mintd-tmp"
+    tmp = dest.with_name(dest.name + suffix)
     tmp.parent.mkdir(parents=True, exist_ok=True)
+    _sweep_stale_tmps(dest)
 
     def _attempt() -> None:
         # Remove any pre-existing tmp (incl. a planted symlink) before the
         # download: s3transfer opens the filename with a plain open('wb'),
-        # which would otherwise FOLLOW a symlink at this predictable path and
+        # which would otherwise FOLLOW a symlink at the tmp path and
         # overwrite its target. Unlinking first forces a fresh regular file.
         tmp.unlink(missing_ok=True)
         try:
@@ -711,9 +755,19 @@ def share_get(
     with reporter.progress(total=info.size, desc=f"Downloading {filename}") as advance:
         # Pass the HEAD size so download_object enforces it — this is what
         # makes the "verified by size only" warning above a real guarantee.
-        n = download_object(
-            s3, bucket, key, dest, progress=advance, expected_size=info.size
-        )
+        try:
+            n = download_object(
+                s3, bucket, key, dest, progress=advance, expected_size=info.size
+            )
+        except OSError as exc:
+            # Local-filesystem failures (no space, a path component that is a
+            # plain file, or a name whose tmp sibling exceeds NAME_MAX) resolve
+            # to a real error line, never a traceback. The cache lane already
+            # does this at _cache_ops.py's `except OSError`.
+            raise TransferError(
+                f"could not write {dest}: {exc}",
+                hint="check the destination path, permissions and free space",
+            ) from exc
     return GetResult(
         name=filename, ref=ref, dest=dest, bytes=n, elapsed_s=time.monotonic() - start
     )

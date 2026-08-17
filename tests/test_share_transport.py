@@ -319,14 +319,44 @@ class _WriteThenRaiseClient:
         raise self.exc
 
 
-def test_download_client_error_leaves_no_dest_no_tmp(tmp_path: Path) -> None:
+class _GoodClient:
+    def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        Path(Filename).write_bytes(b"good-bytes")
+
+
+@pytest.mark.parametrize(
+    "case", ["client_error", "keyboard_interrupt", "verify_raises", "size_mismatch"]
+)
+def test_download_leaves_no_orphan_tmp(case: str, tmp_path: Path) -> None:
+    # Name-agnostic on purpose: the tmp name is a per-call uuid, so the old
+    # `not (tmp_path / "out.parquet.tmp").exists()` form would pass without
+    # testing anything. Nothing at all may survive a failed download.
+    # size_mismatch also pins the "verified by size only" guarantee
+    # (_share_ops.py:373-379) — do not drop its match=.
     dest = tmp_path / "out.parquet"
-    tmp = tmp_path / "out.parquet.tmp"
-    client = _WriteThenRaiseClient(_client_error("AccessDenied", 403, "GetObject"))
-    with pytest.raises(TransferError):
-        download_object(client, "b", "k", dest, progress=lambda _n: None)
-    assert not dest.exists()
-    assert not tmp.exists()
+    kwargs: dict = {"progress": lambda _n: None}
+    match = None
+    client: object
+    expected: type[BaseException]
+    if case == "client_error":
+        client = _WriteThenRaiseClient(_client_error("AccessDenied", 403, "GetObject"))
+        expected = TransferError
+    elif case == "keyboard_interrupt":
+        client, expected = _WriteThenRaiseClient(KeyboardInterrupt()), KeyboardInterrupt
+    elif case == "verify_raises":
+        client, expected, match = _GoodClient(), ValueError, "checksum mismatch"
+
+        def _verify(_p: Path) -> None:
+            raise ValueError("checksum mismatch")
+
+        kwargs["verify_tmp"] = _verify
+    else:
+        client, expected, match = _GoodClient(), TransferError, "size mismatch"
+        kwargs["expected_size"] = 99999
+
+    with pytest.raises(expected, match=match):
+        download_object(client, "b", "k", dest, **kwargs)
+    assert list(tmp_path.iterdir()) == []  # no dest, no orphan tmp
 
 
 def test_download_no_such_bucket_404_maps_to_bucket_hint_not_not_found(
@@ -343,48 +373,28 @@ def test_download_no_such_bucket_404_maps_to_bucket_hint_not_not_found(
     assert ei.value.hint == "check storage_bucket_prefix (mintd config setup)"
 
 
-def test_download_keyboardinterrupt_leaves_no_dest_no_tmp(tmp_path: Path) -> None:
-    dest = tmp_path / "out.parquet"
-    tmp = tmp_path / "out.parquet.tmp"
-    client = _WriteThenRaiseClient(KeyboardInterrupt())
-    with pytest.raises(KeyboardInterrupt):
-        download_object(client, "b", "k", dest, progress=lambda _n: None)
-    assert not dest.exists()
-    assert not tmp.exists()
-
-
-def test_download_verify_tmp_raise_leaves_no_dest_no_tmp(tmp_path: Path) -> None:
-    dest = tmp_path / "out.parquet"
-    tmp = tmp_path / "out.parquet.tmp"
-
-    class _GoodClient:
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
-            Path(Filename).write_bytes(b"good-bytes")
-
-    def _verify(_p: Path) -> None:
-        raise ValueError("checksum mismatch")
-
-    with pytest.raises(ValueError, match="checksum mismatch"):
-        download_object(
-            _GoodClient(), "b", "k", dest, progress=lambda _n: None, verify_tmp=_verify
-        )
-    assert not dest.exists()
-    assert not tmp.exists()
-
-
-def test_download_tmp_name_appends_not_with_suffix(tmp_path: Path) -> None:
-    # report.parquet -> report.parquet.tmp (NOT report.tmp), so sibling
-    # dests with different extensions never collide.
+def test_download_default_tmp_name_is_collision_proof(tmp_path: Path) -> None:
+    # report.parquet -> report.parquet.<uuid>.mintd-tmp: NOT report.tmp (no
+    # with_suffix collapse, so sibling dests with different extensions never
+    # collide) and NOT report.parquet.tmp either — that predictable sibling is
+    # a user's own scratch file (see tests/test_tmp_name_parity.py).
     dest = tmp_path / "report.parquet"
-    captured: dict = {}
+    seen: list[str] = []
 
     class _C:
         def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
-            captured["filename"] = Filename
+            seen.append(Path(Filename).name)
             Path(Filename).write_bytes(b"x")
 
     download_object(_C(), "b", "k", dest, progress=lambda _n: None)
-    assert captured["filename"].endswith("report.parquet.tmp")
+    dest.unlink()
+    download_object(_C(), "b", "k", dest, progress=lambda _n: None)
+
+    for name in seen:
+        assert name.startswith("report.parquet.")  # appended, not with_suffix
+        assert name.endswith(".mintd-tmp")
+        assert name != "report.parquet.tmp"
+    assert seen[0] != seen[1]  # a fresh token per call, not per dest
 
 
 def test_download_sends_checksum_mode_enabled(tmp_path: Path) -> None:
@@ -442,7 +452,7 @@ def test_download_network_error_after_retry_maps_to_hinted_error(tmp_path: Path)
     with pytest.raises(TransferError) as ei:
         download_object(client, "b", "k", dest, progress=lambda _n: None)
     assert ei.value.hint is not None
-    assert not dest.exists() and not (tmp_path / "out.parquet.tmp").exists()
+    assert not dest.exists() and list(tmp_path.iterdir()) == []
 
 
 def test_download_retries_exceeded_maps_to_hinted_error(tmp_path: Path) -> None:
@@ -461,13 +471,14 @@ def test_download_retries_exceeded_maps_to_hinted_error(tmp_path: Path) -> None:
     with pytest.raises(TransferError) as ei:
         download_object(client, "b", "k", dest, progress=lambda _n: None)
     assert ei.value.hint is not None
-    assert not dest.exists() and not (tmp_path / "out.parquet.tmp").exists()
+    assert not dest.exists() and list(tmp_path.iterdir()) == []
 
     # opaque cause -> generic hinted transfer error, still no traceback
     client2 = _WriteThenRaiseClient(RetriesExceededError(RuntimeError("opaque")))
     with pytest.raises(TransferError) as ei2:
         download_object(client2, "b", "k", tmp_path / "o2.parquet", progress=lambda _n: None)
     assert ei2.value.hint is not None
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_download_checksum_mismatch_maps_to_hinted_error(tmp_path: Path) -> None:
@@ -480,7 +491,7 @@ def test_download_checksum_mismatch_maps_to_hinted_error(tmp_path: Path) -> None
     with pytest.raises(TransferError) as ei:
         download_object(client, "b", "k", dest, progress=lambda _n: None)
     assert "checksum mismatch" in str(ei.value)
-    assert not dest.exists() and not (tmp_path / "out.parquet.tmp").exists()
+    assert not dest.exists() and list(tmp_path.iterdir()) == []
 
 
 def test_upload_network_error_after_retry_maps_to_hinted_error(tmp_path: Path) -> None:
@@ -511,26 +522,75 @@ def test_reserved_key_guard_is_case_insensitive(tmp_path: Path) -> None:
             )
 
 
-def test_download_size_mismatch_for_uncensummed_object_fails(tmp_path: Path) -> None:
-    """The 'verified by size only' guarantee is real: a download whose byte
-    count != the HEAD size raises and leaves nothing behind."""
-    dest = tmp_path / "out.parquet"
+def test_download_sweeps_its_own_stale_temps_but_not_user_files(tmp_path: Path) -> None:
+    # A hard kill (SIGKILL/SIGTERM skips the cleanup handler) strands a temp.
+    # The old predictable name self-healed on the next run; the uuid name only
+    # does so because of the sweep. It must match our exact generated shape and
+    # nothing else.
+    dest = tmp_path / "big.parquet"
+    ours = [
+        tmp_path / f"big.parquet.{'a' * 32}.mintd-tmp",
+        tmp_path / f"big.parquet.{'b' * 32}.mintd-tmp",
+    ]
+    for p in ours:
+        p.write_bytes(b"orphaned partial")
+    # Files mintd never generates: a different dest, a non-hex token, and a
+    # user's own file that merely ends in .mintd-tmp.
+    theirs = [
+        tmp_path / f"other.parquet.{'c' * 32}.mintd-tmp",
+        tmp_path / "big.parquet.notes.mintd-tmp",
+        tmp_path / "big.parquet.mintd-tmp",
+    ]
+    for p in theirs:
+        p.write_bytes(b"do not delete")
 
-    class _WrongSizeClient:
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
-            Path(Filename).write_bytes(b"only-three-hundred")  # != expected_size
+    download_object(_GoodClient(), "b", "k", dest, progress=lambda _n: None)
 
-    with pytest.raises(TransferError, match="size mismatch"):
-        download_object(
-            _WrongSizeClient(), "b", "k", dest,
-            progress=lambda _n: None, expected_size=99999,
-        )
-    assert not dest.exists() and not (tmp_path / "out.parquet.tmp").exists()
+    assert dest.read_bytes() == b"good-bytes"
+    assert not any(p.exists() for p in ours)  # our leftovers are swept
+    assert all(p.read_bytes() == b"do not delete" for p in theirs)  # theirs are not
+
+
+def test_sweep_glob_escapes_the_dest_name(tmp_path: Path) -> None:
+    # dest names are server- (cache pull) or user-supplied (share get --out), so
+    # they carry glob metacharacters. Unescaped, "report [1].csv" expands [1] to
+    # a character class matching "report 1.csv" — and cache pull runs `jobs`
+    # downloads concurrently, so that sibling's temp is live, not stale.
+    sibling_tmp = tmp_path / f"report 1.csv.{'a' * 32}.mintd-tmp"
+    sibling_tmp.write_bytes(b"sibling in flight")
+
+    download_object(_GoodClient(), "b", "k", tmp_path / "report [1].csv",
+                    progress=lambda _n: None)
+
+    assert sibling_tmp.read_bytes() == b"sibling in flight"
+
+
+def test_sweep_ignores_temps_that_appeared_after_we_started(tmp_path: Path) -> None:
+    # The directory is scanned once, not once per download — a per-dest glob is
+    # O(n^2) over a directory of n pulled files. That snapshot is also the
+    # safety property: anything created after we first touched the directory is
+    # somebody's live temp (a sibling thread, or a second mintd process), never
+    # a leftover of ours.
+    download_object(_GoodClient(), "b", "k", tmp_path / "first.csv",
+                    progress=lambda _n: None)
+
+    live = tmp_path / f"second.csv.{'a' * 32}.mintd-tmp"
+    live.write_bytes(b"concurrent run, still downloading")
+
+    download_object(_GoodClient(), "b", "k", tmp_path / "second.csv",
+                    progress=lambda _n: None)
+
+    assert live.read_bytes() == b"concurrent run, still downloading"
 
 
 def test_download_does_not_follow_symlink_at_tmp_path(tmp_path: Path) -> None:
-    """A planted symlink at the predictable <dest>.tmp must not be followed —
-    the pre-download unlink forces a fresh regular file, protecting the target."""
+    """A planted symlink at the tmp path must not be followed — the
+    pre-download unlink forces a fresh regular file, protecting the target.
+
+    ``tmp_suffix`` is pinned because the default is now an unguessable per-call
+    uuid; without pinning, the plant would sit on a path nothing touches and
+    this test would pass while testing nothing. The guard still has to hold for
+    any caller that pins a name."""
     dest = tmp_path / "out.parquet"
     tmp = tmp_path / "out.parquet.tmp"
     victim = tmp_path / "victim.txt"
@@ -541,7 +601,7 @@ def test_download_does_not_follow_symlink_at_tmp_path(tmp_path: Path) -> None:
         def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
             Path(Filename).write_bytes(b"downloaded")
 
-    download_object(_C(), "b", "k", dest, progress=lambda _n: None)
+    download_object(_C(), "b", "k", dest, progress=lambda _n: None, tmp_suffix=".tmp")
     assert victim.read_text() == "do not overwrite me"  # untouched
     assert dest.read_bytes() == b"downloaded"
 
