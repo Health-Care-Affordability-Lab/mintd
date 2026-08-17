@@ -22,9 +22,12 @@ from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from mintd import cli
 from mintd.catalog import CatalogAlreadyExists, CatalogNotFound, InMemoryCatalogClient
 from mintd.check import CheckFinding
+from mintd._config import ConfigError
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
+from mintd._registry_git_ops import GitOpError
+from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -50,6 +53,9 @@ def patched_clients(
     )
     monkeypatch.setattr(
         "mintd.cli._resolve_clients", lambda cfg, reporter=None, **_: (client, dvc_ops)
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: dvc_ops
     )
     monkeypatch.setattr(
         "mintd.cli._resolve_catalog_client", lambda cfg, **_: client
@@ -454,6 +460,35 @@ def test_data_import_bump_pin_missing_exits_one(
     err = capsys.readouterr().err
     assert rc == 1
     assert "retry" not in err
+
+
+def test_bump_blocked_catalog_unresolved_prefers_the_findings_own_hint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`catalog_unresolved` now covers a failed catalog *read* as well as a
+    missing client, so the renderer's fixed "set registry_url" string would
+    misdirect a user whose registry_url is already correct."""
+    finding = CheckFinding(
+        severity="error",
+        section="consumer",
+        message="cannot read the catalog to resolve producer URL for provider-xw: fatal: unable to access",
+        kind="catalog_unresolved",
+        hint="check your network and `registry_url`; if both are fine, delete the local registry cache",
+    )
+
+    def raises(*args: Any, **kwargs: Any) -> Any:
+        raise BumpBlocked("provider-xw", finding)
+
+    monkeypatch.setattr("mintd.cli.bump_import", raises)
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "delete the local registry cache" in err
+    assert "check that registry_url is set" not in err
 
 
 def test_data_import_bump_with_rev_exits_64(
@@ -2506,12 +2541,16 @@ def test_cli_registry_sync_shows_refresh_status(
     assert ("status", "Refreshing registry cache...") in recording_reporter.events
 
 
-def test_spinner_dvc_handlers_thread_reporter_into_resolve_clients(
+def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recording_reporter,
 ) -> None:
     """Pins fix #2: every spinner-wrapped dvc handler must pass the reporter
-    into _resolve_clients so dvc subprocess stderr flows through the spinner
-    (passthrough_stderr), not raw to the terminal."""
+    into the factory that builds its DvcOps, so dvc subprocess stderr flows
+    through the spinner (passthrough_stderr), not raw to the terminal.
+
+    Two factories since the issue30 split: `data push`/`data verify` resolve
+    dvc alone, `data import`/`enclave pull` need the catalog too. Both spies
+    append to one list — all four handlers must still thread the reporter."""
     captured: list = []
     client = InMemoryCatalogClient()
     _register_provider_xw(client)
@@ -2523,7 +2562,12 @@ def test_spinner_dvc_handlers_thread_reporter_into_resolve_clients(
         captured.append(reporter)
         return client, fake_dvc
 
+    def dvc_only_spy(config, reporter=None, **_):
+        captured.append(reporter)
+        return fake_dvc
+
     monkeypatch.setattr("mintd.cli._resolve_clients", spy)
+    monkeypatch.setattr("mintd.cli._resolve_dvc_ops", dvc_only_spy)
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
 
     cli.main(["data", "push"])
@@ -3165,3 +3209,235 @@ def test_cli_registry_update_success_names_reused_pr(
     msg = recording_reporter.events_of("success")[-1][1]
     assert "updated PR" in msg
     assert "/pull/42" in msg
+
+
+# ---------------------------------------------------------------------------
+# P2a (issue13) — the three check_project gates must be handed a catalog client
+#
+# A project with one approved product in enclave_manifest.yaml is blocked from
+# check, publish AND registry register by a finding about mintd's own wiring.
+# These tests deliberately do NOT patch `mintd.cli.check_project` — the three
+# existing register tests (:663/:688/:706) do, which is why the suite misses it.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_register_with_enclave_manifest_reaches_client_register(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    registered: list[str] = []
+    real_register = client.register
+
+    def spy(metadata: Metadata, **kwargs: Any):
+        registered.append(metadata.project.name)
+        return real_register(metadata, **kwargs)
+
+    monkeypatch.setattr(client, "register", spy)
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+
+    assert rc == 0
+    assert registered == ["test_project"]
+
+
+def test_plain_check_resolves_a_catalog_client(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """Pins fix 3 (the hoist): plain `check` resolves a client best-effort, so
+    an enclave consumer has a default surface that reports it healthy. Stays
+    red after the publish/register fixes alone."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+    _register_provider_xw(client)
+
+    rc = cli.main(["check", str(tmp_path)])
+
+    assert rc == 0
+
+
+def test_plain_check_without_registry_url_still_reports_catalog_unresolved(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard on fix 3: best-effort resolution must not swallow the
+    diagnostic on a machine with no registry_url."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+
+    def _no_registry_url(*a: Any, **kw: Any):
+        raise ConfigError("registry_url required for this command; set it in ...")
+
+    monkeypatch.setattr("mintd.cli._resolve_clients", _no_registry_url)
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", _no_registry_url)
+
+    rc = cli.main(["check", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "catalog client not provided" in out
+
+
+def test_check_upgrades_unreachable_registry_prints_an_error_not_a_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """A registry that cannot be cloned is a documented failure path."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_enclave_manifest(tmp_path)
+    client, _ = patched_clients
+
+    def _unreachable(name: str):
+        raise GitOpError(
+            ["git", "clone", "--depth=1", "/nonexistent/registry.git"],
+            "fatal: repository '/nonexistent/registry.git' does not exist",
+        )
+
+    monkeypatch.setattr(client, "fetch", _unreachable)
+
+    rc = cli.main(["check", str(tmp_path), "--upgrades"])
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert rc == 1
+    assert "cannot read the catalog" in output
+    assert "does not exist" in output  # git's own words reach the user
+    assert "Traceback" not in output
+
+
+def test_every_check_project_call_site_passes_a_client() -> None:
+    """Meta-test: every `check_project(...)` call in src/mintd passes a
+    `client=` keyword. This is the anti-drift ratchet that keeps "one gate"
+    enforceable without making the parameter keyword-required (unit A owns
+    that migration).
+
+    Allowlist rationale — `data.py`'s import-bump call is inert for this
+    defect: `_find_consumer_finding_for_target` matches on
+    `source == <.dvc file>`, and enclave-manifest findings carry
+    `source=<manifest>`, so they never select a bump target. Asserted by set
+    equality, so the allowlist can only shrink.
+    """
+    import ast
+
+    src_dir = Path(__file__).resolve().parents[1] / "src" / "mintd"
+    offenders: set[str] = set()
+    for path in sorted(src_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if name != "check_project":
+                continue
+            if not any(kw.arg == "client" for kw in node.keywords):
+                offenders.add(path.name)
+
+    assert offenders == {"data.py"}, (
+        f"check_project call sites missing client=: {sorted(offenders)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P2b (issue30) — local commands must not demand a registry_url they never use
+# ---------------------------------------------------------------------------
+
+
+def _local_data_argv(verb: str, tmp_path: Path) -> list[str]:
+    target = tmp_path / "raw.csv"
+    target.write_text("data")
+    return {
+        "add": ["data", "add", str(target)],
+        "pull": ["data", "pull", "--path", str(tmp_path)],
+        "push": ["data", "push"],
+        "verify": ["data", "verify"],
+        "remove": ["data", "remove", "raw.csv"],
+    }[verb]
+
+
+@pytest.fixture
+def unconfigured_machine(monkeypatch: pytest.MonkeyPatch) -> _FakeDvcOps:
+    """A laptop with no registry_url: the real `_resolve_catalog_client` raises
+    ConfigError off the default Config. `SubprocessDvcOps` is replaced at the
+    constructor so no dvc subprocess runs, whichever factory builds it."""
+    dvc_ops = _FakeDvcOps()
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli.SubprocessDvcOps", lambda **kwargs: dvc_ops)
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: None)
+    return dvc_ops
+
+
+@pytest.mark.parametrize("verb", ["add", "pull", "push", "verify", "remove"])
+def test_local_data_commands_do_not_require_registry_url(
+    verb: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    unconfigured_machine: _FakeDvcOps,
+) -> None:
+    """All five wrap dvc and never contact the catalog."""
+    (tmp_path / ".dvc").mkdir()
+    dvc_ops = unconfigured_machine
+
+    rc = cli.main(_local_data_argv(verb, tmp_path))
+
+    err = capsys.readouterr().err
+    assert "registry_url" not in err
+    assert rc == 0
+    assert any([
+        dvc_ops.add_calls, dvc_ops.pull_calls, dvc_ops.push_calls,
+        dvc_ops.status_calls, dvc_ops.remove_calls,
+    ]), f"`data {verb}` never reached its DVC work"
+
+
+def test_local_data_handlers_never_build_a_catalog_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unconfigured_machine: _FakeDvcOps,
+) -> None:
+    """The structural twin: not merely tolerating a missing registry_url, but
+    never asking for the collaborator in the first place."""
+    (tmp_path / ".dvc").mkdir()
+
+    def must_not_call(*a: Any, **kw: Any) -> None:
+        pytest.fail("local data handlers must not build a catalog client")
+
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", must_not_call)
+
+    for verb in ("add", "pull", "push", "verify", "remove"):
+        assert cli.main(_local_data_argv(verb, tmp_path)) == 0
+
+
+def test_publish_builds_dvc_ops_with_a_reporter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+) -> None:
+    """`dvc push` is the longest operation mintd performs; without a reporter
+    it streams no progress. Asserted at the SubprocessDvcOps constructor —
+    `patched_clients`' `**_` lambda would swallow the kwarg — and by identity,
+    since a throwaway `Reporter()` would satisfy a not-None check while losing
+    everything `_build_reporter` reads off argv (verbose/quiet/json/no-color)."""
+    captured: dict[str, Any] = {}
+
+    def recorder(**kwargs: Any) -> _FakeDvcOps:
+        captured.update(kwargs)
+        return _FakeDvcOps()
+
+    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
+    monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: InMemoryCatalogClient())
+    monkeypatch.setattr("mintd.cli.SubprocessDvcOps", recorder)
+
+    cli.main(["publish", "--path", str(tmp_path), "--dry-run"])
+
+    assert captured, "publish never built a SubprocessDvcOps"
+    assert captured["reporter"] is recording_reporter

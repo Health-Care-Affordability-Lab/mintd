@@ -12,6 +12,7 @@ from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
+from tests._enclave_fixtures import client_with_provider_xw, stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
@@ -618,3 +619,67 @@ def test_publish_registry_branch_exists_hint_does_advise_merge_or_delete(tmp_pat
 
     hint = raised.value.recovery_hint or ""
     assert "merge or delete it" in hint
+
+
+# ---------------------------------------------------------------------------
+# P2a (issue13) — the publish gate must use the client it already holds
+#
+# Both tests below override the autouse `mock_check_project`; without that they
+# pass vacuously in either direction. Precedent: :330.
+# ---------------------------------------------------------------------------
+
+
+def _seed_enclave_consumer(tmp_path):
+    """A project that imports one approved enclave product, committed."""
+    proj = _seed_project(tmp_path)
+    stage_enclave_manifest(proj)
+    subprocess.run(["git", "add", "enclave_manifest.yaml"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-m", "add enclave manifest"], cwd=proj, check=True)
+    return proj
+
+
+def test_prepare_publish_passes_the_catalog_client_to_check(tmp_path, monkeypatch):
+    """A project with one approved product is publishable: the gate runs the
+    real check_project with the client prepare_publish already requires."""
+    from mintd.check import check_project as real_check_project
+    from mintd.publish import prepare_publish
+
+    monkeypatch.setattr("mintd.publish.check_project", real_check_project)
+    proj = _seed_enclave_consumer(tmp_path)
+
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=True,
+        client=client_with_provider_xw(),
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert preview.new_version == "0.1.1"
+
+
+def test_publish_full_flow_with_enclave_manifest_reaches_the_tag(tmp_path, monkeypatch):
+    """The whole transaction, not just the gate: a real `git tag -a` lands."""
+    from mintd.check import check_project as real_check_project
+    from mintd.model import Metadata
+
+    monkeypatch.setattr("mintd.publish.check_project", real_check_project)
+    proj = _seed_enclave_consumer(tmp_path)
+    client = client_with_provider_xw()
+    # Step 5 updates this project's own catalog entry; register it first.
+    client.register(Metadata.from_json_file(proj / "metadata.json"))
+
+    result = publish_project(
+        project_path=proj,
+        version="0.1.1",
+        dry_run=False,
+        client=client,
+        dvc_ops=_FakeDvcOps(),
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert result.tagged
+    tags = subprocess.run(
+        ["git", "tag", "-l"], cwd=proj, capture_output=True, text=True, check=True
+    ).stdout.split()
+    assert "v0.1.1" in tags

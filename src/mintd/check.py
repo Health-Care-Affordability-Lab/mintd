@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
+from ._registry_git_ops import GitOpError
 from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
 from .model import Metadata
@@ -361,15 +362,36 @@ def _consumer_findings_from_enclave_manifest(
 
         try:
             repo_url = _resolve_approved_product_url(client, ap)
-        except (ValueError, CatalogNotFound) as e:
+        except (ValueError, CatalogNotFound, GitOpError) as e:
+            # A GitOpError means the catalog read itself failed — the cache is
+            # cloned/refreshed on every fetch. That is a documented path, not a
+            # traceback, and since plain `check` resolves a client too, every
+            # enclave consumer is on it. An unreachable remote and a corrupt
+            # local cache are indistinguishable here, so report git's own words
+            # rather than asserting a cause; the other two already carry a
+            # user-facing message.
+            if isinstance(e, GitOpError):
+                message = (
+                    f"cannot read the catalog to resolve producer URL for "
+                    f"{ap.repo}: {_git_error_summary(e)}"
+                )
+                hint = (
+                    "check your network and `registry_url` in "
+                    "~/.config/mintd/config.yaml; if both are fine, delete the "
+                    "local registry cache (~/.cache/mintd/registry by default) "
+                    "and retry"
+                )
+            else:
+                message, hint = str(e), None
             findings.append(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=str(e),
+                    message=message,
                     source=manifest_path,
                     field_path=field_path,
                     kind="catalog_unresolved",
+                    hint=hint,
                 )
             )
             continue
@@ -408,6 +430,12 @@ def _consumer_findings_from_enclave_manifest(
             )
         )
     return findings
+
+
+def _git_error_summary(exc: GitOpError) -> str:
+    """First non-blank line of git's own stderr; the command when it is empty."""
+    lines = (ln.strip() for ln in (exc.stderr or "").splitlines() if ln.strip())
+    return next(lines, " ".join(exc.command))
 
 
 def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) -> str:

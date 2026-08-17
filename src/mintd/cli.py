@@ -671,17 +671,24 @@ def _resolve_catalog_client(config: Config) -> CatalogClient:
     )
 
 
-def _resolve_clients(config: Config, reporter: Optional[Reporter] = None) -> tuple[CatalogClient, DvcOps]:
-    """Build production ``GitCatalogClient`` + ``SubprocessDvcOps`` from
-    config. Tests monkeypatch this function to inject fakes.
-    """
-    client = _resolve_catalog_client(config)
-    dvc_ops: DvcOps = SubprocessDvcOps(
+def _resolve_dvc_ops(config: Config, reporter: Optional[Reporter] = None) -> DvcOps:
+    """Build a production ``SubprocessDvcOps`` from config. Handlers that only
+    wrap dvc use this directly, so a machine with no ``registry_url`` is not
+    refused work that never touches the catalog. Tests monkeypatch this
+    function to inject fakes."""
+    return SubprocessDvcOps(
         timeouts=config.timeouts,
         reporter=reporter,
         aws_profile_name=config.aws_profile_name,
     )
-    return client, dvc_ops
+
+
+def _resolve_clients(config: Config, reporter: Optional[Reporter] = None) -> tuple[CatalogClient, DvcOps]:
+    """Build production ``GitCatalogClient`` + ``SubprocessDvcOps`` from
+    config, for handlers that genuinely need both. Tests monkeypatch this
+    function to inject fakes.
+    """
+    return _resolve_catalog_client(config), _resolve_dvc_ops(config, reporter)
 
 
 def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
@@ -746,13 +753,16 @@ def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> Reg
 def _handle_check(args: argparse.Namespace) -> int:
     config = Config.load()
     client: CatalogClient | None = None
-    if args.upgrades:
-        try:
-            client, _ = _resolve_clients(config)
-        except ConfigError:
-            # Let the manifest walker emit `catalog_unresolved` findings —
-            # surface what's missing without pre-validating.
-            client = None
+    # Resolved for every check, not just --upgrades: an enclave consumer's
+    # approved products need the catalog to validate, and publish/register
+    # already validate them. Leaving plain check weaker would mean "check is
+    # green" and "publish will not be blocked" stop meaning the same thing.
+    try:
+        client = _resolve_catalog_client(config)
+    except ConfigError:
+        # Let the manifest walker emit `catalog_unresolved` findings —
+        # surface what's missing without pre-validating.
+        client = None
     findings = check_project(args.path, upgrades=args.upgrades, client=client)
     return _render_findings(findings, json_out=args.json_out)
 
@@ -844,7 +854,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
         return 1
     reporter = args._reporter
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config, reporter)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     fast_sync_ops = _resolve_fast_sync_ops(config)
     try:
         summary = data_pull(
@@ -911,7 +921,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
 def _handle_data_push(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config, reporter)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
         with reporter.status("Pushing data to DVC..."):
             summary = data_push(
@@ -1270,7 +1280,7 @@ def _handle_cache_ls(args: argparse.Namespace) -> int:
 def _handle_data_add(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config, reporter)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
         produced = data_add(args.path, dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
@@ -1329,7 +1339,7 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
 def _handle_data_verify(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config, reporter)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
         with reporter.status("Verifying DVC data..."):
             status_map = data_verify(
@@ -1357,7 +1367,7 @@ def _handle_data_verify(args: argparse.Namespace) -> int:
 def _handle_data_remove(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    _, dvc_ops = _resolve_clients(config, reporter)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
         data_remove(args.name, dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
@@ -2324,7 +2334,7 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
             hint="run 'mintd check' to see field-level details",
         )
         return 1
-    findings = check_project(args.path, upgrades=False)
+    findings = check_project(args.path, upgrades=False, client=client)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         return _render_findings(error_findings, json_out=False)
@@ -2461,7 +2471,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
     from .publish import prepare_publish, _apply_publish
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config)
+    client, dvc_ops = _resolve_clients(config, reporter)
     git_ops = _resolve_git_ops(config)
     try:
         preview = prepare_publish(
@@ -2744,8 +2754,16 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
             file=sys.stderr,
         )
     elif kind == "catalog_unresolved":
+        # Prefer the finding's own hint. This kind now covers both "no catalog
+        # client was provided" and "the catalog read failed", and only the
+        # finding knows which — a fixed string would misdirect the second case
+        # at a setting that is already correct. Still `kind` dispatch, not
+        # message parsing.
         print(
-            "hint: check that registry_url is set in ~/.config/mintd/config.yaml",
+            "hint: " + (
+                exc.finding.hint
+                or "check that registry_url is set in ~/.config/mintd/config.yaml"
+            ),
             file=sys.stderr,
         )
     if kind in _RECOVERABLE_KINDS:

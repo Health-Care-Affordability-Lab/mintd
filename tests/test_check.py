@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from mintd._registry_git_ops import GitOpError
 from mintd.check import CheckFinding, check_project
 from mintd.model import DataProductOutput, DataProducts, Metadata
 from mintd.producer import ProducerError, ProducerView
@@ -433,29 +434,10 @@ def test_finding_source_field_round_trips(tmp_path: Path):
 # Slice 8 — enclave manifest walker
 # ---------------------------------------------------------------------------
 
-import shutil as _shutil_for_enclave_tests  # noqa: E402
-
-from mintd.catalog import InMemoryCatalogClient  # noqa: E402
-
-_ENCLAVE_FIXTURE = FIXTURES / "enclave_manifest_v2_minimal.yaml"
-_PROVIDER_XW_URL = "https://github.com/example-org/provider-xw"
-
-
-def _stage_enclave_manifest(tmp_path: Path) -> Path:
-    """Copy the minimal enclave manifest fixture into tmp_path."""
-    dest = tmp_path / "enclave_manifest.yaml"
-    _shutil_for_enclave_tests.copy(_ENCLAVE_FIXTURE, dest)
-    return dest
-
-
-def _client_with_provider_xw() -> InMemoryCatalogClient:
-    client = InMemoryCatalogClient()
-    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = _PROVIDER_XW_URL
-    client.register(Metadata.model_validate(data))
-    return client
+from tests._enclave_fixtures import (  # noqa: E402
+    client_with_provider_xw as _client_with_provider_xw,
+    stage_enclave_manifest as _stage_enclave_manifest,
+)
 
 
 def test_consumer_section_walks_enclave_manifest_approved_products(tmp_path: Path):
@@ -634,6 +616,61 @@ def test_consumer_manifest_catalog_unresolved_finding_has_catalog_unresolved_kin
 
     assert len(consumer_findings) == 1
     assert consumer_findings[0].kind == "catalog_unresolved"
+
+
+class _UnreachableRegistryClient:
+    """Catalog client whose every read fails the way an unreachable registry
+    does: `CatalogCache.ensure_fresh` shells out to `git clone`, which raises
+    `GitOpError` out of `_registry_git_ops`."""
+
+    def fetch(self, name: str):
+        raise GitOpError(["git", "clone", "--depth=1", "/nonexistent/registry.git"],
+                         "fatal: repository '/nonexistent/registry.git' does not exist")
+
+
+@pytest.mark.parametrize("upgrades", [False, True])
+def test_unreachable_registry_becomes_a_finding_not_an_exception(tmp_path: Path, upgrades: bool):
+    """A registry that cannot be reached is a documented failure path, not a
+    traceback. Both arms: `_resolve_approved_product_url` is called above the
+    `if not upgrades` branch, so plain `check` hits the network too."""
+    _write_metadata(tmp_path)
+    _stage_enclave_manifest(tmp_path)
+
+    findings = check_project(tmp_path, upgrades=upgrades, client=_UnreachableRegistryClient())
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    f = consumer_findings[0]
+    assert f.kind == "catalog_unresolved"
+    assert f.severity == "error"
+    assert "provider-xw" in f.message
+    # Reports what git said rather than asserting a cause: the same exception
+    # covers an unreachable registry and a corrupt local cache.
+    assert "does not exist" in f.message
+    assert f.hint is not None
+    assert f.source == tmp_path / "enclave_manifest.yaml"
+
+
+def test_catalog_read_failure_does_not_blame_the_network_for_a_local_cache_fault(
+    tmp_path: Path,
+):
+    """A corrupt registry cache raises the same GitOpError as an unreachable
+    remote. The finding must carry git's own words and offer both remedies."""
+    _write_metadata(tmp_path)
+    _stage_enclave_manifest(tmp_path)
+
+    class _CorruptCacheClient:
+        def fetch(self, name: str):
+            raise GitOpError(
+                ["git", "checkout", "-f", "main"],
+                "error: pathspec 'main' did not match any file(s) known to git",
+            )
+
+    findings = check_project(tmp_path, client=_CorruptCacheClient())
+    f = [f for f in findings if f.section == "consumer"][0]
+
+    assert "did not match any file" in f.message
+    assert "registry cache" in (f.hint or "")
 
 
 # ---------------------------------------------------------------------------
