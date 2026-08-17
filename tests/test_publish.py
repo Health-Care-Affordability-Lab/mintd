@@ -683,3 +683,181 @@ def test_publish_full_flow_with_enclave_manifest_reaches_the_tag(tmp_path, monke
         ["git", "tag", "-l"], cwd=proj, capture_output=True, text=True, check=True
     ).stdout.split()
     assert "v0.1.1" in tags
+
+
+# ---------------------------------------------------------------------------
+# issue28 — publish must stop eating keys the researcher authored
+# ---------------------------------------------------------------------------
+# The sub-models are extra="ignore", so a hand-added `ownership.slack` is gone
+# by the time publish dumps the parsed model. Writing that dump back over the
+# file made the loss durable. Every assertion here re-reads the file from disk:
+# asserting on the returned model passes while the file is destroyed.
+
+
+def _seed_project_with_strays(tmp_path: Path) -> Path:
+    """A seeded project whose metadata.json carries three user-authored keys
+    the model does not declare — one per block the scaffold generates, plus one
+    inside an `outputs[]` entry (the case a local_diff replay would miss,
+    because `_dict_diff` does not recurse into lists)."""
+    proj = _seed_project(tmp_path)
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["ownership"]["slack"] = "#my-channel"
+    meta["metadata"]["doi"] = "10.5281/zenodo.1234"
+    meta["data_products"]["outputs"][0]["units"] = "USD"
+    (proj / "metadata.json").write_text(json.dumps(meta, indent=2))
+    subprocess.run(["git", "commit", "-am", "add my own notes"], cwd=proj, check=True)
+    return proj
+
+
+def _publish(proj: Path, version: str = "0.1.1", **kwargs):
+    return publish_project(
+        project_path=proj, version=version, dry_run=False,
+        client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(),
+        git_ops=_FakeRegistryGitOps(), **kwargs,
+    )
+
+
+def test_publish_preserves_user_authored_nested_fields(tmp_path, monkeypatch):
+    """Runs the REAL check_project (overriding the autouse mock), so this also
+    pins that a project carrying hand-added keys still clears the publish
+    preflight — the gate has to let the write happen for the fix to matter."""
+    from mintd.check import check_project as real_check_project
+    proj = _seed_project_with_strays(tmp_path)
+    monkeypatch.setattr("mintd.publish.check_project", real_check_project)
+
+    _publish(proj)
+
+    on_disk = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    assert on_disk["ownership"]["slack"] == "#my-channel"
+    assert on_disk["metadata"]["doi"] == "10.5281/zenodo.1234"
+    assert on_disk["mint"]["version"] == "0.1.1"
+
+
+def test_publish_preserves_keys_inside_output_entries(tmp_path):
+    proj = _seed_project_with_strays(tmp_path)
+
+    _publish(proj)
+
+    entry = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))["data_products"]["outputs"][0]
+    assert entry["units"] == "USD"
+    assert entry["last_published"], "publish still owns and stamps last_published"
+
+
+@pytest.mark.parametrize("arm", ["diff_nonempty", "diff_empty"])
+def test_publish_write_is_lossless(tmp_path, arm):
+    """A real bump gains the bumped fields and loses nothing; a no-op publish
+    does not touch the file at all. The diff_empty arm is the durable guard for
+    the issue21 interaction: when the `last_updated` stamp becomes conditional,
+    this still holds."""
+    from datetime import datetime, timezone
+    from mintd.metadata_migrate import _find_dropped_keys
+    from mintd.publish import _apply_publish, prepare_publish
+
+    pinned = datetime(2026, 5, 11, tzinfo=timezone.utc)
+    proj = _seed_project_with_strays(tmp_path)
+    if arm == "diff_empty":
+        # Pre-stamp the file into exactly the state a 0.1.0 publish produces,
+        # so nothing changes and step 1 never fires.
+        meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+        meta["status"]["last_updated"] = pinned.isoformat()
+        meta["status"]["last_published_version"] = "0.1.0"
+        meta["data_products"]["outputs"][0]["last_published"] = pinned.isoformat()
+        (proj / "metadata.json").write_text(json.dumps(meta, indent=2))
+        subprocess.run(["git", "commit", "-am", "already published"], cwd=proj, check=True)
+
+    before = (proj / "metadata.json").read_text(encoding="utf-8")
+    preview = prepare_publish(
+        project_path=proj,
+        version="0.1.0" if arm == "diff_empty" else "0.1.1",
+        dry_run=False, client=_FakeCatalogClient(),
+        git_ops=_FakeRegistryGitOps(), now=pinned,
+    )
+    assert (preview.local_diff == []) is (arm == "diff_empty")
+
+    _apply_publish(
+        preview, project_path=proj, client=_FakeCatalogClient(),
+        dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(), message=None,
+    )
+    after = (proj / "metadata.json").read_text(encoding="utf-8")
+
+    if arm == "diff_empty":
+        assert after == before
+    else:
+        assert _find_dropped_keys(json.loads(before), json.loads(after)) == []
+        assert json.loads(after)["mint"]["version"] == "0.1.1"
+
+
+def test_publish_rollback_restores_the_users_nested_keys(tmp_path):
+    """The new merge-then-write path must not break step 2's rollback."""
+    proj = _seed_project_with_strays(tmp_path)
+    before = (proj / "metadata.json").read_text(encoding="utf-8")
+    dvc = _FakeDvcOps()
+    dvc.push_raises = DvcPushError("dvc push exited 1")
+
+    with pytest.raises(DvcPushFailed):
+        publish_project(
+            project_path=proj, version="0.1.1", dry_run=False,
+            client=_FakeCatalogClient(), dvc_ops=dvc,
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+    assert (proj / "metadata.json").read_text(encoding="utf-8") == before
+    assert json.loads(before)["ownership"]["slack"] == "#my-channel"
+
+
+def test_publish_preview_still_lists_the_bumped_fields(tmp_path):
+    """The preview the user reads is unchanged by the write change."""
+    proj = _seed_project_with_strays(tmp_path)
+
+    result = publish_project(
+        project_path=proj, version="0.1.1", dry_run=True,
+        client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(),
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    paths = {c.field_path for c in result.diff}
+    assert "mint.version" in paths
+    assert "status.last_updated" in paths
+
+
+def test_publish_write_does_not_reshuffle_a_file_with_no_strays(tmp_path):
+    """The overlay must be a no-op for everyone who never hand-edited anything:
+    the plain model dump's bytes, same key order. Without this,
+    modeled-but-absent keys (`storage`) migrate to the end of the file and every
+    user's first publish after the change carries a spurious reordering. The
+    trailing newline is the one intended difference — every other
+    metadata.json writer already emits it (`_render.py`, `init.py`,
+    `metadata_migrate.py`), so publish had been silently stripping it."""
+    from mintd.model import Metadata
+
+    proj = _seed_project(tmp_path)
+
+    _publish(proj)
+
+    on_disk = (proj / "metadata.json").read_text(encoding="utf-8")
+    canonical = Metadata.from_json_file(proj / "metadata.json").model_dump_json(indent=2)
+    assert on_disk == canonical + "\n"
+
+
+def test_publish_maps_corrupt_metadata_between_preview_and_apply(tmp_path):
+    """The confirm prompt is an unbounded window in which the file can be
+    edited into invalid JSON. The overlay parses it, so that has to surface as
+    a PublishError with a hint, not a raw JSONDecodeError traceback."""
+    from mintd.publish import _apply_publish, prepare_publish
+
+    proj = _seed_project_with_strays(tmp_path)
+    preview = prepare_publish(
+        project_path=proj, version="0.1.1", dry_run=False,
+        client=_FakeCatalogClient(), git_ops=_FakeRegistryGitOps(),
+    )
+    (proj / "metadata.json").write_text("{ not json", encoding="utf-8")
+
+    with pytest.raises(PublishError) as exc:
+        _apply_publish(
+            preview, project_path=proj, client=_FakeCatalogClient(),
+            dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(), message=None,
+        )
+
+    assert "no longer valid JSON" in str(exc.value)
+    assert exc.value.recovery_hint
+    assert not exc.value.pushed
