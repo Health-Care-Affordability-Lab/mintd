@@ -417,6 +417,7 @@ def test_interactive_setup_walks_each_field(tmp_path: Path) -> None:
     cfg = interactive_setup(
         p,
         prompt_fn=_scripted_prompt("https://example.com/r.git"),
+        aws_credentials_path=tmp_path / "aws-credentials",
     )
     assert cfg.registry_url == "https://example.com/r.git"
     assert cfg.author == "existing-author"          # carried over from existing
@@ -426,7 +427,10 @@ def test_interactive_setup_walks_each_field(tmp_path: Path) -> None:
 
 def test_interactive_setup_dry_run_does_not_write(tmp_path: Path) -> None:
     p = tmp_path / "cfg.yaml"
-    cfg = interactive_setup(p, write=False, prompt_fn=_scripted_prompt("https://x"))
+    cfg = interactive_setup(
+        p, write=False, prompt_fn=_scripted_prompt("https://x"),
+        aws_credentials_path=tmp_path / "aws-credentials",
+    )
     assert cfg.registry_url == "https://x"
     assert not p.exists()
 
@@ -441,7 +445,10 @@ def test_interactive_setup_strips_v1_keys_from_existing(tmp_path: Path) -> None:
         "registry:\n  url: https://old.example/r.git\n"
         "registry_url: https://new.example/r.git\n"
     )
-    cfg = interactive_setup(p, prompt_fn=_scripted_prompt())
+    cfg = interactive_setup(
+        p, prompt_fn=_scripted_prompt(),
+        aws_credentials_path=tmp_path / "aws-credentials",
+    )
     assert cfg.registry_url == "https://new.example/r.git"
     written = yaml.safe_load(p.read_text(encoding="utf-8"))
     assert "defaults" not in written
@@ -497,6 +504,38 @@ def test_interactive_setup_captures_aws_credentials_when_mintd_missing(
     cp.read(creds)
     assert cp.get("mintd", "aws_access_key_id") == "AKIA0001"
     assert cp.get("mintd", "aws_secret_access_key") == "secret-1"
+
+
+def test_setup_credentials_write_failure_reports_an_error_not_a_traceback(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A full-disk / permission failure writing ~/.aws/credentials must arrive
+    as a ConfigError the CLI already renders — it used to escape
+    config_ops.py's ``except CredentialsWriteError`` and cli.main's three
+    ``except`` clauses as a bare traceback."""
+    import configparser
+    import itertools
+
+    p = tmp_path / "cfg.yaml"
+    creds = tmp_path / "aws-credentials"
+
+    answers = ([""] * 11) + ["y", "AKIA0001", "secret-1"]
+    seq = itertools.chain(iter(answers), itertools.repeat(""))
+
+    def prompt(_msg: str) -> str:
+        return next(seq)
+
+    # Inject below write_profile (the function under repair), at the stdlib
+    # writer. It cannot collide with the config.yaml write, which is YAML via
+    # _atomic_write_yaml, nor with has_profile, which only reads.
+    def boom(self, fp, space_around_delimiters=True):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(configparser.RawConfigParser, "write", boom)
+
+    with pytest.raises(ConfigError, match="could not write") as ei:
+        interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert "was not modified" in str(ei.value)
 
 
 def test_interactive_setup_skips_aws_when_mintd_already_present(

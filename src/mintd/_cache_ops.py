@@ -31,7 +31,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
-from uuid import uuid4
 
 from ._fast_sync_ops import (
     ClientError,
@@ -1101,12 +1100,6 @@ def _pull_one(
         n = download_object(
             s3, bucket, full_key, dest, progress=advance,
             verify_tmp=verify, expected_size=info.size,
-            # dest is a user-controlled path in the working tree — a predictable
-            # <name>.tmp would clobber a user's own scratch file of that name and
-            # race a sibling task pulling a key literally named "<name>.tmp"
-            # (whose FINAL dest would equal this tmp). A per-download uuid token
-            # makes the tmp path collision-proof.
-            tmp_suffix=f".{uuid4().hex}.mintd-tmp",
         )
     except TransferError as exc:
         retry = "retry: mintd cache pull"
