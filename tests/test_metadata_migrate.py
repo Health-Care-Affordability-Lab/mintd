@@ -7,6 +7,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from mintd import cli
 from mintd.metadata_migrate import (
@@ -141,12 +142,15 @@ def test_migration_report_lists_all_dropped_fields() -> None:
         "language",
         "schema",
         "lifecycle",
-        "storage",
         "project.display_name",
         "metadata.version",
         "metadata.mint_version",
     ):
         assert expected in report.dropped, f"missing: {expected}"
+    # issue27: `storage` used to be listed here. It is carried now — dropping
+    # it manufactured a storage-drift error on the very next `check`. Only the
+    # sub-keys v2 does not model are still reported as dropped.
+    assert "storage" not in report.dropped
 
 
 # ---------- apply_metadata_migration -------------------------------------
@@ -377,3 +381,132 @@ def test_migrate_handles_explicit_null_output_fields() -> None:
     })
     assert v2["data_products"]["outputs"][0]["primary"] is False
     assert v2["data_products"]["outputs"][0]["last_published"] == ""
+
+
+# ---------- issue27: the storage block survives the migration -------------
+# Dropping it manufactured a `storage_partial_dvc_only` error on the very next
+# `mintd check`, whose repair hint told the user to hand-retype the six-field
+# object the tool had held in memory seconds earlier.
+
+
+_V1_REMOTE_URL = "s3://cooper-globus/lab/data_cms-pps-weights/"
+
+
+def _v1_with_storage(**storage_overrides) -> dict:
+    """The committed real-world v1 fixture with its storage block overridden."""
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    v1["storage"].update(storage_overrides)
+    return v1
+
+
+def _write_dvc_remote(project: Path, url: str = _V1_REMOTE_URL) -> None:
+    dvc = project / ".dvc"
+    dvc.mkdir(parents=True, exist_ok=True)
+    (dvc / "config").write_text(
+        "[core]\n"
+        "    remote = data_cms-pps-weights\n"
+        "['remote \"data_cms-pps-weights\"']\n"
+        f"    url = {url}\n"
+        "    endpointurl = https://s3.wasabisys.com\n",
+        encoding="utf-8",
+    )
+
+
+def test_migrate_carries_the_storage_block(tmp_path: Path) -> None:
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    v2, _report = migrate_v1_to_v2(v1)
+    assert v2["storage"]["provider"] == "s3"
+    assert v2["storage"]["dvc"]["remote_name"] == "data_cms-pps-weights"
+    Metadata.model_validate(v2)
+
+
+def test_apply_reports_storage_subkeys_as_dropped(tmp_path: Path) -> None:
+    """v2 models neither `storage.sensitivity` nor `storage.dvc.remote_url`, so
+    the canonical dump still strips them — but the report now names them at
+    sub-key granularity instead of claiming the whole block was dropped."""
+    shutil.copy(FIXTURE, tmp_path / "metadata.json")
+
+    report = apply_metadata_migration(tmp_path)
+
+    assert "storage.sensitivity" in report.dropped
+    assert "storage.dvc.remote_url" in report.dropped
+    assert "storage" not in report.dropped
+
+
+def test_migrate_then_check_reports_no_storage_drift(tmp_path: Path) -> None:
+    """The durable one. A real v1 project always has a .dvc/config remote, so
+    before this fix the migration's own output failed the very next check."""
+    from mintd.check import check_project
+
+    shutil.copy(FIXTURE, tmp_path / "metadata.json")
+    _write_dvc_remote(tmp_path)
+
+    apply_metadata_migration(tmp_path)
+
+    findings = check_project(tmp_path, upgrades=False)
+    storage_findings = [f for f in findings if f.kind.startswith("storage")]
+    assert storage_findings == [], f"migration manufactured: {storage_findings}"
+
+
+def test_bucket_and_prefix_are_derived_from_the_v1_remote_url() -> None:
+    """Both, not just the bucket: the fixture's v1 prefix disagrees with its own
+    remote_url, so deriving the bucket alone lands the project in url_mismatch."""
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert v1["storage"]["bucket"] == ""
+    assert v1["storage"]["prefix"] != "lab/data_cms-pps-weights/"
+
+    v2, report = migrate_v1_to_v2(v1)
+
+    assert v2["storage"]["bucket"] == "cooper-globus"
+    assert v2["storage"]["prefix"] == "lab/data_cms-pps-weights/"
+    assert "storage.bucket (derived from storage.dvc.remote_url)" in report.defaulted
+    assert "storage.prefix (derived from storage.dvc.remote_url)" in report.defaulted
+
+
+@pytest.mark.parametrize(
+    "remote_url",
+    [None, "", "/mnt/share/data", "gs://other/x", {"nested": True}, 123, ["a"]],
+)
+def test_storage_carried_untouched_when_remote_url_is_unusable(remote_url) -> None:
+    """No parseable s3:// URL to derive from — carry bucket/prefix as-is and let
+    check's existing one-field `bucket_empty` hint take over. issue27's
+    required_edits #1: not every real v1 file is guaranteed to carry one.
+
+    The non-string cases are the messy-v1 shapes: a truthy non-string reaches
+    urlparse and raises AttributeError, which no CLI handler maps, so
+    `mintd update metadata` would exit on a raw traceback."""
+    dvc = {"remote_name": "data_cms-pps-weights"}
+    if remote_url is not None:
+        dvc["remote_url"] = remote_url
+    v1 = _v1_with_storage(bucket="", prefix="lab/keep-me/", dvc=dvc)
+
+    v2, report = migrate_v1_to_v2(v1)
+
+    assert v2["storage"]["bucket"] == ""
+    assert v2["storage"]["prefix"] == "lab/keep-me/"
+    assert not [d for d in report.defaulted if d.startswith("storage.")]
+
+
+def test_a_correct_v1_bucket_is_never_overwritten() -> None:
+    """The derivation fires only on an empty bucket. A v1 file whose bucket is
+    right — even where it disagrees with a stale remote_url — keeps its own."""
+    v1 = _v1_with_storage(bucket="the-real-bucket", prefix="lab/the-real-prefix/")
+
+    v2, report = migrate_v1_to_v2(v1)
+
+    assert v2["storage"]["bucket"] == "the-real-bucket"
+    assert v2["storage"]["prefix"] == "lab/the-real-prefix/"
+    assert not [d for d in report.defaulted if d.startswith("storage.")]
+
+
+def test_storage_of_an_unusable_shape_reaches_model_validation(tmp_path: Path) -> None:
+    """A malformed v1 `storage` is carried, not swallowed, so the user gets a
+    field path from validation rather than a silent drop."""
+    v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    v1["storage"] = "s3://not-an-object"
+
+    v2, _report = migrate_v1_to_v2(v1)
+
+    assert v2["storage"] == "s3://not-an-object"
+    with pytest.raises(ValidationError):
+        Metadata.model_validate(v2)
