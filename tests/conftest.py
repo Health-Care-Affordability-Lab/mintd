@@ -89,3 +89,24 @@ def s3_versioned():
             Bucket=bucket, VersioningConfiguration={"Status": "Enabled"}
         )
         yield client, bucket
+
+
+@pytest.fixture(autouse=True)
+def _real_aws_credentials_are_unreachable(monkeypatch):
+    """Keep the developer's real ``~/.aws/credentials`` out of every test.
+
+    A ratchet, not a bug fix. Tests that need the writer pass an explicit
+    ``credentials_path=`` / ``aws_credentials_path=`` under ``tmp_path``;
+    without this, ``interactive_setup``'s default resolution reads the real
+    file and those tests take a different branch depending on whether the
+    machine happens to have a ``[mintd]`` profile.
+    """
+    from mintd import _aws_credentials
+
+    def _boom() -> Path:
+        raise AssertionError(
+            "default_credentials_path() called — that is the real "
+            "~/.aws/credentials; pass an explicit path under tmp_path instead"
+        )
+
+    monkeypatch.setattr(_aws_credentials, "default_credentials_path", _boom)
