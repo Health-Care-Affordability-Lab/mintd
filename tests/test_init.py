@@ -1281,6 +1281,93 @@ def test_dvc_remote_add_issues_version_aware_true(
     assert [*dvc_cmd(), "remote", "modify", "data_x", "version_aware", "true"] in calls
 
 
+def test_dvc_remote_add_exists_skips_only_the_add(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`exists=True` must skip the add and NOTHING else.
+
+    Only the add writes the URL, so a run interrupted after it leaves a
+    remote with no endpointurl / profile / version_aware -- and that is
+    precisely the state a resume exists to finish. `dvc remote default`
+    stands in for the `-d` the skipped add would have set.
+
+    Pinned against the real argv, not the fake: the fake sets its own
+    default_remote off the kwarg, so it would satisfy a policy assertion no
+    matter what this function actually issues.
+    """
+    import subprocess
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return _R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    SubprocessInitOps().dvc_remote_add(
+        tmp_path,
+        name="data_x",
+        url="s3://b/k/",
+        default=True,
+        endpoint="https://minio.lab",
+        profile="mintd",
+        exists=True,
+    )
+
+    # No `remote add` at all -- it would need -f, which replaces the section.
+    assert not any(c[-3:-2] == ["add"] or "add" in c[:4] for c in calls), calls
+    assert calls[0] == [*dvc_cmd(), "remote", "default", "data_x"]
+    # ...but every option step still runs.
+    for tail in (
+        ["remote", "modify", "data_x", "endpointurl", "https://minio.lab"],
+        ["remote", "modify", "data_x", "profile", "mintd"],
+        ["remote", "modify", "data_x", "version_aware", "true"],
+    ):
+        assert [*dvc_cmd(), *tail] in calls, calls
+
+
+def test_dvc_remote_url_reads_project_scope_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe must use `dvc config --project`, and map a non-zero exit
+    to "absent".
+
+    `--project` is load-bearing: plain `dvc config` merges the user's GLOBAL
+    config, so on a lab machine that already has a global remote of this
+    name a genuinely fresh init would look like a collision and be refused.
+    """
+    import subprocess
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        def __init__(self, rc: int, out: str) -> None:
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    def make(rc: int, out: str):
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return _R(rc, out)
+        return fake_run
+
+    monkeypatch.setattr(subprocess, "run", make(0, "s3://b/k/\n"))
+    assert SubprocessInitOps().dvc_remote_url(tmp_path, "data_x") == "s3://b/k/"
+    assert calls[0] == [*dvc_cmd(), "config", "--project", "remote.data_x.url"]
+
+    # dvc exits 251 for a remote that is not in the project config.
+    monkeypatch.setattr(subprocess, "run", make(251, ""))
+    assert SubprocessInitOps().dvc_remote_url(tmp_path, "data_x") is None
+
+
 def test_dvc_remote_add_version_aware_fires_after_endpoint_and_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
