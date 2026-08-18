@@ -1596,7 +1596,7 @@ def test_dvc_remote_add_exists_skips_only_the_add(
     )
 
     # No `remote add` at all -- it would need -f, which replaces the section.
-    assert not any(c[-3:-2] == ["add"] or "add" in c[:4] for c in calls), calls
+    assert not any(c[len(dvc_cmd()):][:2] == ["remote", "add"] for c in calls), calls
     assert calls[0] == [*dvc_cmd(), "remote", "default", "data_x"]
     # ...but every option step still runs.
     for tail in (
