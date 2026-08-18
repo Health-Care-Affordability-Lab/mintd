@@ -33,6 +33,7 @@ class InitOps(Protocol):
     def git_init(self, target_dir: Path) -> None: ...
     def git_add(self, target_dir: Path, paths: list[str]) -> None: ...
     def git_unstage(self, target_dir: Path, paths: list[str]) -> None: ...
+    def git_origin_url(self, target_dir: Path) -> str | None: ...
     def dvc_init(self, target_dir: Path) -> None: ...
     def dvc_remote_add(
         self, target_dir: Path, *,
@@ -104,6 +105,39 @@ class SubprocessInitOps:
             )
         except (OSError, subprocess.SubprocessError):
             pass
+
+    def git_origin_url(self, target_dir: Path) -> str | None:
+        """The URL of remote ``origin``, verbatim as git prints it, or None
+        when the repo has no ``origin``.
+
+        Named for ``origin`` rather than taking a remote-name parameter: it is
+        the only remote anything asks for, and a parameter no caller varies is
+        a knob that only ever gets passed the same value.
+
+        Returned RAW. Turning ``git@github.com:org/repo.git`` into an https
+        URL is init's job (``_https_remote``), not this seam's -- so the test
+        fake hands over the exact forms git emits and the normalization under
+        test is the production one, instead of each side having its own.
+
+        Best-effort: a missing binary, a timeout, or a non-zero exit (git
+        exits 2 with "No such remote") all read as "no origin". This only
+        feeds a *suggestion* inside a warning, so finding nothing costs the
+        user nothing.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
 
     def dvc_init(self, target_dir: Path) -> None:
         try:

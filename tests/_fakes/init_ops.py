@@ -33,6 +33,12 @@ class _FakeInitOps:
         # merges rather than replacing.
         self.remote_configs: dict[str, dict[str, str]] = {}
         self.default_remote: str | None = None
+        # The repo's `origin`, RAW as git prints it -- so a test can hand over
+        # the scp-like `git@host:org/repo.git` form, a trailing `.git`, a
+        # non-GitHub host, or a bare local path, and init's real normalizer
+        # runs on it. None means the repo has no origin, which is the plain
+        # `mintd init` case (git_init just made the repo).
+        self.origin_url: str | None = None
 
     def git_init(self, target_dir: Path) -> None:
         if "git_init" in self.fail_on:
@@ -59,6 +65,16 @@ class _FakeInitOps:
 
     def dvc_remote_url(self, target_dir: Path, name: str) -> str | None:
         return self.existing_remotes.get(name)
+
+    def git_origin_url(self, target_dir: Path) -> str | None:
+        # `fail_on` reaches this one too: the real seam swallows a missing
+        # binary and a timeout but not, say, a PermissionError on cwd, and
+        # init must survive that -- which is untestable if the double can
+        # only ever succeed.
+        if "git_origin_url" in self.fail_on:
+            raise InitOpError("fake git_origin_url failure")
+        self.call_log.append("git_origin_url")
+        return self.origin_url
 
     def dvc_remote_add(
         self,

@@ -92,6 +92,7 @@ class CheckFinding:
         "storage_bucket_empty",
         "data_products_primary_missing",
         "data_products_primary_mismatch",
+        "repository_github_url_missing",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
 
@@ -210,8 +211,32 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
 
     if meta:
         findings.extend(_check_data_products_primary(meta, metadata_path))
+        findings.extend(_check_repository_identity(meta, metadata_path))
 
     return findings
+
+
+def _check_repository_identity(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
+    """An entry with no repository.github_url is unusable to every consumer.
+
+    `_require_repo_url` (data.py:300-304) raises on it, so `mintd data clone`
+    against such a catalog entry exits 1. Presence only -- the derived
+    `{org}/{full_name}` shape is a scaffold default a human may legitimately
+    override (the lab's `skills` entry really lives at `hcal-agent-skills`).
+    """
+    if meta.repository.github_url.strip():
+        return []
+    return [
+        CheckFinding(
+            severity="error",
+            section="producer",
+            message="repository.github_url is not set",
+            field_path="repository.github_url",
+            source=metadata_path,
+            kind="repository_github_url_missing",
+            hint="set repository.github_url to this project's GitHub URL (e.g. 'https://github.com/<org>/<full_name>'). Without it, 'mintd data clone' against this entry exits 1.",
+        )
+    ]
 
 
 def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
