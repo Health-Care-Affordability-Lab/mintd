@@ -106,6 +106,12 @@ def _build_context(
         version = importlib.metadata.version("mintd")
     except importlib.metadata.PackageNotFoundError:
         version = "0.0.0"
+    # setuptools-scm suffixes any untagged or dirty build ("0.0.2.dev110+g03b29b5"),
+    # and publish semver-checks this field before it looks at the requested version —
+    # a suffixed string blocks publish outright. Stamp the release segment only.
+    # See notes/issues/issue-publish-rejects-dev-mint-version.md.
+    release = re.match(r"\d+\.\d+\.\d+", version)
+    version = release.group(0) if release else "0.0.0"
     # Load the user's config lazily; slice 21 lets users seed these fields
     # via `mintd config setup`. Absent fields fall back to safe defaults
     # — empty strings for cosmetic vars, sensible literals for the rest.

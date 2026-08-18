@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from mintd._templates import (
 )
 from mintd._templates.scaffolds import dispatch
 from mintd.model import Metadata
+from mintd.publish import _resolve_version
 
 
 # --- engine + name validation ---------------------------------------------
@@ -443,6 +445,38 @@ def test_transfer_manifest_default_schema_version_validates(
 
     assert manifest["schema_version"] == "2.0"
     TransferManifest.model_validate(manifest)
+
+
+@pytest.mark.parametrize(
+    "installed",
+    [
+        "0.0.2.dev110+g03b29b57b.d20260818",  # untagged build — what every install of main reports
+        "0.1.0+d20260818",                    # tagged but dirty tree
+        "0.1.0",                              # tagged, clean
+    ],
+)
+def test_scaffold_stamps_a_publishable_mint_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed: str
+) -> None:
+    """`mint.version` must be plain semver whatever the install reports.
+
+    setuptools-scm suffixes any untagged or dirty build, and `publish` validates
+    this field *before* it looks at the requested version — so a suffixed string
+    made every scaffolded repo unpublishable, with or without a flag.
+    See notes/issues/issue-publish-rejects-dev-mint-version.md.
+    """
+    monkeypatch.setattr(
+        "mintd._templates._render.importlib.metadata.version", lambda _dist: installed
+    )
+
+    render_scaffold(
+        project_type="data", name="foo", language="python", target_dir=tmp_path
+    )
+
+    stamped = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))["mint"]["version"]
+    assert stamped == installed.split(".dev")[0].split("+")[0]
+    # The real consumer, not a re-implementation of its regex.
+    assert _resolve_version(stamped, None)
 
 
 # --- helpers --------------------------------------------------------------
