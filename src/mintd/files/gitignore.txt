@@ -168,6 +168,10 @@ Thumbs.db
 *.swo
 *~
 
+# mintd init's crash marker. Present only while an init is incomplete; a
+# rerun of the same `mintd init` command resumes from it and removes it.
+.mintd-init-incomplete
+
 # Temporary files
 *.tmp
 *.temp

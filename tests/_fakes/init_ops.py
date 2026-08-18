@@ -26,6 +26,13 @@ class _FakeInitOps:
         # per-method timestamp.
         self.call_log: list[str] = []
         self.fail_on: set[str] = fail_on or set()
+        # Remotes already in .dvc/config before init runs, so tests can
+        # model a repo whose remote of this name is somebody else's.
+        self.existing_remotes: dict[str, str] = {}
+        # Full per-remote option set, so tests can see that a rerun
+        # merges rather than replacing.
+        self.remote_configs: dict[str, dict[str, str]] = {}
+        self.default_remote: str | None = None
 
     def git_init(self, target_dir: Path) -> None:
         if "git_init" in self.fail_on:
@@ -50,6 +57,9 @@ class _FakeInitOps:
         self.call_log.append("dvc_init")
         self.dvc_calls.append(target_dir)
 
+    def dvc_remote_url(self, target_dir: Path, name: str) -> str | None:
+        return self.existing_remotes.get(name)
+
     def dvc_remote_add(
         self,
         target_dir: Path,
@@ -59,15 +69,32 @@ class _FakeInitOps:
         default: bool,
         endpoint: str | None,
         profile: str | None,
+        exists: bool = False,
     ) -> None:
         if "dvc_remote_add" in self.fail_on:
             raise InitOpError("fake dvc_remote_add failure")
+        # Mirror real dvc: `remote add` on an existing name fails, and the
+        # follow-up `remote modify` calls MERGE into the section rather than
+        # replacing it -- which is why `exists` skips only the add.
+        if name in self.existing_remotes and not exists:
+            raise InitOpError(f"remote {name!r} already exists")
+        self.existing_remotes[name] = url
+        cfg = self.remote_configs.setdefault(name, {})
+        cfg["url"] = url
+        if endpoint:
+            cfg["endpointurl"] = endpoint
+        if profile:
+            cfg["profile"] = profile
+        cfg["version_aware"] = "true"
+        if default:
+            self.default_remote = name
         self.call_log.append("dvc_remote_add")
         self.remote_add_calls.append(
             {
                 "target_dir": target_dir,
                 "name": name,
                 "url": url,
+                "exists": exists,
                 "default": default,
                 "endpoint": endpoint,
                 "profile": profile,

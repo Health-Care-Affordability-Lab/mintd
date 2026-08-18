@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -170,9 +171,10 @@ def test_init_refuses_to_write_outside_the_project_through_a_symlink(
 ) -> None:
     """Not even --force may follow a link out of the project.
 
-    --force authorizes overwriting files in THIS project. A symlinked leaf
-    (README.md -> ../shared/TEAM-README.md) is caught by os.path.lexists;
-    the escape check is what makes the refusal hold under --force too.
+    --force authorizes overwriting files in THIS project. Two shapes: a
+    symlinked leaf (README.md -> ../shared/TEAM-README.md) and a symlinked
+    directory (code/ -> ../shared_code), which os.path.lexists cannot see
+    because mkdir is satisfied by the link and write_text follows it.
     """
     outside = tmp_path / "shared"
     outside.mkdir()
@@ -197,11 +199,7 @@ def test_init_refuses_to_write_outside_the_project_through_a_symlink(
 
 
 def test_init_refuses_a_symlinked_scaffold_directory(tmp_path: Path) -> None:
-    """The parent-directory case os.path.lexists cannot see.
-
-    mkdir is satisfied by the link and write_text follows it, so a leaf-only
-    guard would let init write a whole scaffold outside the project.
-    """
+    """The parent-directory case the leaf check cannot see."""
     shared_code = tmp_path / "shared_code"
     shared_code.mkdir()
     team_utils = shared_code / "_mintd_utils.py"
@@ -449,8 +447,371 @@ def test_init_project_rollback_on_remote_add_failure(tmp_path: Path) -> None:
             ops=fake,
         )
     assert not (tmp_path / "data_foo" / ".dvc").exists()
-    # metadata.json left in place — rerunning init re-applies the patch
+    # metadata.json and the sentinel are left in place — together they are
+    # what lets the identical command resume; see the rerun test below.
     assert (tmp_path / "data_foo" / "metadata.json").exists()
+    assert (tmp_path / "data_foo" / ".mintd-init-incomplete").exists()
+
+
+def test_init_resumes_storage_after_rollback(tmp_path: Path) -> None:
+    """The rerun the rollback promises must actually work.
+
+    At HEAD the rollback comment said "rerunning init re-applies the storage
+    block", but the rerun hit the destination guard first, so the project was
+    wedged until the user hand-deleted metadata.json. Nothing tested it: the
+    rollback test asserted the leave-in-place state and never reran.
+    """
+    project_path = tmp_path / "data_foo"
+    kwargs = dict(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+    )
+
+    with pytest.raises(InitOpError, match="dvc_remote_add"):
+        init_project(ops=_FakeInitOps(fail_on={"dvc_remote_add"}), **kwargs)  # type: ignore[arg-type]
+
+    sentinel = project_path / ".mintd-init-incomplete"
+    assert sentinel.exists()
+    # Something the user edited between the failed run and the rerun.
+    readme = project_path / "README.md"
+    readme.write_text("EDITED AFTER THE FAILURE\n", encoding="utf-8")
+
+    _path, written = init_project(ops=_FakeInitOps(), **kwargs)  # type: ignore[arg-type]
+
+    assert written == []  # resume wires storage; it does not re-render
+    assert readme.read_text(encoding="utf-8") == "EDITED AFTER THE FAILURE\n"
+    assert _read_metadata(project_path).storage is not None
+    assert not sentinel.exists()
+
+
+def _complete_tree(tmp_path: Path, *, full_name: str = "data_foo") -> Path:
+    """Render a full scaffold so the resume predicate is actually reachable.
+
+    `resuming` is `not force and len(collisions) == len(targets) and
+    _resuming(...)`, so a test that seeds one or two files never reaches
+    `_resuming` at all -- it refuses on the collision branch and pins nothing.
+    """
+    from mintd._templates import render_scaffold
+
+    project_path = tmp_path / full_name
+    project_path.mkdir()
+    render_scaffold(
+        project_type="data", name="foo", language="python", target_dir=project_path
+    )
+    return project_path
+
+
+def test_init_refuses_rerun_without_sentinel(tmp_path: Path) -> None:
+    """No sentinel, no resume -- even when the metadata looks exactly right.
+
+    This is the case the infer-from-metadata-shape predicate could not tell
+    apart: a hand-authored or half-migrated metadata.json with a matching
+    name and no storage block would have been silently storage-patched.
+
+    The tree is complete and the name matches, so the sentinel's absence is
+    the ONLY thing standing between this project and a silent storage patch.
+    """
+    project_path = _complete_tree(tmp_path)
+    (project_path / "metadata.json").write_text(
+        json.dumps({"project": {"full_name": "data_foo"}, "storage": None}),
+        encoding="utf-8",
+    )
+    assert not (project_path / ".mintd-init-incomplete").exists()
+
+    fake = _FakeInitOps()
+    with pytest.raises(InitDestinationExists):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            classification="labonly",
+            bucket="cooper-globus",
+            endpoint="",
+            ops=fake,
+        )
+    assert fake.git_calls == []
+
+
+def test_init_refuses_rerun_for_another_project(tmp_path: Path) -> None:
+    """A sentinel is not a blank cheque: the name still has to match."""
+    project_path = _complete_tree(tmp_path)
+    (project_path / ".mintd-init-incomplete").write_text("", encoding="utf-8")
+    (project_path / "metadata.json").write_text(
+        json.dumps({"project": {"full_name": "data_other"}}), encoding="utf-8"
+    )
+
+    with pytest.raises(InitDestinationExists):
+        init_project(
+            project_type="data", name="foo", target_dir=tmp_path, ops=_FakeInitOps()
+        )
+
+
+@pytest.mark.parametrize(
+    "body", ["{ not json", "[]", '"a string"', '{"project": {}}'], ids=
+    ["truncated", "toplevel-list", "toplevel-string", "missing-key"],
+)
+def test_init_refuses_corrupt_metadata_without_traceback(
+    tmp_path: Path, body: str
+) -> None:
+    """A corrupt metadata.json must make init refuse, not raise a parse error.
+
+    The sentinel path parses a file the user can edit, so every read/parse/
+    shape failure has to land as InitDestinationExists.
+    """
+    project_path = _complete_tree(tmp_path)
+    (project_path / ".mintd-init-incomplete").write_text("", encoding="utf-8")
+    (project_path / "metadata.json").write_text(body, encoding="utf-8")
+
+    with pytest.raises(InitDestinationExists):
+        init_project(
+            project_type="data", name="foo", target_dir=tmp_path, ops=_FakeInitOps()
+        )
+
+
+def test_init_rollback_keeps_a_dvc_dir_it_did_not_create(tmp_path: Path) -> None:
+    """The rollback must not delete a `.dvc/` mintd never created.
+
+    `dvc init` is skipped when `.dvc/` already exists, so the rollback can now
+    reach one the user made -- holding `config.local` (credentials, gitignored,
+    unrecoverable) and `cache/` (unpushed blobs). Deleting those would be the
+    same class of harm as commit 9eedd9f.
+    """
+    project_path = tmp_path / "data_foo"
+    dvc_dir = project_path / ".dvc"
+    (dvc_dir / "cache").mkdir(parents=True)
+    (dvc_dir / "config").write_text("[core]\n", encoding="utf-8")
+    (dvc_dir / "config.local").write_text(
+        "secret_access_key = S3CRET\n", encoding="utf-8"
+    )
+    (dvc_dir / "cache" / "blob").write_text("unpushed\n", encoding="utf-8")
+
+    fake = _FakeInitOps(fail_on={"dvc_remote_add"})
+    with pytest.raises(InitOpError, match="dvc_remote_add"):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            force=True,
+            classification="labonly",
+            bucket="cooper-globus",
+            endpoint="",
+            ops=fake,
+        )
+
+    assert (dvc_dir / "config").exists()
+    assert (dvc_dir / "config.local").read_text(encoding="utf-8") == (
+        "secret_access_key = S3CRET\n"
+    )
+    assert (dvc_dir / "cache" / "blob").read_text(encoding="utf-8") == "unpushed\n"
+    assert fake.dvc_calls == []  # dvc_init skipped: .dvc/ already there
+
+
+def test_init_refuses_resume_over_a_partial_scaffold(tmp_path: Path) -> None:
+    """A crash mid-render leaves the sentinel and a matching metadata.json --
+    metadata.json is written 2nd of 14 -- but resuming there would skip the
+    render and report success over a tree with no .gitignore and no dvc.yaml."""
+    project_path = tmp_path / "data_foo"
+    project_path.mkdir()
+    (project_path / ".mintd-init-incomplete").write_text("", encoding="utf-8")
+    (project_path / "README.md").write_text("partial\n", encoding="utf-8")
+    (project_path / "metadata.json").write_text(
+        json.dumps({"project": {"full_name": "data_foo"}}), encoding="utf-8"
+    )
+
+    with pytest.raises(InitDestinationExists):
+        init_project(
+            project_type="data", name="foo", target_dir=tmp_path, ops=_FakeInitOps()
+        )
+
+
+def test_init_resume_maps_invalid_metadata_to_init_op_error(tmp_path: Path) -> None:
+    """Resume re-reads a file the user may have edited between the runs, so a
+    pydantic ValidationError must not reach the CLI as a raw traceback."""
+    kwargs = dict(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+    )
+    with pytest.raises(InitOpError, match="dvc_remote_add"):
+        init_project(ops=_FakeInitOps(fail_on={"dvc_remote_add"}), **kwargs)  # type: ignore[arg-type]
+
+    # The user "fixes" metadata.json and drops a required block.
+    metadata_path = tmp_path / "data_foo" / "metadata.json"
+    raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    raw.pop("governance", None)
+    metadata_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(InitOpError, match="not valid mintd metadata"):
+        init_project(ops=_FakeInitOps(), **kwargs)  # type: ignore[arg-type]
+
+
+def test_init_refuses_to_repoint_a_remote_it_did_not_create(tmp_path: Path) -> None:
+    """A same-named remote pointing elsewhere is somebody else's.
+
+    Whether the remote is mintd's to rewrite is a question about the remote,
+    not about how init got here: neither "mintd crashed here once" nor
+    --force says anything about who put it there. Repointing it would send
+    the user's next `dvc push` to a bucket they did not choose.
+    """
+    project_path = tmp_path / "data_foo"
+    (project_path / ".dvc").mkdir(parents=True)
+
+    fake = _FakeInitOps()
+    fake.existing_remotes["data_foo"] = "s3://someone-elses-bucket/private"
+
+    # A file the user wrote, which --force would otherwise replace.
+    readme = project_path / "README.md"
+    readme.write_text("MY NOTES\n", encoding="utf-8")
+
+    with pytest.raises(InitOpError, match="already points at"):
+        init_project(
+            project_type="data",
+            name="foo",
+            target_dir=tmp_path,
+            force=True,
+            classification="labonly",
+            bucket="cooper-globus",
+            endpoint="",
+            ops=fake,
+        )
+    assert fake.existing_remotes["data_foo"] == "s3://someone-elses-bucket/private"
+    # The refusal is a preflight check, so it must land before the render --
+    # otherwise the user loses their files and still gets no project.
+    assert readme.read_text(encoding="utf-8") == "MY NOTES\n"
+    assert fake.git_calls == []
+
+
+def test_init_force_completes_over_its_own_finished_project(tmp_path: Path) -> None:
+    """--force over a project mintd already wired must finish, not half-run.
+
+    The remote is already exactly what mintd would write, so re-adding it is
+    ours to do. Getting this wrong re-rendered every file and THEN died on
+    dvc's "remote already exists", leaving storage unwired.
+    """
+    kwargs = dict(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="",
+    )
+    fake = _FakeInitOps()
+    project_path, _ = init_project(ops=fake, **kwargs)  # type: ignore[arg-type]
+    assert _read_metadata(project_path).storage is not None
+
+    # .dvc/ survives a real init, so the rerun skips dvc_init as it would live.
+    (project_path / ".dvc").mkdir(exist_ok=True)
+
+    init_project(ops=fake, force=True, **kwargs)  # type: ignore[arg-type]
+    assert _read_metadata(project_path).storage is not None
+    assert not (project_path / ".mintd-init-incomplete").exists()
+    # The rerun must not try to ADD the remote again -- real dvc fails on a
+    # duplicate without -f, and -f would replace the section.
+    assert fake.remote_add_calls[-1]["exists"] is True
+
+
+def test_init_rerun_keeps_endpoint_and_profile_on_the_existing_remote(
+    tmp_path: Path,
+) -> None:
+    """A rerun must not strip endpointurl/profile from the tracked config.
+
+    `dvc remote add -f` replaces the section rather than merging, and the
+    machine doing the rerun may not be able to supply those values at all --
+    SSO or env-var auth gives no [mintd] profile. .dvc/config is tracked and
+    mintd stages it, so the loss would be committed for everyone.
+    """
+    kwargs = dict(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+    )
+    fake = _FakeInitOps()
+    project_path, _ = init_project(  # type: ignore[arg-type]
+        ops=fake, endpoint="https://minio.lab", profile="mintd", **kwargs
+    )
+    (project_path / ".dvc").mkdir(exist_ok=True)
+    assert fake.remote_configs["data_foo"]["endpointurl"] == "https://minio.lab"
+
+    # Second machine: same bucket, but no endpoint and no [mintd] profile.
+    init_project(  # type: ignore[arg-type]
+        ops=fake, force=True, endpoint="", profile=None, **kwargs
+    )
+    cfg = fake.remote_configs["data_foo"]
+    assert cfg["endpointurl"] == "https://minio.lab"
+    assert cfg["profile"] == "mintd"
+
+
+def test_init_resume_finishes_a_half_configured_remote(tmp_path: Path) -> None:
+    """A run interrupted between `remote add` and `remote modify` must be
+    completed by the resume, not declared finished.
+
+    Only the first of dvc_remote_add's steps writes the URL, so matching on
+    the URL alone would treat a remote with no endpointurl / profile /
+    version_aware as fully configured -- and the state most likely to need
+    resuming is exactly that one.
+    """
+    kwargs = dict(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="cooper-globus",
+        endpoint="https://minio.lab",
+        profile="mintd",
+    )
+    project_path = tmp_path / "data_foo"
+    (project_path / ".dvc").mkdir(parents=True)
+
+    fake = _FakeInitOps()
+    # The interrupted state: URL written, nothing after it.
+    fake.existing_remotes["data_foo"] = "s3://cooper-globus/lab/data_foo/"
+
+    init_project(ops=fake, force=True, **kwargs)  # type: ignore[arg-type]
+
+    cfg = fake.remote_configs["data_foo"]
+    assert cfg["endpointurl"] == "https://minio.lab"
+    assert cfg["profile"] == "mintd"
+    assert cfg["version_aware"] == "true"
+    assert fake.default_remote == "data_foo"
+
+
+def test_init_sentinel_does_not_write_through_a_symlink(tmp_path: Path) -> None:
+    """The sentinel is not a scaffold target, so _escapes never sees it --
+    but write_text would still follow a symlink there and truncate the
+    target. It gets the same unlink-first treatment as rendered files."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP SECRET\n", encoding="utf-8")
+
+    project_path = tmp_path / "my_proj"
+    project_path.mkdir()
+    (project_path / ".mintd-init-incomplete").symlink_to(secret)
+
+    init_project(
+        project_type="code",
+        name="my_proj",
+        target_dir=tmp_path,
+        use_current_repo=True,
+        ops=_FakeInitOps(),
+    )
+    assert secret.read_text(encoding="utf-8") == "TOP SECRET\n"
+
+
+def test_init_removes_sentinel_on_success(tmp_path: Path) -> None:
+    """A finished project carries no crash marker."""
+    project_path, _ = init_project(
+        project_type="data", name="foo", target_dir=tmp_path, ops=_FakeInitOps()
+    )
+    assert not (project_path / ".mintd-init-incomplete").exists()
 
 
 def test_init_project_requires_bucket_when_classification_set(tmp_path: Path) -> None:

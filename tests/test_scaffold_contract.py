@@ -162,6 +162,8 @@ def test_c4_gitignore_policy(rendered_matrix: dict) -> None:
     assert not is_ignored(tree.root, "results/tables/model.dvc")
     assert is_ignored(tree.root, "data/raw/big.csv")
     assert not is_ignored(tree.root, "code/analysis.py")
+    # init's crash marker must never be committed.
+    assert is_ignored(tree.root, ".mintd-init-incomplete")
 
 
 # --- C5 — requirements sanity ---------------------------------------------
