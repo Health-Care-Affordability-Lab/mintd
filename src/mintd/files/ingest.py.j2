@@ -17,8 +17,6 @@ standardization. If the clean_* helpers grow, split them into their own module
 — and into their own dvc.yaml stage between ingest and validate.
 """
 
-from pathlib import Path
-
 import pandas as pd
 
 # Import mint utilities (located in same code/ directory)
@@ -56,7 +54,9 @@ def parse_and_clean(df, logger):
 def main():
     """Read raw source data, normalize it, write to the intermediate directory."""
     logger = ParameterAwareLogger("ingest")
-    logger.log("Starting data ingestion for {{ project_name }}...")
+    logger.log(
+        "Starting data ingestion for {{ project_name }}...",
+    )
 
     # Ensure pipeline directories exist (raw is read-only here; do NOT write it).
     paths = get_data_paths()

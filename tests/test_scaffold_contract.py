@@ -1,4 +1,4 @@
-"""Scaffold contract suite (C1-C5) over the full rendered matrix.
+"""Scaffold contract suite (C1-C8) over the full rendered matrix.
 
 One module-scoped fixture renders the 8 unique scaffold trees once
 (data x {py, r, stata}, project x {py, r, stata}, code, enclave) via the
@@ -9,9 +9,13 @@ helper contracts.
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import os
+import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -200,14 +204,18 @@ def test_c5_requirements_resolvable_network(rendered_matrix: dict) -> None:
 
 # --- Bounded execution: the rendered lockfile hook ------------------------
 
-def _write_hook(tree: RenderedTree, work: Path) -> Path:
-    hook = work / "check-env-lockfiles.sh"
+def _write_hook(
+    tree: RenderedTree,
+    work: Path,
+    rel: str = "scripts/check-env-lockfiles.sh",
+) -> Path:
+    hook = work / Path(rel).name
     # Normalize CRLF -> LF: on Windows CI, git's autocrlf checks the .j2
     # template out with \r\n and bash chokes on the \r (exit 1 everywhere).
     # We are testing the hook's LOGIC, not the checkout's line-ending
     # accident; real scaffolds .gitattributes-pin *.sh to LF is a tracked
     # Windows-GA follow-up (project_windows_support_followup).
-    body = tree.files["scripts/check-env-lockfiles.sh"].replace("\r\n", "\n")
+    body = tree.files[rel].replace("\r\n", "\n")
     hook.write_text(body, encoding="utf-8", newline="\n")
     hook.chmod(0o755)
     return hook
@@ -232,7 +240,9 @@ def _run_hook(hook: Path, work: Path) -> int:
     ("scenario", "lock_content", "expected"),
     [
         ("no_requirements", None, 0),
-        ("lock_missing", "__omit__", 1),
+        # A fresh scaffold ships requirements.txt and no lock: the hook must
+        # not block its own first commit. Empty/whitespace still fail.
+        ("lock_missing", "__omit__", 0),
         ("lock_empty", "", 1),
         ("lock_whitespace", "   \n\t\n", 1),
         ("lock_real", "pandas==2.0.0\n", 0),
@@ -245,8 +255,14 @@ def test_lockfile_hook_scenarios(
     lock_content: str | None,
     expected: int,
 ) -> None:
-    """The lockfile hook fails on a missing/empty/whitespace-only lock and
-    passes on no-requirements or a real lock."""
+    """The lockfile hook fails only on an empty/whitespace-only lock, and
+    passes on no-requirements, an absent lock, or a real lock.
+
+    An absent lock is a project that has not frozen its environment yet --
+    the fresh scaffold's own state -- so failing it would block the very
+    first commit. A present-but-blank lock is the failed-`pip install`
+    accident the hook was written to catch, and still fails.
+    """
     tree = rendered_matrix[("project", "python")]
     hook = _write_hook(tree, tmp_path)
 
@@ -256,3 +272,163 @@ def test_lockfile_hook_scenarios(
         (tmp_path / "requirements-lock.txt").write_text(lock_content)
 
     assert _run_hook(hook, tmp_path) == expected
+
+
+# --- Bounded execution: the rendered dvc-sync hook ------------------------
+
+_GIT_ENV_ARGS = [
+    "-c", "user.email=t@t",
+    "-c", "user.name=t",
+    "-c", "commit.gpgsign=false",
+]
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="the hook is a POSIX pre-commit script, fully exercised on the six "
+    "POSIX cells; on windows-latest subprocess bash resolution is unreliable "
+    "(System32's WSL-stub bash.exe can shadow Git Bash and exits 1 for any "
+    "script — observed as constant exit 1 across all scenarios), so running "
+    "it there tests the runner, not the hook",
+)
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not on PATH")
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not on PATH")
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        # The scaffold's own first commit: nothing to drift from yet.
+        ("first_commit", 0),
+        # After that the hook has teeth again.
+        ("no_lock_after_first_commit", 1),
+        ("lock_on_disk_not_staged", 1),
+        ("lock_staged", 0),
+    ],
+)
+def test_dvc_sync_hook_scenarios(
+    rendered_matrix: dict,
+    tmp_path: Path,
+    scenario: str,
+    expected: int,
+) -> None:
+    """The dvc-sync hook exempts the repo's first commit and only its first.
+
+    Guarding on ``git rev-parse --verify HEAD`` (rather than on the presence
+    of ``dvc.yaml``/``dvc.lock``) is what keeps the exemption to exactly one
+    commit: a file-existence guard would leave the hook inert forever for
+    every project that has not yet run ``dvc repro``.
+
+    Note this hook exits 0 *vacuously* outside a git repo, so the work tree
+    must be a real repo with a real index -- hence the ``git init`` below.
+    It is a function-scoped ``tmp_path``, never ``rendered_matrix``'s shared
+    tree: see the fixture WARNING about ``.git/`` leaking into C1/C3/C5.
+    """
+    tree = rendered_matrix[("data", "python")]
+    hook = _write_hook(tree, tmp_path, "scripts/check-dvc-sync.sh")
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=tmp_path, capture_output=True, text=True, check=True
+        )
+
+    # Lay down the pipeline sources the hook watches.
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "analysis.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "dvc.yaml").write_text("stages: {}\n", encoding="utf-8")
+
+    git("init", "-q", "-b", "main", ".")
+    git("add", "-A")
+
+    if scenario != "first_commit":
+        git(*_GIT_ENV_ARGS, "commit", "-q", "--no-verify", "-m", "initial")
+        (tmp_path / "code" / "analysis.py").write_text("x = 2\n", encoding="utf-8")
+        git("add", "code/analysis.py")
+        if scenario in ("lock_on_disk_not_staged", "lock_staged"):
+            (tmp_path / "dvc.lock").write_text("schema: '2.0'\n", encoding="utf-8")
+        if scenario == "lock_staged":
+            git("add", "dvc.lock")
+
+    assert _run_hook(hook, tmp_path) == expected
+
+
+# --- C7/C8 — the scaffold's own ruff hook passes on the scaffold ----------
+#
+# These are the offline proxy for "a fresh scaffold makes its first commit".
+# The real proof runs the `pre-commit` binary, which needs network to clone
+# ruff-pre-commit and is not in the dev extra -- unacceptable across 9 CI
+# cells. C7 runs the same ruff over the same rendered files; C8 makes sure
+# the version C7 runs is the version the scaffold actually pins.
+
+_LONG_NAME = "a" + "b" * 66 + "c"  # 68 chars; see the long-name cell below
+
+_no_ruff = pytest.mark.skipif(
+    importlib.util.find_spec("ruff") is None, reason="ruff not importable"
+)
+
+
+def _ruff(*args: str) -> subprocess.CompletedProcess:
+    # `sys.executable -m ruff`, never shutil.which("ruff"): windows-test
+    # invokes .venv\Scripts\pytest.exe by full path without activating the
+    # venv, so which() finds nothing and a which()-gated test would skip on
+    # all three Windows cells while looking green.
+    return subprocess.run(
+        [sys.executable, "-m", "ruff", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+@_no_ruff
+@pytest.mark.parametrize(("ptype", "lang"), _COMBOS)
+@pytest.mark.parametrize("name", ["foo", _LONG_NAME], ids=["short-name", "long-name"])
+def test_c7_rendered_python_is_ruff_clean(
+    tmp_path: Path, ptype: str, lang: str, name: str
+) -> None:
+    """A freshly rendered scaffold passes the ruff hooks it ships.
+
+    Rendered into a function-scoped ``tmp_path`` rather than reusing
+    ``rendered_matrix``, whose project/python tree gets a ``.git/`` from C4.
+
+    The long-name cell is load-bearing, not padding: the templates' log lines
+    embed the project name, so they cross ruff's default 88 columns once the
+    name passes ~43 characters and ruff-format rewraps the *rendered* file.
+    A suite pinned at ``name="foo"`` would never see that.
+    """
+    render_scaffold(
+        project_type=ptype, name=name, language=lang, target_dir=tmp_path
+    )
+    if not (tmp_path / ".pre-commit-config.yaml").exists():
+        pytest.skip("scaffold ships no ruff hook")
+
+    # --isolated everywhere: pyproject.toml sets line-length = 120, but a
+    # rendered scaffold ships no ruff config and its hook runs at the default
+    # 88. Checking at 120 would pass here and still fail on the user's machine.
+    check = _ruff("check", "--isolated", str(tmp_path))
+    assert check.returncode == 0, f"ruff check:\n{check.stdout}{check.stderr}"
+
+    fmt = _ruff("format", "--isolated", "--check", str(tmp_path))
+    assert fmt.returncode == 0, f"ruff format:\n{fmt.stdout}{fmt.stderr}"
+
+
+@_no_ruff
+def test_c8_scaffold_ruff_pin_matches_installed(rendered_matrix: dict) -> None:
+    """The scaffold's pinned ruff is the ruff C7 verified the scaffold against.
+
+    Without this, a one-sided bump (pyproject only, or the template only)
+    silently reintroduces the first-commit failure: C7 would keep passing at
+    the installed version while every real scaffold runs a different one.
+    """
+    config = rendered_matrix[("project", "python")].files[".pre-commit-config.yaml"]
+    match = re.search(r"rev:\s*v(\S+)", config)
+    assert match, f"no ruff-pre-commit rev found in:\n{config}"
+
+    pinned = match.group(1)
+    installed = importlib.metadata.version("ruff")
+    assert pinned == installed, (
+        f"scaffold pins ruff v{pinned} but this env has ruff {installed}.\n"
+        "These must move together, in one commit:\n"
+        "  1. pyproject.toml            -> \"ruff == <version>\"\n"
+        "  2. src/mintd/files/pre-commit-config.yaml.j2 -> rev: v<version>\n"
+        "  3. re-run: uv run ruff format --isolated src/mintd/files/*.py.j2\n"
+        "  4. uv lock\n"
+        "Otherwise a fresh scaffold fails its own first commit again."
+    )

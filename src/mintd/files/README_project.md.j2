@@ -44,7 +44,7 @@ The data are licensed under a [Creative Commons Attribution 4.0 International Li
 ### Software Requirements
 
 {% if language == 'r' %}
-- R {{ language_version | default('4.0+') }}
+- R {{ language_version | default('4.0+', true) }}
 - See `renv.lock` for package dependencies
 
 Install R dependencies with renv:
@@ -53,12 +53,12 @@ install.packages("renv")
 renv::restore()
 ```
 {% elif language == 'stata' %}
-- Stata {{ language_version | default('17+') }} (MP/SE/IC)
+- Stata {{ language_version | default('17+', true) }} (MP/SE/IC)
 
 No additional package manager required. Ensure Stata is installed and configured.
 User-written commands are documented in `citations.md`.
 {% else %}
-- Python {{ language_version | default('3.9+') }}
+- Python {{ language_version | default('3.9+', true) }}
 - See `requirements.txt` for package dependencies
 
 Install Python dependencies:

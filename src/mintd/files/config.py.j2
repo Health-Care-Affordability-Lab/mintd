@@ -15,7 +15,9 @@ from pathlib import Path
 # Set this to your project root directory.
 # All other paths are relative to this base path.
 
-BASE_PATH = Path(__file__).parent.parent  # Default: project root (code/ -> project root)
+BASE_PATH = Path(
+    __file__
+).parent.parent  # Default: project root (code/ -> project root)
 
 # =============================================================================
 # RANDOM SEED FOR REPRODUCIBILITY
@@ -63,16 +65,19 @@ def get_paths() -> dict:
 def setup_random_seed():
     """Set random seeds for reproducibility across common libraries."""
     import random
+
     random.seed(RANDOM_SEED)
 
     try:
         import numpy as np
+
         np.random.seed(RANDOM_SEED)
     except ImportError:
         pass
 
     try:
         import torch
+
         torch.manual_seed(RANDOM_SEED)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(RANDOM_SEED)
