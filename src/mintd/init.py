@@ -90,6 +90,23 @@ def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:
         return False
 
 
+def _https_remote(raw: str) -> str:
+    """A git remote URL in the form the ``github_url`` field wants.
+
+    ``git@github.com:org/repo.git`` -> ``https://github.com/org/repo``. A
+    trailing ``.git`` always comes off; beyond that, anything not in the
+    scp-like form keeps its shape -- a bare path, an ``ssh://`` URL, a
+    non-GitHub host. This value is only ever *suggested* to a human who then
+    confirms it, so reporting an unrecognized remote close to verbatim beats
+    guessing at an https equivalent it may not have.
+    """
+    url = raw.strip()
+    if url.startswith("git@") and ":" in url:
+        host, _, path = url[len("git@"):].partition(":")
+        url = f"https://{host}/{path}"
+    return url.removesuffix(".git")
+
+
 def _prompt_classification(
     *,
     reporter: Reporter,
@@ -402,6 +419,54 @@ def init_project(
                 reporter.warn(
                     "could not restage .dvc/config; run: git add .dvc/config"
                 )
+
+    # `mintd check` reports an empty repository.github_url as an *error*
+    # (unit G), and publish refuses any error finding -- so when the render had
+    # no `registry_org` to derive from, init is handing back a project it
+    # already knows cannot pass check. Say so here, where the empty value gets
+    # written, rather than leaving the user to meet it on their next `check`.
+    #
+    # Read the value back out of the file instead of re-deriving it from
+    # config: this is the exact value `check` will read, so the warning cannot
+    # disagree with the error it is warning about. Best-effort like the restage
+    # above -- an unreadable metadata.json must not fail an otherwise healthy
+    # init, and `check` reports that case on its own anyway.
+    if reporter is not None:
+        try:
+            meta_raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+            url_missing = not str(meta_raw["repository"]["github_url"] or "").strip()
+        except (OSError, ValueError, KeyError, TypeError):
+            url_missing = False
+        if url_missing:
+            # Not gated on --use-current-repo: on the plain path `git init`
+            # just made a fresh repo, so this read returns None by itself --
+            # while `--force` into an existing clone arrives here with a real
+            # origin and no such flag. "The URL is empty" is the only gate
+            # that matters, and it is the branch we are already in.
+            # Best-effort, for the same reason as the restage and sentinel
+            # blocks below: this runs after an otherwise-healthy init, and a
+            # raise here would fail it. The seam maps a missing binary and a
+            # timeout to None itself, but not a PermissionError on cwd -- and
+            # an InitOps impl is free to raise anything. A suggestion is the
+            # most optional thing in this function; losing it must cost the
+            # user nothing more than the suggestion.
+            try:
+                origin = ops.git_origin_url(project_path)
+            except (OSError, InitOpError):
+                origin = None
+            suggestion = (
+                f" This repo's git origin is {_https_remote(origin)} — "
+                "probably what belongs in the field."
+                if origin
+                else ""
+            )
+            reporter.warn(
+                f"{metadata_path}: repository.github_url is empty, so "
+                "`mintd check` reports an error here and publish refuses. "
+                "Run `mintd config setup` to set registry_org (future "
+                "scaffolds derive it from that), and fill this one in."
+                + suggestion
+            )
 
     # Last thing, and only on full success: from here the directory is a
     # finished project, not init's half-finished output. Best-effort for the

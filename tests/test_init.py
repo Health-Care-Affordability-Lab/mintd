@@ -972,10 +972,15 @@ def test_init_rollback_unstages_dvc_and_skips_restage(tmp_path: Path) -> None:
 
 
 def test_init_failed_restage_warns_once_and_returns_success(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failed restage must not fail an otherwise-healthy init: init
-    returns success and the reporter records exactly one actionable warn."""
+    returns success and the reporter records exactly one actionable warn.
+
+    Config is pinned because "exactly one" is now shared with unit G's
+    empty-github_url warning: without an org configured that warning fires
+    too, and this count would depend on the machine running it."""
+    _isolated_config(monkeypatch, tmp_path, registry_org="acme")
     fake = _FakeInitOps(fail_on={"git_add"})
     reporter = _WarnRecorder()
     project_path, written = init_project(
@@ -990,9 +995,12 @@ def test_init_failed_restage_warns_once_and_returns_success(
     assert "git add .dvc/config" in reporter.warnings[0]
 
 
-def test_init_successful_restage_emits_no_warning(tmp_path: Path) -> None:
+def test_init_successful_restage_emits_no_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The restage warning fires only on failure — a clean restage is
-    silent (zero warns)."""
+    silent (zero warns). Config pinned for the same reason as above."""
+    _isolated_config(monkeypatch, tmp_path, registry_org="acme")
     fake = _FakeInitOps()
     reporter = _WarnRecorder()
     init_project(
@@ -1015,6 +1023,273 @@ def test_init_failed_restage_without_reporter_still_succeeds(
         project_type="data", name="foo", target_dir=tmp_path, ops=fake
     )
     assert (project_path / "metadata.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Unit G, S3a + S3b — init warns about the empty repository.github_url it just
+# wrote, and names the repo's git origin as a candidate. Unit G's render and
+# `check` halves live in tests/test_repository_identity.py; these two slices
+# are init behavior, so they sit here beside _WarnRecorder, _FakeInitOps, and
+# the argv-pinned seam tests they reuse rather than duplicate.
+# ---------------------------------------------------------------------------
+
+
+def _isolated_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, registry_org: str | None
+) -> None:
+    """Point ``Config.load()`` at a config dir this test owns.
+
+    Load-bearing, not hygiene. `_render` derives repository.github_url from
+    `registry_org` (`_render.py:178`) through the real `Config.load()`, so
+    without this the assertions below would pass or fail depending on whether
+    whoever runs them happens to have an org configured -- and that genuinely
+    differs between a lab laptop and CI.
+    """
+    cfg_dir = tmp_path / "_cfg"
+    cfg_dir.mkdir()
+    if registry_org is not None:
+        (cfg_dir / "config.yaml").write_text(
+            f"registry_org: {registry_org}\n", encoding="utf-8"
+        )
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg_dir))
+
+
+def _url_of(project_path: Path) -> str:
+    raw = json.loads((project_path / "metadata.json").read_text(encoding="utf-8"))
+    return raw["repository"]["github_url"]
+
+
+def test_init_warns_when_it_wrote_an_empty_github_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `registry_org` means nothing to derive, so init writes an empty
+    github_url -- and `mintd check` rejects that at severity=error, which
+    publish then refuses. Init must say so where the value is written, not
+    leave the user to discover it on their next `check`."""
+    _isolated_config(monkeypatch, tmp_path, registry_org=None)
+    fake = _FakeInitOps()
+    reporter = _WarnRecorder()
+
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert _url_of(project_path) == ""
+    assert len(reporter.warnings) == 1
+    warning = reporter.warnings[0]
+    # The three things the user needs: which field, what will reject it, the fix.
+    assert "repository.github_url" in warning
+    assert "mintd check" in warning
+    assert "mintd config setup" in warning
+
+
+def test_init_does_not_warn_when_the_github_url_was_derived(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Over-fire guard: the healthy path is silent. Deleting the emptiness
+    check in init (warn unconditionally) reddens exactly here."""
+    _isolated_config(monkeypatch, tmp_path, registry_org="acme")
+    fake = _FakeInitOps()
+    reporter = _WarnRecorder()
+
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert _url_of(project_path) == "https://github.com/acme/data_foo"
+    assert reporter.warnings == []
+    # And no pointless subprocess on the healthy path.
+    assert "git_origin_url" not in fake.call_log
+
+
+def test_init_empty_url_warning_suggests_the_git_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3b: the warning names a candidate rather than only saying "empty".
+
+    The fake returns the raw scp-like form git actually prints, so init's own
+    normalizer is what runs -- if the fake normalized instead, this would pass
+    no matter what production does with `git@...` (the lesson of 7c5fe05).
+    """
+    _isolated_config(monkeypatch, tmp_path, registry_org=None)
+    fake = _FakeInitOps()
+    fake.origin_url = "git@github.com:acme/data_foo.git"
+    reporter = _WarnRecorder()
+
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert len(reporter.warnings) == 1
+    assert "https://github.com/acme/data_foo" in reporter.warnings[0]
+    # A suggestion, never a fallback: nothing wrote it into the file.
+    assert _url_of(tmp_path / "data_foo") == ""
+
+
+def test_init_empty_url_warning_omits_the_candidate_without_an_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary path: `git init` just made the repo, so there is no origin
+    to name. The base warning still fires; it simply has no candidate."""
+    _isolated_config(monkeypatch, tmp_path, registry_org=None)
+    fake = _FakeInitOps()
+    fake.origin_url = None
+    reporter = _WarnRecorder()
+
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert len(reporter.warnings) == 1
+    assert "repository.github_url" in reporter.warnings[0]
+    assert "origin" not in reporter.warnings[0]
+
+
+def test_init_reports_a_non_github_origin_as_it_found_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No host filter, deliberately. The message reports what origin IS and a
+    human confirms it before anything is written -- and filtering here would
+    contradict `check`, which validates presence only and never asserts the
+    derived shape (mirrors, forks, renames)."""
+    _isolated_config(monkeypatch, tmp_path, registry_org=None)
+    fake = _FakeInitOps()
+    fake.origin_url = "git@gitlab.com:acme/foo.git"
+    reporter = _WarnRecorder()
+
+    init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert "https://gitlab.com/acme/foo" in reporter.warnings[0]
+
+
+def test_init_survives_a_failing_origin_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken origin lookup costs the suggestion, not the init.
+
+    This block runs after an otherwise-healthy init, where the surrounding code
+    goes out of its way to never raise (restage, sentinel) -- a traceback here
+    would fail a project that is already on disk and fine.
+    """
+    _isolated_config(monkeypatch, tmp_path, registry_org=None)
+    fake = _FakeInitOps(fail_on={"git_origin_url"})
+    reporter = _WarnRecorder()
+
+    project_path, _ = init_project(
+        project_type="data",
+        name="foo",
+        target_dir=tmp_path,
+        ops=fake,
+        reporter=reporter,
+    )
+
+    assert (project_path / "metadata.json").exists()
+    assert len(reporter.warnings) == 1
+    assert "repository.github_url" in reporter.warnings[0]
+    assert "origin" not in reporter.warnings[0]
+
+
+def test_https_remote_normalizes_the_forms_git_prints() -> None:
+    """Normalization lives in init, not in the seam, so the fake cannot pin
+    its own version of it. Table-driven because each row is a form git really
+    emits."""
+    from mintd.init import _https_remote
+
+    assert _https_remote("git@github.com:acme/foo.git") == "https://github.com/acme/foo"
+    assert _https_remote("https://github.com/acme/foo.git") == "https://github.com/acme/foo"
+    assert _https_remote("git@gitlab.com:acme/foo.git") == "https://gitlab.com/acme/foo"
+    assert _https_remote("  git@github.com:acme/foo  ") == "https://github.com/acme/foo"
+    # Not scp-like: kept as found rather than guessed at.
+    assert _https_remote("/srv/git/foo.git") == "/srv/git/foo"
+    assert _https_remote("ssh://git@github.com/acme/foo") == "ssh://git@github.com/acme/foo"
+
+
+def test_git_origin_url_argv_and_absent_remote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pins the argv, and that a non-zero exit reads as "no origin".
+
+    Same reason as test_dvc_remote_url_reads_project_scope_only: the fake
+    returns whatever a test set on it, so only this pins what the real
+    function asks git.
+    """
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+
+    calls: list[list[str]] = []
+
+    class _R:
+        def __init__(self, rc: int, out: str) -> None:
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    def make(rc: int, out: str):
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return _R(rc, out)
+        return fake_run
+
+    monkeypatch.setattr(subprocess, "run", make(0, "git@github.com:acme/foo.git\n"))
+    assert SubprocessInitOps().git_origin_url(tmp_path) == "git@github.com:acme/foo.git"
+    assert calls[0] == ["git", "remote", "get-url", "origin"]
+
+    # git exits 2 ("error: No such remote 'origin'") on a repo with no origin.
+    monkeypatch.setattr(subprocess, "run", make(2, ""))
+    assert SubprocessInitOps().git_origin_url(tmp_path) is None
+
+    # Non-zero WITH output on stdout is what the returncode check is actually
+    # for -- absent an explicit check, `stdout.strip() or None` would hand this
+    # back as if it were a remote URL. Empty-stdout failures cannot tell the
+    # two apart, so this case is the one that pins the guard.
+    monkeypatch.setattr(subprocess, "run", make(2, "warning: whatever\n"))
+    assert SubprocessInitOps().git_origin_url(tmp_path) is None
+
+
+def test_git_origin_url_reads_a_real_repo_live(tmp_path: Path) -> None:
+    """Live seam: argv-pinning proves we issue what we meant, not that git
+    understands it. A real `git init` + `git remote add` closes that."""
+    import shutil
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    ops = SubprocessInitOps()
+    assert ops.git_origin_url(tmp_path) is None  # no origin yet
+
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:acme/foo.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+    assert ops.git_origin_url(tmp_path) == "git@github.com:acme/foo.git"
 
 
 def test_subprocess_git_add_restages_dvc_config_live(tmp_path: Path) -> None:
