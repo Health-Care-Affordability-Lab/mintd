@@ -17,7 +17,12 @@ dependencies = [
 dev = [
     "pytest >= 7.0",
     "mypy >= 1.0",
-    "ruff >= 0.1",
+    # Pinned in lockstep with the scaffold's own ruff hook
+    # (src/mintd/files/pre-commit-config.yaml.j2 `rev:`). The scaffold's
+    # templates are formatted with exactly this version, so a one-sided
+    # bump makes a fresh scaffold fail its own first commit again.
+    # test_c8_scaffold_ruff_pin_matches_installed is what catches that.
+    "ruff == 0.15.13",
     "types-PyYAML",
     "moto[s3] ~= 5.0",
     "types-boto3",

@@ -40,7 +40,9 @@ def fetch_raw_data(logger):
 
 def main():
     logger = ParameterAwareLogger("fetch")
-    logger.log("Starting data fetch for {{ project_name }}...")
+    logger.log(
+        "Starting data fetch for {{ project_name }}...",
+    )
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     fetch_raw_data(logger)
     logger.log("Data fetch completed.")

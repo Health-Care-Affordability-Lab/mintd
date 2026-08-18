@@ -6,13 +6,15 @@ set -e
 
 errors=0
 
-# Python: if requirements.txt exists, requirements-lock.txt must exist AND
-# contain at least one non-whitespace character. A failed `pip install` followed
-# by the documented `pip freeze > requirements-lock.txt` recovery writes an
-# empty file, which a plain existence test would wrongly accept.
-if [ -f "requirements.txt" ]; then
-    if ! grep -q '[^[:space:]]' requirements-lock.txt 2>/dev/null; then
-        echo "ERROR: requirements-lock.txt is missing or empty"
+# Python: an ABSENT requirements-lock.txt is a project that has not frozen its
+# environment yet — the fresh scaffold's own state — and must not block its
+# first commit. A PRESENT but empty/whitespace-only lock is the real hazard: a
+# failed `pip install` followed by the documented
+# `pip freeze > requirements-lock.txt` recovery writes an empty file, which a
+# plain existence test would wrongly accept. Only that case fails.
+if [ -f "requirements.txt" ] && [ -f "requirements-lock.txt" ]; then
+    if ! grep -q '[^[:space:]]' requirements-lock.txt; then
+        echo "ERROR: requirements-lock.txt is empty"
         echo "  Run: pip freeze > requirements-lock.txt"
         errors=$((errors + 1))
     fi

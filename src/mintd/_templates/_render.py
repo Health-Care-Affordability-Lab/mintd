@@ -255,6 +255,11 @@ def _render_metadata_json(context: dict[str, object]) -> str:
 
 def _write_file(out_path: Path, template_name: str, context: dict[str, object]) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Replace the entry, never write through it. If the target is a symlink,
+    # write_text would follow it and clobber a file outside the project --
+    # which is exactly what init's collision guard uses os.path.lexists to
+    # detect, and what --force would otherwise do anyway.
+    out_path.unlink(missing_ok=True)
     if template_name in _STATIC_FILES:
         # Copy verbatim. Use importlib.resources for installed-package safety.
         from importlib.resources import files as _files
@@ -267,6 +272,23 @@ def _write_file(out_path: Path, template_name: str, context: dict[str, object]) 
         out_path.write_text(_render_metadata_json(context), encoding="utf-8")
         return
     out_path.write_text(render_template(template_name, context), encoding="utf-8")
+
+
+def scaffold_targets(
+    *,
+    project_type: str,
+    name: str,
+    language: str,
+) -> list[str]:
+    """The rel-paths ``render_scaffold`` will write, in write order.
+
+    Same ``dispatch(...)`` call ``render_scaffold`` makes below, so init's
+    collision guard cannot drift from what the renderer actually writes.
+    Pure: touches no filesystem.
+    """
+    full_name = project_full_name(project_type, name)
+    _dirs, files = dispatch(project_type)(language, name, full_name)
+    return [rel_path for rel_path, _template in files]
 
 
 def render_scaffold(
@@ -313,6 +335,7 @@ __all__ = [
     "project_full_name",
     "render_scaffold",
     "render_template",
+    "scaffold_targets",
     "validate_project_name",
 ]
 

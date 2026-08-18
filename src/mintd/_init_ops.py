@@ -38,7 +38,9 @@ class InitOps(Protocol):
         self, target_dir: Path, *,
         name: str, url: str, default: bool,
         endpoint: str | None, profile: str | None,
+        exists: bool = False,
     ) -> None: ...
+    def dvc_remote_url(self, target_dir: Path, name: str) -> str | None: ...
 
 
 class SubprocessInitOps:
@@ -48,7 +50,13 @@ class SubprocessInitOps:
     def git_init(self, target_dir: Path) -> None:
         try:
             result = subprocess.run(
-                ["git", "init"],
+                # `-b main`, not a bare `git init`: `_render.py:235` writes
+                # `"default_branch": "main"` into the metadata.json produced by
+                # this same call, and without `-b` the branch is whatever the
+                # machine's `init.defaultBranch` says -- `master` on a fresh
+                # one. Needs git >= 2.28; an older git exits non-zero into the
+                # InitOpError mapping below, so no silent wrong-branch repo.
+                ["git", "init", "-b", "main"],
                 cwd=target_dir,
                 capture_output=True,
                 text=True,
@@ -133,10 +141,38 @@ class SubprocessInitOps:
                 f"dvc config cache.type failed: {result.stderr.strip()}"
             )
 
+    def dvc_remote_url(self, target_dir: Path, name: str) -> str | None:
+        """The URL of remote ``name``, or None if it is not configured.
+
+        Lets init tell "this remote is the one mintd would write" from "this
+        remote is somebody else's". Best-effort: any failure reads as absent,
+        and `dvc remote add` itself then decides.
+
+        ``--project`` is load-bearing. Plain ``dvc remote list`` merges the
+        user's global config, so a lab machine that already has a global
+        remote named ``data_foo`` would make a genuinely fresh init look like
+        a collision. Only the repo's own ``.dvc/config`` counts here.
+        """
+        try:
+            result = subprocess.run(
+                [*dvc_cmd(), "config", "--project", f"remote.{name}.url"],
+                cwd=target_dir,
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
     def dvc_remote_add(
         self, target_dir: Path, *,
         name: str, url: str, default: bool,
         endpoint: str | None, profile: str | None,
+        exists: bool = False,
     ) -> None:
         """Write a remote section to ``.dvc/config`` (per-project scope —
         no ``--local``/``--global``/``--system``, so the section lives in
@@ -149,25 +185,36 @@ class SubprocessInitOps:
         the file's real path (mintd's mental model; matches what
         ``metadata.storage.versioning = True`` already declares).
         """
-        cmd = [*dvc_cmd(), "remote", "add"]
-        if default:
-            cmd.append("-d")
-        cmd.extend([name, url])
-        try:
-            result = subprocess.run(
-                cmd,
-                cwd=target_dir,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout,
-                check=False,
-            )
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
-        if result.returncode != 0:
-            if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+        # `exists` means the caller already found this remote at exactly
+        # ``url``, so only the add is skipped -- never the modify steps below.
+        # No `-f` anywhere: it REPLACES the section rather than merging, which
+        # would drop an endpointurl/profile this machine cannot re-supply. But
+        # skipping the whole op would be just as wrong: only the add writes the
+        # URL, so a run interrupted between the add and the modifies leaves a
+        # half-configured remote that a resume must finish, not declare done.
+        if exists:
+            cmd = [*dvc_cmd(), "remote", "default", name] if default else []
+        else:
+            cmd = [*dvc_cmd(), "remote", "add"]
+            if default:
+                cmd.append("-d")
+            cmd.extend([name, url])
+        if cmd:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    cwd=target_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=self._timeout,
+                    check=False,
+                )
+            except FileNotFoundError:
                 raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
-            raise InitOpError(f"dvc remote add failed: {result.stderr.strip()}")
+            if result.returncode != 0:
+                if "No module named 'dvc'" in result.stderr or "No module named dvc" in result.stderr:
+                    raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+                raise InitOpError(f"dvc remote add failed: {result.stderr.strip()}")
         if endpoint:
             result = subprocess.run(
                 [*dvc_cmd(), "remote", "modify", name, "endpointurl", endpoint],

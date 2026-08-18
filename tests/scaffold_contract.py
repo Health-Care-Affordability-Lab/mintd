@@ -20,6 +20,15 @@ Checks:
 * ``C4`` — :func:`is_ignored`: gitignore policy, exercised through real git.
 * ``C5`` — :func:`check_requirements`: every requirements line parses and names
   a PyPI-installable package.
+
+The remaining checks need no helper here — they live directly in
+``tests/test_scaffold_contract.py`` because they execute rendered artifacts
+rather than inspect them:
+
+* ``C6`` — the collision guard's target list matches what the renderer writes.
+* ``C7`` — a rendered scaffold passes the ruff hooks it ships, at a short *and*
+  a long project name.
+* ``C8`` — the ruff the scaffold pins is the ruff C7 checked it against.
 """
 
 from __future__ import annotations

@@ -9,6 +9,7 @@ rendered files so the CLI can print per-file output.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from collections.abc import Callable
@@ -18,11 +19,22 @@ from typing import Literal
 from ._console import Reporter
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
 from ._storage_state import SLUG_REGEX, compute_storage_prefix
-from ._templates import InitNameInvalid, project_full_name, render_scaffold
+from ._templates import (
+    InitNameInvalid,
+    project_full_name,
+    render_scaffold,
+    scaffold_targets,
+    validate_project_name,
+)
 from .model import DvcStorage, Metadata, Storage
 from .publish import atomic_write_json
 
 _DVC_INIT_TYPES: frozenset[str] = frozenset({"data", "code", "project"})
+
+# Written before the first scaffold file, removed only after a fully
+# successful init. Its presence is what makes "this directory is init's own
+# half-finished output" provable rather than inferred.
+_SENTINEL_NAME = ".mintd-init-incomplete"
 
 _TIERS: list[tuple[str, str]] = [
     ("labonly", "Lab-only — internal data, private to lab members"),
@@ -32,7 +44,50 @@ _TIERS: list[tuple[str, str]] = [
 
 
 class InitDestinationExists(Exception):
-    """`metadata.json` already exists at the target. Refusing to overwrite."""
+    """The target already holds files the scaffold would overwrite."""
+
+    def __init__(self, msg: str, *, hint: str | None = None) -> None:
+        super().__init__(msg)
+        self.hint = hint
+
+
+def _escapes(project_path: Path, rel: str) -> bool:
+    """True if writing ``rel`` would land outside ``project_path``.
+
+    ``os.path.lexists`` catches a symlinked *leaf*, but a symlinked parent
+    directory (``code/ -> ../shared_code``) is transparent to it: mkdir is
+    satisfied by the link and write_text then follows it out of the project.
+    Resolving the whole path is what closes that.
+    """
+    try:
+        resolved = (project_path / rel).resolve()
+        resolved.relative_to(project_path.resolve())
+    except OSError:
+        return False
+    except ValueError:
+        return True
+    return False
+
+
+def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:
+    """True iff a previous ``init_project`` crashed here, on THIS project.
+
+    The sentinel is what proves the state is init's own output. Inferring it
+    from the metadata's shape instead (scaffold present, ``storage`` null,
+    name matches) would also match a hand-authored or half-migrated
+    metadata.json, and silently wire lab storage into someone else's file.
+
+    Any read/parse/shape failure is a non-match, never an exception: a
+    corrupt metadata.json must make init refuse, not raise JSONDecodeError
+    out of the CLI.
+    """
+    if not sentinel.is_file():
+        return False
+    try:
+        raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return bool(raw["project"]["full_name"] == full_name)
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _prompt_classification(
@@ -96,48 +151,170 @@ def init_project(
     bucket: str | None = None,
     endpoint: str | None = None,
     profile: str | None = None,
+    force: bool = False,
     ops: InitOps | None = None,
     reporter: Reporter | None = None,
 ) -> tuple[Path, list[Path]]:
     """Initialize a fresh mintd project with storage configuration."""
-    if use_current_repo:
-        project_path = target_dir
-    else:
-        project_path = target_dir / project_full_name(project_type, name)
-
-    project_path.mkdir(parents=True, exist_ok=True)
+    # Preflight: validate, then refuse, then write. Nothing below this block
+    # touches the filesystem until every reason to refuse has been checked --
+    # a failed init must not leave a half-made project behind.
+    validate_project_name(name)
+    full_name = project_full_name(project_type, name)
+    project_path = target_dir if use_current_repo else target_dir / full_name
     metadata_path = project_path / "metadata.json"
-    if metadata_path.exists():
-        raise InitDestinationExists(metadata_path)
 
-    written = render_scaffold(
-        project_type=project_type,
-        name=name,
-        language=language,
-        target_dir=project_path,
+    wants_storage = classification is not None and project_type in _DVC_INIT_TYPES
+    if wants_storage and not bucket:
+        # Hoisted from the storage block below, where it used to raise after
+        # the scaffold, `git init` and `dvc init` had all run -- and *outside*
+        # the rollback boundary, so nothing was undone and the rerun then hit
+        # the destination guard. Raised here it leaves nothing behind at all.
+        raise InitOpError(
+            "bucket not configured in ~/.mintd/config.yaml; run "
+            "'mintd config setup' first, then rerun the same command"
+        )
+    # Validated once, above; re-bound as a plain str so the storage block
+    # needs no second check. Truthy iff storage is wanted and configured.
+    storage_bucket: str = bucket if wants_storage and bucket else ""
+
+    # An init that crashed here already wrote the scaffold, so every target
+    # "collides" with itself. Resume re-runs only the storage wiring and
+    # leaves the tree alone -- including anything the user edited after the
+    # failed run. Ceiling: a crash *mid-render* leaves a partial tree that
+    # resume will not repair; --force re-renders it.
+    # lexists, not exists: a broken symlink is still something the user put
+    # there, and write_text would follow it out of the project.
+    targets = scaffold_targets(
+        project_type=project_type, name=name, language=language
+    )
+    collisions = sorted(
+        rel for rel in targets if os.path.lexists(project_path / rel)
     )
 
+    # Resume only over a COMPLETE tree. A crash *mid-render* also leaves the
+    # sentinel and a matching metadata.json (it is written 2nd of 14), but
+    # resuming there would skip the render and report success over a scaffold
+    # missing .gitignore and dvc.yaml. Partial trees fall through to the
+    # refusal below, where --force re-renders and completes them.
+    sentinel = project_path / _SENTINEL_NAME
+    resuming = (
+        not force
+        and len(collisions) == len(targets)
+        and _resuming(sentinel, metadata_path, full_name)
+    )
+
+    # Refused even under --force: --force authorizes overwriting files in
+    # THIS project, never following a link out of it.
+    escaping = sorted(rel for rel in targets if _escapes(project_path, rel))
+    if escaping:
+        raise InitDestinationExists(
+            f"refusing to write outside {project_path} through a symlink:\n  "
+            + "\n  ".join(escaping),
+            hint="a directory in the scaffold's path is a symlink; "
+            "replace it with a real directory",
+        )
+
+    if collisions and not force and not resuming:
+        raise InitDestinationExists(
+            f"refusing to overwrite {len(collisions)} existing "
+            f"file(s) in {project_path}:\n  " + "\n  ".join(collisions),
+            hint=(
+                "move them aside, or re-run with --force to overwrite them.\n"
+                "--force re-renders every file above, metadata.json included, "
+                "so anything you added to it is lost."
+            ),
+        )
+
     ops = ops or SubprocessInitOps()
-    ops.git_init(project_path)
-    if project_type in _DVC_INIT_TYPES:
-        ops.dvc_init(project_path)
 
-    if classification is not None and project_type in _DVC_INIT_TYPES:
-        if not bucket:
-            raise InitOpError(
-                "bucket not configured in ~/.mintd/config.yaml; run "
-                "'mintd config setup' first"
-            )
-
+    # Storage identity, and the one reason storage wiring can refuse, are both
+    # knowable before any write -- so they belong here, with the other
+    # refusals. Checked after the render instead, a refusal lands on a user
+    # whose files have already been replaced, which is exactly what the
+    # comment at the top of this block promises does not happen.
+    prefix = remote_name = remote_url = ""
+    existing_remote: str | None = None
+    if storage_bucket:
         prefix = compute_storage_prefix(
             classification=classification,  # type: ignore[arg-type]
-            project_name=project_full_name(project_type, name),
+            project_name=full_name,
             slug=slug,
         )
-        remote_name = project_full_name(project_type, name)
-        remote_url = f"s3://{bucket}/{prefix}"
+        remote_name = full_name
+        remote_url = f"s3://{storage_bucket}/{prefix}"
+        # `dvc init` is skipped when .dvc/ already exists, and that is exactly
+        # when an existing remote of this name can be one mintd never wrote.
+        # Whether it is ours is a question about the remote, not about how
+        # init got here: "crashed here once" and "--force" both say nothing
+        # about who put it there. Its URL does.
+        if (project_path / ".dvc").is_dir():
+            existing_remote = ops.dvc_remote_url(project_path, remote_name)
+        if existing_remote is not None and existing_remote != remote_url:
+            raise InitOpError(
+                f"DVC remote {remote_name!r} already points at "
+                f"{existing_remote}, not {remote_url}. mintd will not repoint "
+                "an existing remote -- pushes would go somewhere you did not "
+                f"choose. If it is stale, `dvc remote remove {remote_name}` "
+                "and rerun; otherwise rename it."
+            )
+
+    try:
+        project_path.mkdir(parents=True, exist_ok=True)
+        # unlink first, same reason as _write_file: the sentinel path is
+        # not a scaffold target, so _escapes never sees it, and
+        # write_text would follow a symlink there and truncate whatever
+        # it points at.
+        sentinel.unlink(missing_ok=True)
+        sentinel.write_text("", encoding="utf-8")
+        written = (
+            []
+            if resuming
+            else render_scaffold(
+                project_type=project_type,
+                name=name,
+                language=language,
+                target_dir=project_path,
+            )
+        )
+    except OSError as exc:
+        # mkdir raises FileExistsError / NotADirectoryError / PermissionError
+        # for a --path that is a regular file or unwritable. cli.py catches
+        # InitOpError, not OSError, so without this the user gets a traceback.
+        raise InitOpError(f"cannot write to {project_path}: {exc}") from exc
+
+    if resuming and reporter is not None:
+        reporter.info(
+            f"resuming interrupted init in {project_path}; configuring storage only"
+        )
+
+    ops.git_init(project_path)
+    # `dvc init` fails outright on an existing .dvc/ (needs -f), which a
+    # resume -- or --use-current-repo into an existing DVC repo -- would hit.
+    # The remote-add rollback rmtree's .dvc/, so a resume after *that*
+    # failure still gets a fresh init, which re-stages .dvc/* as before.
+    dvc_initialized_here = False
+    if project_type in _DVC_INIT_TYPES and not (project_path / ".dvc").is_dir():
+        ops.dvc_init(project_path)
+        dvc_initialized_here = True
+
+    if storage_bucket:
+        # prefix / remote_name / remote_url / existing_remote were all
+        # computed in the preflight, along with the refusal for a remote
+        # pointing somewhere else.
+        if existing_remote is None and not dvc_initialized_here and reporter is not None:
+            # Adding into a .dvc/ mintd did not create: `-d` makes this the
+            # default remote, which is a change to a file the user owns.
+            reporter.warn(
+                f"pointing DVC remote {remote_name!r} at {remote_url} "
+                "in an existing .dvc/config; this becomes the default remote"
+            )
 
         try:
+            # Always call it, even when the remote is already there: only its
+            # first step writes the URL, and the endpointurl / profile /
+            # version_aware steps after it are what a run interrupted
+            # mid-sequence still needs. `exists` skips just the add.
             ops.dvc_remote_add(
                 project_path,
                 name=remote_name,
@@ -145,6 +322,7 @@ def init_project(
                 default=True,
                 endpoint=endpoint,
                 profile=profile,
+                exists=existing_remote is not None,
             )
 
             # Slice 30 defensive raw-dict pop:
@@ -155,12 +333,21 @@ def init_project(
             # pre-existing storage key, then validate. The pop is a
             # no-op in the standard v2 path (templates strip storage
             # entirely) but survives template regressions.
-            raw = json.loads(metadata_path.read_text(encoding="utf-8"))
-            raw.pop("storage", None)
-            metadata = Metadata.model_validate(raw)
+            try:
+                raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+                raw.pop("storage", None)
+                metadata = Metadata.model_validate(raw)
+            except (ValueError, TypeError) as exc:
+                # On the resume path this file is one the user may have edited
+                # between the failed run and the rerun. pydantic's
+                # ValidationError is a ValueError; unmapped it reaches the CLI
+                # as a raw traceback.
+                raise InitOpError(
+                    f"{metadata_path} is not valid mintd metadata: {exc}"
+                ) from exc
             metadata.storage = Storage(
                 provider="s3",
-                bucket=bucket,
+                bucket=storage_bucket,
                 prefix=prefix,
                 endpoint=endpoint or "",
                 versioning=True,
@@ -173,14 +360,30 @@ def init_project(
             )
         except Exception:
             # Rollback boundary: remove .dvc/ on remote-add or patch
-            # failure. metadata.json is left in place (atomic write +
-            # replay-safe; rerunning init re-applies the storage block).
+            # failure. metadata.json is left in place, and so is the
+            # `.mintd-init-incomplete` sentinel -- together they are what
+            # lets the identical `mintd init` command resume and re-apply
+            # just the storage block, instead of refusing on the scaffold
+            # it wrote itself.
             # `dvc init` staged `.dvc/*` in git's index before it failed;
             # unstage those entries too so a subsequent rerun/commit
             # doesn't carry a phantom `.dvc/config` (best-effort, never
             # raises — must not mask the original failure).
-            shutil.rmtree(project_path / ".dvc", ignore_errors=True)
-            ops.git_unstage(project_path, [".dvc"])
+            # ONLY when this call created it. Skipping `dvc init` over a
+            # pre-existing .dvc/ means the rollback can now reach one mintd
+            # never made -- whose config.local (credentials, gitignored) and
+            # cache (unpushed blobs) are not ours to delete and not always
+            # recoverable.
+            if dvc_initialized_here:
+                shutil.rmtree(project_path / ".dvc", ignore_errors=True)
+                ops.git_unstage(project_path, [".dvc"])
+            elif reporter is not None:
+                # Nothing to undo safely, but `dvc remote add -d` has already
+                # repointed core.remote in a config we do not own. Say so.
+                reporter.warn(
+                    f"left {project_path / '.dvc' / 'config'} as-is; "
+                    "mintd may have changed your default remote"
+                )
             raise
 
     # `dvc init` stages `.dvc/config`, and the subsequent
@@ -199,6 +402,19 @@ def init_project(
                 reporter.warn(
                     "could not restage .dvc/config; run: git add .dvc/config"
                 )
+
+    # Last thing, and only on full success: from here the directory is a
+    # finished project, not init's half-finished output. Best-effort for the
+    # same reason as the restage above -- a raw OSError here would escape the
+    # CLI's except clause *after* an otherwise healthy init.
+    try:
+        sentinel.unlink(missing_ok=True)
+    except OSError:
+        if reporter is not None:
+            reporter.warn(
+                f"could not remove {_SENTINEL_NAME}; "
+                "delete it before rerunning init"
+            )
 
     return project_path, written
 

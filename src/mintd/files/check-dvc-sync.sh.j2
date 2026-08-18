@@ -6,6 +6,14 @@
 
 set -euo pipefail
 
+# The repo's very first commit has nothing to compare against: every
+# scaffolded file is "changed" and `dvc repro` has not run, so dvc.lock
+# cannot exist yet. Let the initial commit through; the hook regains its
+# teeth on every commit after it.
+if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+
 {% if language == "stata" %}
 PIPELINE_PATTERNS="{{ source_dir }}/.*\.(py|do)$|configs/.*\.do$|dvc\.yaml$|dvc_vars\.yaml$"
 {% else %}

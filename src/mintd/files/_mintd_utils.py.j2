@@ -35,12 +35,12 @@ def get_data_paths() -> Dict[str, Path]:
         Dict with keys: 'data', 'raw', 'intermediate', 'final', 'analysis'
     """
     return {
-        'data': DATA_DIR,
-        'raw': RAW_DIR,
-        'intermediate': INTERMEDIATE_DIR,
-        'final': FINAL_DIR,
-        'analysis': ANALYSIS_DIR,
-        'logs': LOGS_DIR,
+        "data": DATA_DIR,
+        "raw": RAW_DIR,
+        "intermediate": INTERMEDIATE_DIR,
+        "final": FINAL_DIR,
+        "analysis": ANALYSIS_DIR,
+        "logs": LOGS_DIR,
     }
 
 
@@ -61,7 +61,7 @@ def setup_project_directory() -> Path:
 
     current_dir = Path.cwd()
     # Look for project root indicators
-    root_indicators = ['metadata.json', '.git']
+    root_indicators = ["metadata.json", ".git"]
     # Check if we're in code/ (project indicators in parent directory)
     parent_dir = current_dir.parent
     if any((parent_dir / indicator).exists() for indicator in root_indicators):
@@ -105,9 +105,9 @@ class ParameterAwareLogger:
 
         # Parse command line arguments to get parameters for log filename
         parser = argparse.ArgumentParser(add_help=False)
-        parser.add_argument('--year', '-y')
-        parser.add_argument('--version', '-v')
-        parser.add_argument('--param', '-p')
+        parser.add_argument("--year", "-y")
+        parser.add_argument("--version", "-v")
+        parser.add_argument("--param", "-p")
 
         # Try to parse known args, ignore unknown ones
         try:
@@ -122,14 +122,17 @@ class ParameterAwareLogger:
 
             # Check for positional arguments that might be parameters
             remaining_args = sys.argv[1:]
-            if remaining_args and not remaining_args[0].startswith('-'):
+            if remaining_args and not remaining_args[0].startswith("-"):
                 # First positional argument might be a parameter (like year)
                 param_candidate = remaining_args[0]
                 if param_candidate.isdigit() or len(param_candidate) <= 10:
                     params.append(param_candidate)
 
-            self.params_suffix = '_'.join(params) if params else None
-        except:
+            self.params_suffix = "_".join(params) if params else None
+        # SystemExit too, not just Exception: argparse calls sys.exit() on a
+        # malformed flag, and SystemExit is not an Exception subclass. This
+        # block is best-effort log naming -- it must never kill the script.
+        except (Exception, SystemExit):
             self.params_suffix = None
 
         # Create log filename
@@ -155,7 +158,7 @@ class ParameterAwareLogger:
 
         # Create formatter
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
         file_handler.setFormatter(formatter)
 
@@ -204,7 +207,9 @@ class ParameterAwareLogger:
             self.logger.removeHandler(handler)
 
 
-def generate_data_schema(data_path: Path, output_path: Optional[Path] = None) -> Dict[str, Any]:
+def generate_data_schema(
+    data_path: Path, output_path: Optional[Path] = None
+) -> Dict[str, Any]:
     """Generate JSON schema from data file.
 
     Args:
@@ -218,11 +223,11 @@ def generate_data_schema(data_path: Path, output_path: Optional[Path] = None) ->
 
     try:
         # Read data based on file extension
-        if data_path.suffix.lower() == '.csv':
+        if data_path.suffix.lower() == ".csv":
             df = pd.read_csv(data_path)
-        elif data_path.suffix.lower() == '.json':
+        elif data_path.suffix.lower() == ".json":
             df = pd.read_json(data_path)
-        elif data_path.suffix.lower() in ['.xlsx', '.xls']:
+        elif data_path.suffix.lower() in [".xlsx", ".xls"]:
             df = pd.read_excel(data_path)
         else:
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
@@ -233,49 +238,61 @@ def generate_data_schema(data_path: Path, output_path: Optional[Path] = None) ->
             "filepath": str(data_path),
             "observations": len(df),
             "columns": len(df.columns),
-            "variables": []
+            "variables": [],
         }
 
         for col in df.columns:
             # Basic type detection
             dtype = str(df[col].dtype)
-            if dtype.startswith('int'):
+            if dtype.startswith("int"):
                 var_type = "integer"
-            elif dtype.startswith('float'):
+            elif dtype.startswith("float"):
                 var_type = "numeric"
-            elif dtype == 'object':
+            elif dtype == "object":
                 var_type = "string"
-            elif dtype.startswith('bool'):
+            elif dtype.startswith("bool"):
                 var_type = "boolean"
             else:
                 var_type = dtype
 
             # Generate basic label from column name
-            label = col.replace('_', ' ').replace('-', ' ').title()
+            label = col.replace("_", " ").replace("-", " ").title()
 
             variable_info = {
                 "name": col,
                 "type": var_type,
                 "label": label,
                 "missing_count": int(df[col].isna().sum()),
-                "unique_values": int(df[col].nunique()) if df[col].dtype == 'object' else None
+                "unique_values": int(df[col].nunique())
+                if df[col].dtype == "object"
+                else None,
             }
 
             # Add numeric statistics for numeric columns
             if var_type in ["integer", "numeric"]:
-                variable_info.update({
-                    "min": float(df[col].min()) if not pd.isna(df[col].min()) else None,
-                    "max": float(df[col].max()) if not pd.isna(df[col].max()) else None,
-                    "mean": float(df[col].mean()) if not pd.isna(df[col].mean()) else None,
-                    "std": float(df[col].std()) if not pd.isna(df[col].std()) else None
-                })
+                variable_info.update(
+                    {
+                        "min": float(df[col].min())
+                        if not pd.isna(df[col].min())
+                        else None,
+                        "max": float(df[col].max())
+                        if not pd.isna(df[col].max())
+                        else None,
+                        "mean": float(df[col].mean())
+                        if not pd.isna(df[col].mean())
+                        else None,
+                        "std": float(df[col].std())
+                        if not pd.isna(df[col].std())
+                        else None,
+                    }
+                )
 
             schema["variables"].append(variable_info)
 
         # Save schema if output path provided
         if output_path:
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, 'w') as f:
+            with open(output_path, "w") as f:
                 json.dump(schema, f, indent=2, default=str)
 
         return schema
@@ -295,7 +312,7 @@ def find_data_files(directory: Path, extensions: List[str] = None) -> List[Path]
         List of data file paths
     """
     if extensions is None:
-        extensions = ['.csv', '.json', '.xlsx', '.xls', '.dta', '.rds', '.sav']
+        extensions = [".csv", ".json", ".xlsx", ".xls", ".dta", ".rds", ".sav"]
 
     data_files = []
     for ext in extensions:
