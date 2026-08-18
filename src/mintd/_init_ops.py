@@ -48,7 +48,13 @@ class SubprocessInitOps:
     def git_init(self, target_dir: Path) -> None:
         try:
             result = subprocess.run(
-                ["git", "init"],
+                # `-b main`, not a bare `git init`: `_render.py:235` writes
+                # `"default_branch": "main"` into the metadata.json produced by
+                # this same call, and without `-b` the branch is whatever the
+                # machine's `init.defaultBranch` says -- `master` on a fresh
+                # one. Needs git >= 2.28; an older git exits non-zero into the
+                # InitOpError mapping below, so no silent wrong-branch repo.
+                ["git", "init", "-b", "main"],
                 cwd=target_dir,
                 capture_output=True,
                 text=True,

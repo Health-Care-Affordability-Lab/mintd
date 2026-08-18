@@ -522,6 +522,86 @@ def test_subprocess_git_add_restages_dvc_config_live(tmp_path: Path) -> None:
     assert not after.startswith("AM")
 
 
+def test_subprocess_git_init_lands_on_main_branch_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git init` must produce a repo on `main`, not `master`.
+
+    `_render.py:235` hardcodes `"default_branch": "main"` into the
+    metadata.json written by the same `mintd init` call, so a bare
+    `git init` on a machine without `init.defaultBranch` contradicts the
+    metadata mintd just wrote.
+
+    Both GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM are scrubbed, because a
+    machine with `init.defaultBranch=main` set globally MASKS this entirely
+    -- the test would pass without the fix and prove nothing. They point at
+    an empty file rather than /dev/null so this also runs on windows-test.
+    """
+    import shutil
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+
+    empty = tmp_path / "empty-gitconfig"
+    empty.write_text("", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(empty))
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    SubprocessInitOps().git_init(repo)
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    assert head == "main", f"new repo landed on {head!r}, not 'main'"
+
+
+def test_subprocess_git_init_leaves_an_existing_branch_alone_live(
+    tmp_path: Path,
+) -> None:
+    """Re-running init over an existing repo must not rename its branch.
+
+    `git init -b main` on an already-initialized repo prints
+    `warning: re-init: ignored --initial-branch=main` and exits 0. So
+    `--use-current-repo` into a repo already on `master` keeps `master`,
+    even though metadata records `main`. That is correct -- mintd must not
+    rename someone's branch -- and is pinned here so it is not "fixed" later
+    as a bug.
+    """
+    import shutil
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "-b", "master", "."],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    SubprocessInitOps().git_init(repo)
+    head = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == "master"
+
+
 # ---------------------------------------------------------------------------
 # Slice 30 — _prompt_classification (interactive prompt)
 # ---------------------------------------------------------------------------
