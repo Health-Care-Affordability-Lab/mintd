@@ -212,13 +212,23 @@ def _render_metadata_json(context: dict[str, object]) -> str:
     created_at = str(context["created_at"])
     created_by = str(context["created_by"]) or "unknown"
     mint_version = str(context.get("mint_version") or "0.0.0")
+    full_name = project_full_name(project_type, name)
+    # Derived from the same full_name written to project.full_name below, so
+    # the URL can never disagree with the project it names. Without an org
+    # there is nothing to derive: empty beats "https://github.com//<name>",
+    # which check accepts and every consumer clone then fails on. The check
+    # gate is what catches the empty case; this only stops new rot.
+    registry_org = str(context.get("registry_org") or "").strip()
+    github_url = (
+        f"https://github.com/{registry_org}/{full_name}" if registry_org else ""
+    )
     data = {
         "schema_version": "2.0",
         "mint": {"version": mint_version, "commit_hash": ""},
         "project": {
             "type": project_type,
             "name": name,
-            "full_name": project_full_name(project_type, name),
+            "full_name": full_name,
             "created_at": created_at,
             "created_by": created_by,
         },
@@ -231,7 +241,7 @@ def _render_metadata_json(context: dict[str, object]) -> str:
         },
         "data_products": {"primary": None, "outputs": []},
         "repository": {
-            "github_url": "",
+            "github_url": github_url,
             "default_branch": "main",
             "visibility": "private",
             "mirror": {
