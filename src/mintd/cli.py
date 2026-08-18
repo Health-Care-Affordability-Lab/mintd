@@ -332,6 +332,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_init.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Overwrite existing files that collide with the scaffold. Without "
+            "this, init refuses and names every colliding file."
+        ),
+    )
+    p_init.add_argument(
         "--lang",
         choices=["python", "r", "stata"],
         default="python",
@@ -806,6 +814,7 @@ def _handle_init(args: argparse.Namespace) -> int:
             target_dir=args.path,
             language=args.lang,
             use_current_repo=args.use_current_repo,
+            force=args.force,
             classification=classification,
             slug=slug,
             bucket=bucket,
@@ -814,7 +823,8 @@ def _handle_init(args: argparse.Namespace) -> int:
             reporter=reporter,
         )
     except (InitDestinationExists, InitNameInvalid, InitOpError) as exc:
-        reporter.error(str(exc))
+        # getattr: only InitDestinationExists carries a hint.
+        reporter.error(str(exc), hint=getattr(exc, "hint", None))
         return 1
     # Render paths relative to cwd when possible so the user sees the subdir.
     cwd = Path.cwd().resolve()

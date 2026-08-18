@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from mintd._templates import render_scaffold
+from mintd._templates import render_scaffold, scaffold_targets
 from mintd._templates._render import project_full_name
 from mintd._templates.scaffolds import dispatch
 from mintd.cli import _build_parser
@@ -432,3 +432,22 @@ def test_c8_scaffold_ruff_pin_matches_installed(rendered_matrix: dict) -> None:
         "  4. uv lock\n"
         "Otherwise a fresh scaffold fails its own first commit again."
     )
+
+
+# --- C6 — the collision guard sees exactly what the renderer writes -------
+
+@pytest.mark.parametrize(("ptype", "lang"), _COMBOS)
+def test_c6_scaffold_targets_match_renderer(
+    rendered_matrix: dict, ptype: str, lang: str
+) -> None:
+    """``scaffold_targets`` is what ``init`` refuses to overwrite, so it must
+    equal what ``render_scaffold`` actually writes -- in the same order.
+
+    If these drift, init either refuses on a file it would not have written
+    (a false refusal the user cannot clear) or silently overwrites one it
+    would (the defect the guard exists to stop).
+    """
+    tree = rendered_matrix[(ptype, lang)]
+    assert scaffold_targets(
+        project_type=ptype, name="foo", language=lang
+    ) == list(tree.files)

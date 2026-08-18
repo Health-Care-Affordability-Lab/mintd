@@ -101,6 +101,177 @@ def test_init_existing_metadata_raises(tmp_path: Path) -> None:
     assert fake.dvc_calls == []
 
 
+def test_init_refuses_to_overwrite_scaffold_files(tmp_path: Path) -> None:
+    """Files the user wrote by hand are not the scaffold's to replace.
+
+    At HEAD the only guarded path was metadata.json, so a hand-written
+    README.md was silently replaced and printed back as `created:`.
+    """
+    project_path = tmp_path / "data_my_proj"
+    project_path.mkdir()
+    (project_path / "README.md").write_text("MY NOTES\n", encoding="utf-8")
+    (project_path / ".gitignore").write_text("*.secret\n", encoding="utf-8")
+
+    fake = _FakeInitOps()
+    with pytest.raises(InitDestinationExists) as excinfo:
+        init_project(
+            project_type="data", name="my_proj", target_dir=tmp_path, ops=fake
+        )
+
+    msg = str(excinfo.value)
+    assert "README.md" in msg and ".gitignore" in msg
+    assert (project_path / "README.md").read_text(encoding="utf-8") == "MY NOTES\n"
+    assert (project_path / ".gitignore").read_text(encoding="utf-8") == "*.secret\n"
+    assert fake.git_calls == []
+    assert fake.dvc_calls == []
+
+
+def test_init_use_current_repo_tolerates_non_scaffold_files(tmp_path: Path) -> None:
+    """The negative control: refusing on *any* file would break the flow
+    `--use-current-repo` exists for. Only scaffold-owned paths collide."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    (tmp_path / "notes.txt").write_text("keep me\n", encoding="utf-8")
+
+    fake = _FakeInitOps()
+    project_path, written = init_project(
+        project_type="data",
+        name="my_proj",
+        target_dir=tmp_path,
+        use_current_repo=True,
+        ops=fake,
+    )
+
+    assert (project_path / "metadata.json").exists()
+    assert written
+    assert (tmp_path / "LICENSE").read_text(encoding="utf-8") == "MIT\n"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_init_force_overwrites_colliding_files(tmp_path: Path) -> None:
+    """`--force` is the documented escape hatch and must actually overwrite."""
+    project_path = tmp_path / "data_my_proj"
+    project_path.mkdir()
+    (project_path / "README.md").write_text("MY NOTES\n", encoding="utf-8")
+
+    fake = _FakeInitOps()
+    init_project(
+        project_type="data",
+        name="my_proj",
+        target_dir=tmp_path,
+        force=True,
+        ops=fake,
+    )
+    assert (project_path / "README.md").read_text(encoding="utf-8") != "MY NOTES\n"
+
+
+def test_init_refuses_to_write_outside_the_project_through_a_symlink(
+    tmp_path: Path,
+) -> None:
+    """Not even --force may follow a link out of the project.
+
+    --force authorizes overwriting files in THIS project. A symlinked leaf
+    (README.md -> ../shared/TEAM-README.md) is caught by os.path.lexists;
+    the escape check is what makes the refusal hold under --force too.
+    """
+    outside = tmp_path / "shared"
+    outside.mkdir()
+    team_doc = outside / "TEAM-README.md"
+    team_doc.write_text("TEAM DOC\n", encoding="utf-8")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "README.md").symlink_to(team_doc)
+
+    for force in (False, True):
+        with pytest.raises(InitDestinationExists):
+            init_project(
+                project_type="data",
+                name="cohort",
+                target_dir=work,
+                use_current_repo=True,
+                force=force,
+                ops=_FakeInitOps(),
+            )
+    assert team_doc.read_text(encoding="utf-8") == "TEAM DOC\n"
+
+
+def test_init_refuses_a_symlinked_scaffold_directory(tmp_path: Path) -> None:
+    """The parent-directory case os.path.lexists cannot see.
+
+    mkdir is satisfied by the link and write_text follows it, so a leaf-only
+    guard would let init write a whole scaffold outside the project.
+    """
+    shared_code = tmp_path / "shared_code"
+    shared_code.mkdir()
+    team_utils = shared_code / "_mintd_utils.py"
+    team_utils.write_text("TEAM UTILS\n", encoding="utf-8")
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "code").symlink_to(shared_code, target_is_directory=True)
+
+    with pytest.raises(InitDestinationExists, match="outside"):
+        init_project(
+            project_type="data",
+            name="cohort",
+            target_dir=work,
+            use_current_repo=True,
+            force=True,
+            ops=_FakeInitOps(),
+        )
+    assert team_utils.read_text(encoding="utf-8") == "TEAM UTILS\n"
+    assert list(shared_code.iterdir()) == [team_utils]
+
+
+def test_init_code_type_ignores_a_readme(tmp_path: Path) -> None:
+    """A code scaffold writes metadata.json and nothing else, so a README in
+    the target is not a collision for it."""
+    project_path = tmp_path / "my_proj"
+    project_path.mkdir()
+    (project_path / "README.md").write_text("MY NOTES\n", encoding="utf-8")
+
+    fake = _FakeInitOps()
+    init_project(
+        project_type="code", name="my_proj", target_dir=tmp_path, ops=fake
+    )
+    assert (project_path / "README.md").read_text(encoding="utf-8") == "MY NOTES\n"
+    assert (project_path / "metadata.json").exists()
+
+
+def test_init_missing_bucket_writes_nothing(tmp_path: Path) -> None:
+    """The likeliest first-run failure must leave no half-made project.
+
+    At HEAD this raised after the scaffold, `git init` and `dvc init` had
+    run, and *outside* the rollback boundary -- so metadata.json and .dvc/
+    survived and the rerun wedged on the destination guard.
+    """
+    fake = _FakeInitOps()
+    with pytest.raises(InitOpError, match="bucket not configured"):
+        init_project(
+            project_type="data",
+            name="my_proj",
+            target_dir=tmp_path,
+            classification="labonly",
+            bucket=None,
+            endpoint="",
+            ops=fake,
+        )
+    assert not (tmp_path / "data_my_proj").exists()
+    assert fake.git_calls == []
+    assert fake.dvc_calls == []
+
+
+def test_init_invalid_name_leaves_no_directory(tmp_path: Path) -> None:
+    """Validation runs before mkdir, so a bad name leaves no stray dir."""
+    fake = _FakeInitOps()
+    with pytest.raises(InitNameInvalid):
+        init_project(
+            project_type="data", name="-bad", target_dir=tmp_path, ops=fake
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_init_creates_target_dir_if_missing(tmp_path: Path) -> None:
     target_dir = tmp_path / "new" / "nested"
     fake = _FakeInitOps()

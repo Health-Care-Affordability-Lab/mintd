@@ -1542,6 +1542,52 @@ def test_init_existing_metadata_exits_one(
     assert "error:" in err
 
 
+def test_init_refuses_to_overwrite_and_force_overrides(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    """Refusal names the problem and the way out; --force takes it."""
+    (tmp_path / "README.md").write_text("MY NOTES\n", encoding="utf-8")
+    argv = [
+        "init", "data", "my_proj",
+        "--path", str(tmp_path),
+        "--use-current-repo",
+    ]
+
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "hint:" in err
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == "MY NOTES\n"
+
+    assert cli.main([*argv, "--force"]) == 0
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") != "MY NOTES\n"
+
+
+def test_init_path_is_a_regular_file_exits_one_without_traceback(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_init_ops,
+) -> None:
+    """A --path that is a regular file is user error, not a crash.
+
+    At HEAD `mkdir` raised NotADirectoryError straight through cli.py's
+    except clause, which catches only InitDestinationExists / InitNameInvalid
+    / InitOpError -- so the user got a raw traceback.
+    """
+    afile = tmp_path / "afile"
+    afile.write_text("not a dir\n", encoding="utf-8")
+
+    rc = cli.main(["init", "data", "my_proj", "--path", str(afile)])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "error:" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+
+
 def test_init_rejects_invalid_lang(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -12,6 +12,7 @@ from ._render import (
     project_full_name,
     render_scaffold,
     render_template,
+    scaffold_targets,
     validate_project_name,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "project_full_name",
     "render_scaffold",
     "render_template",
+    "scaffold_targets",
     "validate_project_name",
 ]
