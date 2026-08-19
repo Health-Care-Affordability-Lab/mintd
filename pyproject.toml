@@ -55,6 +55,18 @@ pythonpath = ["src", "."]
 markers = [
     "integration: requires MINTD_RUN_INTEGRATION=1 and real git",
 ]
+# One clean run leaves ~179 MB under the pytest tmp root, dominated by
+# `test_import_rescue`'s 10 MiB multipart fixture across 8 tests (each landing
+# in the workspace and again in `.dvc/cache`). Retaining the default 3 sessions
+# of that is ~0.5 GB of temp files nobody reads.
+#
+# `failed` keeps the directories for failing tests, which is the case you
+# actually need on disk; passing tests' dirs go at session end. To inspect a
+# PASSING test's tmp_path, override on the command line -- note that
+# `--basetemp` alone does NOT defeat this, the policy still applies:
+#     pytest -o tmp_path_retention_policy=all --basetemp=/tmp/x tests/foo.py
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 
 [tool.ruff]
 line-length = 120

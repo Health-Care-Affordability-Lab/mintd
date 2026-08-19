@@ -50,8 +50,14 @@ def test_try_fsync_parent_dir_closes_fd_on_fsync_failure(
     real_open = _atomic.os.open
     real_close = _atomic.os.close
 
-    def _wrap_open(path: str, flags: int) -> int:
-        fd = real_open(path, flags)
+    def _wrap_open(*args, **kwargs) -> int:
+        # Widest possible signature on purpose. `_atomic.os` IS the global `os`
+        # module, so this patch is process-wide while the test runs — and
+        # anything else that opens a file during that window comes through
+        # here. A stub narrower than the real function turns an unrelated
+        # caller's valid call into a TypeError; `shutil.rmtree` uses
+        # `os.open(..., dir_fd=...)`, which a `(path, flags)` stub rejects.
+        fd = real_open(*args, **kwargs)
         opened.append(fd)
         return fd
 
@@ -106,8 +112,14 @@ def test_try_fsync_file_closes_fd_on_fsync_failure(
     real_open = _atomic.os.open
     real_close = _atomic.os.close
 
-    def _wrap_open(path: str, flags: int) -> int:
-        fd = real_open(path, flags)
+    def _wrap_open(*args, **kwargs) -> int:
+        # Widest possible signature on purpose. `_atomic.os` IS the global `os`
+        # module, so this patch is process-wide while the test runs — and
+        # anything else that opens a file during that window comes through
+        # here. A stub narrower than the real function turns an unrelated
+        # caller's valid call into a TypeError; `shutil.rmtree` uses
+        # `os.open(..., dir_fd=...)`, which a `(path, flags)` stub rejects.
+        fd = real_open(*args, **kwargs)
         opened.append(fd)
         return fd
 
