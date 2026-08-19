@@ -2626,8 +2626,18 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
 
 
 def test_no_handler_calls_sys_stderr_directly() -> None:
-    """Meta-test: every `print(..., file=sys.stderr)` in cli.py is inside the
-    documented allowlist. Pins the slice-38a print→reporter migration.
+    """Meta-test: the set of functions in cli.py that call
+    `print(..., file=sys.stderr)`, asserted by set equality. Pins the
+    slice-38a print→reporter migration. Set equality, not `offenders == []`,
+    so the literal can only shrink: a name that stops writing to stderr must
+    be removed from it, and a seventh `file=sys.stderr` writer must be added
+    deliberately.
+
+    SCOPE HOLE, stated deliberately: the matcher reads `file=` keywords only.
+    `sys.stderr.write(...)`, and the positional form already in-tree at
+    `cli.py:198` (`self.print_usage(sys.stderr)`), are invisible to it. That
+    one is inert — its enclosing `error` is allowlisted anyway — but a new
+    handler using either form would not redden this test.
 
     Allowlist rationale:
       - error: argparse framework override (not a handler).
@@ -2648,7 +2658,7 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
         "error", "_handle_data_pull", "_handle_config_show",
         "_handle_config_setup", "_handle_update_metadata", "_render_bump_blocked",
     }
-    offenders: list[str] = []
+    writers: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -2670,9 +2680,12 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
             if isinstance(cur, ast.FunctionDef):
                 fn_name = cur.name
                 break
-        if fn_name not in allowlist:
-            offenders.append(fn_name or "<module>")
-    assert offenders == [], f"unexpected sys.stderr writers: {offenders}"
+        writers.add(fn_name or "<module>")
+
+    assert writers == allowlist, (
+        f"unexpected sys.stderr writers: {sorted(writers - allowlist)}; "
+        f"stale allowlist entries: {sorted(allowlist - writers)}"
+    )
 
 
 # ---------------------------------------------------------------------------
