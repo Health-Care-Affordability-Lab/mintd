@@ -9,7 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Protocol
-from ._dvc_invoke import dvc_cmd
+from ._dvc_invoke import dvc_cmd, dvc_env
 
 
 class InitOpError(Exception):
@@ -144,6 +144,7 @@ class SubprocessInitOps:
             result = subprocess.run(
                 [*dvc_cmd(), "init"],
                 cwd=target_dir,
+                env=dvc_env(),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
@@ -165,6 +166,7 @@ class SubprocessInitOps:
         result = subprocess.run(
             [*dvc_cmd(), "config", "cache.type", "reflink,hardlink,symlink,copy"],
             cwd=target_dir,
+            env=dvc_env(),
             capture_output=True,
             text=True,
             timeout=self._timeout,
@@ -191,6 +193,7 @@ class SubprocessInitOps:
             result = subprocess.run(
                 [*dvc_cmd(), "config", "--project", f"remote.{name}.url"],
                 cwd=target_dir,
+                env=dvc_env(),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
@@ -238,6 +241,7 @@ class SubprocessInitOps:
                 result = subprocess.run(
                     cmd,
                     cwd=target_dir,
+                    env=dvc_env(),
                     capture_output=True,
                     text=True,
                     timeout=self._timeout,
@@ -253,6 +257,7 @@ class SubprocessInitOps:
             result = subprocess.run(
                 [*dvc_cmd(), "remote", "modify", name, "endpointurl", endpoint],
                 cwd=target_dir,
+                env=dvc_env(),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
@@ -266,6 +271,7 @@ class SubprocessInitOps:
             result = subprocess.run(
                 [*dvc_cmd(), "remote", "modify", name, "profile", profile],
                 cwd=target_dir,
+                env=dvc_env(),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
@@ -278,6 +284,7 @@ class SubprocessInitOps:
         result = subprocess.run(
             [*dvc_cmd(), "remote", "modify", name, "version_aware", "true"],
             cwd=target_dir,
+            env=dvc_env(),
             capture_output=True,
             text=True,
             timeout=self._timeout,

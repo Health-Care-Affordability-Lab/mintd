@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from mintd._producer_git_ops import FetchError, GitArchiveFetcher
+from tests._harness.git import _git
 
 pytestmark = [
     pytest.mark.integration,
@@ -21,16 +22,6 @@ pytestmark = [
         reason="set MINTD_RUN_INTEGRATION=1 to run",
     ),
 ]
-
-
-def _git(args: list[str], cwd: Path | None = None) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
 
 
 def _init_producer_bare_repo(tmp_path: Path) -> tuple[Path, str]:

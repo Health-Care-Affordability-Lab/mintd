@@ -481,3 +481,107 @@ def test_translate_storage_key_error_ignores_other_stderr(tmp_path: Path) -> Non
         "ERROR: unexpected error - (1, 2)",
         op="pull", exit_code=255, cwd=tmp_path,
     ) is None
+
+
+# ---------------------------------------------------------------------------
+# dvc telemetry opt-out
+# ---------------------------------------------------------------------------
+
+
+def test_dvc_env_carries_the_analytics_opt_out() -> None:
+    """`dvc_env()` disables dvc's telemetry.
+
+    dvc ships analytics on by default: left alone it writes a persistent
+    machine id under ``$HOME`` and POSTs a report from a detached daemon on
+    every spawn, and under CI that report carries the org name and acting
+    account rather than an anonymous id. mintd scaffolds enclave and lab-only
+    projects, so an unannounced outbound request on project creation is a
+    governance question, not a default to inherit.
+
+    Mutation that must redden this: drop the ``DVC_NO_ANALYTICS`` line from
+    ``src/mintd/_dvc_invoke.py``.
+    """
+    from mintd._dvc_invoke import dvc_env
+
+    assert dvc_env()["DVC_NO_ANALYTICS"] == "1"
+
+
+def test_subprocess_dvc_ops_env_carries_the_opt_out_with_and_without_a_profile() -> None:
+    """`_env()` used to return ``None`` — "inherit the parent env" — whenever no
+    AWS profile was configured, which also inherited dvc's telemetry default.
+    Both arms must now carry the opt-out."""
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+
+    plain = SubprocessDvcOps(timeouts=Timeouts())._env()
+    profiled = SubprocessDvcOps(timeouts=Timeouts(), aws_profile_name="mintd")._env()
+
+    assert plain["DVC_NO_ANALYTICS"] == "1"
+    assert profiled["DVC_NO_ANALYTICS"] == "1"
+    assert profiled["AWS_PROFILE"] == "mintd"
+
+
+def test_every_function_that_spawns_dvc_passes_an_explicit_env() -> None:
+    """No dvc spawn in `src/mintd/` may inherit the ambient environment.
+
+    `dvc_env()` is only an opt-out for the call sites that pass it, so the
+    invariant that matters is not "the helper exists" but "nothing spawns dvc
+    without it". Scanned per *function*, because the argv is sometimes built
+    into a local (`cmd = [*dvc_cmd(), "push"]`) and handed to `run_streaming`
+    a few lines later — both halves live in one function body.
+
+    Mutations that must redden this: delete `env=dvc_env()` from any
+    `subprocess.run` in `_init_ops.py` or `_fast_sync_ops.py`; delete
+    `env=self._env()` from any `run_streaming` in `_dvc_ops.py`; or weaken any
+    of them to `env=None`, which is an `env` keyword and still inherits.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src" / "mintd"
+    spawners = {"run", "Popen", "run_streaming"}
+    offenders: list[str] = []
+    checked = 0
+
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.dump(fn)
+            if "'dvc_cmd'" not in body:
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None)
+                )
+                if name not in spawners:
+                    continue
+                checked += 1
+                env_kw = next((k for k in node.keywords if k.arg == "env"), None)
+                if env_kw is None:
+                    offenders.append(f"{path.name}:{node.lineno} in {fn.name}() — no env=")
+                    continue
+                # Presence is not enough: `env=None` *is* an `env` keyword and
+                # means "inherit", which is exactly the semantics this change
+                # removed from `_dvc_ops._env()` and so the realistic
+                # regression. Only a call to `dvc_env()` / `self._env()` counts.
+                value = env_kw.value
+                builder = None
+                if isinstance(value, ast.Call):
+                    builder = (
+                        value.func.attr
+                        if isinstance(value.func, ast.Attribute)
+                        else getattr(value.func, "id", None)
+                    )
+                if builder not in {"dvc_env", "_env"}:
+                    offenders.append(
+                        f"{path.name}:{node.lineno} in {fn.name}() — env={ast.unparse(value)}"
+                    )
+
+    assert offenders == [], f"dvc spawned with an inherited env: {offenders}"
+    # Guard the scanner itself: a matcher that finds nothing passes vacuously.
+    assert checked == 16, f"dvc spawn sites moved: {checked}"

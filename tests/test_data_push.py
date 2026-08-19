@@ -27,10 +27,6 @@ def push_clients(monkeypatch: pytest.MonkeyPatch) -> _FakeDvcOps:
         "mintd.cli.Config.load", classmethod(lambda cls, path=None: cls())
     )
     monkeypatch.setattr(
-        "mintd.cli._resolve_clients",
-        lambda cfg, reporter=None, **_: (None, dvc_ops),
-    )
-    monkeypatch.setattr(
         "mintd.cli._resolve_dvc_ops",
         lambda cfg, reporter=None, **_: dvc_ops,
     )

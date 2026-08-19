@@ -37,6 +37,7 @@ from mintd.model import Metadata
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
+from tests._harness.git import _git
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V1_REAL_WORLD = FIXTURES / "metadata_v1_real_world.json"
@@ -79,17 +80,13 @@ def _drain(capsys) -> str:
     return captured.out + captured.err
 
 
-def _git(args: list[str], cwd: Path) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=test@mintd", "-c", "user.name=test", *args],
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-
-def _write_config(config_dir: Path, *, registry_url: str | None, cache_dir: Path) -> None:
+def _write_config(
+    config_dir: Path,
+    *,
+    registry_url: str | None,
+    cache_dir: Path,
+    registry_org: str | None = None,
+) -> None:
     """A real config.yaml under MINTD_CONFIG_DIR — `Config.load` is never patched,
     so 'no registry_url configured' is a fact about the file, not about a stub."""
     lines = [
@@ -100,6 +97,8 @@ def _write_config(config_dir: Path, *, registry_url: str | None, cache_dir: Path
     ]
     if registry_url is not None:
         lines.append(f"registry_url: {registry_url}")
+    if registry_org is not None:
+        lines.append(f"registry_org: {registry_org}")
     (config_dir / "config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -190,7 +189,7 @@ def journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_emp
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: dvc_ops)
     monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, reporter=None, **_: git_ops)
-    # `_resolve_catalog_client` and `_resolve_clients` are left alone on purpose.
+    # `_resolve_catalog_client` is left alone on purpose.
     # Stubbing either replaces the `registry_url` guard that issue30 is about, and
     # the `data add` leg below then passes whether or not that fix is present —
     # verified: with the guard restored to `data add`, a stubbed resolver keeps
@@ -307,3 +306,167 @@ def test_local_loop_never_destroys_a_file_mintd_did_not_create(
     final = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
     assert final["ownership"]["slack"] == SLACK
     assert final["metadata"]["doi"] == DOI
+
+
+# ---------------------------------------------------------------------------
+# The scaffold lane (rule 3a)
+#
+# Everything above seeds by migrating the v1 fixture, and the file's own
+# docstring makes that a rule — so nothing here has ever walked a project
+# `mintd init` produced. That is the only lane reaching the two blockers PRs
+# #26 and #27 fixed, and both were shipped without a journey that crosses them.
+# ---------------------------------------------------------------------------
+
+SCAFFOLD_ORG = "example-org"
+
+
+@pytest.fixture
+def scaffolded_journey(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_empty: Path
+) -> Path:
+    """A project as `mintd init` leaves it, then filled in the way a researcher
+    fills one in.
+
+    Returns `(project_path, dvc_spawn_envs)`.
+
+    `init_project` is called directly rather than through
+    `cli.main(["init", …])`. That path prompts for a storage classification and
+    raises `InitNonInteractive` off a TTY — verified, it exits 1 with "init is
+    interactive; run from a terminal" — and the only way past it is
+    `monkeypatch.setattr("mintd.init._prompt_classification", …)`, which is a
+    `BANNED_TARGETS` entry and shrink-only. What this lane is *about* lives in
+    `render_scaffold`, which this reaches; argparse coverage of the verb is
+    `tests/test_cli.py:1486`'s job.
+
+    Ops are real: a fake `InitOps` records `dvc init` instead of performing it,
+    which leaves no `.dvc/config` and makes `check` report storage drift for a
+    reason no researcher would ever see. HOME and the dvc site cache are
+    redirected under `tmp_path` so the real binaries stay off the developer's
+    machine.
+    """
+    from mintd.init import init_project
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("DVC_SITE_CACHE_DIR", str(tmp_path / "dvc-site"))
+    # DVC_NO_ANALYTICS is deliberately NOT set here. Production passes it via
+    # `dvc_env()`, and the telemetry assertion in the test below is what proves
+    # that — setting it in the fixture would make the assertion measure the
+    # fixture instead of `SubprocessInitOps`.
+    (tmp_path / "home").mkdir()
+
+    _write_config(
+        config_dir,
+        registry_url=str(remote_registry_empty),
+        cache_dir=tmp_path / "cache",
+        registry_org=SCAFFOLD_ORG,
+    )
+
+    git_ops = _FakeRegistryGitOps()
+    monkeypatch.setattr(
+        "mintd.cli.GitCatalogClient",
+        lambda **kw: GitCatalogClient(**kw, git_ops=git_ops),
+    )
+    monkeypatch.setattr(
+        "mintd.cli._resolve_git_ops", lambda cfg, reporter=None, **_: git_ops
+    )
+
+    # Observe what `SubprocessInitOps` actually hands each dvc spawn. A
+    # pass-through spy on the process boundary, not a stub: dvc still runs.
+    dvc_spawn_envs: list[dict[str, str]] = []
+    real_run = subprocess.run
+
+    def _record_dvc_spawns(argv, *a, **kw):
+        if isinstance(argv, list) and any("dvc" in str(x) for x in argv[:3]):
+            dvc_spawn_envs.append(dict(kw.get("env") or {}))
+        return real_run(argv, *a, **kw)
+
+    monkeypatch.setattr("mintd._init_ops.subprocess.run", _record_dvc_spawns)
+
+    proj, _ = init_project(
+        project_type="data",
+        name="scaffolded",
+        target_dir=tmp_path,
+        classification="labonly",
+        bucket="test-bucket",
+        endpoint="https://s3",
+    )
+
+    # The one field the scaffold deliberately leaves for the researcher.
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["data_products"] = {
+        "primary": "data/final/",
+        "outputs": [
+            {
+                "path": "data/final/",
+                "description": "analysis-ready dataset",
+                "primary": True,
+                "last_published": "",
+            }
+        ],
+    }
+    (proj / "metadata.json").write_text(
+        json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+    )
+    return proj, dvc_spawn_envs
+
+
+def test_scaffolded_project_checks_and_publishes_clean(
+    scaffolded_journey, capsys
+) -> None:
+    """A scaffold that a researcher filled in passes both gates.
+
+    PR #26 gave the scaffold a derived `repository.github_url` and made an
+    empty one an *error*; PR #27 stamped a publishable `mint.version`. Both
+    are load-bearing here: without either, one of these two calls returns 1.
+    """
+    proj, dvc_spawn_envs = scaffolded_journey
+
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["repository"]["github_url"] == (
+        f"https://github.com/{SCAFFOLD_ORG}/data_scaffolded"
+    )
+    assert meta["mint"]["version"]
+
+    assert cli.main(["check", str(proj)]) == 0, _drain(capsys)
+    assert cli.main(["publish", "--path", str(proj), "--dry-run"]) == 0, _drain(capsys)
+
+    # Every dvc spawn `SubprocessInitOps` made carried the telemetry opt-out.
+    #
+    # Asserted on the env at the syscall boundary rather than on the absence of
+    # dvc's telemetry id file. That file is written by a *detached* daemon
+    # ~0.3s after dvc exits, so an absence check races it and fails in the
+    # silent direction — a slow CI runner means telemetry is on and the test
+    # is green — and on Windows the file lands under %LOCALAPPDATA%, outside
+    # the redirected HOME, so the check would no-op entirely.
+    assert dvc_spawn_envs, "no dvc spawn observed — this stopped testing real init ops"
+    assert all(e.get("DVC_NO_ANALYTICS") == "1" for e in dvc_spawn_envs), [
+        e.get("DVC_NO_ANALYTICS") for e in dvc_spawn_envs
+    ]
+
+
+def test_scaffolded_project_with_an_emptied_github_url_fails_check(
+    scaffolded_journey, capsys
+) -> None:
+    """The red twin. Every other `cli.main` assertion in this file is `== 0`,
+    so no verb here has ever had a failing arm — which is what leaves a green
+    journey unable to distinguish "the gate passed" from "the gate is inert".
+
+    Emptying the field is the state PR #26 found in four live catalog entries,
+    reached from the opposite direction: a human editing metadata.json after
+    the scaffold derived it correctly.
+    """
+    proj, _ = scaffolded_journey
+    path = proj / "metadata.json"
+    meta = json.loads(path.read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = ""
+    path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    assert cli.main(["check", str(proj)]) == 1
+
+    out = _drain(capsys)
+    assert "repository.github_url is not set" in out
+    # publish must refuse for the same reason, or `check` is advisory.
+    assert cli.main(["publish", "--path", str(proj), "--dry-run"]) == 1

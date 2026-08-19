@@ -41,7 +41,10 @@ _BOUNDARY_SUFFIXES = (
 
 # BANNED: internal mintd functions and module attributes stubbed out
 # wholesale (``_fast_sync_ops.boto3`` is the one attribute). 132 sites / 28
-# targets at 70a7a9e. Shrink-only.
+# targets at 70a7a9e, unmoved since. Shrink-only. The running totals for the
+# WHOLE census (banned + permitted) live in
+# ``test_the_checked_in_literal_matches_a_fresh_scan``, not here — a count
+# repeated in a comment is a count that rots, which is this file's own thesis.
 BANNED_TARGETS: dict[str, int] = {
     "mintd._config.Config.load": 1,
     "mintd._fast_sync_ops._check_dvc": 16,
@@ -80,19 +83,19 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
     "mintd.cli._resolve_catalog_client": 6,
-    "mintd.cli._resolve_clients": 4,
     "mintd.cli._resolve_dvc_ops": 4,
     "mintd.cli._resolve_fast_sync_ops": 6,
-    "mintd.cli._resolve_git_ops": 8,
+    "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 5,
+    "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.time.sleep": 9,
     "mintd._producer_git_ops.subprocess.run": 6,
     "mintd._share_ops._create_s3_client": 2,
     "mintd._templates._render.importlib.metadata.version": 1,
-    "mintd.cli.GitCatalogClient": 1,
+    "mintd.cli.GitCatalogClient": 2,
     "mintd.cli.SubprocessDvcOps": 2,
     "mintd.init.SubprocessInitOps": 1,
     "mintd.producer.os.replace": 1,
@@ -188,8 +191,52 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
     assert sum(banned.values()) == 132
 
 
+def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
+    """``cli._resolve_clients`` is gone (DECIDED 2026-08-18, user).
+
+    It bundled two collaborators behind one name, so a test that wanted a fake
+    catalog got a fake DvcOps for free and vice versa. Its three handlers now
+    name the two factories directly.
+
+    What made the four patch sites safe to drop is the **handler set**, not —
+    as an earlier draft of this docstring claimed — that each already patched
+    both factories beside it. Two of the four did not: ``test_data_push.py:30``
+    patched ``_resolve_dvc_ops`` but never ``_resolve_catalog_client``, and
+    ``test_cli.py:3338`` patched ``_resolve_catalog_client`` but never
+    ``_resolve_dvc_ops``. They are safe because ``_handle_data_push``
+    (``cli.py:926``) and ``_handle_data_verify`` (``:1344``) resolve only dvc
+    ops, and ``_handle_check`` (``:753``) resolves only the catalog client — so
+    neither module ever reaches the factory it left unpatched. Stated wrongly,
+    that precondition reads as a general licence to drop a wrapper patch on a
+    handler that really does resolve both.
+
+    Pairs with rule 1's ratchet. Rule 1 permits any ``mintd.cli._resolve_*``
+    target by prefix, so this deletion could have been made to *look* free by
+    relabelling it into the other bucket; instead the name is gone from
+    production, from both literals, and from every patch site — a real shrink,
+    -4 sites / -1 target off a census of 194 / 47. ``BANNED_TARGETS`` stays at
+    132 / 28 and must not move here. The running totals live in
+    ``test_the_checked_in_literal_matches_a_fresh_scan``, not here, so an
+    unrelated permitted patch added in the same slice cannot masquerade as
+    this deletion failing.
+
+    Mutation that must redden this: reintroduce ``_resolve_clients`` in
+    ``src/mintd/cli.py``, or patch that name from any test.
+    """
+    assert "_resolve_clients" not in (
+        REPO_ROOT / "src" / "mintd" / "cli.py"
+    ).read_text(encoding="utf-8")
+
+    assert "mintd.cli._resolve_clients" not in _scan_double_targets()
+
+    assert "mintd.cli._resolve_clients" not in PERMITTED_TARGETS
+    assert "mintd.cli._resolve_clients" not in BANNED_TARGETS
+    assert sum(BANNED_TARGETS.values()) == 132
+    assert len(BANNED_TARGETS) == 28
+
+
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (194 sites / 47 targets), not
+    """The literals above are the *whole* census (193 sites / 47 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -200,14 +247,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (194 → 193), or drop ``patch`` (194 → 164).
+    ``monkeypatch``-receiver calls (193 → 192), or drop ``patch`` (193 → 163).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 194
+    assert sum(scanned.values()) == 193
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

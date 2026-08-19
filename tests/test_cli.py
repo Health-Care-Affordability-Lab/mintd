@@ -1,7 +1,7 @@
 """Tests for ``mintd.cli`` — slice 10 minimal CLI scaffolding.
 
 All tests call ``cli.main(argv=[...])`` in-process and monkeypatch
-``_resolve_clients`` to inject fakes. One subprocess smoke test
+the ``_resolve_*`` factories to inject fakes. One subprocess smoke test
 (``test_python_m_mintd_version_smoke``) exercises packaging via
 ``python -m mintd``.
 """
@@ -50,9 +50,6 @@ def patched_clients(
     monkeypatch.setattr(
         "mintd.cli.Config.load",
         classmethod(lambda cls, path=None: cls()),
-    )
-    monkeypatch.setattr(
-        "mintd.cli._resolve_clients", lambda cfg, reporter=None, **_: (client, dvc_ops)
     )
     monkeypatch.setattr(
         "mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: dvc_ops
@@ -2604,15 +2601,10 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
     monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: client)
 
-    def spy(config, reporter=None, **_):
-        captured.append(reporter)
-        return client, fake_dvc
-
     def dvc_only_spy(config, reporter=None, **_):
         captured.append(reporter)
         return fake_dvc
 
-    monkeypatch.setattr("mintd.cli._resolve_clients", spy)
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", dvc_only_spy)
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
 
@@ -3335,7 +3327,6 @@ def test_plain_check_without_registry_url_still_reports_catalog_unresolved(
     def _no_registry_url(*a: Any, **kw: Any):
         raise ConfigError("registry_url required for this command; set it in ...")
 
-    monkeypatch.setattr("mintd.cli._resolve_clients", _no_registry_url)
     monkeypatch.setattr("mintd.cli._resolve_catalog_client", _no_registry_url)
 
     rc = cli.main(["check", str(tmp_path)])

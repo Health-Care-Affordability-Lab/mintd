@@ -21,6 +21,7 @@ from mintd._config import Timeouts
 from mintd._dvc_ops import SubprocessDvcOps
 from mintd._templates import render_scaffold
 from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_pull
+from tests._harness.git import _git
 
 pytestmark = [
     pytest.mark.integration,
@@ -29,13 +30,6 @@ pytestmark = [
         reason="set MINTD_RUN_INTEGRATION=1 to run",
     ),
 ]
-
-
-def _git(args: list[str], cwd: Path) -> None:
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
-        cwd=str(cwd), check=True, capture_output=True, text=True,
-    )
 
 
 def _dvc(args: list[str], cwd: Path) -> None:
