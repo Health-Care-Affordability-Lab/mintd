@@ -48,7 +48,7 @@ except ImportError:
     SSLError = _BotocoreMissingError  # type: ignore[assignment,misc]
 
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
-from mintd._dvc_invoke import dvc_cmd
+from mintd._dvc_invoke import dvc_cmd, dvc_env
 from mintd.model import FastPullResult
 
 if TYPE_CHECKING:
@@ -90,6 +90,7 @@ def _check_dvc() -> tuple[bool, str | None]:
     try:
         result = subprocess.run(
             [*dvc_cmd(), "--version"],
+            env=dvc_env(),
             capture_output=True,
             text=True,
             timeout=5,

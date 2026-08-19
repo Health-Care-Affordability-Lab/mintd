@@ -29,18 +29,7 @@ from mintd._registry_git_ops import (
     SubprocessRegistryGitOps,
 )
 
-
-IDENT = ["-c", "user.email=test@mintd", "-c", "user.name=test"]
-
-
-def _git(args: list[str], cwd: Path | None = None) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
+from tests._harness.git import _git
 
 
 def _seed_update_branch(remote: Path, work: Path, *, with_pending: bool) -> None:
@@ -49,18 +38,18 @@ def _seed_update_branch(remote: Path, work: Path, *, with_pending: bool) -> None
     PR while other entries keep landing on main)."""
     seed = work / "seed"
     _git(["clone", str(remote), str(seed)])
-    _git([*IDENT, "checkout", "-b", "update/x"], cwd=seed)
+    _git(["checkout", "-b", "update/x"], cwd=seed)
     (seed / "entry.yaml").write_text("v1\n", encoding="utf-8")
     if with_pending:
         (seed / ".mintd_pending.json").write_text("remote-copy\n", encoding="utf-8")
     _git(["add", "-A"], cwd=seed)
-    _git([*IDENT, "commit", "-m", "Update x"], cwd=seed)
+    _git(["commit", "-m", "Update x"], cwd=seed)
     _git(["push", "origin", "update/x"], cwd=seed)
 
-    _git([*IDENT, "checkout", "main"], cwd=seed)
+    _git(["checkout", "main"], cwd=seed)
     (seed / "moved.txt").write_text("main moved on\n", encoding="utf-8")
     _git(["add", "-A"], cwd=seed)
-    _git([*IDENT, "commit", "-m", "unrelated entry"], cwd=seed)
+    _git(["commit", "-m", "unrelated entry"], cwd=seed)
     _git(["push", "origin", "main"], cwd=seed)
 
 

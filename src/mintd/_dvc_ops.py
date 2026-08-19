@@ -13,7 +13,7 @@ from typing import Optional, Protocol
 
 from ._config import Timeouts
 from ._console import Reporter
-from ._dvc_invoke import dvc_cmd
+from ._dvc_invoke import dvc_cmd, dvc_env
 from ._subprocess import run_streaming
 
 
@@ -280,21 +280,23 @@ class SubprocessDvcOps:
         self._reporter = reporter
         self._aws_profile_name = aws_profile_name
 
-    def _env(self) -> Optional[dict[str, str]]:
-        """Subprocess env with AWS_PROFILE injected so dvc's boto3 picks
-        up mintd's [mintd] credentials (no [default] profile required in
-        ~/.aws/credentials). None means inherit parent env unchanged.
+    def _env(self) -> dict[str, str]:
+        """Subprocess env for dvc: ``dvc_env()`` plus AWS_PROFILE, so dvc's
+        boto3 picks up mintd's [mintd] credentials (no [default] profile
+        required in ~/.aws/credentials).
+
+        Always a dict now, never ``None``. It used to inherit the parent env
+        unchanged when no profile was configured, which also inherited dvc's
+        telemetry default -- see ``dvc_env``.
 
         Uses ``setdefault`` so an already-exported ``AWS_PROFILE``
         (per-invocation override, SSO session manager like aws-vault) wins
         over mintd's auto-detected default. Standard AWS precedence chain
         is preserved.
         """
-        if not self._aws_profile_name:
-            return None
-        import os
-        env = dict(os.environ)
-        env.setdefault("AWS_PROFILE", self._aws_profile_name)
+        env = dvc_env()
+        if self._aws_profile_name:
+            env.setdefault("AWS_PROFILE", self._aws_profile_name)
         return env
 
     def init(self, *, cwd: Path | None = None) -> None:

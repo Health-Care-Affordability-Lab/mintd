@@ -7,22 +7,21 @@ GitHub.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import boto3
 import pytest
 from moto import mock_aws
 
+from tests._harness.git import _git
 
-def _git(args: list[str], cwd: Path | None = None) -> None:
-    subprocess.run(
-        ["git", *args],
-        cwd=str(cwd) if cwd else None,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+# Fixtures live beside the builders they wrap; importing them here is what
+# registers them suite-wide. `pytest_plugins` is not an option — pytest
+# rejects it in a non-rootdir conftest.
+from tests._harness.consumer import consumer_project  # noqa: F401
+from tests._harness.dvc import real_dvc  # noqa: F401
+from tests._harness.producer import local_producer  # noqa: F401
+from tests._harness.synthetic import synthetic_project  # noqa: F401
 
 
 def _init_remote(tmp_path: Path, *, with_seed: bool) -> Path:

@@ -6,7 +6,7 @@ library layer (``mintd.{check, data, enclave, catalog}``). The only
 CLI-specific concerns are:
 
 - argument parsing
-- ``Config`` loading and client construction (``_resolve_clients``)
+- ``Config`` loading and client construction (the ``_resolve_*`` factories)
 - rendering ``CheckFinding``s and ``BumpBlocked`` exceptions for humans
 - exit-code dispatch
 """
@@ -689,14 +689,6 @@ def _resolve_dvc_ops(config: Config, reporter: Optional[Reporter] = None) -> Dvc
         reporter=reporter,
         aws_profile_name=config.aws_profile_name,
     )
-
-
-def _resolve_clients(config: Config, reporter: Optional[Reporter] = None) -> tuple[CatalogClient, DvcOps]:
-    """Build production ``GitCatalogClient`` + ``SubprocessDvcOps`` from
-    config, for handlers that genuinely need both. Tests monkeypatch this
-    function to inject fakes.
-    """
-    return _resolve_catalog_client(config), _resolve_dvc_ops(config, reporter)
 
 
 def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
@@ -1804,7 +1796,8 @@ def _handle_data_import(args: argparse.Namespace) -> int:
 
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config, reporter)
+    client = _resolve_catalog_client(config)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
 
     if args.bump:
         try:
@@ -2127,7 +2120,8 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
 def _handle_enclave_pull(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config, reporter)
+    client = _resolve_catalog_client(config)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
         with reporter.status("Pulling enclave data..."):
             _, written = enclave_pull(
@@ -2481,7 +2475,8 @@ def _handle_publish(args: argparse.Namespace) -> int:
     from .publish import prepare_publish, _apply_publish
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    client, dvc_ops = _resolve_clients(config, reporter)
+    client = _resolve_catalog_client(config)
+    dvc_ops = _resolve_dvc_ops(config, reporter)
     git_ops = _resolve_git_ops(config)
     try:
         preview = prepare_publish(
