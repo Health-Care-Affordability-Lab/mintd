@@ -256,7 +256,25 @@ class ProducerView:
         fetcher: Fetcher | None = None,
         cache_dir: Path | None = None,
     ) -> "ProducerView | ProducerError":
+        """Resolve `repo` at `pin`, returning the error instead of raising.
+
+        ``pin=""`` means HEAD. That sentinel is `_consumer_findings`'
+        (`check.py:328`) way of asking "where is the producer now?", and until
+        1b it was honoured by *test doubles only* — the real implementation
+        passed the empty string to git as a revision, which always fails with
+        `path 'metadata.json' does not exist`. `check.py:329-331` reads any
+        HEAD failure as "we could not reach HEAD, degrade to up-to-date", so
+        the breakage was silent and total: against a real producer `mintd
+        check` reported every stale import as current and `mintd data import
+        <name> --bump` was a permanent no-op.
+
+        Found by `tests/test_pre_units_journey.py`'s payload journeys, which
+        are the first tests to drive this path without injecting a
+        `producer_view_factory` that special-cases `""`.
+        """
         try:
+            if pin == "":
+                return cls.at_head(repo, fetcher=fetcher, cache_dir=cache_dir)[0]
             return cls.at(repo, pin, fetcher=fetcher, cache_dir=cache_dir)
         except ProducerError as e:
             return e

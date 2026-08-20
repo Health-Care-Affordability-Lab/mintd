@@ -301,3 +301,148 @@ def test_cache_long_repo_url_writes_successfully(tmp_path: Path) -> None:
     assert sub.is_dir()
     assert len(sub.name.encode("utf-8")) <= 200
     assert (sub / f"{PIN}.json").exists()
+
+
+def test_try_at_resolves_the_empty_pin_to_head(local_producer, tmp_path) -> None:
+    """``pin=""`` means HEAD, against a real producer and not just a double.
+
+    `_consumer_findings` (`src/mintd/check.py:328`) asks "where is the producer
+    now?" as ``try_at(repo, "")``. Until 1b that sentinel was honoured by test
+    doubles only: the real implementation handed the empty string to git as a
+    revision, which fails with ``path 'metadata.json' does not exist``, and
+    `check.py:329-331` reads *any* HEAD failure as "cannot reach HEAD, degrade
+    to up-to-date". The two failures compounded into a silent, total one —
+    against a real producer `mintd check` called every stale import current and
+    `mintd data import <name> --bump` could never fire.
+
+    It stayed invisible because all 48 `producer_view_factory` injection sites
+    in this suite supply a fake that special-cases ``""``, so no test had ever
+    driven the real path. That is the gap `tests/_harness/` closes, and this is
+    the unit-level pin for it.
+
+    Mutation that must redden this: restore the unconditional
+    ``cls.at(repo, pin, ...)`` in `ProducerView.try_at`.
+    """
+    local_producer.commit_more("advance past the seed commit")
+
+    result = ProducerView.try_at(
+        local_producer.url, "", cache_dir=tmp_path / "pcache"
+    )
+
+    assert not isinstance(result, ProducerError), getattr(result, "detail", result)
+    assert result.pin == local_producer.head_sha
+
+
+def _catalog_for(url: str):
+    """A catalog whose `provider-xw` entry points at `url`."""
+    import json
+
+    from mintd.catalog import InMemoryCatalogClient
+    from mintd.model import Metadata
+
+    fixtures = Path(__file__).parent / "fixtures"
+    data = json.loads((fixtures / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "data_provider-xw"
+    data["repository"]["github_url"] = url
+    client = InMemoryCatalogClient()
+    client.register(Metadata.model_validate(data))
+    return client
+
+
+def test_an_empty_manifest_pin_is_refused_not_resolved_to_head(
+    local_producer, tmp_path
+) -> None:
+    """A hand-edited `pin: ''` must fail loudly, not silently mean HEAD.
+
+    `try_at(repo, "")` resolves HEAD — that is the sentinel `_consumer_findings`
+    uses to ask "where is the producer now?". `ApprovedProduct.pin` is a bare
+    `str` with no validator, and `mintd enclave add <repo> --pin=""` (say,
+    `--pin="$SHA"` with `SHA` unset) writes an empty one. Without the guard at
+    `check.py`, the two meanings collide and an enclave pinned at nothing
+    reports a clean "up to date" while `enclave_bump` silently no-ops.
+
+    Caught in review of the `""`-means-HEAD fix itself — the fix that made
+    drift detection work at all also widened `""` past its intended caller.
+    """
+    from mintd.check import _consumer_findings_from_enclave_manifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    manifest.write_text(
+        "schema_version: '2.0'\n"
+        "enclave_name: probe\n"
+        "approved_products:\n"
+        "  - repo: provider-xw\n"
+        "    registry_entry: catalog/data/provider-xw.yaml\n"
+        "    pin: ''\n"
+        "    source_path: data/final/\n"
+        "downloaded: []\n"
+        "transferred: []\n",
+        encoding="utf-8",
+    )
+
+    findings = _consumer_findings_from_enclave_manifest(
+        tmp_path,
+        upgrades=True,
+        producer_view_factory=None,
+        client=_catalog_for(local_producer.url),
+    )
+
+    kinds = {f.kind for f in findings if f.section == "consumer"}
+    assert "up_to_date" not in kinds, (
+        "an empty pin resolved to HEAD and reported clean — the HEAD sentinel "
+        "swallowed user data"
+    )
+    assert "pin_missing" in kinds
+
+
+def test_an_empty_dvc_rev_lock_is_refused_not_resolved_to_head(
+    local_producer, tmp_path
+) -> None:
+    """The same guard, on the `.dvc` import lane.
+
+    Sibling of `test_an_empty_manifest_pin_is_refused_not_resolved_to_head`.
+    The first cut of that guard was written only on the enclave-manifest
+    branch, so `_consumer_findings_from_dvc` still let an empty `rev_lock`
+    through — and the `""`-means-HEAD fix then made that WORSE than before it:
+
+        before the fix   `[warning] producer unreachable: ...`
+        after the fix    `✓ up to date`
+
+    because both `factory(...)` calls resolved HEAD, the two views matched, and
+    `_drift_finding` saw no drift. A warning became a green tick on an import
+    pinned at nothing, and `data_bump` (data.py:568, gates on kind) went from
+    blocked to a silent no-op.
+
+    Found in review round 3. Filed here rather than beside the enclave test
+    because the lesson is the pairing: a guard on one of two sibling branches
+    is not a guard.
+    """
+    from mintd.check import _consumer_findings_from_dvc
+
+    project = tmp_path / "consumer"
+    (project / "data" / "imports").mkdir(parents=True)
+    (project / "data" / "imports" / "thing.dvc").write_text(
+        "outs:\n"
+        f"  - md5: {'c' * 32}\n"
+        "    size: 12345\n"
+        "    path: final\n"
+        "deps:\n"
+        "  - path: outputs/final/\n"
+        "    repo:\n"
+        f"      url: {local_producer.url}\n"
+        "      rev: main\n"
+        "      rev_lock: ''\n",
+        encoding="utf-8",
+    )
+
+    findings = _consumer_findings_from_dvc(
+        project, upgrades=True, producer_view_factory=None
+    )
+
+    kinds = {f.kind for f in findings if f.section == "consumer"}
+    assert "up_to_date" not in kinds, (
+        "an empty rev_lock resolved to HEAD and reported clean — the HEAD "
+        "sentinel swallowed user data on the .dvc lane"
+    )
+    assert "pin_missing" in kinds

@@ -18,11 +18,13 @@ from __future__ import annotations
 import dataclasses
 import json
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from tests._harness.git import _git
+from tests._harness.payload import publish_payload, publish_pipeline_payload
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
@@ -36,6 +38,7 @@ class LocalProducer:
 
     bare: Path
     work: Path
+    remote: Path
 
     @property
     def url(self) -> str:
@@ -121,27 +124,50 @@ class LocalProducer:
         assert lines, f"no peeled ref for tag {name!r} on {self.url}"
         return lines[0].split()[0]
 
-    # -- payload (1b) -------------------------------------------------------
+    # -- payload -------------------------------------------------------------
 
-    def publish(self, *args, **kwargs):
-        """Not built. The payload lane is 1b; see
-        `notes/mintd-check/PLAN-hermetic-harness.md` Approach C.
+    def publish(
+        self,
+        outs: Mapping[str, bytes | Mapping[str, bytes]],
+        *,
+        message: str = "payload",
+    ) -> str:
+        """DVC-track `outs`, push the blobs, and land the pointers in a commit.
 
-        Present and raising rather than absent so a caller that needs bytes
-        gets told which slice owes them, instead of an AttributeError that
-        reads like a typo.
+        Two halves, and the second is not optional. `publish_payload` pushes
+        blobs to `remote` and writes `.dvc/` + the pointer files into the work
+        tree, but commits nothing — a consumer cloning at that point gets no
+        `.dvc/` and `dvc pull` exits 253 "not inside of a DVC repository".
+        Committing here rather than inside `publish_payload` keeps the branch
+        the producer's business and the bytes the payload's.
+
+        **This advances HEAD**, so it is a peer of `commit_more()`, not a
+        prelude to one: a caller wanting "the payload landed at commit N+1"
+        calls `publish()` alone. `publish()` then `commit_more()` puts the
+        payload at N+1 and leaves HEAD at N+2, which is a different world and
+        almost never the one the test meant.
         """
-        raise NotImplementedError(
-            "LocalProducer.publish() is the payload lane, delivered by 1b "
-            "(payload + strict fake). This producer serves metadata and git "
-            "history only."
-        )
+        publish_payload(self.work, self.remote, outs)
+        return self._commit_and_push(message)
+
+    def publish_pipeline(
+        self,
+        dvc_yaml: str,
+        *,
+        seed: Mapping[str, bytes | Mapping[str, bytes]] | None = None,
+        message: str = "pipeline payload",
+    ) -> str:
+        """`publish()`'s pipeline twin: a real stage run, so `dvc.lock` is
+        dvc's own output rather than authored text. Same commit semantics."""
+        publish_pipeline_payload(self.work, self.remote, dvc_yaml, seed=seed)
+        return self._commit_and_push(message)
 
 
 def build_local_producer(root: Path) -> LocalProducer:
     """Bare repo + work clone, seeded with full v2 metadata on `main`."""
     bare = root / "producer.git"
     work = root / "producer"
+    remote = root / "dvc-remote"
     _git(["init", "--bare", "-b", "main", str(bare)])
     _git(["clone", str(bare), str(work)])
     _git(["checkout", "-b", "main"], cwd=work)
@@ -164,7 +190,7 @@ def build_local_producer(root: Path) -> LocalProducer:
         "config", "-f", str(bare / "config"),
         "uploadarchive.allowUnreachable", "true",
     ])
-    return LocalProducer(bare=bare, work=work)
+    return LocalProducer(bare=bare, work=work, remote=remote)
 
 
 @pytest.fixture

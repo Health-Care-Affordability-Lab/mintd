@@ -2625,11 +2625,15 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
     be removed from it, and a seventh `file=sys.stderr` writer must be added
     deliberately.
 
-    SCOPE HOLE, stated deliberately: the matcher reads `file=` keywords only.
-    `sys.stderr.write(...)`, and the positional form already in-tree at
-    `cli.py:198` (`self.print_usage(sys.stderr)`), are invisible to it. That
-    one is inert — its enclosing `error` is allowlisted anyway — but a new
-    handler using either form would not redden this test.
+    SCOPE HOLE CLOSED (1b). The matcher used to read `file=` keywords only, so
+    `sys.stderr.write(...)` and the positional form already in-tree at
+    `cli.py:198` (`self.print_usage(sys.stderr)`) were both invisible: a new
+    handler using either would not have reddened this test. All three forms
+    now count. The allowlist is unchanged and that is the measured result, not
+    an assumption — widening finds exactly the same six names, because
+    `cli.py:198`'s enclosing `error` was already allowlisted. So this closes an
+    evasion without relabelling anything, which is the only honest way to close
+    a ratchet hole.
 
     Allowlist rationale:
       - error: argparse framework override (not a handler).
@@ -2654,13 +2658,21 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        uses_stderr = any(
-            kw.arg == "file"
-            and isinstance(kw.value, ast.Attribute)
-            and isinstance(kw.value.value, ast.Name)
-            and kw.value.value.id == "sys"
-            and kw.value.attr == "stderr"
-            for kw in node.keywords
+        def _is_stderr(expr: ast.expr) -> bool:
+            return (
+                isinstance(expr, ast.Attribute)
+                and expr.attr == "stderr"
+                and isinstance(expr.value, ast.Name)
+                and expr.value.id == "sys"
+            )
+
+        uses_stderr = (
+            # print(..., file=sys.stderr)
+            any(kw.arg == "file" and _is_stderr(kw.value) for kw in node.keywords)
+            # self.print_usage(sys.stderr)  — positional
+            or any(_is_stderr(arg) for arg in node.args)
+            # sys.stderr.write(...)
+            or (isinstance(node.func, ast.Attribute) and _is_stderr(node.func.value))
         )
         if not uses_stderr:
             continue

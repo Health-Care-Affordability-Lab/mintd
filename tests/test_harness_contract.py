@@ -18,13 +18,22 @@ from pathlib import Path
 
 import pytest
 
-from mintd._fast_sync_ops import parse_dvc_lock_outs
+from mintd._config import Timeouts
+from mintd._dvc_ops import DvcOpError, SubprocessDvcOps
+from mintd._fast_sync_ops import (
+    SubprocessFastSyncOps,
+    parse_dvc_lock_outs,
+    partition_pipeline_outs,
+)
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import check_project
+from mintd.data_ops import data_pull
 from mintd.imports import scan_imports
 from mintd.model import Metadata
 from mintd.producer import ProducerError, ProducerView
+from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness.consumer import Import
+from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -188,14 +197,451 @@ def test_moved_tag_resolves_to_the_new_commit(
     assert view.metadata.data_products.primary == "data/v2/"
 
 
-def test_publish_names_the_slice_that_owes_the_payload(
-    local_producer: LocalProducer,
+#: One flat out and one directory out. The directory is not decoration: it is
+#: what drives dvc's `.dir` manifest, the piece mechanism (b) would have had to
+#: re-implement and the piece a pointer-only assertion never touches.
+PAYLOAD = {
+    "data/final.csv": b"a,b\n1,2\n",
+    "data/parts": {"p1.csv": b"1\n", "p2.csv": b"2\n"},
+}
+
+
+def _clone(producer: LocalProducer, dest: Path) -> Path:
+    """What a consumer does: a plain git clone of the bare repo. The payload
+    is NOT here yet — only the `.dvc` pointers are — which is the distinction
+    every test below turns on."""
+    _git(["clone", producer.url, str(dest)])
+    return dest
+
+
+def _pull(project: Path, targets: list[str] | None = None) -> None:
+    """Production's own pull, through the real dvc seam. `fast_sync_ops=None`
+    on purpose — see `test_local_remote_degrades_fast_sync_to_the_fallback_route`
+    for why a local-directory remote could not use fast-sync anyway."""
+    cwd = os.getcwd()
+    os.chdir(project)
+    try:
+        data_pull(
+            project_path=project,
+            targets=targets,
+            dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+            fast_sync_ops=None,
+        )
+    finally:
+        os.chdir(cwd)
+
+
+def test_clone_from_local_producer_lands_payload_bytes(
+    local_producer: LocalProducer, tmp_path: Path
 ) -> None:
-    """`publish()` is present and raising. An absent method fails with an
-    `AttributeError` that reads like a typo; this one says which slice owes
-    the bytes."""
-    with pytest.raises(NotImplementedError, match="1b"):
-        local_producer.publish()
+    """The capability this whole slice exists for: a consumer clone that ends
+    with the producer's real bytes on disk.
+
+    Until now "the consumer pulled it" was always a double's return value.
+    Here it is `stat` + `read_bytes` on files a real `dvc pull` fetched from a
+    real remote, so a pull that silently no-ops has somewhere to fail.
+    """
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+
+    assert not (clone / "data" / "final.csv").exists(), (
+        "a fresh clone must carry pointers only — if the bytes are already "
+        "here, the pull below proves nothing"
+    )
+
+    _pull(clone)
+
+    assert (clone / "data" / "final.csv").read_bytes() == PAYLOAD["data/final.csv"]
+    for name, body in PAYLOAD["data/parts"].items():
+        assert (clone / "data" / "parts" / name).read_bytes() == body
+
+
+def test_published_payload_is_byte_identical_to_a_subprocess_dvc_push(
+    local_producer: LocalProducer, tmp_path: Path, real_dvc
+) -> None:
+    """The licence for mechanism (c).
+
+    `publish_payload` drives `dvc.repo.Repo` in-process; mintd itself drives
+    the `dvc` CLI (`_dvc_ops.py`, `[*dvc_cmd(), ...]`). mintd pins a **range**
+    (`pyproject.toml:12`, `dvc >= 3.66, < 4.0`), so nothing but this test
+    stands between "the harness is dvc" and "the harness is a second dvc that
+    used to agree". Build the same payload both ways; diff the artifacts.
+
+    Reds the day the in-process API diverges from the CLI — which is the day
+    every payload assertion in this suite silently starts certifying the wrong
+    thing. That is why mechanism (a) is kept alive here and nowhere else.
+    """
+    local_producer.publish(PAYLOAD)
+
+    # Mechanism (a): same outs, same remote layout, through the CLI.
+    cli_work = tmp_path / "cli-work"
+    cli_remote = tmp_path / "cli-remote"
+    cli_remote.mkdir()
+    _git(["init", "-b", "main", str(cli_work)])
+    real_dvc(["init"], cwd=cli_work, check=True)
+    real_dvc(["remote", "add", "-d", "storage", str(cli_remote)], cwd=cli_work, check=True)
+    for rel, body in PAYLOAD.items():
+        target = cli_work / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(body, dict):
+            target.mkdir(exist_ok=True)
+            for name, blob in body.items():
+                (target / name).write_bytes(blob)
+        else:
+            target.write_bytes(body)
+        real_dvc(["add", rel], cwd=cli_work, check=True)
+    real_dvc(["push"], cwd=cli_work, check=True)
+
+    def _tree(root: Path) -> dict[str, bytes]:
+        return {
+            str(p.relative_to(root)): p.read_bytes()
+            for p in sorted(root.rglob("*"))
+            if p.is_file()
+        }
+
+    # The remote object tree: same content addresses, same bytes. This is the
+    # assertion that would catch a cache-layout or hash-algorithm change.
+    assert _tree(local_producer.remote) == _tree(cli_remote)
+
+    # And the pointers the consumer actually reads. `.dvc` files carry an
+    # `md5`/`size`/`path` triple; a divergence here means a consumer resolving
+    # the same product would address different blobs.
+    for rel in PAYLOAD:
+        ours = (local_producer.work / f"{rel}.dvc").read_text(encoding="utf-8")
+        theirs = (cli_work / f"{rel}.dvc").read_text(encoding="utf-8")
+        assert ours == theirs, f"pointer divergence for {rel}"
+
+
+def test_targeted_pull_lands_only_the_requested_out(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """The negative control. A pull that fetched *everything* would pass
+    `test_clone_from_local_producer_lands_payload_bytes` just as well, so
+    without this one that test cannot tell delivery from a blanket fetch."""
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+
+    _pull(clone, targets=["data/parts.dvc"])
+
+    assert (clone / "data" / "parts" / "p1.csv").read_bytes() == b"1\n"
+    assert not (clone / "data" / "final.csv").exists(), (
+        "targeted pull fetched an out nobody asked for"
+    )
+
+
+def test_pipeline_stage_out_is_servable(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """A `dvc.lock` that **dvc wrote**, parsed by production's own reader.
+
+    Every lock in this suite before now was hand-authored text, so
+    `parse_dvc_lock_outs` had never once been fed dvc's own output — it was
+    checked against the suite's idea of the format, which is exactly how a
+    parser and a producer drift apart. Resolver S5-S6 gates on this.
+    """
+    local_producer.publish_pipeline(
+        "stages:\n"
+        "  build:\n"
+        "    cmd: python -c \"import pathlib; "
+        "d=pathlib.Path('data/built'); d.mkdir(parents=True, exist_ok=True); "
+        "(d/'out.csv').write_bytes(b'x\\n')\"\n"
+        "    outs:\n"
+        "      - data/built\n"
+    )
+
+    lock = local_producer.work / "dvc.lock"
+    assert lock.exists(), "reproduce() wrote no lock — the stage did not run"
+
+    # `partition_pipeline_outs`, the function the criterion names — not
+    # `parse_dvc_lock_outs`, which it wraps. Behaviourally identical for the
+    # `all_outs` half (`_fast_sync_ops.py:582` returns it verbatim), so the
+    # substitution changed no verdict; calling the named one anyway removes a
+    # discrepancy between the criterion and the test that satisfies it.
+    fast_syncable, all_outs = partition_pipeline_outs(local_producer.work, "storage")
+    assert [o.path for o in all_outs] == ["data/built"], (
+        f"production's lock reader disagrees with dvc's own lock: {all_outs}"
+    )
+
+    # And the classifier half is EMPTY here, deliberately stated rather than
+    # left to look like an oversight: a local-directory remote has no
+    # `version_id`/`cloud` block, so `_is_fast_syncable_pipeline_out` rejects
+    # every out. This lane is the fallback route — see
+    # `test_local_remote_degrades_fast_sync_to_the_fallback_route`.
+    assert fast_syncable == []
+
+    clone = _clone(local_producer, tmp_path / "consumer")
+    _pull(clone)
+    assert (clone / "data" / "built" / "out.csv").read_bytes() == b"x\n"
+
+
+def test_local_remote_degrades_fast_sync_to_the_fallback_route(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """The honesty test. This lane certifies the FALLBACK route, not fast-sync.
+
+    A local-directory remote is not an S3 url, so `try_fast_pull` degrades
+    every target before a single byte moves. Stated here as an assertion
+    rather than a comment so that nobody downstream reads a green payload test
+    as fast-sync coverage — units 9 and 10 have to say which of their claims
+    are which, and this is the artifact they can point at.
+    """
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+    targets = ["data/final.csv.dvc", "data/parts.dvc"]
+
+    result = SubprocessFastSyncOps().try_fast_pull(
+        project_path=clone, targets=targets, remote_name="storage",
+    )
+
+    assert result.success is False
+    assert "non-S3 remote" in (result.reason or "")
+    assert sorted(result.fallback_targets) == sorted(targets)
+
+
+def test_in_process_dvc_leaves_no_state_in_the_pytest_process(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """`Repo` runs in *this* process, so its side effects outlive the call.
+
+    A subprocess takes its logging config and its cwd to the grave; an
+    imported `dvc.repo` does not. Both leaks below are silent and land in an
+    unrelated test later in the session — dvc output appearing in another
+    module's captured stream, or a relative path resolving somewhere new.
+
+    Pins the autouse fixture in `conftest.py`. That cleanup deliberately does
+    not live inside `publish_payload`: there it would be a property of calling
+    the builder, and any other route into `dvc.repo` would skip it.
+    """
+    import logging
+
+    # ASSERTED FIRST, and the ordering is the whole point. dvc attaches its
+    # handlers to the `dvc` / `dvc_data` / `dvc_objects` loggers and NEVER to
+    # root, so the root-handler check below is vacuous for the thing the
+    # fixture actually cleans up — measured, root 0 -> 0 while `dvc` 0 -> 4,
+    # and deleting `handlers.clear()` from conftest left this test green. The
+    # plan's own transcript recorded that same root count and drew the same
+    # false comfort from it.
+    #
+    # Every payload test above this one builds a `Repo`, so in a full-suite run
+    # their handlers are only absent here because the autouse fixture cleared
+    # them at each teardown. Run this test ALONE (`-k in_process`) and the
+    # assertion is trivially true — it pins the fixture in the suite, which is
+    # where the gate runs, not in isolation.
+    for name in ("dvc", "dvc_data", "dvc_objects"):
+        assert logging.getLogger(name).handlers == [], (
+            f"{name!r} logger entered this test with handlers still attached — "
+            "the autouse cleanup in conftest.py is not running, or not covering "
+            "this logger. dvc output leaks into other tests' captured streams."
+        )
+
+    root_before = list(logging.getLogger().handlers)
+    cwd_before = os.getcwd()
+
+    local_producer.publish(PAYLOAD)
+    local_producer.publish_pipeline(
+        "stages:\n  noop:\n    cmd: python -c pass\n"
+    )
+
+    assert os.getcwd() == cwd_before
+    assert list(logging.getLogger().handlers) == root_before
+
+    # Hermeticity: the in-process `Repo` must not read the developer's real dvc
+    # config. Before `_in_process_dvc_is_hermetic`, a single publish inherited
+    # 28 real S3 remotes plus `core.autostage=True` and wrote a 116 KB entry to
+    # `/Library/Caches/dvc/repo` — 169 MB there after one day of this suite.
+    from dvc.dirs import global_config_dir, site_cache_dir
+
+    for label, path in (
+        ("global config", global_config_dir()),
+        ("site cache", site_cache_dir()),
+    ):
+        assert str(tmp_path) in str(path), (
+            f"dvc {label} resolves to {path}, outside tmp_path — the in-process "
+            "lane is reading and writing the real machine"
+        )
+
+
+
+# ---------------------------------------------------------------------------
+# strict_targets
+# ---------------------------------------------------------------------------
+
+#: A `dvc.yaml` whose stage writes a DIRECTORY out. Both halves matter: the
+#: stage NAME and a path UNDER the dir out are the two cases the previous
+#: attempt at a strict fake (`GraphAwareDvcOps`) wrongly rejected.
+PIPELINE_YAML = (
+    "stages:\n"
+    "  build:\n"
+    "    cmd: python -c \"import pathlib; "
+    "d=pathlib.Path('data/built'); d.mkdir(parents=True, exist_ok=True); "
+    "(d/'out.csv').write_bytes(b'x\\n')\"\n"
+    "    outs:\n"
+    "      - data/built\n"
+    # A `foreach` stage, because `dvc.yaml` names it `fan` while `dvc.lock`
+    # names the instances `fan@a` / `fan@b`, and `fan@a` is the ONLY way real
+    # dvc lets you target one instance. Without this stage the oracle's graph
+    # cannot express the shape at all — which is exactly how a false-reject on
+    # `fan@a` shipped and had to be caught in review.
+    "  fan:\n"
+    "    foreach:\n"
+    "      a: {out: data/fan_a.csv}\n"
+    "      b: {out: data/fan_b.csv}\n"
+    "    do:\n"
+    "      cmd: python -c \"import pathlib; "
+    "pathlib.Path('${item.out}').write_bytes(b'${key}\\n')\"\n"
+    "      outs:\n"
+    "        - ${item.out}\n"
+)
+
+
+def _graph(producer: LocalProducer, tmp_path: Path) -> Path:
+    """One workspace carrying both out kinds — a `.dvc` pointer and a
+    pipeline stage — plus a stage that exists ONLY in `dvc.lock`."""
+    producer.publish(PAYLOAD)
+    producer.publish_pipeline(PIPELINE_YAML)
+
+    # The orphan: a stage in the lock that `dvc.yaml` never declares. This is
+    # a real drift state (someone edits dvc.yaml and does not re-run), and it
+    # is the one case where reading the lock for ACCEPTS silently makes a fake
+    # wrong.
+    lock = producer.work / "dvc.lock"
+    lock.write_text(
+        lock.read_text(encoding="utf-8")
+        + "  ghost:\n"
+        "    cmd: python -c pass\n"
+        "    outs:\n"
+        "    - path: data/ghost.csv\n"
+        f"      md5: {'a' * 32}\n"
+        "      size: 3\n",
+        encoding="utf-8",
+    )
+    producer._commit_and_push("orphan the lock")
+    return _clone(producer, tmp_path / "consumer")
+
+
+def _strict_fake(workspace: Path) -> _FakeDvcOps:
+    fake = _FakeDvcOps()
+    fake.workspace = workspace
+    fake.strict_targets = True
+    return fake
+
+
+def test_strict_fake_rejects_a_lock_only_orphan(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """`data/ghost.csv` is in `dvc.lock` and in no `dvc.yaml` stage.
+
+    Before `strict_targets`, `_FakeDvcOps.pull` recorded the call and
+    returned `None` for any target at all, so it neither rejected nor
+    accepted anything — "the pull succeeded" was unfalsifiable.
+    """
+    clone = _graph(local_producer, tmp_path)
+
+    with pytest.raises(DvcOpError, match="ghost"):
+        _strict_fake(clone).pull(targets=["data/ghost.csv"])
+
+
+def test_strict_fake_accepts_a_declared_out(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """The other direction, and the one that is easy to get wrong.
+
+    A fake that rejects everything passes the rejection test perfectly. This
+    is the half that keeps `strict_targets` a double rather than a second,
+    stricter dvc.
+    """
+    clone = _graph(local_producer, tmp_path)
+    fake = _strict_fake(clone)
+
+    fake.pull(targets=["data/final.csv.dvc", "data/built", "build"])
+
+    assert fake.pull_calls, "an accepted pull must still be recorded"
+
+
+def test_strict_fake_rejects_an_absolute_path_outside_the_graph(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """An absolute path nothing declares is refused, like real dvc refuses it.
+
+    Regression. `rglob("*.dvc")` matches the **`.dvc` DIRECTORY** that every
+    dvc repo has, not just pointer files, so the declared-paths list picked up
+    a `""` entry (`".dvc"` minus the suffix). The prefix test for
+    directory-out subpaths is `nt.startswith(f"{p}/")`, which with `p == ""`
+    reads `nt.startswith("/")` — so **every absolute path was accepted**,
+    `/etc/passwd` included. Verified against dvc 3.67.1: it returns rc=1,
+    `'/etc/passwd' does not exist as an output or a stage name`.
+
+    The oracle did not catch this because none of its ten rows is an absolute
+    path — a reminder that an oracle only licenses the cases in its table.
+    """
+    clone = _graph(local_producer, tmp_path)
+
+    with pytest.raises(DvcOpError):
+        _strict_fake(clone).pull(targets=["/etc/passwd"])
+
+
+def test_strict_fake_agrees_with_real_dvc_on_one_graph(
+    local_producer: LocalProducer, tmp_path: Path, real_dvc
+) -> None:
+    """The oracle. Same graph, same targets, both directions, both engines.
+
+    Without the ACCEPT half this proves only "dvc rejects something" — which
+    is exactly what issue01's own oracle turned out to prove, mutation-proven
+    non-load-bearing. And an accept-only oracle is what killed
+    `GraphAwareDvcOps`: measured against dvc 3.67.1, a bare stage name
+    (`build`) and a directory-out subpath (`data/built/out.csv`) are both
+    `rc=0`, and rejecting them would have false-failed issues 06 and 07.
+
+    Both cases are in the table below deliberately. If the fake is ever made
+    stricter than dvc, this reds on the accept half rather than shipping and
+    false-failing a downstream unit.
+
+    **The last four rows were added after the table's first version missed
+    them**, and they are the reason an oracle is only as good as its cases: an
+    empty target and an absolute path INSIDE the workspace are both `rc=0` on
+    real dvc, and the fake rejected both. `/etc/passwd` and `.dvc` are the
+    matching negatives, so accept and reject are covered on the same axis
+    rather than one being assumed.
+    """
+    clone = _graph(local_producer, tmp_path)
+    fake = _strict_fake(clone)
+
+    targets = [
+        "data/final.csv.dvc",   # a .dvc pointer
+        "data/final.csv",       # the out path itself
+        "data/parts",           # a directory out
+        "build",                # a bare STAGE NAME
+        "data/built",           # a pipeline stage's dir out
+        "data/built/out.csv",   # a path UNDER a dir out
+        "dvc.yaml",             # the pipeline file
+        "",                     # empty: dvc takes it as no filter at all
+        str(clone / "data" / "final.csv"),  # ABSOLUTE, inside the workspace
+        "data/ghost.csv",       # lock-only orphan
+        "nope.dvc",             # nothing declares it
+        "data/nothing.csv",     # nor this
+        "/etc/passwd",          # absolute and genuinely outside
+        ".dvc",                 # the dvc directory itself
+        "fan",                  # a foreach stage's dvc.yaml name
+        "fan@a",                # a foreach INSTANCE, only nameable via the lock
+        "data/fan_a.csv",       # that instance's out
+        "fan@zzz",              # an instance that does not exist
+    ]
+
+    real_verdict, fake_verdict = {}, {}
+    for target in targets:
+        real_verdict[target] = real_dvc(["pull", target], cwd=clone).returncode == 0
+        try:
+            fake.pull(targets=[target])
+        except DvcOpError:
+            fake_verdict[target] = False
+        else:
+            fake_verdict[target] = True
+
+    assert fake_verdict == real_verdict
+
+    # Belt and braces: an oracle where everything landed on one side would
+    # agree trivially. Assert the graph actually exercised both directions.
+    assert True in real_verdict.values() and False in real_verdict.values()
 
 
 # ---------------------------------------------------------------------------
@@ -394,3 +840,65 @@ def test_foreach_lock_stages_are_authorable(synthetic_project, real_dvc) -> None
     outs = parse_dvc_lock_outs(proj, "origin")
 
     assert sorted(o.path for o in outs) == ["data/a.parquet", "data/b.parquet"]
+
+
+def test_strict_fake_reads_the_out_path_from_the_pointer_not_its_filename(
+    tmp_path, real_dvc
+) -> None:
+    """A `dvc import` pointer's out path is unrelated to its filename.
+
+    `dvc add data/final.csv` writes `data/final.csv.dvc`, so stem and out path
+    agree and a fake can derive one from the other and look correct forever.
+    `dvc import` breaks that: it writes `<name>.dvc` whose out is the LOCAL
+    path. `tests/_harness/consumer.py::write_import` has always emitted exactly
+    that shape — `Import(name="alpha", local_path="final")` gives `alpha.dvc`
+    carrying `path: final` — so the two names differ in the tree already.
+
+    The first cut of `strict_targets` derived the out from the stem and so
+    INVERTED the first two rows below: it rejected the real out and accepted a
+    name dvc refuses. Stricter than dvc in one direction and more lenient in
+    the other — the same double failure that killed `GraphAwareDvcOps`.
+
+    Not caught by the 18-row oracle above, because every row there uses an
+    `add`-shaped pointer where stem and out agree. An oracle only licenses the
+    shapes in its table; this is the shape it was missing.
+    """
+    work = tmp_path / "ws"
+    (work / "data" / "imports").mkdir(parents=True)
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _git(["init", "-b", "main", str(work)])
+    real_dvc(["init"], cwd=work)
+    real_dvc(["remote", "add", "-d", "storage", str(remote)], cwd=work)
+
+    (work / "data" / "imports" / "final").write_text("a,b\n1,2\n", encoding="utf-8")
+    real_dvc(["add", "data/imports/final"], cwd=work)
+    real_dvc(["push"], cwd=work)
+    # Rename to the `dvc import` shape: pointer named for the import, out
+    # still `final`.
+    (work / "data" / "imports" / "final.dvc").rename(
+        work / "data" / "imports" / "alpha.dvc"
+    )
+
+    targets = [
+        "data/imports/final",      # the real out — dvc accepts
+        "data/imports/alpha",      # the pointer's STEM — dvc does not know it
+        "data/imports/alpha.dvc",  # the pointer file itself — dvc accepts
+    ]
+
+    fake = _strict_fake(work)
+    real_verdict, fake_verdict = {}, {}
+    for target in targets:
+        real_verdict[target] = real_dvc(["pull", target], cwd=work).returncode == 0
+        try:
+            fake.pull(targets=[target])
+        except DvcOpError:
+            fake_verdict[target] = False
+        else:
+            fake_verdict[target] = True
+
+    assert fake_verdict == real_verdict
+    # The stem and the out MUST disagree, or this test is a tautology that
+    # passes on the very bug it exists to catch.
+    assert real_verdict["data/imports/final"] is True
+    assert real_verdict["data/imports/alpha"] is False

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from mintd._dvc_ops import DvcOpError, DvcPushResult
+from mintd._dvc_ops import DvcOpError, DvcPullError, DvcPushResult
 
 
 class DvcInitCall(NamedTuple):
@@ -95,6 +95,15 @@ class _FakeDvcOps:
         # Targets checkout NEVER materializes (even single-target retries)
         # — models a target whose cache blobs are unusable/corrupt.
         self.checkout_never_materializes: set[str] = set()
+        # Opt-in target validation. OFF by default: 142 assert-lines across
+        # seven modules read this fake's `*_calls`, and they assert "the
+        # handler called the seam with X", not "X was legal". Flipping the
+        # default would redden them for a reason unrelated to what they
+        # test. ON, `pull()` rejects what real dvc rejects -- see
+        # `_reject_unknown_targets` for the measured boundary and
+        # `test_strict_fake_agrees_with_real_dvc_on_one_graph` for its
+        # licence.
+        self.strict_targets: bool = False
 
     def init(self, *, cwd: Path | None = None) -> None:
         self.init_calls.append(DvcInitCall(cwd=cwd))
@@ -166,6 +175,8 @@ class _FakeDvcOps:
         for t in targets or []:
             if t in self.pull_raises_for:
                 raise self.pull_raises_for[t]
+        if self.strict_targets:
+            self._reject_unknown_targets(targets)
         self.pull_calls.append(
             DvcPullCall(
                 targets=targets, remote=remote, jobs=jobs, extra_args=extra_args,
@@ -178,7 +189,19 @@ class _FakeDvcOps:
         self.add_calls.append(DvcAddCall(path=path))
         dvc_file = path.parent / (path.name + ".dvc")
         dvc_file.parent.mkdir(parents=True, exist_ok=True)
-        dvc_file.write_text("")
+        # A REAL `.dvc` body. This used to be `""`, which is valid YAML
+        # (it parses to None) and so never failed loudly -- it just made
+        # every downstream reader see an out-less pointer. Real `dvc add`
+        # always writes an `outs` block, and
+        # `test_dvc_ops_contract.py::test_add_writes_a_parseable_dvc_file`
+        # is what caught the gap: it passed on the real arm and failed on
+        # the fake with `no outs block: {}`.
+        dvc_file.write_text(
+            "outs:\n"
+            f"  - md5: {'a' * 32}\n"
+            "    size: 0\n"
+            f"    path: {path.name}\n"
+        )
         return dvc_file
 
     def status(self, targets: list[str] | None = None) -> dict[str, str]:
@@ -271,3 +294,185 @@ class _FakeDvcOps:
             else:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text("materialized")
+
+    # -- strict target validation --------------------------------------------
+
+    def _declared_targets(self, root: Path) -> tuple[set[str], list[str]]:
+        """What this workspace declares, as (names, out-paths).
+
+        Anchored on ``dvc.yaml`` and ``.dvc`` files, deliberately NOT on
+        ``dvc.lock``. A lock can carry a stage no ``dvc.yaml`` declares, and
+        real dvc rejects that stage's out -- measured at dvc 3.67.1:
+
+            data/built.csv (dvc.yaml stage out)  rc=0
+            data/ghost.csv (dvc.lock only)       rc=1  "does not exist as an
+                                                        output or a stage name
+                                                        in 'dvc.yaml'"
+
+        Reading the lock for accepts is exactly how a fake starts accepting
+        orphans, which is the failure this flag exists to catch.
+
+        **Why not ``parse_dvc_lock_outs``**, which does this parse already:
+        it sets ``target=rel`` (`_fast_sync_ops.py:536`), i.e. it throws the
+        stage name away and keeps only the path. The stage name is precisely
+        what separates a declared out from an orphan, so that function cannot
+        answer this question -- the first attempt here used it and the oracle
+        caught the fake rejecting `data/built`, a stage out real dvc accepts.
+        The wdir handling below mirrors it on purpose.
+        """
+        import posixpath
+
+        import yaml
+
+        names: set[str] = set()
+        paths: list[str] = []
+
+        for dvc_file in sorted(root.rglob("*.dvc")):
+            # `is_file()` is load-bearing: `*.dvc` also matches the `.dvc`
+            # DIRECTORY every dvc repo has. Without this the list gains a ``""``
+            # entry (``".dvc"`` minus its suffix), and the subpath test below —
+            # ``nt.startswith(f"{p}/")`` — degenerates to ``nt.startswith("/")``,
+            # accepting every absolute path including ``/etc/passwd``. Pinned by
+            # ``test_strict_fake_rejects_an_absolute_path_outside_the_graph``.
+            if not dvc_file.is_file():
+                continue
+            rel = dvc_file.relative_to(root).as_posix()
+            names.add(rel)
+            # The out path comes from ``outs[].path``, NEVER from the filename.
+            # `dvc add` happens to make the two agree; `dvc import` does not —
+            # it writes ``<name>.dvc`` whose out is the LOCAL path, which is
+            # exactly what ``tests/_harness/consumer.py::write_import`` emits
+            # (``alpha.dvc`` carrying ``path: final``). Deriving the out from
+            # the stem made this fake wrong in BOTH directions on that shape.
+            # Measured, dvc 3.67.1, on `alpha.dvc` with `path: final`:
+            #
+            #     data/imports/final      rc=0   (stem-fake REJECTED it)
+            #     data/imports/alpha      rc=1   (stem-fake ACCEPTED it)
+            #     data/imports/alpha.dvc  rc=0
+            #
+            # Stricter than dvc on the real out and more lenient on a name dvc
+            # refuses — the same double failure that killed `GraphAwareDvcOps`.
+            # ``names.add(rel)`` stays: dvc accepts the pointer file by name
+            # whatever its out path is (measured rc=0 above).
+            try:
+                body = yaml.safe_load(dvc_file.read_text(encoding="utf-8"))
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(body, dict):
+                # A malformed or empty pointer declares no outs. Skipping it
+                # keeps the pointer's own NAME accepted (dvc reads the file
+                # lazily) without inventing an out from the filename.
+                continue
+            wdir = dvc_file.parent.relative_to(root).as_posix()
+            for out in body.get("outs") or []:
+                raw = (out or {}).get("path") if isinstance(out, dict) else None
+                if raw:
+                    paths.append(posixpath.normpath(posixpath.join(wdir, raw)))
+
+        yaml_path = root / "dvc.yaml"
+        if not yaml_path.is_file():
+            return names, paths
+        names.add("dvc.yaml")
+
+        try:
+            stages = (yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}).get(
+                "stages"
+            ) or {}
+            lock = (
+                yaml.safe_load((root / "dvc.lock").read_text(encoding="utf-8")) or {}
+            ).get("stages") or {}
+        except (OSError, yaml.YAMLError):
+            return names, paths
+        names.update(stages)
+
+        for stage, body in lock.items():
+            # `foreach` splits the name: `dvc.yaml` says `base`, `dvc.lock`
+            # says `base@a`. Match on the base so foreach instances are
+            # accepted while genuine orphans stay rejected.
+            base = stage.split("@", 1)[0]
+            if base not in stages:
+                continue
+            # The INSTANCE name is itself a legal target: `dvc pull base@a` is
+            # the only way real dvc lets you target one instance of a `foreach`
+            # stage, and it exits 0 (measured, dvc 3.67.1, fresh clone per
+            # target: base@a rc=0 fetching only a.parquet, base@zzz rc=1).
+            # Adding it here rather than beside `names.update(stages)` is what
+            # keeps orphan rejection intact — a lock-only stage is skipped by
+            # the guard above before it can be added.
+            names.add(stage)
+            wdir = (stages[base] or {}).get("wdir", ".")
+            for out in (body or {}).get("outs") or []:
+                raw = out.get("path")
+                if not raw:
+                    continue
+                try:
+                    resolved = (root / wdir / raw).resolve()
+                    paths.append(resolved.relative_to(root.resolve()).as_posix())
+                except (ValueError, OSError):
+                    continue
+        return names, paths
+
+    def _reject_unknown_targets(self, targets: list[str] | None) -> None:
+        """Raise on a target real dvc would refuse.
+
+        The accept side is as load-bearing as the reject side and is where
+        the previous attempt at this (`GraphAwareDvcOps`) died: it was
+        STRICTER than dvc, rejecting bare stage names and directory-out
+        subpaths, which would have false-failed issues 06 and 07. Measured
+        against dvc 3.67.1 on one graph, all rc=0:
+
+            data/final.csv.dvc   a .dvc pointer
+            data/final.csv       the out path itself
+            build                a bare stage name
+            data/built           a pipeline stage's dir out
+            data/built/out.csv   a path UNDER a dir out
+            dvc.yaml             the pipeline file
+
+        and rc=1 for `nope.dvc` / `data/nothing.csv`. A fake that rejects
+        anything in the first list is a second source of truth, not a
+        double.
+        """
+        from mintd._fast_sync_ops import normalize_target
+
+        root = self.workspace
+        if root is None:
+            raise AssertionError(
+                "strict_targets needs `workspace` set to the project root — "
+                "without it there is no graph to validate against"
+            )
+        names, paths = self._declared_targets(root)
+
+        for target in targets or []:
+            # dvc accepts an empty target (measured: `dvc pull ""` → rc=0); it
+            # simply contributes no filter. Rejecting it would be stricter than
+            # dvc, which is the one direction this flag must never be.
+            if not target.strip():
+                continue
+            nt = normalize_target(target)
+            # An ABSOLUTE path inside the workspace is legal — measured rc=0
+            # against a declared out. `normalize_target` passes absolute paths
+            # through unchanged, so re-anchor here. Deliberately NOT
+            # `resolve()`d on either side: dvc compares physical paths without
+            # following symlinks, so resolving would accept a symlinked
+            # absolute target dvc refuses — leniency, the one direction this
+            # flag must never be. (An earlier comment here blamed macOS `/var`
+            # vs `/private/var`. That was wrong: pytest hands out an already
+            # resolved `tmp_path`, so the two never disagreed and neither
+            # `resolve()` was pinned by any test.)
+            if Path(nt).is_absolute():
+                try:
+                    nt = Path(nt).relative_to(root).as_posix()
+                except ValueError:
+                    # Genuinely outside the workspace (`/etc/passwd`). dvc
+                    # rejects these — measured rc=1 — so fall through.
+                    pass
+            if target in names or nt in names or nt in paths:
+                continue
+            # Under a directory out: dvc resolves into the `.dir` manifest.
+            if any(nt.startswith(f"{p}/") for p in paths):
+                continue
+            raise DvcPullError(
+                f"dvc pull failed (exit 1): ERROR: failed to pull data from "
+                f"the cloud - '{target}' does not exist as an output or a "
+                f"stage name in 'dvc.yaml'"
+            )
