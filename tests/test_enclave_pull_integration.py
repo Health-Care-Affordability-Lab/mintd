@@ -105,16 +105,9 @@ def test_enclave_pull_end_to_end_real_dvc(
         ],
     ).save(m_path)
 
-    # Run from the tmp ROOT, not the enclave. This used to chdir into the
-    # enclave with the comment "the real `dvc import` inherits cwd, so mirror
-    # that" -- the suite had codified the workaround as the contract. Unit A
-    # made `cwd` an argument, so standing elsewhere must now be harmless.
-    #
-    # NOT A GATE: this module is skipped unless MINTD_RUN_INTEGRATION=1 and no
-    # CI job sets it. The ungated version of this claim is
-    # `tests/test_harness_contract.py::
-    # test_enclave_pull_caches_into_the_enclave_not_the_outer_repo`.
-    monkeypatch.chdir(tmp_path)
+    # Production runs `mintd enclave pull` from inside the enclave dir; the real
+    # `dvc import` inherits cwd, so mirror that.
+    monkeypatch.chdir(enclave)
 
     _, written = enclave_pull(
         _Client(str(prod)),

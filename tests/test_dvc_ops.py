@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from mintd._dvc_invoke import dvc_cmd
-from mintd._dvc_ops import DvcOps, SubprocessDvcOps
+from mintd._dvc_ops import DvcOps
 from mintd.imports import DataDependency
+
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 
@@ -22,7 +23,6 @@ def test_fake_records_call(tmp_path: Path) -> None:
     dest = tmp_path / "cms_based"
 
     fake.import_(
-        cwd=tmp_path,
         repo_url="https://github.com/example-org/provider-xw",
         path="outputs/cms_based/",
         dest=dest,
@@ -44,7 +44,6 @@ def test_fake_writes_parseable_stub(tmp_path: Path) -> None:
     dest = tmp_path / "cms_based"
 
     produced = fake.import_(
-        cwd=tmp_path,
         repo_url="https://github.com/example-org/provider-xw",
         path="outputs/cms_based/",
         dest=dest,
@@ -64,7 +63,6 @@ def test_fake_handles_file_paths_with_suffix(tmp_path: Path) -> None:
     dest = tmp_path / "main.parquet"
 
     produced = fake.import_(
-        cwd=tmp_path,
         repo_url="https://github.com/example-org/p",
         path="outputs/main.parquet",
         dest=dest,
@@ -94,7 +92,7 @@ def _stub_run_streaming(captured: list[list[str]]):
 
 
 def test_subprocess_pull_appends_extra_args_after_typed_flags(
-    monkeypatch, tmp_path: Path
+    monkeypatch,
 ) -> None:
     """`extra_args` items land between the typed `--remote`/`--jobs`
     block and the positional targets — readable argv shape and matches
@@ -107,7 +105,6 @@ def test_subprocess_pull_appends_extra_args_after_typed_flags(
 
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     ops.pull(
-        cwd=tmp_path,
         targets=["data/foo"],
         remote="X",
         jobs=4,
@@ -120,7 +117,7 @@ def test_subprocess_pull_appends_extra_args_after_typed_flags(
 
 
 def test_subprocess_pull_extra_args_none_keeps_legacy_argv(
-    monkeypatch, tmp_path: Path
+    monkeypatch,
 ) -> None:
     """Backward compat: with `extra_args=None` (the default), argv is
     byte-for-byte the pre-slice-34 shape."""
@@ -131,7 +128,7 @@ def test_subprocess_pull_extra_args_none_keeps_legacy_argv(
     monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_run_streaming(captured))
 
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    ops.pull(cwd=tmp_path, targets=["data/foo"], remote="X", jobs=4)
+    ops.pull(targets=["data/foo"], remote="X", jobs=4)
 
     assert captured == [
         [*dvc_cmd(), "pull", "--remote", "X", "--jobs", "4", "data/foo"],
@@ -152,7 +149,6 @@ def test_subprocess_import_appends_extra_args_after_typed_flags(
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     dest = tmp_path / "out"
     ops.import_(
-        cwd=tmp_path,
         repo_url="https://example/x",
         path="data/y",
         dest=dest,
@@ -169,7 +165,7 @@ def test_subprocess_import_appends_extra_args_after_typed_flags(
     ]
 
 
-def test_pull_raises_dvc_not_installed_when_module_missing(monkeypatch, tmp_path: Path) -> None:
+def test_pull_raises_dvc_not_installed_when_module_missing(monkeypatch) -> None:
     """`sys.executable -m dvc` exits 1 + ModuleNotFoundError when dvc isn't
     in mintd's env. Surface as DvcNotInstalled (with the reinstall hint),
     not as a generic DvcPullError that buries the cause in stderr."""
@@ -187,7 +183,7 @@ def test_pull_raises_dvc_not_installed_when_module_missing(monkeypatch, tmp_path
 
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcNotInstalled, match="reinstall mintd"):
-        ops.pull(cwd=tmp_path, targets=["data/foo"])
+        ops.pull(targets=["data/foo"])
 
 
 # Slice 47 — lazy `dvc init` op + typed not-in-repo error.
@@ -218,7 +214,7 @@ def test_subprocess_init_runs_dvc_init_in_cwd(monkeypatch, tmp_path) -> None:
     assert seen["cwd"] == tmp_path
 
 
-def test_subprocess_init_tolerates_already_initialized(monkeypatch, tmp_path: Path) -> None:
+def test_subprocess_init_tolerates_already_initialized(monkeypatch) -> None:
     """Re-running `init` on a DVC repo must not raise — repeated pulls stay
     idempotent. `dvc init` exits non-zero with "'.dvc' exists" in that case."""
     from mintd import _dvc_ops
@@ -231,7 +227,7 @@ def test_subprocess_init_tolerates_already_initialized(monkeypatch, tmp_path: Pa
 
     monkeypatch.setattr(_dvc_ops, "run_streaming", lambda *a, **k: _R())
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    ops.init(cwd=tmp_path)  # must not raise
+    ops.init()  # must not raise
 
 
 def test_subprocess_import_raises_not_in_repo(monkeypatch, tmp_path) -> None:
@@ -252,7 +248,7 @@ def test_subprocess_import_raises_not_in_repo(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(_dvc_ops, "run_streaming", lambda *a, **k: _R())
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcNotInRepoError):
-        ops.import_(cwd=tmp_path, repo_url="http://x", path="out", dest=tmp_path / "d")
+        ops.import_(repo_url="http://x", path="out", dest=tmp_path / "d")
 
 
 # Slice 48 — push scrapes its count from captured stdout under json_mode.
@@ -275,7 +271,7 @@ def _stub_push_run_streaming(stdout_lines: list[str], seen: dict):
     return _fake
 
 
-def test_subprocess_push_parses_count_from_captured_stdout(monkeypatch, tmp_path: Path) -> None:
+def test_subprocess_push_parses_count_from_captured_stdout(monkeypatch) -> None:
     """`push` returns the scraped count even though `json_mode=True` is set —
     proving json_mode doesn't empty `r.stdout_lines`. Also: no `--json` in argv
     (dvc push rejects it)."""
@@ -287,7 +283,7 @@ def test_subprocess_push_parses_count_from_captured_stdout(monkeypatch, tmp_path
         _dvc_ops, "run_streaming", _stub_push_run_streaming(["3 files pushed"], seen)
     )
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    result = ops.push(cwd=tmp_path, remote="r")
+    result = ops.push(remote="r")
 
     assert result.pushed == 3
     assert result.up_to_date is False
@@ -295,7 +291,7 @@ def test_subprocess_push_parses_count_from_captured_stdout(monkeypatch, tmp_path
     assert seen["kwargs"].get("json_mode") is True
 
 
-def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch, tmp_path: Path) -> None:
+def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch) -> None:
     from mintd import _dvc_ops
     from mintd._config import Timeouts
 
@@ -306,13 +302,13 @@ def test_subprocess_push_detects_up_to_date_from_stdout(monkeypatch, tmp_path: P
         _stub_push_run_streaming(["Everything is up to date."], seen),
     )
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    result = ops.push(cwd=tmp_path)
+    result = ops.push()
 
     assert result.pushed == 0
     assert result.up_to_date is True
 
 
-def test_subprocess_push_appends_targets_after_flags(monkeypatch, tmp_path: Path) -> None:
+def test_subprocess_push_appends_targets_after_flags(monkeypatch) -> None:
     """Targets land at the END of the argv, AFTER `--remote`/`--jobs` —
     options-before-positionals, the same shape pull uses."""
     from mintd import _dvc_ops
@@ -323,7 +319,7 @@ def test_subprocess_push_appends_targets_after_flags(monkeypatch, tmp_path: Path
         _dvc_ops, "run_streaming", _stub_push_run_streaming(["2 files pushed"], seen)
     )
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    ops.push(cwd=tmp_path, targets=["a.dvc", "dir/b"], remote="r", jobs=2)
+    ops.push(targets=["a.dvc", "dir/b"], remote="r", jobs=2)
 
     cmd = seen["cmd"]
     assert cmd[-2:] == ["a.dvc", "dir/b"]
@@ -354,7 +350,7 @@ def _stub_result_run_streaming(seen: dict, *, returncode: int = 255, stderr_line
     return _fake
 
 
-def test_subprocess_checkout_runs_under_transfer_timeout(monkeypatch, tmp_path: Path) -> None:
+def test_subprocess_checkout_runs_under_transfer_timeout(monkeypatch) -> None:
     """`dvc checkout` materializes cache blobs into the workspace — tens of
     GB on a fresh clone of a real product. It must run under the transfer
     tier, not the 30s fast tier that SIGTERM'd it mid-materialization on
@@ -365,13 +361,13 @@ def test_subprocess_checkout_runs_under_transfer_timeout(monkeypatch, tmp_path: 
     seen: dict = {}
     monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_result_run_streaming(seen, returncode=0))
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts(fast=1.0, transfer=345.0))
-    ops.checkout(cwd=tmp_path, targets=["data/final.dvc"])
+    ops.checkout(targets=["data/final.dvc"])
 
     assert seen["kwargs"]["wall_timeout"] == 345.0
 
 
 def test_subprocess_checkout_default_timeouts_mean_no_wall_timeout(
-    monkeypatch, tmp_path: Path
+    monkeypatch,
 ) -> None:
     """Default config: transfer=None → checkout gets NO wall timeout (it
     previously inherited fast=30.0 and got killed)."""
@@ -381,7 +377,7 @@ def test_subprocess_checkout_default_timeouts_mean_no_wall_timeout(
     seen: dict = {}
     monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_result_run_streaming(seen, returncode=0))
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-    ops.checkout(cwd=tmp_path)
+    ops.checkout()
 
     assert seen["kwargs"]["wall_timeout"] is None
 
@@ -397,10 +393,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
 
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "final.dvc").write_text("outs: []\n")
-    # No `monkeypatch.chdir`: `cwd=` is what resolves the owning `.dvc` now.
-    # Its presence here used to be load-bearing -- the translator fell back to
-    # `Path.cwd()` -- so removing it is what makes that fallback's deletion
-    # observable.
+    monkeypatch.chdir(tmp_path)
 
     seen: dict = {}
     monkeypatch.setattr(
@@ -416,7 +409,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
     )
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcStorageKeyError) as exc_info:
-        ops.pull(cwd=tmp_path, targets=["data/final.dvc"])
+        ops.pull(targets=["data/final.dvc"])
 
     err = exc_info.value
     assert err.target == "data/final.dvc"
@@ -435,10 +428,7 @@ def test_subprocess_checkout_translates_storage_key_tuple(
 
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "final.dvc").write_text("outs: []\n")
-    # No `monkeypatch.chdir`: `cwd=` is what resolves the owning `.dvc` now.
-    # Its presence here used to be load-bearing -- the translator fell back to
-    # `Path.cwd()` -- so removing it is what makes that fallback's deletion
-    # observable.
+    monkeypatch.chdir(tmp_path)
 
     seen: dict = {}
     monkeypatch.setattr(
@@ -451,7 +441,7 @@ def test_subprocess_checkout_translates_storage_key_tuple(
     )
     ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
     with pytest.raises(_dvc_ops.DvcStorageKeyError) as exc_info:
-        ops.checkout(cwd=tmp_path, targets=["data/final.dvc"])
+        ops.checkout(targets=["data/final.dvc"])
 
     err = exc_info.value
     assert err.target == "data/final.dvc"
@@ -558,16 +548,7 @@ def test_every_function_that_spawns_dvc_passes_an_explicit_env() -> None:
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             body = ast.dump(fn)
-            # `SubprocessDvcOps._spawn` is the single chokepoint every dvc
-            # verb now spawns through, and it does NOT mention `dvc_cmd` --
-            # the argv is built by the verb and handed in. Without naming it
-            # here the scanner walks straight past the only line in
-            # `_dvc_ops.py` that actually starts a process, and the whole file
-            # passes vacuously. (That is exactly what happened when the eight
-            # duplicated spawn blocks were collapsed into it: `offenders`
-            # stayed empty while `checked` fell from 16 to 8, and only the
-            # count below caught it.)
-            if "'dvc_cmd'" not in body and fn.name != "_spawn":
+            if "'dvc_cmd'" not in body:
                 continue
             for node in ast.walk(fn):
                 if not isinstance(node, ast.Call):
@@ -603,200 +584,4 @@ def test_every_function_that_spawns_dvc_passes_an_explicit_env() -> None:
 
     assert offenders == [], f"dvc spawned with an inherited env: {offenders}"
     # Guard the scanner itself: a matcher that finds nothing passes vacuously.
-    # 9 = eight in `_init_ops.py` / `_fast_sync_ops.py` + ONE in `_dvc_ops.py`.
-    # Was 16 until unit A collapsed that file's eight duplicated
-    # `run_streaming` blocks into `SubprocessDvcOps._spawn`. A FALLING count is
-    # not automatically fine -- it is how this invariant would rot silently, by
-    # spawns moving somewhere the scanner does not look -- so the number is
-    # pinned and every move has to be explained here, which is the point.
-    assert checked == 9, f"dvc spawn sites moved: {checked}"
-
-
-# --- unit A: the `cwd` seam ------------------------------------------------
-#
-# Three pins on the protocol itself, not on any one call site. Between them
-# they make "a verb forgot which repo it acts on" a test failure rather than a
-# silent write into whatever directory the process happened to be standing in.
-
-_VERBS = ("init", "import_", "push", "pull", "add", "status", "remove", "checkout")
-
-
-@pytest.mark.parametrize("verb", _VERBS)
-@pytest.mark.parametrize(
-    "impl", [DvcOps, SubprocessDvcOps, _FakeDvcOps], ids=["protocol", "real", "fake"],
-)
-def test_every_dvc_ops_verb_requires_cwd(impl, verb: str) -> None:
-    """`cwd` is keyword-only AND has no default, on all three implementations.
-
-    Required is the whole point. `cwd: Path | None = None` would type-check
-    every existing caller and keep ambient process cwd as the default — the
-    exact trap unit A removes, wearing better types. With no default, a missed
-    call site is a `mypy src/mintd` failure at CI time.
-
-    Parametrized over the Protocol as well as the two implementations because
-    a Protocol that has drifted from its implementations licenses nothing.
-    """
-    import inspect
-
-    param = inspect.signature(getattr(impl, verb)).parameters.get("cwd")
-    assert param is not None, f"{impl.__name__}.{verb} has no `cwd` parameter"
-    assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
-        f"{impl.__name__}.{verb}: `cwd` must be keyword-only, got {param.kind}"
-    )
-    assert param.default is inspect.Parameter.empty, (
-        f"{impl.__name__}.{verb}: `cwd` must be required, got default {param.default!r}"
-    )
-
-
-def test_every_subprocess_verb_forwards_cwd_to_run_streaming(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """Declaring `cwd` and forwarding it are different things.
-
-    A verb that accepts `cwd` and drops it on the floor passes the signature
-    pin above while still shelling into `os.getcwd()` — which is precisely the
-    bug, just harder to see. So: drive all eight through a stubbed
-    `run_streaming` and assert every spawn was aimed.
-    """
-    from mintd import _dvc_ops
-    from mintd._config import Timeouts
-
-    seen: list[object] = []
-
-    class _R:
-        returncode = 0
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-
-    def _fake(cmd, **kwargs):
-        seen.append(kwargs.get("cwd", "MISSING"))
-        return _R()
-
-    monkeypatch.setattr(_dvc_ops, "run_streaming", _fake)
-    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-
-    ops.init(cwd=tmp_path)
-    ops.import_(repo_url="http://x", path="o", dest=tmp_path / "d", cwd=tmp_path)
-    ops.push(cwd=tmp_path)
-    ops.pull(cwd=tmp_path)
-    ops.add(tmp_path / "f", cwd=tmp_path)
-    ops.status(cwd=tmp_path)
-    ops.remove("n", cwd=tmp_path)
-    ops.checkout(cwd=tmp_path)
-
-    assert seen == [tmp_path] * len(_VERBS), (
-        f"not every verb aimed its subprocess: {seen}"
-    )
-
-
-def test_path_typed_argv_is_absolutized_so_cwd_cannot_reanchor_it(
-    monkeypatch, tmp_path: Path
-) -> None:
-    """`import_`'s `-o` and `add`'s path survive a `cwd` that is not the
-    process cwd — and the return value is still built from the original.
-
-    This is the half of unit A that is easy to miss and expensive to get
-    wrong. `dest` and `path` mean "relative to where the user is standing";
-    once a `cwd` is forwarded, a *relative* one would be re-read against the
-    child's new directory instead. Measured against real dvc 3.67.1 with a
-    nested enclave: the naive version fails `stage working dir
-    '.../outer/enclave/enclave/downloads/_staging' does not exist` — the path
-    segment appears twice. Absolutizing at the seam keeps today's meaning.
-
-    `.absolute()` rather than `.resolve()` on purpose: resolve() follows
-    symlinks, which under `tmp_path` on macOS rewrites `/var` to `/private/var`
-    and makes the argv stop matching what the caller asked for.
-    """
-    from mintd import _dvc_ops
-    from mintd._config import Timeouts
-
-    captured: list[list[str]] = []
-    monkeypatch.setattr(_dvc_ops, "run_streaming", _stub_run_streaming(captured))
-    monkeypatch.chdir(tmp_path)
-    ops = _dvc_ops.SubprocessDvcOps(timeouts=Timeouts())
-
-    elsewhere = tmp_path / "other-repo"
-    elsewhere.mkdir()
-
-    produced = ops.import_(
-        repo_url="http://x", path="outputs/d.csv",
-        dest=Path("downloads/d.csv"), cwd=elsewhere,
-    )
-    out_arg = Path(captured[0][captured[0].index("-o") + 1])
-    assert out_arg.is_absolute(), f"-o is relative and cwd will re-anchor it: {out_arg}"
-    assert out_arg == tmp_path / "downloads" / "d.csv"
-    # the caller's view is unchanged: still relative to what it passed
-    assert produced == Path("downloads/d.csv.dvc")
-
-    captured.clear()
-    produced_add = ops.add(Path("data/final.csv"), cwd=elsewhere)
-    assert Path(captured[0][-1]) == tmp_path / "data" / "final.csv"
-    assert produced_add == Path("data/final.csv.dvc")
-
-
-@pytest.mark.parametrize("verb", _VERBS)
-def test_an_unusable_cwd_is_not_reported_as_a_broken_dvc_install(
-    verb: str, tmp_path: Path
-) -> None:
-    """A bad `cwd` says "not a directory", never "reinstall mintd".
-
-    Threading `cwd` to `subprocess` made an existing translation unsound.
-    Every verb turned `FileNotFoundError` into `DvcNotInstalled("mintd's
-    bundled dvc is missing — reinstall mintd.")`, which was correct only while
-    `cwd` was always the process's own directory and so always existed.
-    `subprocess` raises that same exception for a missing *working directory*.
-    Measured on this branch before the fix: `mintd data verify --path
-    /nope/nope` exited 2 telling the user to `pip install dvc`, on a machine
-    where dvc was fine. Remediation advice that is actively wrong is worse
-    than a bare stack trace, because it gets followed.
-
-    Parametrized over all eight because the translation was duplicated eight
-    times; it now lives once, in `_spawn`.
-    """
-    from mintd._config import Timeouts
-    from mintd._dvc_ops import DvcNotInstalled, DvcRepoPathError, SubprocessDvcOps
-
-    ops = SubprocessDvcOps(timeouts=Timeouts())
-    missing = tmp_path / "no-such-dir"
-    kwargs: dict = {"cwd": missing}
-    args: tuple = ()
-    if verb == "import_":
-        kwargs |= {"repo_url": "http://x", "path": "o", "dest": tmp_path / "d"}
-    elif verb == "add":
-        args = (tmp_path / "f",)
-    elif verb == "remove":
-        args = ("n",)
-
-    with pytest.raises(DvcRepoPathError) as exc_info:
-        getattr(ops, verb)(*args, **kwargs)
-
-    assert not isinstance(exc_info.value, DvcNotInstalled), (
-        f"{verb} still blames the install for a bad cwd"
-    )
-    assert str(missing) in str(exc_info.value)
-    assert exc_info.value.hint and str(missing) in exc_info.value.hint
-
-
-def test_a_cwd_that_is_a_regular_file_does_not_escape_as_a_traceback(
-    tmp_path: Path
-) -> None:
-    """`NotADirectoryError` is an `OSError` but NOT a `FileNotFoundError`, so
-    before the fix it sailed past every `except` in the seam AND both arms in
-    the CLI handler, reaching the user as a raw Python traceback — against
-    this repo's standing rule that documented failure paths never traceback.
-
-    Same root cause as the test above, different exception class, which is
-    exactly why the guard is a positive `is_dir()` check rather than a wider
-    `except`.
-    """
-    from mintd._config import Timeouts
-    from mintd._dvc_ops import DvcRepoPathError, SubprocessDvcOps
-
-    a_file = tmp_path / "notadir"
-    a_file.write_text("x")
-    ops = SubprocessDvcOps(timeouts=Timeouts())
-
-    # DvcRepoPathError subclasses DvcOpError, which is the net every CLI
-    # handler catches -- so pinning the class here pins "no traceback" too.
-    with pytest.raises(DvcRepoPathError):
-        ops.status(cwd=a_file)
+    assert checked == 16, f"dvc spawn sites moved: {checked}"

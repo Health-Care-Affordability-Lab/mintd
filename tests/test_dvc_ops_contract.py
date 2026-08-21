@@ -7,15 +7,11 @@ case below is parametrized `["fake", "real"]`; the real arm is a genuine
 
 **THE BOUNDARY — read this before adding an assertion anywhere in the suite.**
 
-**148 assert-lines** across **eight** modules read `_FakeDvcOps`'s
+**142 assert-lines** across **seven** modules read `_FakeDvcOps`'s
 call-recording attributes — 108 in `test_data_ops.py` alone, then
-`test_data_clone.py` 19, `test_cli.py` 9, `test_publish.py` 5,
-`test_enclave_pull.py` 4, `test_dvc_ops_contract.py` 1,
-`test_harness_contract.py` 1, `test_import_rescue.py` 1.
-
-*Re-measured at unit A, which added `cwd` to every recorded call and six
-assertions that read it: 143 across seven modules before, 148 across eight
-after.*
+`test_data_clone.py` 18, `test_cli.py` 9, `test_publish.py` 3,
+`test_enclave_pull.py` 2, `test_harness_contract.py` 1,
+`test_import_rescue.py` 1.
 
 The number is only meaningful with the query that produced it, so here it is
 rather than a bare figure — re-run it instead of trusting this paragraph:
@@ -58,33 +54,24 @@ from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness.git import _git
 
 
-@pytest.fixture
-def workspace(tmp_path: Path) -> Path:
-    """The repo under test. A plain fixture, because "which repo" is now a
-    parameter of every call rather than something an `ops` object carries."""
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _git(["init", "-b", "main", str(ws)])
-    return ws
-
-
 @pytest.fixture(params=["fake", "real"])
-def ops(request, workspace: Path, tmp_path: Path, monkeypatch):
-    """One object, and it is the `DvcOps` under test.
+def ops(request, tmp_path: Path, monkeypatch):
+    """`(ops, workspace)` — not just `ops`.
 
-    This fixture used to return `(ops, workspace)`, and said so: the tuple
-    was forced by `SubprocessDvcOps` shelling into `os.getcwd()` while
-    `_FakeDvcOps` ignored location entirely, so no single object could answer
-    "which repo does this act on". Unit A made `cwd` a required parameter of
-    every verb, so the question is answered at the call and the tuple is
-    gone — as is the `_is_real()` branching the two bodies below needed to
-    paper over the same gap.
+    The tuple is forced by the thing it exposes: `SubprocessDvcOps` shells
+    into `os.getcwd()` and `_FakeDvcOps` ignores location entirely, so there
+    is no single object that answers "which repo does this act on". That
+    missing `cwd` parameter is unit A's bug in fixture form; when unit A adds
+    it to `DvcOps`, this fixture collapses back to returning `ops`.
     """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _git(["init", "-b", "main", str(workspace)])
+
     if request.param == "fake":
         fake = _FakeDvcOps()
-        fake.workspace = workspace  # switch: let fake checkout materialize
-        fake.strict_targets = True  # about strictness, not location
-        return fake
+        fake.workspace = workspace
+        return fake, workspace
 
     # Hermetic real dvc. The config knobs are dvc's own (`dvc/dirs.py`);
     # redirecting `HOME` alone fails OPEN on Windows and under XDG, and a
@@ -101,14 +88,15 @@ def ops(request, workspace: Path, tmp_path: Path, monkeypatch):
     }.items():
         monkeypatch.setenv(key, value)
 
-    # Keyword-only by construction — a bare `SubprocessDvcOps()` raises
-    # TypeError. No `monkeypatch.chdir` here: `cwd=` is what aims it now.
+    # Keyword-only by construction (`_dvc_ops.py:272-278`) — a bare
+    # `SubprocessDvcOps()` raises TypeError.
     real = SubprocessDvcOps(timeouts=Timeouts())
     real.init(cwd=workspace)
-    return real
+    monkeypatch.chdir(workspace)
+    return real, workspace
 
 
-def test_add_writes_a_parseable_dvc_file(ops, workspace: Path) -> None:
+def test_add_writes_a_parseable_dvc_file(ops) -> None:
     """`add()` produces a pointer with a real `outs` block.
 
     Landed RED on the fake and GREEN on the real arm: the fake wrote `""`,
@@ -118,18 +106,19 @@ def test_add_writes_a_parseable_dvc_file(ops, workspace: Path) -> None:
     data" rather than "this fixture is lying". Fixing the fake is what made
     this pass on both arms.
     """
+    dvc_ops, workspace = ops
     (workspace / "data").mkdir()
     payload = workspace / "data" / "final.csv"
     payload.write_text("a,b\n1,2\n", encoding="utf-8")
 
-    produced = ops.add(payload, cwd=workspace)
+    produced = dvc_ops.add(Path("data/final.csv") if _is_real(dvc_ops) else payload)
 
     parsed = yaml.safe_load(Path(produced).read_text(encoding="utf-8")) or {}
     assert parsed.get("outs"), f"no outs block: {parsed}"
     assert parsed["outs"][0]["path"] == "final.csv"
 
 
-def test_pull_rejects_a_target_no_stage_declares(ops, workspace: Path) -> None:
+def test_pull_rejects_a_target_no_stage_declares(ops) -> None:
     """A target nothing declares is an error, on both arms.
 
     This is the case the fake could not express at all: `pull()` recorded the
@@ -139,8 +128,12 @@ def test_pull_rejects_a_target_no_stage_declares(ops, workspace: Path) -> None:
     therefore checking that mintd passed a string along, not that the string
     meant anything.
     """
+    dvc_ops, workspace = ops
+    if not _is_real(dvc_ops):
+        dvc_ops.strict_targets = True
+
     with pytest.raises(DvcOpError):
-        ops.pull(targets=["data/nothing-declares-this.csv"], cwd=workspace)
+        dvc_ops.pull(targets=["data/nothing-declares-this.csv"])
 
 
 def test_module_docstring_states_the_calls_boundary() -> None:
@@ -166,25 +159,5 @@ def test_module_docstring_states_the_calls_boundary() -> None:
     assert "X had effect Y" in doc
 
 
-def test_the_ops_fixture_returns_one_object(ops) -> None:
-    """The fixture hands back a `DvcOps`, not a `(ops, workspace)` pair.
-
-    This is unit A's binding acceptance criterion, kept as a test rather than
-    a note. The tuple existed because `DvcOps` had no `cwd`: `SubprocessDvcOps`
-    shelled into `os.getcwd()` and `_FakeDvcOps` ignored location entirely, so
-    the fixture had to hand out the workspace separately for the bodies to
-    branch on. Both are gone, and re-introducing either should redden a NAMED
-    test rather than surface as an unpack error three files away.
-
-    `_is_real` is asserted absent for the same reason — it is the other half
-    of the same workaround.
-    """
-    assert not isinstance(ops, tuple), "the `ops` fixture re-grew its tuple"
-    # Asked of the module NAMESPACE, not of its source text: a grep for the
-    # helper's name matches this test's own docstring and assertion, so a
-    # source-substring version of this check can never pass.
-    import sys
-
-    assert not hasattr(sys.modules[__name__], "_is_real"), (
-        "the real/fake branching helper is back; the two arms have diverged again"
-    )
+def _is_real(dvc_ops) -> bool:
+    return isinstance(dvc_ops, SubprocessDvcOps)

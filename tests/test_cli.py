@@ -1409,7 +1409,6 @@ def test_enclave_pull_happy_path(
 
     monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
 
-    monkeypatch.chdir(tmp_path)
     rc = cli.main([
         "enclave", "pull", "provider-xw",
         "--manifest", str(manifest),
@@ -1438,7 +1437,6 @@ def test_enclave_pull_nothing_to_pull_message(
 
     monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
 
-    monkeypatch.chdir(tmp_path)
     rc = cli.main([
         "enclave", "pull",
         "--manifest", str(manifest),
@@ -2435,7 +2433,6 @@ def test_cli_enclave_pull_shows_outer_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
 ) -> None:
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
-    monkeypatch.chdir(tmp_path)
     cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
     assert ("status", "Pulling enclave data...") in recording_reporter.events
 
@@ -2450,7 +2447,6 @@ def test_cli_enclave_pull_dvc_op_error_names_producer(
         "mintd.cli.enclave_pull",
         _raises(EnclavePullError("repo-b", DvcPullError("x"))),
     )
-    monkeypatch.chdir(tmp_path)
     rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
     assert rc == 1
     errs = recording_reporter.events_of("error")
@@ -2474,7 +2470,6 @@ def test_cli_enclave_pull_not_in_repo_hint_is_not_pin_repo(
         "mintd.cli.enclave_pull",
         _raises(EnclavePullError("repo-b", DvcNotInRepoError("nope"))),
     )
-    monkeypatch.chdir(tmp_path)
     rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
     assert rc == 1
     hint = recording_reporter.events_of("error")[0][2] or ""
@@ -2493,7 +2488,6 @@ def test_cli_enclave_pull_path_not_found_keeps_pin_repo_hint(
         "mintd.cli.enclave_pull",
         _raises(EnclavePullError("repo-b", DvcImportPathNotFound("missing"))),
     )
-    monkeypatch.chdir(tmp_path)
     rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
     assert rc == 1
     hint = recording_reporter.events_of("error")[0][2] or ""
@@ -2617,7 +2611,6 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
     cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
-    monkeypatch.chdir(tmp_path)
     cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
 
     assert len(captured) == 4
@@ -3510,123 +3503,3 @@ def test_publish_builds_dvc_ops_with_a_reporter(
 
     assert captured, "publish never built a SubprocessDvcOps"
     assert captured["reporter"] is recording_reporter
-
-
-def test_enclave_pull_allows_the_relative_default_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The guard must not break the ordinary invocation.
-
-    `--manifest` defaults to a RELATIVE `enclave_manifest.yaml`, whose parent
-    is `.` — which always resolves to the process cwd. Standing in the enclave
-    and typing `mintd enclave pull` has to keep working, or the guard has
-    broken the only path anyone actually uses.
-    """
-    called = []
-    # Object-form on purpose: the pinned substrate census counts string-form
-    # `monkeypatch.setattr("mintd.…")` sites, and a new test should not move a
-    # ratchet it has nothing to do with.
-    monkeypatch.setattr(
-        cli, "enclave_pull", lambda *a, **k: called.append(1) or (Path("."), []),
-    )
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main(["enclave", "pull"])
-
-    assert rc == 0
-    assert called == [1]
-
-
-def test_enclave_pull_refusal_hint_survives_spaces_and_carries_every_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The hint is runnable AS PRINTED — including a path with a space, and
-    including `--force`.
-
-    Two review rounds found two separate defects in the f-string version of
-    this hint: it dropped `--force` (so the pasted retry SKIPS already-
-    downloaded products instead of re-fetching them — a different operation
-    from the one the user asked for), and it did not quote, so an enclave
-    under `~/…/My Drive/…` produced `cd /x/My Drive/enclave` — which `cd`s to
-    `/x/My` and fails.
-
-    Both are the same root cause: a concatenated string makes every flag
-    something you can forget and every path something you can forget to quote.
-    The hint is built as argv and joined with `shlex` now, so this test asserts
-    against `shlex.split` round-tripping rather than against a literal.
-    """
-    import shlex
-
-    called = []
-    monkeypatch.setattr(
-        cli, "enclave_pull", lambda *a, **k: called.append(1) or (Path("."), []),
-    )
-    enclave = tmp_path / "My Drive" / "enclave_x"
-    enclave.mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main([
-        "enclave", "pull", "provider-xw",
-        "--manifest", str(enclave / "audit.yaml"), "--force",
-    ])
-
-    assert rc == 1
-    assert called == [], "the pull ran anyway; the guard is decorative"
-    errors = [e for e in recording_reporter.events if e[0] == "error"]
-    assert any("must run from inside the enclave" in e[1] for e in errors), errors
-    hint = next(e[2] for e in errors if e[2])
-    cd_part, _, retry_part = hint.partition(" && ")
-    # the `cd` target survives shlex round-trip as ONE argument, spaces intact
-    assert shlex.split(cd_part) == ["cd", str(enclave)]
-    # and every flag the user gave is carried into the retry
-    assert shlex.split(retry_part) == [
-        "mintd", "enclave", "pull", "provider-xw",
-        "--manifest", "audit.yaml", "--force",
-    ]
-
-
-def test_enclave_pull_refusal_names_one_filesystem_root_not_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The message compares resolved paths, so it must PRINT resolved paths.
-
-    `Path.cwd()` is physical by definition — POSIX `getcwd` resolves symlinks —
-    so an unresolved `enclave_dir` printed beside it showed two roots that look
-    unrelated: "must run from inside the enclave (/tmp/x/enclave), not from
-    /private/tmp/x" on any macOS, where `/tmp` is itself a symlink. The user
-    cannot tell those are the same place.
-    """
-    monkeypatch.setattr(cli, "enclave_pull", lambda *a, **k: (Path("."), []))
-    real = tmp_path / "real"
-    (real / "enclave").mkdir(parents=True)
-    link = tmp_path / "link"
-    link.symlink_to(real, target_is_directory=True)
-    monkeypatch.chdir(tmp_path)
-
-    cli.main(["enclave", "pull", "--manifest", str(link / "enclave" / "m.yaml")])
-
-    msg = next(e[1] for e in recording_reporter.events if e[0] == "error")
-    assert str(real / "enclave") in msg, msg
-    assert str(link) not in msg, f"unresolved path leaked into the message: {msg}"
-
-
-def test_enclave_pull_missing_manifest_is_an_error_not_a_traceback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """A missing manifest reports; it does not raise.
-
-    `EnclaveManifest.load` raises `FileNotFoundError`, which was in none of the
-    handler's except arms, so it reached the user as a raw traceback. The cwd
-    guard added in this unit funnels every user into exactly this path — stand
-    in the enclave, run it — so leaving the leak would have traded one bad
-    message for a stack trace. `_handle_enclave_list` and
-    `_handle_enclave_verify` already fixed the identical leak; this mirrors them.
-    """
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main(["enclave", "pull"])
-
-    assert rc == 1
-    errors = [e for e in recording_reporter.events if e[0] == "error"]
-    assert any("not found" in e[1] for e in errors), errors
-    assert any(e[2] and "--manifest" in e[2] for e in errors), errors

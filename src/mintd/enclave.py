@@ -413,20 +413,6 @@ def enclave_pull(
     today: date | None = None,
     reporter: "Reporter | None" = None,
 ) -> tuple[Path, list[DownloadedItem]]:
-    """Fetch every approved product into the enclave beside `manifest_path`.
-
-    **The enclave is `manifest_path.parent`, and that is where dvc runs.** Both
-    `init` and `import_` are given it as `cwd`, so this works from any process
-    directory. It did not always: `import_` had no `cwd` to be given, so it ran
-    wherever the caller stood, and pulling from outside the enclave cached the
-    producer's restricted bytes into the enclosing repo at exit 0.
-
-    **`downloads_root` must therefore stay INSIDE `manifest_path.parent`.** dvc
-    refuses an output that falls outside the repo it is running in, so an
-    override pointing elsewhere now fails loudly where it used to "work" by
-    accident of the process cwd. Left as a constraint rather than a guard: no
-    production caller overrides it, and the failure is dvc's own and legible.
-    """
     manifest = EnclaveManifest.load(manifest_path)
     targets = [ap for ap in manifest.approved_products if repo is None or ap.repo == repo]
     if repo is not None and not targets:
@@ -490,7 +476,6 @@ def enclave_pull(
                 dest = staging_dir / Path(output.rstrip("/")).name
                 try:
                     dvc_path = dvc_ops.import_(
-                        cwd=manifest_path.parent,
                         repo_url=repo_url,
                         path=output,
                         dest=dest,
