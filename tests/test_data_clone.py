@@ -313,43 +313,37 @@ def test_clone_and_pull_product_translates_git_failure_to_producer_error(
     assert "partial clone left in place" in msg
 
 
-class _CwdRecordingDvcOps(_FakeDvcOps):
-    def __init__(self) -> None:
-        super().__init__()
-        self.pull_cwds: list[Path] = []
-
-    def pull(
-        self,
-        *,
-        targets: list[str] | None = None,
-        remote: str | None = None,
-        jobs: int | None = None,
-        extra_args: list[str] | None = None,
-    ) -> None:
-        self.pull_cwds.append(Path.cwd())
-        super().pull(targets=targets, remote=remote, jobs=jobs, extra_args=extra_args)
-
-
-def test_clone_and_pull_product_runs_dvc_inside_clone_dest(
+def test_clone_and_pull_product_passes_the_clone_dest_as_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The clone lane names the repo it pulls, instead of standing in it.
+
+    This test used to be `..._runs_dvc_inside_clone_dest` and sampled
+    `Path.cwd()` from inside a `_CwdRecordingDvcOps` subclass, because that
+    was the only way to observe which repo `data_pull` would act on: the
+    answer lived in process state, put there by a `os.chdir` in `data.py`
+    that existed solely because `DvcOps` had no `cwd`. Unit A gave the
+    protocol a `cwd`, so the answer is now an argument and the fake records
+    it — the subclass is gone with the chdir it was watching.
+    """
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client)
-    dvc = _CwdRecordingDvcOps()
+    dvc = _FakeDvcOps()
 
     clone_and_pull_product(
         client, dvc, _NoopCloneGitOps(), None, name="provider-xw",
     )
 
-    assert dvc.pull_cwds == [(tmp_path / "data_provider-xw").resolve()]
-    assert Path.cwd() == tmp_path  # restored after return
+    assert [c.cwd for c in dvc.pull_calls] == [tmp_path / "data_provider-xw"]
+    assert Path.cwd() == tmp_path  # never chdir'd in the first place
 
 
 class _DvcPullErrorOps(_FakeDvcOps):
     def pull(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -358,7 +352,7 @@ class _DvcPullErrorOps(_FakeDvcOps):
         raise DvcOpError("boom")
 
 
-def test_clone_and_pull_product_restores_cwd_on_dvc_failure(
+def test_clone_and_pull_product_never_changes_the_process_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)

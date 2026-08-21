@@ -15,7 +15,9 @@ def test_data_pull_default_calls_dvc_ops_pull(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     data_pull(tmp_path, dvc_ops=fake)
     assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0] == DvcPullCall(targets=None, remote=None, jobs=None)
+    assert fake.pull_calls[0] == DvcPullCall(
+        cwd=tmp_path, targets=None, remote=None, jobs=None,
+    )
 
 
 def test_data_pull_with_targets_passes_them(tmp_path: Path) -> None:
@@ -132,7 +134,7 @@ def test_data_add_returns_dvc_path(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     path = tmp_path / "raw.csv"
     path.write_text("data")
-    produced = data_add(path, dvc_ops=fake)
+    produced = data_add(path, project_path=tmp_path, dvc_ops=fake)
     assert produced == tmp_path / "raw.csv.dvc"
     assert (tmp_path / "raw.csv.dvc").exists()
 
@@ -152,7 +154,7 @@ def test_data_verify_with_targets_filters(tmp_path: Path) -> None:
 
 def test_data_remove_calls_dvc_ops_remove(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    data_remove("raw.csv.dvc", dvc_ops=fake)
+    data_remove("raw.csv.dvc", project_path=tmp_path, dvc_ops=fake)
     assert fake.remove_calls[0].name == "raw.csv.dvc"
 
 
@@ -1448,3 +1450,46 @@ def test_data_pull_crash_recovery_count_excludes_stage_out_failures(
     # error_count but must NOT be subtracted from the .dvc-target count.
     assert summary.error_count == 1
     assert summary.targets_pulled == 1
+
+
+def test_data_verify_aims_dvc_at_the_requested_path(tmp_path: Path) -> None:
+    """`--path X` makes dvc status run in X. This is the user-visible half of
+    unit A and it previously did nothing at all.
+
+    `data_verify` took `project_path` and then threw it away:
+
+        del project_path  # currently unused; dvc status doesn't accept a cwd arg
+
+    So `mintd data verify --path ../other` reported on the repo the user was
+    STANDING in while naming a different one — a flag that had been wired to
+    the signature and no further. Nothing caught it because the fake had no
+    `cwd` to record.
+    """
+    fake = _FakeDvcOps()
+    elsewhere = tmp_path / "other-project"
+    elsewhere.mkdir()
+
+    data_verify(elsewhere, dvc_ops=fake)
+
+    assert [c.cwd for c in fake.status_calls] == [elsewhere]
+    assert fake.status_calls[0].cwd != Path.cwd()
+
+
+def test_data_add_and_remove_aim_dvc_at_their_project_path(tmp_path: Path) -> None:
+    """The same for `add` and `remove`, which had no repo root at all.
+
+    Both took only a path/name and a `dvc_ops`, so the repo was whatever the
+    process was standing in. The CLI now resolves it once, explicitly, at the
+    composition root and passes it down.
+    """
+    fake = _FakeDvcOps()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    payload = proj / "raw.csv"
+    payload.write_text("data")
+
+    data_add(payload, project_path=proj, dvc_ops=fake)
+    data_remove("raw.csv.dvc", project_path=proj, dvc_ops=fake)
+
+    assert [c.cwd for c in fake.add_calls] == [proj]
+    assert [c.cwd for c in fake.remove_calls] == [proj]

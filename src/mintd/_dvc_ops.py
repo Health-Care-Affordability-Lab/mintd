@@ -14,7 +14,7 @@ from typing import Optional, Protocol
 from ._config import Timeouts
 from ._console import Reporter
 from ._dvc_invoke import dvc_cmd, dvc_env
-from ._subprocess import run_streaming
+from ._subprocess import StreamResult, run_streaming
 
 
 class DvcOpError(Exception):
@@ -38,6 +38,23 @@ def pull_retry_hint(target: str | None) -> str:
     if target is None:
         return "retry the .dvc target that tracks this path: mintd data pull <target>.dvc"
     return f"retry just this target: mintd data pull {target}"
+
+
+class DvcRepoPathError(DvcOpError):
+    """The directory a verb was aimed at is missing or is not a directory.
+
+    Its own type because the alternative is a lie. Every verb translates
+    `FileNotFoundError` from the spawn into `DvcNotInstalled` ("reinstall
+    mintd"), which was sound only while `cwd` was always the process's own
+    directory and therefore always existed. Once `cwd` became a parameter,
+    `subprocess` began raising the same exception for a bad *working
+    directory* — so a user who typo'd `--path` was told their install was
+    broken, at exit 2. A typo is not a broken install.
+    """
+
+    def __init__(self, cwd: Path) -> None:
+        super().__init__(f"not a directory: {cwd}")
+        self.hint = f"check the path exists and is a project directory: {cwd}"
 
 
 class DvcNotInstalled(DvcOpError):
@@ -148,7 +165,7 @@ _STORAGE_KEY_TUPLE_RE = re.compile(r"unexpected error\s*-\s*(\([^()]*\))")
 
 
 def _translate_storage_key_error(
-    stderr: str, *, op: str, exit_code: int, cwd: Path | None = None,
+    stderr: str, *, op: str, exit_code: int, cwd: Path,
 ) -> DvcStorageKeyError | None:
     """Translate dvc's StorageKeyError tuple crash into an actionable error.
 
@@ -173,7 +190,7 @@ def _translate_storage_key_error(
     ):
         return None
     rel = "/".join(parts)
-    base = cwd if cwd is not None else Path.cwd()
+    base = cwd
     target: str | None = None
     for i in range(len(parts), 0, -1):
         candidate = "/".join(parts[:i])
@@ -209,9 +226,29 @@ class DvcOps(Protocol):
     """Surface used by the rest of mintd to talk to dvc.
 
     Tests pass a fake; production passes `SubprocessDvcOps`.
+
+    **`cwd` is required on every verb, and that is the point.** dvc resolves
+    "which repo am I acting on" from its working directory, so a verb without
+    a `cwd` acts on wherever the process happens to be standing. Seven of these
+    eight used to work that way: `mintd enclave pull --manifest <path>` cached a
+    producer's restricted bytes into whatever repo the user was in, exit 0, and
+    `data.py` carried a process-global `os.chdir` to paper over the same hole on
+    the clone lane. An optional `cwd: Path | None = None` would rebuild that trap
+    with better typing, since ambient cwd stays the default. Required means a
+    missed call site is a mypy failure, not a silent wrong-repo write.
+
+    **The argument rule, stated once.** `Path`-typed arguments (`import_`'s
+    `dest`, `add`'s `path`) are anchored to the *process* cwd — they are
+    absolutized at this seam, so they keep meaning exactly what they mean today
+    no matter what `cwd` is passed. `str`-typed arguments (`targets`, `name`) are
+    *repo*-relative and are interpreted against `cwd`, which is the fix. Without
+    the absolutizing half, passing a `cwd` would silently re-anchor a relative
+    `-o` against the new directory: measured against real dvc 3.67.1, that turns
+    the enclave's silent wrong-repo write into `stage working dir
+    '.../outer/enclave/enclave/downloads/_staging' does not exist`.
     """
 
-    def init(self, *, cwd: Path | None = None) -> None:
+    def init(self, *, cwd: Path) -> None:
         """Run `dvc init` (bare, no remote). Tolerant of an already-init repo."""
         ...
 
@@ -221,6 +258,7 @@ class DvcOps(Protocol):
         repo_url: str,
         path: str,
         dest: Path,
+        cwd: Path,
         rev: str | None = None,
         force: bool = False,
         extra_args: list[str] | None = None,
@@ -231,6 +269,7 @@ class DvcOps(Protocol):
     def push(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -241,6 +280,7 @@ class DvcOps(Protocol):
     def pull(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -249,19 +289,19 @@ class DvcOps(Protocol):
         """Run `dvc pull`."""
         ...
 
-    def add(self, path: Path) -> Path:
+    def add(self, path: Path, *, cwd: Path) -> Path:
         """Run `dvc add` and return the path of the produced `.dvc` file."""
         ...
 
-    def status(self, targets: list[str] | None = None) -> dict[str, str]:
+    def status(self, targets: list[str] | None = None, *, cwd: Path) -> dict[str, str]:
         """Run `dvc status` and return a status map."""
         ...
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str, *, cwd: Path) -> None:
         """Run `dvc remove`."""
         ...
 
-    def checkout(self, *, targets: list[str] | None = None) -> None:
+    def checkout(self, *, cwd: Path, targets: list[str] | None = None) -> None:
         """Run `dvc checkout`."""
         ...
 
@@ -299,16 +339,46 @@ class SubprocessDvcOps:
             env.setdefault("AWS_PROFILE", self._aws_profile_name)
         return env
 
-    def init(self, *, cwd: Path | None = None) -> None:
-        cmd = [*dvc_cmd(), "init"]
+    def _spawn(
+        self,
+        cmd: list[str],
+        *,
+        cwd: Path,
+        wall_timeout: float | None,
+        json_mode: bool = False,
+    ) -> "StreamResult":
+        """Run one dvc command in `cwd`, and answer "is dvc even installed?"
+        in one place rather than eight.
+
+        The `FileNotFoundError` translation is only sound when `cwd` is known
+        good: `subprocess` raises it for a missing working directory exactly
+        as readily as for a missing executable. Before `cwd` was a parameter
+        that could not happen; now a single mistyped `--path` does it. So the
+        directory is checked first, and only then is the exception the binary's.
+
+        The stderr half of the same question lives here too — dvc exits 1 with
+        "No module named 'dvc'" when it is missing from mintd's env — because
+        splitting one question across two layers is how the two answers drift.
+        """
+        if not cwd.is_dir():
+            raise DvcRepoPathError(cwd)
         try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, cwd=cwd, env=self._env())
+            r = run_streaming(
+                cmd, wall_timeout=wall_timeout, reporter=self._reporter,
+                cwd=cwd, json_mode=json_mode, env=self._env(),
+            )
         except FileNotFoundError:
+            # cwd was validated above, so this really is the binary.
             raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        if r.returncode != 0 and _is_dvc_module_missing("".join(r.stderr_lines)):
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.")
+        return r
+
+    def init(self, *, cwd: Path) -> None:
+        cmd = [*dvc_cmd(), "init"]
+        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             # Tolerate an already-initialized repo so callers can init
             # unconditionally and repeated pulls stay idempotent. `dvc init`
             # exits non-zero with "'.dvc' exists. Use `-f` to force." in that case.
@@ -324,11 +394,15 @@ class SubprocessDvcOps:
         repo_url: str,
         path: str,
         dest: Path,
+        cwd: Path,
         rev: str | None = None,
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
-        cmd: list[str] = [*dvc_cmd(), "import", repo_url, path, "-o", str(dest)]
+        # `-o` is absolutized against the PROCESS cwd, not `cwd` -- see the
+        # argument rule on `DvcOps`. The return value below stays computed from
+        # the original `dest`, so this is invisible to callers.
+        cmd: list[str] = [*dvc_cmd(), "import", repo_url, path, "-o", str(dest.absolute())]
         if rev:
             cmd.extend(["--rev", rev])
         if force:
@@ -336,15 +410,10 @@ class SubprocessDvcOps:
         if extra_args:
             cmd.extend(extra_args)
 
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
 
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             if "not inside of a DVC repository" in stderr:
                 raise DvcNotInRepoError(
                     f"not inside a DVC repository while importing into '{dest}'"
@@ -366,6 +435,7 @@ class SubprocessDvcOps:
     def push(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -382,17 +452,9 @@ class SubprocessDvcOps:
         # we render our own summary instead, and JSON consumers must not see
         # it. Live transfer progress is on stderr and is unaffected, so the
         # spinner still ticks during the upload.
-        try:
-            r = run_streaming(
-                cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter,
-                json_mode=True, env=self._env(),
-            )
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd, json_mode=True)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcPushError(
                 f"dvc push failed (exit {r.returncode}): {stderr.strip()}"
             )
@@ -401,6 +463,7 @@ class SubprocessDvcOps:
     def pull(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -415,16 +478,11 @@ class SubprocessDvcOps:
             cmd.extend(extra_args)
         if targets:
             cmd.extend(targets)
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             translated = _translate_storage_key_error(
-                stderr, op="pull", exit_code=r.returncode,
+                stderr, op="pull", exit_code=r.returncode, cwd=cwd,
             )
             if translated is not None:
                 raise translated
@@ -432,36 +490,28 @@ class SubprocessDvcOps:
                 f"dvc pull failed (exit {r.returncode}): {stderr.strip()}"
             )
 
-    def add(self, path: Path) -> Path:
-        cmd = [*dvc_cmd(), "add", str(path)]
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+    def add(self, path: Path, *, cwd: Path) -> Path:
+        # Absolutized against the PROCESS cwd; the return value below stays
+        # computed from the original `path`. See the rule on `DvcOps`.
+        cmd = [*dvc_cmd(), "add", str(path.absolute())]
+        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcAddError(
                 f"dvc add failed (exit {r.returncode}): {stderr.strip()}"
             )
         return path.parent / (path.name + ".dvc")
 
-    def status(self, targets: list[str] | None = None) -> dict[str, str]:
+    def status(self, targets: list[str] | None = None, *, cwd: Path) -> dict[str, str]:
         import json
 
         cmd = [*dvc_cmd(), "status", "--json"]
         if targets:
             cmd.extend(targets)
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, json_mode=True, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd, json_mode=True)
 
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcStatusError(
                 f"dvc status failed (exit {r.returncode}): {stderr.strip()}"
             )
@@ -483,21 +533,16 @@ class SubprocessDvcOps:
                 status_map[path] = status
         return status_map
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str, *, cwd: Path) -> None:
         cmd = [*dvc_cmd(), "remove", name]
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.fast, reporter=self._reporter, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             raise DvcRemoveError(
                 f"dvc remove failed (exit {r.returncode}): {stderr.strip()}"
             )
 
-    def checkout(self, *, targets: list[str] | None = None) -> None:
+    def checkout(self, *, cwd: Path, targets: list[str] | None = None) -> None:
         cmd = [*dvc_cmd(), "checkout"]
         if targets:
             cmd.extend(targets)
@@ -506,16 +551,11 @@ class SubprocessDvcOps:
         # ~80 targets on a fresh clone. 0.6s on APFS reflink, but minutes
         # of real copying on non-reflink filesystems (the lab's Linux
         # boxes); the 30s fast tier SIGTERM'd dvc mid-materialization.
-        try:
-            r = run_streaming(cmd, wall_timeout=self._timeouts.transfer, reporter=self._reporter, env=self._env())
-        except FileNotFoundError:
-            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
-            if _is_dvc_module_missing(stderr):
-                raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
             translated = _translate_storage_key_error(
-                stderr, op="checkout", exit_code=r.returncode,
+                stderr, op="checkout", exit_code=r.returncode, cwd=cwd,
             )
             if translated is not None:
                 raise translated

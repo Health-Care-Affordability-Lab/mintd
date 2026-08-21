@@ -218,7 +218,7 @@ def _apply_publish(
     if reporter is not None:
         reporter.update_status("Pushing data to DVC...")
     try:
-        dvc_ops.push()
+        dvc_ops.push(cwd=project_path)
     except DvcOpError as exc:
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(

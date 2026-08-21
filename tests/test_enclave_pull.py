@@ -14,10 +14,15 @@ class _FakeDvcOps:
     def __init__(self):
         self.calls = []
         self.init_calls = []
+        # WHICH REPO each import was aimed at. Separate from `calls` so the
+        # existing tuple-shape assertions keep working; unit A is what made
+        # this observable at all.
+        self.import_cwds = []
     def init(self, *, cwd=None):
         self.init_calls.append(cwd)
-    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+    def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
         self.calls.append((repo_url, path, dest, rev, force))
+        self.import_cwds.append(cwd)
         # Mirror real `dvc import`: the stage working dir must already exist.
         # enclave_pull is responsible for creating it (slice 47); don't mkdir
         # here, or we'd mask a regression of that fix.
@@ -299,7 +304,7 @@ def test_enclave_pull_wraps_dvc_error_as_enclave_pull_error(tmp_path):
     class _FailingDvcOps:
         def init(self, *, cwd=None):
             pass
-        def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+        def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
             raise DvcPullError("network down")
 
     m_path = tmp_path / "enclave_manifest.yaml"
@@ -362,7 +367,7 @@ class _PartialFailDvc:
     def init(self, *, cwd=None):
         pass
 
-    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+    def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
         self.calls.append((repo_url, path, dest, rev, force))
         repo = dest.parent.parent.name
         if repo == self.fail_repo:
@@ -476,7 +481,7 @@ class _FailOnOutputDvc:
     def init(self, *, cwd=None):
         pass
 
-    def import_(self, repo_url, path, dest, rev, force, extra_args=None):
+    def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
         self.calls.append(path)
         if path == self.fail_output:
             raise DvcPullError("boom")
@@ -518,3 +523,50 @@ def test_pull_all_product_partial_outputs_persist_before_failure(tmp_path):
         enclave_pull(_Client(), dvc2, manifest_path=m_path, downloads_root=downloads,
                      producer_view_factory=factory, today=date(2026, 5, 20))
     assert dvc2.calls == ["o2"]
+
+
+def test_enclave_pull_imports_into_the_enclave_from_an_unrelated_cwd(
+    tmp_path, monkeypatch
+):
+    """The custody bug, pinned: `dvc import` is aimed at the enclave, never at
+    whatever repo the caller happens to be standing in.
+
+    Before unit A, `enclave_pull` pinned the working directory for `init`
+    (`cwd=manifest_path.parent`) and could not pass one to `import_` at all —
+    the protocol had no `cwd` on that verb. Run from anywhere but the enclave,
+    a pull cached the producer's restricted bytes into the *enclosing* repo's
+    `.dvc/cache` and staged dvc's bookkeeping into that repo's git index, at
+    exit 0. Measured against real dvc 3.67.1 with the enclave nested one level
+    down: outer cache 1 blob, enclave cache 0.
+
+    This is the fake-backed half; `tests/test_harness_contract.py::
+    test_enclave_pull_caches_into_the_enclave_not_the_outer_repo` runs the
+    same claim through real dvc and checks where the bytes actually land.
+
+    The shared `_FakeDvcOps` records `cwd` on every call tuple and is pinned
+    elsewhere; this module's local double writes `dest`, which `enclave_pull`
+    then moves, so it is the one that can drive the whole lane.
+    """
+    enclave = tmp_path / "enclave"
+    enclave.mkdir()
+    m_path = enclave / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1")
+    ]).save(m_path)
+
+    dvc = _FakeDvcOps()
+
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self): return "out"
+        return View()
+
+    # Stand somewhere else entirely -- the shape that used to corrupt.
+    monkeypatch.chdir(tmp_path)
+    enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=factory)
+
+    assert dvc.import_cwds == [enclave], "dvc import was not aimed at the enclave"
+    assert dvc.init_calls == [enclave]
+    # init and import must agree about where they run; disagreeing is the
+    # failure mode that produced the misdirecting "re-run" hint.
+    assert dvc.import_cwds[0] == dvc.init_calls[0]

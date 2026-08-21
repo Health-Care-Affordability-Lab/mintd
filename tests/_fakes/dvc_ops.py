@@ -15,10 +15,11 @@ from mintd._dvc_ops import DvcOpError, DvcPullError, DvcPushResult
 
 
 class DvcInitCall(NamedTuple):
-    cwd: Path | None
+    cwd: Path
 
 
 class DvcImportCall(NamedTuple):
+    cwd: Path
     repo_url: str
     path: str
     dest: Path
@@ -28,12 +29,14 @@ class DvcImportCall(NamedTuple):
 
 
 class DvcPushCall(NamedTuple):
+    cwd: Path
     remote: str | None
     jobs: int | None
     targets: list[str] | None = None
 
 
 class DvcPullCall(NamedTuple):
+    cwd: Path
     targets: list[str] | None
     remote: str | None
     jobs: int | None
@@ -41,18 +44,22 @@ class DvcPullCall(NamedTuple):
 
 
 class DvcAddCall(NamedTuple):
+    cwd: Path
     path: Path
 
 
 class DvcStatusCall(NamedTuple):
+    cwd: Path
     targets: list[str] | None
 
 
 class DvcRemoveCall(NamedTuple):
+    cwd: Path
     name: str
 
 
 class DvcCheckoutCall(NamedTuple):
+    cwd: Path
     targets: list[str] | None
 
 
@@ -83,8 +90,16 @@ class _FakeDvcOps:
         self.checkout_raises: Exception | None = None
         # Post-checkout verification (data_pull) stats workspace paths, so a
         # fake checkout must be able to MATERIALIZE its targets. Set
-        # ``workspace`` to the project root to enable it. Knobs model the
-        # dvc 3.67.1 index_from_targets bug:
+        # ``workspace`` to any non-None value to enable it.
+        #
+        # It is a SWITCH, not a location. WHERE a checkout materializes is the
+        # ``cwd`` of the call, exactly as it is for real dvc -- there is one
+        # "which repo" concept now, and it is the protocol's. Before unit A
+        # there were two, and they could silently disagree. Setting this to the
+        # project root is still the conventional spelling, and every existing
+        # site does, but only its not-None-ness is read.
+        #
+        # Knobs model the dvc 3.67.1 index_from_targets bug:
         # - checkout_materializes=False: checkout exits 0 having written
         #   nothing (the silent multi-target no-op);
         # - checkout_single_target_only=True: only single-target invocations
@@ -105,7 +120,7 @@ class _FakeDvcOps:
         # licence.
         self.strict_targets: bool = False
 
-    def init(self, *, cwd: Path | None = None) -> None:
+    def init(self, *, cwd: Path) -> None:
         self.init_calls.append(DvcInitCall(cwd=cwd))
 
     def import_(
@@ -114,14 +129,15 @@ class _FakeDvcOps:
         repo_url: str,
         path: str,
         dest: Path,
+        cwd: Path,
         rev: str | None = None,
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
         self.calls.append(
             DvcImportCall(
-                repo_url=repo_url, path=path, dest=dest, rev=rev, force=force,
-                extra_args=extra_args,
+                cwd=cwd, repo_url=repo_url, path=path, dest=dest, rev=rev,
+                force=force, extra_args=extra_args,
             )
         )
         # Mirror real `dvc import`: the destination's parent (the stage working
@@ -153,18 +169,22 @@ class _FakeDvcOps:
     def push(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
     ) -> DvcPushResult:
         if self.push_raises:
             raise self.push_raises
-        self.push_calls.append(DvcPushCall(remote=remote, jobs=jobs, targets=targets))
+        self.push_calls.append(
+            DvcPushCall(cwd=cwd, remote=remote, jobs=jobs, targets=targets)
+        )
         return self.push_result
 
     def pull(
         self,
         *,
+        cwd: Path,
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
@@ -176,17 +196,18 @@ class _FakeDvcOps:
             if t in self.pull_raises_for:
                 raise self.pull_raises_for[t]
         if self.strict_targets:
-            self._reject_unknown_targets(targets)
+            self._reject_unknown_targets(targets, root=cwd)
         self.pull_calls.append(
             DvcPullCall(
-                targets=targets, remote=remote, jobs=jobs, extra_args=extra_args,
+                cwd=cwd, targets=targets, remote=remote, jobs=jobs,
+                extra_args=extra_args,
             )
         )
 
-    def add(self, path: Path) -> Path:
+    def add(self, path: Path, *, cwd: Path) -> Path:
         if self.add_raises:
             raise self.add_raises
-        self.add_calls.append(DvcAddCall(path=path))
+        self.add_calls.append(DvcAddCall(cwd=cwd, path=path))
         dvc_file = path.parent / (path.name + ".dvc")
         dvc_file.parent.mkdir(parents=True, exist_ok=True)
         # A REAL `.dvc` body. This used to be `""`, which is valid YAML
@@ -204,21 +225,21 @@ class _FakeDvcOps:
         )
         return dvc_file
 
-    def status(self, targets: list[str] | None = None) -> dict[str, str]:
+    def status(self, targets: list[str] | None = None, *, cwd: Path) -> dict[str, str]:
         if self.status_raises:
             raise self.status_raises
-        self.status_calls.append(DvcStatusCall(targets=targets))
+        self.status_calls.append(DvcStatusCall(cwd=cwd, targets=targets))
         return self.status_result.copy()
 
-    def remove(self, name: str) -> None:
+    def remove(self, name: str, *, cwd: Path) -> None:
         if self.remove_raises:
             raise self.remove_raises
-        self.remove_calls.append(DvcRemoveCall(name=name))
+        self.remove_calls.append(DvcRemoveCall(cwd=cwd, name=name))
 
-    def checkout(self, *, targets: list[str] | None = None) -> None:
+    def checkout(self, *, cwd: Path, targets: list[str] | None = None) -> None:
         if self.checkout_raises:
             raise self.checkout_raises
-        self.checkout_calls.append(DvcCheckoutCall(targets=targets))
+        self.checkout_calls.append(DvcCheckoutCall(cwd=cwd, targets=targets))
         if (
             self.workspace is not None
             and self.checkout_materializes
@@ -226,9 +247,9 @@ class _FakeDvcOps:
         ):
             for t in targets or []:
                 if t not in self.checkout_never_materializes:
-                    self._materialize_target(t)
+                    self._materialize_target(t, root=cwd)
 
-    def _materialize_target(self, target: str) -> None:
+    def _materialize_target(self, target: str, *, root: Path) -> None:
         """Write what a real `dvc checkout` would: the target's workspace
         path(s). Out shapes (file vs dir vs files-format dir) come from the
         on-disk .dvc / dvc.lock, same as production's verification pass; a
@@ -248,8 +269,6 @@ class _FakeDvcOps:
             workspace_path_for,
         )
 
-        root = self.workspace
-        assert root is not None
         outs = outs_for_target(root, target, "origin")
         if not outs:
             outs = [o for o in parse_dvc_lock_outs(root, "origin") if o.target == target]
@@ -412,7 +431,7 @@ class _FakeDvcOps:
                     continue
         return names, paths
 
-    def _reject_unknown_targets(self, targets: list[str] | None) -> None:
+    def _reject_unknown_targets(self, targets: list[str] | None, *, root: Path) -> None:
         """Raise on a target real dvc would refuse.
 
         The accept side is as load-bearing as the reject side and is where
@@ -434,12 +453,6 @@ class _FakeDvcOps:
         """
         from mintd._fast_sync_ops import normalize_target
 
-        root = self.workspace
-        if root is None:
-            raise AssertionError(
-                "strict_targets needs `workspace` set to the project root — "
-                "without it there is no graph to validate against"
-            )
         names, paths = self._declared_targets(root)
 
         for target in targets or []:

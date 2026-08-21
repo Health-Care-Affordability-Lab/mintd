@@ -217,18 +217,21 @@ def _clone(producer: LocalProducer, dest: Path) -> Path:
 def _pull(project: Path, targets: list[str] | None = None) -> None:
     """Production's own pull, through the real dvc seam. `fast_sync_ops=None`
     on purpose — see `test_local_remote_degrades_fast_sync_to_the_fallback_route`
-    for why a local-directory remote could not use fast-sync anyway."""
-    cwd = os.getcwd()
-    os.chdir(project)
-    try:
-        data_pull(
-            project_path=project,
-            targets=targets,
-            dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
-            fast_sync_ops=None,
-        )
-    finally:
-        os.chdir(cwd)
+    for why a local-directory remote could not use fast-sync anyway.
+
+    This helper used to wrap the call in `os.chdir(project)` / `finally:
+    os.chdir(cwd)`, mirroring the same block `data.py` carried, because
+    `DvcOps` had no way to say which repo a pull acted on. Unit A gave it one,
+    so `project_path` now does the aiming and the chdir is gone. Deleting it
+    is the strongest gate in that unit: with `data_pull` no longer passing
+    `cwd`, the three real-dvc tests below fail outright rather than quietly
+    passing on ambient process state."""
+    data_pull(
+        project_path=project,
+        targets=targets,
+        dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+        fast_sync_ops=None,
+    )
 
 
 def test_clone_from_local_producer_lands_payload_bytes(
@@ -538,7 +541,7 @@ def test_strict_fake_rejects_a_lock_only_orphan(
     clone = _graph(local_producer, tmp_path)
 
     with pytest.raises(DvcOpError, match="ghost"):
-        _strict_fake(clone).pull(targets=["data/ghost.csv"])
+        _strict_fake(clone).pull(targets=["data/ghost.csv"], cwd=clone)
 
 
 def test_strict_fake_accepts_a_declared_out(
@@ -553,7 +556,7 @@ def test_strict_fake_accepts_a_declared_out(
     clone = _graph(local_producer, tmp_path)
     fake = _strict_fake(clone)
 
-    fake.pull(targets=["data/final.csv.dvc", "data/built", "build"])
+    fake.pull(targets=["data/final.csv.dvc", "data/built", "build"], cwd=clone)
 
     assert fake.pull_calls, "an accepted pull must still be recorded"
 
@@ -577,7 +580,7 @@ def test_strict_fake_rejects_an_absolute_path_outside_the_graph(
     clone = _graph(local_producer, tmp_path)
 
     with pytest.raises(DvcOpError):
-        _strict_fake(clone).pull(targets=["/etc/passwd"])
+        _strict_fake(clone).pull(targets=["/etc/passwd"], cwd=clone)
 
 
 def test_strict_fake_agrees_with_real_dvc_on_one_graph(
@@ -631,7 +634,7 @@ def test_strict_fake_agrees_with_real_dvc_on_one_graph(
     for target in targets:
         real_verdict[target] = real_dvc(["pull", target], cwd=clone).returncode == 0
         try:
-            fake.pull(targets=[target])
+            fake.pull(targets=[target], cwd=clone)
         except DvcOpError:
             fake_verdict[target] = False
         else:
@@ -891,7 +894,7 @@ def test_strict_fake_reads_the_out_path_from_the_pointer_not_its_filename(
     for target in targets:
         real_verdict[target] = real_dvc(["pull", target], cwd=work).returncode == 0
         try:
-            fake.pull(targets=[target])
+            fake.pull(targets=[target], cwd=work)
         except DvcOpError:
             fake_verdict[target] = False
         else:
@@ -902,3 +905,89 @@ def test_strict_fake_reads_the_out_path_from_the_pointer_not_its_filename(
     # passes on the very bug it exists to catch.
     assert real_verdict["data/imports/final"] is True
     assert real_verdict["data/imports/alpha"] is False
+
+
+def test_enclave_pull_caches_into_the_enclave_not_the_outer_repo(
+    local_producer: LocalProducer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The custody defect, through real dvc, with the enclave nested inside
+    another DVC repo — the shape that failed SILENTLY at exit 0.
+
+    Standing in `outer/` and pulling `enclave/`'s manifest, pre-unit-A dvc
+    imported into `outer` because that is where the process was: measured at
+    `9a2a54e`, `outer/.dvc/cache` gained the producer's blob and the enclave's
+    cache stayed empty, rc=0, with the file still delivered to the right path
+    so nothing looked wrong. In the one lane whose entire purpose is data
+    custody, a repo that is not the enclave held the restricted bytes.
+
+    Two things have to be right for this to pass, and only one of them is
+    "pass cwd":
+
+    1. `import_` is aimed at `manifest_path.parent`.
+    2. `-o` is absolutized at the seam. The manifest path here is DELIBERATELY
+       RELATIVE, because that is production's default (`cli.py`'s `--manifest`
+       defaults to `Path("enclave_manifest.yaml")` and is never resolved). With
+       a relative `-o` and a re-aimed cwd, real dvc reads the destination
+       against the NEW directory and fails `stage working dir
+       '.../outer/enclave/enclave/downloads/_staging' does not exist` — note
+       the doubled segment. An absolute-manifest version of this test passes
+       either way and gates nothing.
+    """
+    from dataclasses import dataclass
+
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_pull
+
+    for key, value in {
+        "HOME": str(tmp_path / "dvc-home"),
+        "USERPROFILE": str(tmp_path / "dvc-home"),
+        "DVC_GLOBAL_CONFIG_DIR": str(tmp_path / "dvc-home" / "global"),
+        "DVC_SYSTEM_CONFIG_DIR": str(tmp_path / "dvc-home" / "system"),
+        "DVC_SITE_CACHE_DIR": str(tmp_path / "dvc-site"),
+    }.items():
+        monkeypatch.setenv(key, value)
+    (tmp_path / "dvc-home").mkdir(parents=True, exist_ok=True)
+
+    pin = local_producer.publish({"outputs/data.csv": b"restricted-producer-bytes\n"})
+
+    ops = SubprocessDvcOps(timeouts=Timeouts())
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _git(["init", "-b", "main", str(outer)])
+    ops.init(cwd=outer)
+    enclave = outer / "enclave"
+    enclave.mkdir()
+    _git(["init", "-b", "main", str(enclave)])
+    ops.init(cwd=enclave)
+
+    m_path = enclave / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(
+            repo="prod", registry_entry="e", pin=pin, source_path="outputs/data.csv",
+        )
+    ]).save(m_path)
+
+    @dataclass
+    class _Entry:
+        repo_url: str
+
+    class _Client:
+        def fetch(self, name):
+            return _Entry(repo_url=local_producer.url)
+
+    monkeypatch.chdir(outer)
+    # RELATIVE on purpose -- see the docstring. This is what production passes.
+    enclave_pull(_Client(), ops, manifest_path=Path("enclave/enclave_manifest.yaml"))
+
+    def blobs(repo: Path) -> list[str]:
+        d = repo / ".dvc" / "cache" / "files" / "md5"
+        return sorted(p.name for p in d.rglob("*") if p.is_file()) if d.exists() else []
+
+    assert blobs(outer) == [], (
+        f"the OUTER repo cached the producer's bytes: {blobs(outer)}"
+    )
+    assert blobs(enclave), "the enclave's cache is empty; the import went elsewhere"
+    delivered = list((enclave / "downloads" / "prod").rglob("data.csv"))
+    assert delivered, "the payload was not delivered into the enclave"
+    assert delivered[0].read_bytes() == b"restricted-producer-bytes\n"

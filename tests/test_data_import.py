@@ -71,7 +71,7 @@ def test_import_product_uses_primary_when_no_path(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", dest_root=tmp_path
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
     assert len(produced) == 1
@@ -90,7 +90,7 @@ def test_import_product_path_override(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     import_product(
-        client, fake, "provider_xw", path="outputs/other.csv", dest_root=tmp_path
+        client, fake, "provider_xw", path="outputs/other.csv", cwd=tmp_path, dest_root=tmp_path
     )
 
     assert fake.calls[0].path == "outputs/other.csv"
@@ -106,7 +106,7 @@ def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", all_outputs=True, dest_root=tmp_path
+        client, fake, "provider_xw", all_outputs=True, cwd=tmp_path, dest_root=tmp_path
     )
 
     assert len(produced) == 3
@@ -148,7 +148,7 @@ def test_import_product_rev_without_path_resolves_via_producer_view(
         fake,
         "provider_xw",
         rev="abc123",
-        dest_root=tmp_path,
+        cwd=tmp_path, dest_root=tmp_path,
         producer_view_factory=factory,
     )
 
@@ -173,7 +173,7 @@ def test_import_product_propagates_producer_error(tmp_path: Path) -> None:
             fake,
             "provider_xw",
             rev="abc123",
-            dest_root=tmp_path,
+            cwd=tmp_path, dest_root=tmp_path,
             producer_view_factory=factory,
         )
 
@@ -197,7 +197,7 @@ def test_import_product_rev_without_path_no_primary_raises(tmp_path: Path) -> No
             fake,
             "provider_xw",
             rev="abc123",
-            dest_root=tmp_path,
+            cwd=tmp_path, dest_root=tmp_path,
             producer_view_factory=factory,
         )
 
@@ -216,7 +216,7 @@ def test_import_product_default_factory_is_producer_view_at(
 
     monkeypatch.setattr("mintd.data.ProducerView.at", stub)
 
-    import_product(client, fake, "provider_xw", rev="abc123", dest_root=tmp_path)
+    import_product(client, fake, "provider_xw", rev="abc123", cwd=tmp_path, dest_root=tmp_path)
 
     assert captured == [("https://github.com/example-org/provider_xw", "abc123")]
     assert fake.calls[0].path == "outputs/from_stub.parquet"
@@ -236,7 +236,7 @@ def test_import_product_rev_with_path_passes_through(tmp_path: Path) -> None:
         "provider_xw",
         path="outputs/x.csv",
         rev="abc123",
-        dest_root=tmp_path,
+        cwd=tmp_path, dest_root=tmp_path,
         producer_view_factory=factory_must_not_run,
     )
 
@@ -254,7 +254,7 @@ def test_import_product_missing_primary_raises(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     with pytest.raises(MissingPrimaryDataProduct):
-        import_product(client, fake, "provider_xw", dest_root=tmp_path)
+        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
 
 
 def test_import_product_unknown_name_raises(tmp_path: Path) -> None:
@@ -262,7 +262,7 @@ def test_import_product_unknown_name_raises(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     with pytest.raises(CatalogNotFound):
-        import_product(client, fake, "nope", dest_root=tmp_path)
+        import_product(client, fake, "nope", cwd=tmp_path, dest_root=tmp_path)
 
 
 def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
@@ -271,7 +271,7 @@ def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", dest_root=tmp_path
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
     assert produced == [tmp_path / "data_provider_xw" / "main.parquet.dvc"]
@@ -286,7 +286,7 @@ def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
     (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
 
     with pytest.raises(ImportDestinationExists):
-        import_product(client, fake, "provider_xw", dest_root=tmp_path)
+        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
     assert fake.calls == []
 
 
@@ -298,7 +298,7 @@ def test_import_product_force_overwrites(tmp_path: Path) -> None:
     (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
 
     produced = import_product(
-        client, fake, "provider_xw", dest_root=tmp_path, force=True
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
     )
 
     assert len(produced) == 1
@@ -315,7 +315,7 @@ def test_import_product_trailing_slash_in_path(tmp_path: Path) -> None:
         fake,
         "provider_xw",
         path="outputs/cms_based/",
-        dest_root=tmp_path,
+        cwd=tmp_path, dest_root=tmp_path,
     )
 
     assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "cms_based"
@@ -338,7 +338,7 @@ def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None
     nested_dest = tmp_path / "data" / "imports"
     assert not nested_dest.exists()
 
-    import_product(client, fake, "provider_xw", dest_root=nested_dest)
+    import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=nested_dest)
 
     # Both dest_root and the per-producer namespace dir get auto-created.
     assert (nested_dest / "data_provider_xw").is_dir()
