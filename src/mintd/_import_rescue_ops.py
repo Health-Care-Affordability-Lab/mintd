@@ -488,7 +488,7 @@ def rescue_import_pull(
 
     # 7. Check the import out into the workspace and confirm it materialized.
     try:
-        dvc_ops.checkout(targets=[target])
+        dvc_ops.checkout(targets=[target], cwd=project_path)
     except Exception as exc:
         return RescueResult(
             ok=False,

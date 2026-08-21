@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import posixpath
+import shlex
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -551,7 +552,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_epull = p_enclave_sub.add_parser("pull", help="Fetch subscribed data")
     p_epull.add_argument("repo", nargs="?")
     p_epull.add_argument("--force", action="store_true")
-    p_epull.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
+    p_epull.add_argument(
+        "--manifest", type=Path, default=Path(_DEFAULT_ENCLAVE_MANIFEST),
+    )
     p_epull.set_defaults(_handler=_handle_enclave_pull)
 
     p_epkg = p_enclave_sub.add_parser(
@@ -1284,12 +1287,12 @@ def _handle_data_add(args: argparse.Namespace) -> int:
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
-        produced = data_add(args.path, dvc_ops=dvc_ops)
+        produced = data_add(args.path, project_path=Path("."), dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
         reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        reporter.error(str(e), hint="check the path exists inside a DVC project; 'mintd init' scaffolds one")
+        reporter.error(str(e), hint=e.hint or "check the path exists inside a DVC project; 'mintd init' scaffolds one")
         return 1
     print(str(produced))
     return 0
@@ -1353,7 +1356,7 @@ def _handle_data_verify(args: argparse.Namespace) -> int:
         reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        reporter.error(str(e), hint="retry with --dvc-arg=-v for verbose DVC output")
+        reporter.error(str(e), hint=e.hint or "retry with --dvc-arg=-v for verbose DVC output")
         return 1
     if not status_map:
         print("clean")
@@ -1371,12 +1374,12 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
     try:
-        data_remove(args.name, dvc_ops=dvc_ops)
+        data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
         reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
         return 2
     except DvcOpError as e:
-        reporter.error(str(e), hint="check the name; 'mintd data verify' lists tracked outputs")
+        reporter.error(str(e), hint=e.hint or "check the name; 'mintd data verify' lists tracked outputs")
         return 1
     print(f"removed: {args.name}")
     return 0
@@ -1840,6 +1843,7 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             client,
             dvc_ops,
             args.name,
+            cwd=Path("."),
             dest_root=args.dest_root,
             path=args.import_path,
             rev=args.rev,
@@ -2117,8 +2121,41 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+_DEFAULT_ENCLAVE_MANIFEST = "enclave_manifest.yaml"
+
+
 def _handle_enclave_pull(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
+    # Resolved ONCE and used for the comparison, the message and the hint.
+    # `Path.cwd()` is physical by definition (POSIX getcwd resolves symlinks),
+    # so printing an unresolved `enclave_dir` beside it showed the user two
+    # roots that look unrelated -- "(/tmp/x/enclave), not from /private/tmp/x"
+    # on any macOS, where /tmp IS a symlink.
+    enclave_dir = args.manifest.parent.resolve()
+    if enclave_dir != Path.cwd():
+        # Deliberately narrow. `dvc import` acts on the repo it runs in, and
+        # this is the custody lane: `--manifest` names a file, it is not a
+        # licence to reach into another directory. The library is correct from
+        # anywhere now; the CLI still declines to widen the flag.
+        #
+        # The hint is BUILT AS ARGV and joined by shlex, never concatenated:
+        # a list makes a dropped flag visible and `shlex.join` makes an
+        # unquoted path (cloud drives hand out "My Drive") impossible.
+        # `--manifest` carries only when it is not the default, and as a NAME,
+        # because the hint has already `cd`'d there.
+        retry = ["mintd", "enclave", "pull"]
+        if args.repo:
+            retry.append(args.repo)
+        if args.manifest.name != _DEFAULT_ENCLAVE_MANIFEST:
+            retry += ["--manifest", args.manifest.name]
+        if args.force:
+            retry.append("--force")
+        reporter.error(
+            f"`mintd enclave pull` must run from inside the enclave "
+            f"({enclave_dir}), not from {Path.cwd()}",
+            hint=f"cd {shlex.quote(str(enclave_dir))} && {shlex.join(retry)}",
+        )
+        return 1
     config = Config.load()
     client = _resolve_catalog_client(config)
     dvc_ops = _resolve_dvc_ops(config, reporter)
@@ -2132,6 +2169,17 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
                 force=args.force,
                 reporter=reporter,
             )
+    except FileNotFoundError:
+        # The enclave manifest itself is missing -- mirrors
+        # _handle_enclave_list and _handle_enclave_verify, both of which
+        # already fixed this identical leak. The cwd guard above now funnels
+        # every user into this path, so leaving it raw would trade one bad
+        # message for a traceback.
+        reporter.error(
+            f"{args.manifest.name} not found at {args.manifest}",
+            hint="run this from the enclave repo root, or pass --manifest <path>",
+        )
+        return 1
     except EnclavePullError as exc:
         # The pin/repo retry hint only makes sense when the producer's pin/repo
         # is actually the problem. For an un-DVC-initialized enclave (now

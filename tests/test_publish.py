@@ -861,3 +861,30 @@ def test_publish_maps_corrupt_metadata_between_preview_and_apply(tmp_path):
     assert "no longer valid JSON" in str(exc.value)
     assert exc.value.recovery_hint
     assert not exc.value.pushed
+
+
+def test_apply_publish_pushes_the_project_path_not_the_process_cwd(
+    tmp_path, monkeypatch
+):
+    """`mintd publish --path ../proj` pushes ../proj's data, not this repo's.
+
+    `publish.py`'s step 2 called a bare `dvc_ops.push()`, so dvc uploaded from
+    whatever repo the process was standing in while the surrounding steps —
+    the metadata write, the commit, the tag — all operated on `project_path`.
+    Publishing a project by path from inside another DVC repo therefore pushed
+    the wrong bytes and then tagged the right repo to say it had done so.
+    """
+    proj = _seed_project(tmp_path)
+    dvc = _FakeDvcOps()
+    monkeypatch.chdir(tmp_path)
+
+    publish_project(
+        project_path=proj,
+        version="0.1.2",
+        client=_FakeCatalogClient(),
+        dvc_ops=dvc,
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert [c.cwd for c in dvc.push_calls] == [proj]
+    assert dvc.push_calls[0].cwd != Path.cwd()
