@@ -12,7 +12,6 @@ and overwrite the consumer's `.dvc` file with the new pin.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -124,6 +123,7 @@ def import_product(
     dvc_ops: DvcOps,
     name: str,
     *,
+    cwd: Path,
     dest_root: Path,
     path: str | None = None,
     rev: str | None = None,
@@ -194,6 +194,7 @@ def import_product(
                     repo_url=repo_url,
                     path=p,
                     dest=dest,
+                    cwd=cwd,
                     rev=rev,
                     force=force,
                     extra_args=extra_dvc_args,
@@ -461,24 +462,16 @@ def clone_and_pull_product(
             shutil.rmtree(resolved_dest, ignore_errors=True)
             raise
 
-    # SubprocessDvcOps' subprocess.run calls don't pass cwd=, so they
-    # inherit os.getcwd(). chdir into the clone before invoking data_pull
-    # and restore on return (success OR failure).
-    prev_cwd = Path.cwd()
-    os.chdir(resolved_dest)
-    try:
-        pull_summary = data_pull(
-            project_path=resolved_dest,
-            targets=targets,
-            dvc_ops=dvc_ops,
-            fast_sync_ops=fast_sync_ops,
-            jobs=jobs,
-            extra_dvc_args=extra_dvc_args,
-            reporter=reporter,
-            aws_profile_name=aws_profile_name,
-        )
-    finally:
-        os.chdir(prev_cwd)
+    pull_summary = data_pull(
+        project_path=resolved_dest,
+        targets=targets,
+        dvc_ops=dvc_ops,
+        fast_sync_ops=fast_sync_ops,
+        jobs=jobs,
+        extra_dvc_args=extra_dvc_args,
+        reporter=reporter,
+        aws_profile_name=aws_profile_name,
+    )
 
     # Best-effort provenance for the completion line (slice 38b). Neither
     # the resolved rev nor the bucket blocks the clone — both degrade to
@@ -584,6 +577,7 @@ def bump_import(
         repo_url=dep.producer_repo,
         path=head_primary,
         dest=dest_root / Path(head_primary.rstrip("/")).name,
+        cwd=project_path,
         rev=head_sha,
         force=True,
     )

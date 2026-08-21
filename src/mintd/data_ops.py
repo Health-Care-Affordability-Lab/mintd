@@ -163,7 +163,7 @@ def _split_cached(
     return cached, [t for t in candidates if t not in cached_set]
 
 
-def _checkout_grouped(dvc_ops: DvcOps, targets: list[str]) -> None:
+def _checkout_grouped(dvc_ops: DvcOps, targets: list[str], *, cwd: Path) -> None:
     """Run ``dvc checkout`` without ever mixing ``.dvc`` file paths and bare
     out-path strings (dvc.lock stage outs, suffix-less user targets) in one
     argv.
@@ -186,9 +186,9 @@ def _checkout_grouped(dvc_ops: DvcOps, targets: list[str]) -> None:
     dvc_file_targets = [t for t in targets if t.endswith(".dvc")]
     bare_targets = [t for t in targets if not t.endswith(".dvc")]
     if dvc_file_targets:
-        dvc_ops.checkout(targets=dvc_file_targets)
+        dvc_ops.checkout(targets=dvc_file_targets, cwd=cwd)
     if bare_targets:
-        dvc_ops.checkout(targets=bare_targets)
+        dvc_ops.checkout(targets=bare_targets, cwd=cwd)
 
 
 def _verify_and_retry_checkout(
@@ -228,7 +228,7 @@ def _verify_and_retry_checkout(
             "dvc checkout exited 0 but %s is missing from the workspace; "
             "retrying with a single-target checkout", target,
         )
-        dvc_ops.checkout(targets=[target])
+        dvc_ops.checkout(targets=[target], cwd=project_path)
         if not outs_materialized(project_path, outs):
             still_missing.append(target)
     return still_missing
@@ -302,7 +302,7 @@ def _checkout_pull_verify(
     targets).
     """
     if checkout_targets:
-        _checkout_grouped(dvc_ops, checkout_targets)
+        _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
 
     rescue_failed = _pull_targets_with_import_rescue(
         project_path, pull_targets, remote_name,
@@ -360,7 +360,7 @@ def _pull_targets_with_import_rescue(
     # and aborts the whole pull, unchanged).
     if non_import_targets:
         dvc_ops.pull(
-            targets=non_import_targets,
+            targets=non_import_targets, cwd=project_path,
             remote=remote, jobs=jobs, extra_args=extra_dvc_args,
         )
 
@@ -372,7 +372,8 @@ def _pull_targets_with_import_rescue(
         pull_raised = False
         try:
             dvc_ops.pull(
-                targets=[t], remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+                targets=[t], cwd=project_path, remote=remote, jobs=jobs,
+                extra_args=extra_dvc_args,
             )
         except (DvcPullError, DvcStorageKeyError) as exc:
             # The documented import failure shape: dvc pull cannot materialize
@@ -651,7 +652,8 @@ def data_pull(
     start_t = time.monotonic()
     if fast_sync_ops is None:
         dvc_ops.pull(
-            targets=targets, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+            targets=targets, cwd=project_path, remote=remote, jobs=jobs,
+            extra_args=extra_dvc_args,
         )
         return PullSummary(
             targets_pulled=len(targets or []),
@@ -764,7 +766,8 @@ def data_pull(
         if uncovered:
             logger.info("dvc pull for %d stage out(s) fast-sync can't serve", len(uncovered))
             dvc_ops.pull(
-                targets=uncovered, remote=remote, jobs=jobs, extra_args=extra_dvc_args,
+                targets=uncovered, cwd=project_path, remote=remote, jobs=jobs,
+                extra_args=extra_dvc_args,
             )
         else:
             logger.info("no uncovered stage outs; skipping catch-all dvc pull")
@@ -845,7 +848,9 @@ def data_push(
     # uploads from an intact local cache.
     effective_remote = remote or _default_dvc_remote(project_path) or "origin"
     start_t = time.monotonic()
-    result: DvcPushResult = dvc_ops.push(targets=targets, remote=remote, jobs=jobs)
+    result: DvcPushResult = dvc_ops.push(
+        targets=targets, cwd=project_path, remote=remote, jobs=jobs,
+    )
     return PushSummary(
         remote=effective_remote,
         pushed=result.pushed,
@@ -855,8 +860,8 @@ def data_push(
     )
 
 
-def data_add(path: Path, *, dvc_ops: DvcOps) -> Path:
-    return dvc_ops.add(path)
+def data_add(path: Path, *, project_path: Path, dvc_ops: DvcOps) -> Path:
+    return dvc_ops.add(path, cwd=project_path)
 
 
 def data_verify(
@@ -865,9 +870,8 @@ def data_verify(
     targets: list[str] | None = None,
     dvc_ops: DvcOps,
 ) -> dict[str, str]:
-    del project_path  # currently unused; dvc status doesn't accept a cwd arg
-    return dvc_ops.status(targets=targets)
+    return dvc_ops.status(targets=targets, cwd=project_path)
 
 
-def data_remove(name: str, *, dvc_ops: DvcOps) -> None:
-    dvc_ops.remove(name)
+def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> None:
+    dvc_ops.remove(name, cwd=project_path)
