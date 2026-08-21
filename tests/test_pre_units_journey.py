@@ -32,11 +32,12 @@ from moto import mock_aws
 
 from mintd import cli
 from mintd._config import ConfigError
-from mintd.catalog import GitCatalogClient
+from mintd.catalog import CatalogAlreadyExists, GitCatalogClient
 from mintd.model import Metadata
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
+from mintd._dvc_invoke import dvc_cmd as _dvc_cmd
 from tests._harness.git import _git
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -470,3 +471,291 @@ def test_scaffolded_project_with_an_emptied_github_url_fails_check(
     assert "repository.github_url is not set" in out
     # publish must refuse for the same reason, or `check` is advisory.
     assert cli.main(["publish", "--path", str(proj), "--dry-run"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rule 3b — the payload journeys
+#
+# These are the file's first tests where bytes actually move. Everything above
+# runs against `_FakeDvcOps`, which is right for the questions it asks ("did
+# the handler refuse the work?") and structurally unable to ask this one ("did
+# the researcher end up with the data?").
+#
+# **Nothing in `src/mintd/` is patched here — not one function.** The existing
+# `bump_import` tests (`tests/test_data.py:317`, `:342`) monkeypatch
+# `mintd.data.check_project`, which is the very detector the bump consults to
+# decide whether the producer moved, so they assert the bump acts on a verdict
+# the test itself supplied. Below, the producer really advances, `check_project`
+# really runs, and real dvc really fetches. The only stand-ins are `chdir` and
+# `MINTD_CONFIG_DIR`, and `_resolve_dvc_ops` / `_resolve_catalog_client` are
+# left alone — they already build the production objects.
+# ---------------------------------------------------------------------------
+
+PRODUCT = "test_project"
+#: Matches `data_products.primary` in `metadata_v2_minimal.json` (`data/final/`),
+#: so the producer's own metadata needs no doctoring to describe its payload.
+PRIMARY_OUT = "data/final"
+#: `project.full_name` in the fixture — the directory an import is keyed on.
+FULL_NAME = "data_test_project"
+#: What `--bump` takes, and it is NOT `PRODUCT`. `data import <name>` keys on
+#: the CATALOG product name; `--bump` keys on the import's local-path name
+#: (`_imports_index`, `data.py:595`), i.e. the `.dvc` stem under
+#: `data/imports/<full_name>/`. Asymmetry in the CLI surface, recorded here
+#: rather than papered over — `data import test_project --bump` exits 1 with
+#: "'test_project' not imported in .".
+IMPORT_NAME = "final"
+
+
+@pytest.fixture
+def payload_journey(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_empty: Path
+):
+    """A real producer serving real bytes, a real registry, and real dvc.
+
+    Returns `(producer, consumer, register)`. `register` re-publishes the
+    producer's catalog entry, which is how the consumer learns where to fetch
+    from — the entry's `github_url` is the local bare repo, so `dvc import`
+    clones over the filesystem instead of the network.
+    """
+    import itertools
+
+    from tests._harness.producer import build_local_producer
+
+    seed_counter = itertools.count()
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(config_dir))
+    # dvc's own config knobs, not HOME — see `tests/_harness/dvc.py` for why
+    # HOME alone fails open.
+    home = tmp_path / "home"
+    home.mkdir()
+    for key, value in {
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "DVC_GLOBAL_CONFIG_DIR": str(home / "dvc-global"),
+        "DVC_SYSTEM_CONFIG_DIR": str(home / "dvc-system"),
+        "DVC_SITE_CACHE_DIR": str(tmp_path / "dvc-site"),
+    }.items():
+        monkeypatch.setenv(key, value)
+
+    producer = build_local_producer(tmp_path / "prod")
+    registry_url = str(remote_registry_empty)
+    _write_config(
+        config_dir, registry_url=registry_url, cache_dir=tmp_path / "cache"
+    )
+
+    def register() -> None:
+        """(Re)publish the producer's entry. Called again after the producer
+        moves, because the catalog is how a consumer discovers HEAD."""
+        data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
+        data["repository"]["github_url"] = producer.url
+        # `gh` is a network boundary and is the one thing faked here, by
+        # CONSTRUCTOR ARGUMENT rather than monkeypatch — the same seam
+        # `_register_provider` above uses. The catalog client itself, the git
+        # clone into the bare registry and the entry it writes are all real,
+        # which is what the `data import` leg below then reads back through
+        # the untouched `_resolve_catalog_client`.
+        client = GitCatalogClient(
+            registry_repo_url=registry_url,
+            work_dir=tmp_path / f"seed-{next(seed_counter)}",
+            git_ops=_FakeRegistryGitOps(),
+        )
+        meta = Metadata.model_validate(data)
+        try:
+            client.register(meta)
+        except CatalogAlreadyExists:
+            client.update(meta)
+
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    _git(["init", "-b", "main", str(consumer)])
+    (consumer / "metadata.json").write_text(
+        V2_MINIMAL.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    subprocess.run(
+        [*_dvc_cmd(), "init"], cwd=str(consumer), capture_output=True, check=True
+    )
+    _git(["add", "-A"], cwd=consumer)
+    _git(["commit", "-m", "consumer"], cwd=consumer)
+
+    monkeypatch.chdir(consumer)
+    return producer, consumer, register
+
+
+def _registry_url_from_config() -> str:
+    """The `registry_url` the fixture wrote — read back from the real config
+    rather than threaded through, so it cannot drift from what the CLI reads."""
+    from mintd._config import Config
+
+    url = Config.load().registry_url
+    assert url, "payload_journey did not write a registry_url"
+    return url
+
+
+def _pins_of(consumer: Path) -> dict[str, str]:
+    """Every import's pin, by local-path name, through production's parser.
+
+    `scan_imports` is what `check_project` and `bump_import` both walk, so a
+    pin read any other way could agree with the file and still disagree with
+    what mintd believes.
+    """
+    from mintd.imports import scan_imports
+
+    return {dep.local_path: dep.contract_pin for dep in scan_imports(consumer)}
+
+
+def _imported_bytes(consumer: Path, out_name: str) -> bytes:
+    # `<dest_root>/<full_name>/<basename of primary>` — the import is keyed on
+    # the product's full name, not on the producer's own directory layout.
+    return (
+        consumer / "data" / "imports" / FULL_NAME / out_name / "part.csv"
+    ).read_bytes()
+
+
+def test_import_bump_advances_the_pin_and_lands_new_bytes(
+    payload_journey, capsys
+) -> None:
+    """The drift chain, end to end: producer moves, consumer bumps, new bytes.
+
+    This is the journey `bump_import` exists for and the one no test could
+    stage before, because staging it needs a producer that can *move* —
+    `commit_more()` and `rename_primary()` did not exist, and
+    `_view_with_primary` (`tests/test_check.py:170`) hands back a fixed view,
+    so "the producer advanced" was not expressible at all. The existing bump
+    tests (`tests/test_data.py:317`, `:342`) monkeypatch
+    `mintd.data.check_project` — the very detector the bump consults — so they
+    assert that the bump acts on a verdict the test supplied. Here the
+    producer really moves and the detector really runs.
+
+    **What counts as "the producer moved" is narrower than it sounds, and this
+    test is written to mintd's actual definition rather than the intuitive
+    one.** `_drift_finding_from_views` (`src/mintd/check.py:509-511`) reports
+    `drift` only when the producer's `data_products.primary` PATH changes; if
+    HEAD's primary equals the pin's primary it returns `up_to_date`, however
+    many new commits and however many new bytes sit behind it. So a producer
+    that republishes a refreshed file at the SAME path is invisible here and
+    `--bump` no-ops on it — see the close-out; that is a product gap this
+    journey found, not something this test asserts is correct.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    assert _imported_bytes(consumer, "final") == b"v1\n"
+    pin_before = _pins_of(consumer)["final"]
+
+    # The producer ships a new version AT A NEW PATH and repoints `primary` at
+    # it — the shape `check` recognizes. `publish()` advances HEAD by exactly
+    # one commit (it is a peer of `commit_more()`, not a prelude to one) and
+    # `rename_primary()` advances it by one more.
+    producer.publish({"data/v2": {"part.csv": b"v2\n"}}, message="v2 payload")
+    producer.rename_primary("data/v2/")
+    register()
+
+    assert cli.main(["data", "import", IMPORT_NAME, "--bump"]) == 0, _drain(capsys)
+
+    pins = _pins_of(consumer)
+    assert pins["v2"] == producer.head_sha
+    assert pins["v2"] != pin_before
+    assert _imported_bytes(consumer, "v2") == b"v2\n", (
+        "the pin moved but the bytes did not — a bump that rewrites the "
+        "pointer without re-fetching is the failure this asserts against"
+    )
+
+    # RECORDED, NOT ENDORSED. A rename-shaped bump imports to a directory named
+    # after the NEW primary (`dest_root / basename(head_primary)`,
+    # `data.py:585`) and never removes the old pointer, so the consumer is left
+    # holding `final.dvc` pinned at the superseded commit alongside the fresh
+    # `v2.dvc`. `bump_import`'s docstring says it "rewrites its `.dvc` file",
+    # which is true only while the primary's basename is unchanged. Asserted so
+    # that a future fix reddens here deliberately instead of surprising someone.
+    assert pins["final"] == pin_before
+    assert set(pins) == {"final", "v2"}
+
+
+def test_import_bump_at_head_is_a_no_op(payload_journey, capsys) -> None:
+    """The negative arm. Without it, a bump that always rewrites the pin would
+    pass the test above perfectly."""
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    pin_before = _pins_of(consumer)["final"]
+
+    assert cli.main(["data", "import", IMPORT_NAME, "--bump"]) == 0, _drain(capsys)
+
+    assert _pins_of(consumer)["final"] == pin_before
+    assert "up to date" in _drain(capsys)
+
+
+def test_clone_puts_the_product_on_disk(payload_journey, tmp_path, capsys) -> None:
+    """`mintd data clone` — the consumer's first contact with a product.
+
+    The half of the binding question that is not about drift: a researcher who
+    has never seen this product runs one command and ends up with the bytes.
+    """
+    producer, _consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+
+    dest = tmp_path / "clonedest"
+    assert cli.main(["data", "clone", PRODUCT, "--dest", str(dest)]) == 0, _drain(capsys)
+
+    landed = dest / PRIMARY_OUT / "part.csv"
+    assert landed.read_bytes() == b"v1\n", f"clone left nothing at {landed}"
+
+
+def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
+    """`mintd enclave pull` — the restricted lane, with real bytes.
+
+    The enclave arm has had a consumer *fixture* since 1a but no journey: no
+    test had ever driven `enclave pull` to the point where a file appears. It
+    matters more here than on the ordinary lane because the enclave's whole
+    premise is that only approved products cross the boundary, and "it was
+    approved" and "it arrived" are different claims.
+
+    `_FakeRegistryGitOps` stands in for `gh` and nothing else; the manifest,
+    the catalog entry, the pin and the dvc import are all real.
+    """
+    producer, consumer, _register = payload_journey
+    producer.publish({"outputs/cms_based": {"part.csv": b"enclave\n"}})
+
+    # The catalog entry the manifest approves, pointed at the local producer.
+    data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "data_provider-xw"
+    data["repository"]["github_url"] = producer.url
+    data["data_products"]["primary"] = "outputs/cms_based/"
+    data["data_products"]["outputs"] = [
+        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
+         "last_published": ""}
+    ]
+    GitCatalogClient(
+        registry_repo_url=_registry_url_from_config(),
+        work_dir=consumer.parent / "enclave-seed",
+        git_ops=_FakeRegistryGitOps(),
+    ).register(Metadata.model_validate(data))
+
+    # The manifest, pinned at the producer's REAL head — the fixture's
+    # hardcoded pin is a dead sha and would fail at fetch, not at approval.
+    (consumer / "enclave_manifest.yaml").write_text(
+        "schema_version: '2.0'\n"
+        "enclave_name: my_workspace\n"
+        "approved_products:\n"
+        "  - repo: provider-xw\n"
+        "    registry_entry: catalog/data/provider-xw.yaml\n"
+        f"    pin: {producer.head_sha}\n"
+        "    source_path: outputs/cms_based/\n"
+        "downloaded: []\n"
+        "transferred: []\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["enclave", "pull"]) == 0, _drain(capsys)
+
+    landed = sorted((consumer / "downloads").rglob("part.csv"))
+    assert landed, f"nothing under downloads/: {sorted((consumer / 'downloads').rglob('*'))}"
+    assert landed[0].read_bytes() == b"enclave\n"

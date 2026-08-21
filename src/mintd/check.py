@@ -319,6 +319,25 @@ def _consumer_findings_from_dvc(
             findings.append(_summary_finding(dep))
             continue
 
+        # An EMPTY `rev_lock` is user data, not the HEAD sentinel — the same
+        # collision the enclave-manifest branch guards below, on the lane the
+        # first cut of that guard missed. Without it BOTH `factory` calls
+        # resolve HEAD, the two views are identical, `_drift_finding` sees no
+        # drift, and an import with no pin at all renders as `✓ up to date`
+        # where it used to render as `[warning] producer unreachable`. That
+        # also makes `data_bump` (data.py:568, gates on kind) silently no-op.
+        if not dep.contract_pin.strip():
+            findings.append(
+                CheckFinding(
+                    severity="error",
+                    section="consumer",
+                    message=f"import {dep.local_path} has an empty pin",
+                    source=dep.source,
+                    kind="pin_missing",
+                )
+            )
+            continue
+
         result_pin = factory(dep.producer_repo, dep.contract_pin)
         if isinstance(result_pin, ProducerError):
             findings.append(_error_finding(dep, result_pin))
@@ -431,6 +450,28 @@ def _consumer_findings_from_enclave_manifest(
                     message=msg,
                     source=manifest_path,
                     field_path=field_path,
+                )
+            )
+            continue
+
+        # An EMPTY pin here is user data, not the HEAD sentinel. `try_at`
+        # treats `""` as "resolve HEAD" so that `factory(repo_url, "")` below
+        # can ask that question, but `ap.pin` comes from a hand-editable
+        # manifest and `mintd enclave add <repo> --pin=""` (e.g. `--pin="$SHA"`
+        # with SHA unset) writes it. Without this guard such a manifest would
+        # resolve to HEAD and report a clean "up to date" for a pin that does
+        # not exist, and `enclave_bump` would silently no-op instead of
+        # blocking. Refuse it explicitly rather than letting the sentinel
+        # swallow it.
+        if not ap.pin.strip():
+            findings.append(
+                CheckFinding(
+                    severity="error",
+                    section="consumer",
+                    message=f"approved product {ap.repo!r} has an empty pin",
+                    source=manifest_path,
+                    field_path=field_path,
+                    kind="pin_missing",
                 )
             )
             continue

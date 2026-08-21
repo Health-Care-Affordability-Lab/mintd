@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import re
 import tomllib
 from pathlib import Path
 
@@ -123,6 +124,20 @@ def _scan_double_targets() -> dict[str, int]:
     counts: collections.Counter[str] = collections.Counter()
     for path in sorted(TESTS_DIR.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        # SCOPE HOLE CLOSED (1b): the match was by callee NAME, so
+        # ``from unittest.mock import patch as _p`` renamed its way straight
+        # past this ratchet. Bind aliases per module and count them too. No
+        # test aliases either injector today (measured: zero), so this closes
+        # the evasion without moving a literal — the point is that it stays
+        # closed when someone tries it.
+        injectors = set(_DOUBLE_INJECTORS)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                injectors.update(
+                    alias.asname
+                    for alias in node.names
+                    if alias.asname and alias.name in _DOUBLE_INJECTORS
+                )
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -133,7 +148,7 @@ def _scan_double_targets() -> dict[str, int]:
                 callee = func.attr
             else:
                 continue
-            if callee not in _DOUBLE_INJECTORS:
+            if callee not in injectors:
                 continue
             if not node.args:
                 continue
@@ -262,39 +277,133 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
 # Rule 4 — ratchet, don't exempt
 # ---------------------------------------------------------------------------
 
-ENV_GATED_MODULES = {
-    "test_producer_integration.py",
-    "test_enclave_pull_integration.py",
+#: module → the env vars that gate any test in it. Was a flat set of module
+#: names matched by grepping for one hardcoded variable; see the docstring.
+ENV_GATED_MODULES: dict[str, list[str]] = {
+    "test_enclave_pull_integration.py": ["MINTD_RUN_INTEGRATION"],
+    "test_producer_integration.py": ["MINTD_RUN_INTEGRATION"],
+    "test_scaffold_contract.py": ["MINTD_NETWORK_TESTS"],
 }
 
 
-def test_no_new_env_gated_test_modules() -> None:
-    """Rule 4: a test that only runs behind ``MINTD_RUN_INTEGRATION=1`` runs
-    nowhere by default. Two modules are grandfathered; a third needs a reason
-    in review, not a quiet import.
+def _reads_environ(node: ast.AST) -> bool:
+    """Is this expression an environment read, as opposed to any old ``.get``?
 
-    SCOPE HOLE, stated deliberately: this greps raw file text for one
-    variable name. It is loud in the harmless direction — a module that merely
-    mentions ``MINTD_RUN_INTEGRATION`` in a comment reddens it — and blind in
-    the harmful one: a module gated on any *other* variable, marker, or
-    conftest option is invisible. ``tests/test_scaffold_contract.py:188``
-    already gates on ``MINTD_NETWORK_TESTS`` and this ratchet does not see it.
-    Pinning the mechanism rather than the name would catch that and changes
-    the literal this slice was asked to seed, so it is a scope change this
-    slice does not own.
-
-    Mutation that must redden this: gate a third module on the same variable.
+    Receiver-checked on purpose. A bare ``<anything>.get("str")`` match would
+    make ``@pytest.mark.skipif(sys.platform == "win32", reason=REASONS.get("win"))``
+    register ``win`` as a gating variable and redden this ratchet on an
+    unrelated edit — a ratchet that fires on innocent code is one people delete.
     """
-    needle = "MINTD_RUN_INTEGRATION"
-    gated = {
-        path.name
-        for path in TESTS_DIR.rglob("*.py")
-        # This module names the variable in order to scan for it.
-        if path.name != Path(__file__).name
-        and needle in path.read_text(encoding="utf-8")
-    }
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        recv, attr = node.func.value, node.func.attr
+        if attr == "getenv" and isinstance(recv, ast.Name) and recv.id == "os":
+            return True
+        if attr == "get":
+            if isinstance(recv, ast.Attribute) and recv.attr == "environ":
+                return True
+            if isinstance(recv, ast.Name) and recv.id == "environ":
+                return True
+    if isinstance(node, ast.Subscript):
+        recv = node.value
+        if isinstance(recv, ast.Attribute) and recv.attr == "environ":
+            return True
+        if isinstance(recv, ast.Name) and recv.id == "environ":
+            return True
+    return False
 
-    assert gated == ENV_GATED_MODULES
+
+def _env_vars_read(node: ast.AST) -> set[str]:
+    """Env var names read anywhere under ``node``."""
+    found: set[str] = set()
+    for sub in ast.walk(node):
+        if not _reads_environ(sub):
+            continue
+        arg = sub.args[0] if isinstance(sub, ast.Call) and sub.args else (
+            sub.slice if isinstance(sub, ast.Subscript) else None
+        )
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            found.add(arg.value)
+    return found
+
+
+def _contains_skip_call(node: ast.AST) -> bool:
+    return any(
+        isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Attribute)
+        and sub.func.attr == "skip"
+        for sub in ast.walk(node)
+    )
+
+
+def _scan_env_gated() -> dict[str, list[str]]:
+    """Every module with an env-var-driven skip, by MECHANISM not by name.
+
+    Three shapes, and the third is the one the first version of this scan
+    missed. It ran ``_env_vars_read`` over the ``pytest.skip(...)`` call node,
+    whose subtree holds only the message and ``allow_module_level`` — the env
+    read lives in the SIBLING ``if`` test:
+
+        if os.environ.get("MINTD_SLOW_TESTS") != "1":
+            pytest.skip("set MINTD_SLOW_TESTS=1", allow_module_level=True)
+
+    So that branch was inert: it could only fire for
+    ``pytest.skip(reason=os.environ.get("WHY"))``, which is never a gate.
+    Measured against an injected fourth module, **3 of 4 idioms evaded** — the
+    body-level ``if``/skip, the module-level ``allow_module_level`` form, and
+    the ``os.environ["X"]`` subscript variant. Only the decorator reddened.
+    The repo already carries 11 ``if <cond>: pytest.skip(...)`` sites, each one
+    condition-edit away from an invisible gate.
+    """
+    gated: dict[str, list[str]] = {}
+    for path in sorted(TESTS_DIR.rglob("*.py")):
+        if path.name == Path(__file__).name:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found: set[str] = set()
+        for node in ast.walk(tree):
+            # 1. `@pytest.mark.skipif(...)`, on a function or a class.
+            for dec in getattr(node, "decorator_list", []):
+                if "skipif" in ast.dump(dec):
+                    found |= _env_vars_read(dec)
+            # 2. `if <env read>: pytest.skip(...)` — the whole If, so the test
+            #    expression is in scope, not just the call.
+            if isinstance(node, ast.If) and _contains_skip_call(node):
+                found |= _env_vars_read(node.test)
+        # 3. Module-level `pytestmark = pytest.mark.skipif(...)`.
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", "") == "pytestmark" for t in node.targets
+            ):
+                found |= _env_vars_read(node)
+        if found:
+            gated[path.name] = sorted(found)
+    return gated
+
+
+def test_no_new_env_gated_test_modules() -> None:
+    """Rule 4: a test that only runs behind an env var runs nowhere by
+    default. Three modules are grandfathered; a fourth needs a reason in
+    review, not a quiet decorator.
+
+    SCOPE HOLE CLOSED (1b). This used to grep raw file text for the single
+    string ``MINTD_RUN_INTEGRATION``, which made it loud in the harmless
+    direction (a module merely *mentioning* the name reddened it) and blind in
+    the harmful one: `tests/test_scaffold_contract.py` has gated a test on
+    ``MINTD_NETWORK_TESTS`` the whole time and this ratchet could not see it.
+    It now pins the MECHANISM — any env-var-driven skip — so a fourth module
+    cannot escape by choosing a new variable name.
+
+    **One correction to how the hole was filed.** The backlog says pinning
+    "module-level skipif on any env var" would catch the scaffold-contract
+    case. It would not: that gate is a per-FUNCTION ``@pytest.mark.skipif``
+    (`test_c5_requirements_resolvable_network`), not a module-level one. The
+    scan covers both, and the literal is a module → variables map rather than
+    a bare set of module names, so which variable gates what is visible in the
+    diff.
+
+    Mutation that must redden this: gate any fourth module on any env var.
+    """
+    assert _scan_env_gated() == ENV_GATED_MODULES
 
 
 PER_FILE_IGNORES = {
@@ -304,22 +413,65 @@ PER_FILE_IGNORES = {
     "tests/**": ["T201", "E501"],
 }
 
+#: The rest of ``[tool.ruff.lint]``. Pinned because `per-file-ignores` is only
+#: the most VISIBLE way to exempt code — see the docstring below.
+LINT_SELECT = ["E", "F", "T201"]
+LINT_IGNORE = ["E501"]
+#: per-line ``noqa`` comments under `src/`. A count, not a location list: the point is
+#: that adding one is a visible edit, and pinning line numbers would redden on
+#: every unrelated insertion.
+SRC_NOQA_COUNT = 5
+
 
 def test_ruff_per_file_ignores_shrink_only() -> None:
-    """Rule 4: every ``per-file-ignores`` entry is enumerated here, so adding
-    one is a visible edit. ``src/mintd/_console.py = ["T201"]`` was in this map
-    with zero offenders behind it and is deleted — the ratchet's first shrink.
+    """Rule 4: every lint exemption is enumerated here, so adding one is a
+    visible edit. ``src/mintd/_console.py = ["T201"]`` was in this map with
+    zero offenders behind it and is deleted — the ratchet's first shrink.
 
-    SCOPE HOLE, stated deliberately: this pins ``per-file-ignores`` and
-    nothing else. Three cheaper exemptions stay green — a ``# noqa: T201``
-    comment, adding ``T201`` to the global ``ignore`` list, and narrowing
-    ``select``. Pinning the whole ``[tool.ruff.lint]`` table would close them
-    and is a scope change this slice does not own.
+    SCOPE HOLE CLOSED (1b). This used to pin ``per-file-ignores`` and nothing
+    else, which left three cheaper exemptions completely green — all three
+    executed against the tree at S0 and confirmed to evade it:
 
-    Mutation that must redden this: add any entry to
-    ``[tool.ruff.lint.per-file-ignores]``.
+      1. a per-line ``noqa`` comment on the offender, in ANY of the four
+         spellings ruff accepts,
+      2. adding ``T201`` to the global ``ignore`` list,
+      3. narrowing ``select`` so the rule never fires.
+
+    Each defeats the ratchet without touching the map it pinned. All three are
+    now pinned: the whole ``[tool.ruff.lint]`` table, plus a census of ``#
+    noqa`` under ``src/``. The ratchet's premise is that the cheap direction
+    must be *down*; leaving three cheaper doors open made that false.
+
+    Mutation that must redden this: add any per-file-ignore entry, add any
+    code to ``ignore``, remove any code from ``select``, or add a ``noqa``
+    comment anywhere under ``src/``.
     """
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    configured = pyproject["tool"]["ruff"]["lint"]["per-file-ignores"]
+    lint = pyproject["tool"]["ruff"]["lint"]
 
-    assert configured == PER_FILE_IGNORES
+    assert lint["per-file-ignores"] == PER_FILE_IGNORES
+    assert lint["select"] == LINT_SELECT
+    assert lint["ignore"] == LINT_IGNORE
+    # Nothing else may appear in the table — a key this test does not know
+    # about is an exemption mechanism it is not pinning.
+    assert sorted(lint) == ["ignore", "per-file-ignores", "select"]
+
+    # Ruff accepts `#noqa`, `#  noqa`, `# NOQA` and `#NOQA` as directives — all
+    # four verified rc=0 against `--select T201`. A literal `"# noqa"` count saw
+    # exactly ONE spelling, so appending `print(...)  #noqa: T201` to
+    # `src/mintd/_console.py` left BOTH `ruff check src` and this ratchet green.
+    # `ruff format` does normalize the unspaced form, but nothing gates it: CI
+    # runs only `ruff check src tests` (.github/workflows/test.yml:38, :97) and
+    # there is no pre-commit config at the repo root, so a deliberate evasion
+    # never passes through the formatter.
+    pattern = re.compile(r"#\s*noqa", re.IGNORECASE)
+    noqa = sum(
+        len(pattern.findall(line))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        for line in path.read_text(encoding="utf-8").splitlines()
+    )
+    assert noqa == SRC_NOQA_COUNT, (
+        f"{noqa} noqa comments under src/, pinned at {SRC_NOQA_COUNT}. "
+        "A noqa is a per-line lint exemption and is the cheapest way to "
+        "escape this ratchet."
+    )
