@@ -123,3 +123,49 @@ def test_transferred_item_is_frozen():
     item = TransferredItem(repo="r", contract_pin="c", artifact_pin="a", transfer_date=date(2026, 5, 14), transfer_id="t1", local_path="lp")
     with pytest.raises(ValidationError):
         item.repo = "MODIFIED"
+
+
+# --- P5: one producer, many subscriptions (issue33) -------------------------
+
+
+def test_apply_pin_bump_moves_every_row_of_the_repo():
+    """A repo can hold several subscriptions since P5, and D1 keeps them at one
+    pin — so a first-match return would strand rows 2+ at the old pin."""
+    from mintd.enclave import ApprovedProduct
+
+    m = EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="OLD", source_path="data/x"),
+        ApprovedProduct(repo="a", registry_entry="e", pin="OLD", source_path="data/y"),
+        ApprovedProduct(repo="b", registry_entry="e", pin="OLD"),
+    ])
+
+    bumped = m.apply_pin_bump(repo="a", new_pin="NEW")
+
+    assert [ap.pin for ap in bumped.approved_products] == ["NEW", "NEW", "OLD"]
+
+
+def test_subscription_label_distinguishes_all_from_primary():
+    """`--all` and a bare primary both have source_path None; the render sites
+    that paraphrased this used to show them identically."""
+    from mintd.enclave import ApprovedProduct, subscription_label
+
+    assert subscription_label(
+        ApprovedProduct(repo="a", registry_entry="e", pin="p", source_path="data/x")
+    ) == "data/x"
+    assert subscription_label(
+        ApprovedProduct(repo="a", registry_entry="e", pin="p", all=True)
+    ) == "<all>"
+    assert subscription_label(
+        ApprovedProduct(repo="a", registry_entry="e", pin="p")
+    ) == "<primary>"
+
+
+def test_subscription_label_distinguishes_an_empty_source_path_from_primary():
+    """`enclave_add`'s guard keys on the (repo, source_path, all) triple, so a
+    row with source_path "" is a DIFFERENT subscription from a bare primary.
+    Truthiness collapsed them, rendering two distinct rows identically."""
+    from mintd.enclave import ApprovedProduct, subscription_label
+
+    empty = ApprovedProduct(repo="a", registry_entry="e", pin="p", source_path="")
+    bare = ApprovedProduct(repo="a", registry_entry="e", pin="p")
+    assert subscription_label(empty) != subscription_label(bare)

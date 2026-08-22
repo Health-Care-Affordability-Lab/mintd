@@ -21,14 +21,14 @@ This enclave workspace manages versioned data transfers from the Data Product Ca
 Add approved data products to the enclave manifest:
 
 ```bash
-# Add a specific data product
+# Add a producer's primary data product
 mintd enclave add data_cms-provider-data-service
 
-# Or edit enclave_manifest.yaml directly to add:
-approved_products:
-  - repo: "data_cms-provider-data-service"
-    registry_entry: "catalog/data/data_cms-provider-data-service.yaml"
-    pin: "4f7c2a1..."          # producer git commit; required
+# Add a second product from the same producer
+mintd enclave add data_cms-provider-data-service --source-path data/final/<product>
+
+# Or subscribe to every output it publishes
+mintd enclave add data_cms-provider-data-service --all
 ```
 
 ### 2. Pull Data (Networked Machine)

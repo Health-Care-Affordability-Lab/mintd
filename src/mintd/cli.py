@@ -96,6 +96,7 @@ from ._cache_ops import (
 )
 from .enclave import (
     AlreadyApproved,
+    AmbiguousSubscription,
     AppendOnlyViolation,
     EnclaveManifest,
     EnclavePullError,
@@ -112,6 +113,7 @@ from .enclave import (
     enclave_pull,
     enclave_remove,
     enclave_verify,
+    subscription_label,
 )
 from .imports import scan_imports
 from .init import InitDestinationExists, InitNameInvalid, init_project
@@ -544,8 +546,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_erm = p_enclave_sub.add_parser("remove", help="Unsubscribe from a producer")
     p_erm.add_argument("repo")
     _erm_mutex = p_erm.add_mutually_exclusive_group()
-    _erm_mutex.add_argument("--source-path", dest="source_path")
-    _erm_mutex.add_argument("--all", action="store_true", dest="all_outputs")
+    _erm_mutex.add_argument(
+        "--source-path", dest="source_path",
+        help="remove the subscription to this path",
+    )
+    _erm_mutex.add_argument(
+        "--primary", action="store_true", dest="primary",
+        help="remove the subscription to the producer's primary product",
+    )
+    _erm_mutex.add_argument(
+        "--all", action="store_true", dest="all_outputs",
+        help="remove EVERY subscription to this repo (on 'enclave add', "
+             "--all means an all-outputs subscription instead)",
+    )
     p_erm.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
     p_erm.set_defaults(_handler=_handle_enclave_remove)
 
@@ -1993,7 +2006,7 @@ def _handle_enclave_list(args: argparse.Namespace) -> int:
     if not approved:
         print("  (none)")
     for ap in approved:
-        path = ap.source_path or "<primary>"
+        path = subscription_label(ap)
         print(f"  {ap.repo}@{ap.pin[:7]} (path: {path})")
 
     print("downloaded:")
@@ -2080,7 +2093,9 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")
         return 1
     except MissingPrimaryDataProduct as exc:
-        reporter.error(str(exc), hint="pass --path <output> or --all")
+        # `--path` is not a flag on this parser; following the old hint exited
+        # 64 with `unrecognized arguments`.
+        reporter.error(str(exc), hint="pass --source-path <output> or --all")
         return 1
     except AppendOnlyViolation as exc:
         reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
@@ -2091,8 +2106,30 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     # Re-load to print the just-added entry's resolved pin.
     manifest = EnclaveManifest.load(path)
     ap = manifest.approved_products[-1]
-    src = ap.source_path or ("<all>" if ap.all else "<primary>")
-    print(f"subscribed: {ap.repo}@{ap.pin[:7]} (path: {src})")
+    print(f"subscribed: {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})")
+    # "this add INHERITED a pin", not "the repo now has >1 row": those differ
+    # whenever the sibling rows carry a different pin — a hand-edited manifest,
+    # or the empty-pin case, where enclave_add deliberately resolves HEAD
+    # instead of inheriting. Warning there names a pin that was never recorded.
+    inherited = any(
+        a is not ap and a.repo == ap.repo and a.pin == ap.pin
+        for a in manifest.approved_products
+    )
+    if inherited:
+        # D1: this add INHERITED the repo's recorded pin, it did not resolve
+        # HEAD. If the path did not exist at that pin the add still succeeds and
+        # `pull` is what fails, so name the remedy now rather than in the notes.
+        # `--force` is not decoration: check's drift walk short-circuits a row to
+        # `up to date` exactly when its source_path is absent from the pinned
+        # outputs -- this state -- so bare `enclave bump` returns "up to date"
+        # with the pin unmoved. Narrow this to bare `bump` once the check-drift
+        # lane fixes that short-circuit.
+        reporter.warn(
+            f"inherited the pin recorded for {ap.repo} ({ap.pin[:7]}) - one pin per repo. "
+            f"If {subscription_label(ap)} is newer than that pin, "
+            f"'mintd enclave pull' will fail; run "
+            f"'mintd enclave bump {ap.repo} --force' to move every subscription."
+        )
     return 0
 
 
@@ -2107,7 +2144,15 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
             name=args.repo,
             source_path=args.source_path,
             all_=args.all_outputs,
+            primary=args.primary,
         )
+    except AmbiguousSubscription as exc:
+        reporter.error(
+            str(exc),
+            hint="pass --source-path <path> or --primary to remove one, "
+                 "or --all to remove every subscription",
+        )
+        return 1
     except ImportNotFound as exc:
         reporter.error(str(exc), hint="'mintd enclave list' to see subscribed repos")
         return 1
@@ -2117,6 +2162,8 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
     msg = f"removed: {args.repo}"
     if args.source_path:
         msg += f" (source_path={args.source_path})"
+    elif args.primary:
+        msg += " (primary)"
     print(msg)
     return 0
 

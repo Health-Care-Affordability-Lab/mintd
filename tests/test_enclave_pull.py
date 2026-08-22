@@ -570,3 +570,143 @@ def test_enclave_pull_imports_into_the_enclave_from_an_unrelated_cwd(
     # init and import must agree about where they run; disagreeing is the
     # failure mode that produced the misdirecting "re-run" hint.
     assert dvc.import_cwds[0] == dvc.init_calls[0]
+
+
+# --- P5: one producer, many subscriptions (issue33) -------------------------
+# THE REACHABILITY TRAP. `_all_already_downloaded`'s primary fast-path keys on
+# (repo, contract_pin), and its own comment used to cite "enclave_add rejects
+# duplicate repos" as the proof that key is exact. P5 deletes that guard, so a
+# SIBLING row's downloaded[] entry now satisfies (repo, pin) without the primary
+# having been fetched -- pull exits 0 having fetched nothing. Both sibling
+# shapes get their own test: a frozenset of sibling source_paths would cover
+# the first and silently miss the second, because an `all` row has no path.
+
+
+def _primary_factory():
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self):
+                return "data/primary/"
+            def output_paths(self):
+                return ["data/final/x", "data/primary/"]
+        return View()
+    return factory
+
+
+def test_pull_primary_not_fast_skipped_by_sibling_path_row(tmp_path):
+    """PULL half of P5's binding invariant: a repo subscribed to a path AND its
+    primary, path fetched first, must still fetch the primary."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", source_path="data/final/x"),
+        ApprovedProduct(repo="a", registry_entry="e", pin="1"),
+    ], downloaded=[
+        DownloadedItem(repo="a", output="data/final/x", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(), local_path="lp"),
+    ]).save(m_path)
+
+    dvc = _FakeDvcOps()
+    _, written = enclave_pull(_Client(), dvc, manifest_path=m_path,
+                              producer_view_factory=_primary_factory())
+
+    assert [c[1] for c in dvc.calls] == ["data/primary/"]
+    assert [d.output for d in written] == ["data/primary/"]
+
+
+def test_pull_primary_not_fast_skipped_by_sibling_all_row(tmp_path):
+    """The shape a sibling-source_path design misses: an `all` row has
+    source_path None, so it contributes no path to discriminate on.
+
+    The `all` row must import NOTHING here, or it would fetch the primary
+    itself and the assertion would hold with the guard deleted -- i.e. the test
+    would be vacuous. So its outputs are already in downloaded[], and the only
+    thing that can put `data/primary/` on the wire is the primary row escaping
+    the (repo, pin) fast-skip.
+    """
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", all=True),
+        ApprovedProduct(repo="a", registry_entry="e", pin="1"),
+    ], downloaded=[
+        DownloadedItem(repo="a", output="data/final/x", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(), local_path="lp"),
+    ]).save(m_path)
+
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self):
+                return "data/primary/"
+            def output_paths(self):
+                return ["data/final/x"]
+        return View()
+
+    dvc = _FakeDvcOps()
+    _, written = enclave_pull(_Client(), dvc, manifest_path=m_path,
+                              producer_view_factory=factory)
+
+    assert [c[1] for c in dvc.calls] == ["data/primary/"]
+    assert [d.output for d in written] == ["data/primary/"]
+
+
+def test_pull_overlapping_rows_import_each_output_once(tmp_path):
+    """N2: the inner dedup read the PRE-RUN downloaded[] snapshot, so two rows
+    resolving to overlapping outputs imported the shared one twice and appended
+    a duplicate provenance row to a custody manifest."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", source_path="data/final/x"),
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", all=True),
+    ]).save(m_path)
+
+    dvc = _FakeDvcOps()
+    _, written = enclave_pull(_Client(), dvc, manifest_path=m_path,
+                              producer_view_factory=_primary_factory())
+
+    assert [c[1] for c in dvc.calls] == ["data/final/x", "data/primary/"]
+    outputs = [d.output for d in EnclaveManifest.load(m_path).downloaded]
+    assert outputs == ["data/final/x", "data/primary/"]
+    assert len(outputs) == len(set(outputs))
+
+
+def test_pull_status_names_the_subscription(tmp_path):
+    """Two rows of one repo used to render two identical status lines."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", source_path="data/final/x"),
+        ApprovedProduct(repo="a", registry_entry="e", pin="1"),
+    ]).save(m_path)
+
+    class _RecordingReporter:
+        def __init__(self):
+            self.statuses = []
+        def update_status(self, msg):
+            self.statuses.append(msg)
+
+    reporter = _RecordingReporter()
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 producer_view_factory=_primary_factory(), reporter=reporter)
+
+    assert len(reporter.statuses) == 2
+    assert len(set(reporter.statuses)) == 2
+    assert "data/final/x" in reporter.statuses[0]
+    assert "<primary>" in reporter.statuses[1]
+
+
+def test_pull_force_still_imports_a_shared_output_only_once(tmp_path):
+    """N2 under --force. Two rows of one repo resolving to the same output must
+    not import it twice in ONE run: --force means "re-fetch across runs", never
+    "fetch the same thing twice in this run", and a duplicate append lands in a
+    custody manifest."""
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", source_path="data/final/x"),
+        ApprovedProduct(repo="a", registry_entry="e", pin="1", all=True),
+    ]).save(m_path)
+
+    dvc = _FakeDvcOps()
+    enclave_pull(_Client(), dvc, manifest_path=m_path, force=True,
+                 producer_view_factory=_primary_factory())
+
+    assert [c[1] for c in dvc.calls] == ["data/final/x", "data/primary/"]
+    outputs = [d.output for d in EnclaveManifest.load(m_path).downloaded]
+    assert len(outputs) == len(set(outputs)), f"duplicate provenance rows: {outputs}"
