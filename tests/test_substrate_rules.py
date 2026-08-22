@@ -475,3 +475,163 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
         "A noqa is a per-line lint exemption and is the cheapest way to "
         "escape this ratchet."
     )
+
+
+# ---------------------------------------------------------------------------
+# Rule 2 (census half) — every fake is licensed by a contract test
+# ---------------------------------------------------------------------------
+
+# Rule 2 is stated in `tests/test_dvc_ops_contract.py`: *a fake earns the right
+# to stand in for a boundary only if some test runs unchanged over both it and
+# the real thing*. That file licenses ONE fake. Nothing until now measured how
+# many were unlicensed, so the rule read as satisfied when it was satisfied
+# once out of seven times.
+#
+# What that cost: `_fakes/reporter.py` describes itself as "a deterministic,
+# rich-free Reporter". Rich-free is precisely what made it unable to witness a
+# rich defect -- `enclave pull`'s `[<source_path>]` subscription label was
+# being DELETED by rich's markup parser, and an absolute path raised
+# MarkupError out of a data-custody verb. The guarding test injected that fake
+# and stayed green. Mutation testing did not catch it either: reverting the
+# label reddened the test, so the mutation table called the guard pinned while
+# the feature was broken in production. Only a contract test finds this class.
+
+# Fakes with a `params=["fake", "real"]` contract test. This literal may only
+# GROW -- the opposite direction from rule 1's, because here the licensed set
+# is the good one.
+LICENSED_FAKES = {
+    "dvc_ops",     # tests/test_dvc_ops_contract.py
+    "reporter",    # tests/test_reporter_contract.py
+}
+
+# Unlicensed as of 2026-08-22. Each is a fake standing in for a boundary with
+# nothing proving it behaves like that boundary. Shrink this set by writing a
+# contract test, never by deleting a line from it.
+UNLICENSED_FAKES = {
+    "archive_ops",
+    "fast_sync_ops",
+    "init_ops",
+    "producer",
+    "registry_git_ops",
+}
+
+
+def _fake_modules() -> set[str]:
+    return {
+        p.stem for p in (TESTS_DIR / "_fakes").glob("*.py")
+        if p.stem != "__init__"
+    }
+
+
+def _contract_licensed_modules() -> set[str]:
+    """Fakes named by a test file that parametrizes a fixture fake-vs-real."""
+    licensed: set[str] = set()
+    for path in TESTS_DIR.glob("test_*.py"):
+        source = path.read_text(encoding="utf-8")
+        if not re.search(r"params\s*=\s*\[[\"']fake[\"']\s*,\s*[\"']real[\"']\]", source):
+            continue
+        for module in _fake_modules():
+            if f"_fakes.{module}" in source:
+                licensed.add(module)
+    return licensed
+
+
+def test_every_fake_is_accounted_for() -> None:
+    """Rule 2, census half: no fake may appear without a verdict on it.
+
+    A NEW fake in `tests/_fakes/` fails here until it is either given a
+    contract test (add it to LICENSED_FAKES) or explicitly recorded as
+    unlicensed (add it to UNLICENSED_FAKES) -- which puts the decision in a
+    diff a reviewer reads, rather than in nobody's head.
+
+    Mutation that must redden this: `touch tests/_fakes/anything.py`.
+    """
+    assert _fake_modules() == LICENSED_FAKES | UNLICENSED_FAKES, (
+        "a fake is missing a verdict; give it a contract test or record it as "
+        "unlicensed. fakes on disk vs accounted for: "
+        f"{sorted(_fake_modules() ^ (LICENSED_FAKES | UNLICENSED_FAKES))}"
+    )
+
+
+def test_the_licensed_set_matches_a_fresh_scan() -> None:
+    """The literals above are not self-reported: LICENSED_FAKES must equal
+    what a scan for fake-vs-real parametrization actually finds.
+
+    Guards the failure mode rule 4 exists for -- a checked-in literal that has
+    drifted from the thing it claims to measure. Deleting
+    `tests/test_reporter_contract.py`, or dropping its `params=["fake","real"]`
+    fixture, reddens this even though LICENSED_FAKES still names `reporter`.
+    """
+    scanned = _contract_licensed_modules()
+    assert scanned == LICENSED_FAKES, (
+        "the licensed-fake literal drifted from the scan. "
+        f"pinned={sorted(LICENSED_FAKES)} scanned={sorted(scanned)}"
+    )
+    assert not (scanned & UNLICENSED_FAKES), (
+        "a fake is in both sets; move it out of UNLICENSED_FAKES: "
+        f"{sorted(scanned & UNLICENSED_FAKES)}"
+    )
+
+
+def test_every_spinner_label_is_wrapped_in_text() -> None:
+    """Every string that reaches a rich Spinner must be a `Text`, never a str.
+
+    `rich.Status` -> `Spinner.__init__` runs `Text.from_markup(text)` for a
+    `str` and IGNORES the console's `markup=False`, so a bare-str label
+    silently deletes bracketed user data (a `--source-path`) and raises
+    `MarkupError` -- not a `ValueError`, so it escapes every CLI handler -- on
+    one starting with `/`.
+
+    There are two kinds of site and BOTH matter: `_active_status.update(...)`
+    relabels a live spinner, and `console.status(...)` CONSTRUCTS one. An
+    earlier version of this ratchet scanned only `.update` and only checked
+    which function the call sat in, so it stayed green while `progress()`
+    rebuilt the spinner from a raw str -- a guard that did not guard, which is
+    the failure this file exists to make visible. It now checks the ARGUMENT at
+    every site, which is the thing that actually has to be true.
+
+    Mutations that must redden this: drop the `Text(...)` wrapper at any of the
+    three sites in `_console.py` -- `status()`, `_set_spinner()`, `progress()`.
+    (Three, not four: `_set_spinner` collapsed what used to be several
+    `.update` call sites into one. Re-derived, not quoted.)
+    """
+    source = (REPO_ROOT / "src" / "mintd" / "_console.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    def _is_spinner_site(call: ast.Call) -> bool:
+        func = call.func
+        if not isinstance(func, ast.Attribute):
+            return False
+        if func.attr == "update":
+            inner = func.value
+            return isinstance(inner, ast.Attribute) and inner.attr == "_active_status"
+        if func.attr == "status":
+            inner = func.value
+            return isinstance(inner, ast.Attribute) and inner.attr in {"_stderr", "_stdout"}
+        return False
+
+    bare: list[int] = []
+    sites = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and _is_spinner_site(node)):
+            continue
+        sites += 1
+        if not node.args:
+            continue
+        arg = node.args[0]
+        wrapped = (
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Name)
+            and arg.func.id == "Text"
+        )
+        if not wrapped:
+            bare.append(node.lineno)
+
+    assert sites >= 3, (
+        f"expected at least 3 spinner sites in _console.py, found {sites} -- "
+        "the scan stopped matching; re-derive it rather than lowering this"
+    )
+    assert bare == [], (
+        "these spinner labels are raw strings and will be parsed as rich markup; "
+        f"wrap each in Text(): _console.py lines {bare}"
+    )

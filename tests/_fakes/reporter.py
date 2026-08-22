@@ -29,6 +29,11 @@ class RecordingReporter(Reporter):
     def update_status(self, msg: str) -> None:
         self.events.append(("update_status", msg))
 
+    def passthrough_stderr(self, chunk: str) -> None:
+        # Recorded, not rendered: the real one re-renders the spinner label
+        # around each subprocess tick, which is a second markup path.
+        self.events.append(("passthrough_stderr", chunk))
+
     @contextlib.contextmanager
     def progress(self, total: int, *, desc: str) -> Iterator[Any]:
         self.events.append(("progress", desc, total))
@@ -42,6 +47,13 @@ class RecordingReporter(Reporter):
 
     def info(self, msg: str) -> None:
         self.events.append(("info", msg))
+
+    def warn(self, msg: str) -> None:
+        # Was MISSING, so `warn` fell through to the real Reporter: it printed
+        # to stderr and recorded nothing, and `events_of("warn")` silently
+        # returned [] for all 20 production call sites. Found by
+        # tests/test_reporter_contract.py on its first run.
+        self.events.append(("warn", msg))
 
     def success(self, msg: str, *, elapsed_s: float | None = None) -> None:
         self.events.append(("success", msg))
