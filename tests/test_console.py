@@ -167,3 +167,54 @@ def test_reporter_status_resets_active_status_on_exit():
     with reporter.progress(100, desc="pulling") as adv:
         adv(10)
     assert reporter._active_status is None
+
+
+# --- Reporter must not interpret messages as rich markup ---------------------
+# Every string reaching a Reporter is a MESSAGE. With rich markup on, any
+# `[...]` token is read as a style tag and DELETED, and one starting with `/`
+# raises MarkupError -- which is not a ValueError, so it escapes every CLI
+# handler as a traceback. Found by P5: `enclave pull`'s per-subscription label
+# is `[<source_path>]`, and `--source-path` is stored verbatim with no
+# validation, so both halves were reachable from the CLI.
+#
+# These assert on what rich would RENDER, not on Reporter's own `_status_base`
+# copy of the string -- the pre-existing label test checks the latter, which is
+# exactly why the defect was invisible to it.
+
+
+def _rendered_status(reporter):
+    return reporter._active_status.renderable.text.plain
+
+
+def test_status_label_keeps_bracketed_text():
+    reporter = Reporter(no_color=True)
+    with reporter.status("start"):
+        reporter.update_status("Fetching a [data/final/x]... (1/2)")
+        assert _rendered_status(reporter) == "Fetching a [data/final/x]... (1/2)"
+
+
+def test_status_label_survives_an_absolute_path():
+    """`mintd enclave add P --source-path /mnt/x` is accepted, so `[/mnt/x]`
+    reaches the spinner and rich reads it as a closing tag."""
+    reporter = Reporter(no_color=True)
+    with reporter.status("start"):
+        reporter.update_status("Fetching a [/mnt/x]... (1/2)")
+        assert _rendered_status(reporter) == "Fetching a [/mnt/x]... (1/2)"
+
+
+def test_status_opens_with_a_bracketed_label():
+    reporter = Reporter(no_color=True)
+    with reporter.status("Fetching a [/mnt/x]..."):
+        assert _rendered_status(reporter) == "Fetching a [/mnt/x]..."
+
+
+def test_messages_keep_bracketed_text(capsys):
+    """info/warn/error go through Console.print, which honours markup=False."""
+    reporter = Reporter(no_color=True)
+    reporter.info("uploaded via [s3] to [/bucket/key]")
+    reporter.warn("subscription [data/final/x] is stale")
+    reporter.error("'a' has 2 subscriptions: [data/final/x], <primary>")
+    err = capsys.readouterr().err
+    assert "[s3]" in err
+    assert "[/bucket/key]" in err
+    assert err.count("[data/final/x]") == 2

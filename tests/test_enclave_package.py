@@ -594,3 +594,68 @@ def test_package_preserves_transferred_byte_identical_on_failure(
     reloaded = EnclaveManifest.load(m_path)
     assert len(reloaded.transferred) == 1
     assert reloaded.transferred[0].model_dump() == before
+
+
+def test_unsubscribed_product_is_not_packaged(tmp_path: Path) -> None:
+    """THE CUSTODY INVARIANT, end to end: `enclave remove` then `enclave
+    package` must not ship the product that was just revoked.
+
+    `enclave_package` selects purely off `downloaded[]` and never consults
+    `approved_products` (verified: zero references in its body), so the ONLY
+    thing standing between a revoked subscription and a one-way transfer into
+    the enclave is `enclave_remove` dropping the provenance row. A review round
+    caught a fix that kept the row whenever a bare-primary sibling survived --
+    the manifest looked right, the archive did not. This asserts on the archive
+    because that is where the harm lands; asserting on downloaded[] alone would
+    have passed against the very defect it exists to catch.
+    """
+    from mintd.enclave import ApprovedProduct, enclave_remove
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    keep_dir = tmp_path / "downloads" / "ds-alpha" / "aaaaaaa-2026-05-15"
+    drop_dir = tmp_path / "downloads" / "ds-alpha" / "bbbbbbb-2026-05-15"
+    for d, payload in ((keep_dir, "kept"), (drop_dir, "revoked")):
+        d.mkdir(parents=True)
+        (d / "data.csv").write_text(payload)
+
+    def _item(output: str, pin: str, local: Path) -> DownloadedItem:
+        return DownloadedItem(
+            repo="ds-alpha", output=output, contract_pin="c" * 40,
+            artifact_pin=pin * 5, fetch_strategy="dvc-import",
+            downloaded_at=datetime(2026, 5, 15), local_path=str(local),
+        )
+
+    EnclaveManifest(
+        enclave_name="test-enclave",
+        approved_products=[
+            # the sibling that survives -- a BARE PRIMARY, whose resolved output
+            # is unknowable locally. That ambiguity is what tempts an
+            # implementation into keeping everything.
+            ApprovedProduct(repo="ds-alpha", registry_entry="e", pin="c" * 40),
+            ApprovedProduct(repo="ds-alpha", registry_entry="e", pin="c" * 40,
+                            source_path="data/restricted"),
+        ],
+        downloaded=[_item("data/primary", "aaabbb1", keep_dir),
+                    _item("data/restricted", "bbbccc2", drop_dir)],
+    ).save(m_path)
+
+    class _NoClient:
+        def fetch(self, name):  # enclave_remove does not use it
+            raise AssertionError("no catalog fetch on this path")
+
+    enclave_remove(_NoClient(), manifest_path=m_path, name="ds-alpha",
+                   source_path="data/restricted",
+                   downloads_root=tmp_path / "downloads")
+
+    fake = _FakeArchiveOps()
+    enclave_package(
+        manifest_path=m_path,
+        downloads_root=tmp_path / "downloads",
+        output_dir=tmp_path / "out",
+        archive_ops=fake,
+        today=date(2026, 5, 15),
+    )
+
+    packed = "\n".join(fake.staged[-1])
+    assert "aaaaaaa" in packed, "the surviving subscription must still ship"
+    assert "bbbbbbb" not in packed, "the REVOKED product must not cross the gap"

@@ -606,10 +606,19 @@ def _imports_index(project_path: Path) -> dict[str, Path]:
     return index
 
 
+def _find_consumer_findings_for_target(
+    findings: list[CheckFinding], *, source: Path, field_path: str | None = None
+) -> list[CheckFinding]:
+    return [
+        f for f in findings
+        if f.section == "consumer" and f.source == source and f.field_path == field_path
+    ]
+
+
 def _find_consumer_finding_for_target(
     findings: list[CheckFinding], *, source: Path, field_path: str | None = None
 ) -> CheckFinding | None:
-    for f in findings:
-        if f.section == "consumer" and f.source == source and f.field_path == field_path:
-            return f
-    return None
+    matches = _find_consumer_findings_for_target(
+        findings, source=source, field_path=field_path
+    )
+    return matches[0] if matches else None

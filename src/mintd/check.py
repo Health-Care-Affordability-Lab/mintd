@@ -367,7 +367,7 @@ def _consumer_findings_from_enclave_manifest(
         return []
 
     # Lazy import to break the check.py ↔ enclave.py cycle.
-    from .enclave import EnclaveManifest
+    from .enclave import EnclaveManifest, subscription_label
 
     try:
         manifest = EnclaveManifest.load(manifest_path)
@@ -388,6 +388,21 @@ def _consumer_findings_from_enclave_manifest(
         if producer_view_factory is not None
         else ProducerView.try_at
     )
+
+    # Memoized per (repo_url, pin) FOR THIS CALL ONLY. Before P5 a repo held
+    # exactly one row, so each producer cost one HEAD round-trip; now a repo
+    # with three subscriptions would pay three, and `enclave bump` (which runs
+    # check_project(upgrades=True)) pays them again. `ProducerView.try_at`
+    # disk-caches the pinned read but the HEAD read "always pays the
+    # round-trip" by its own docstring. Same inputs give the same view within
+    # one walk, so this is identical in meaning and strictly cheaper.
+    _views: dict[tuple[str, str], "ProducerView | ProducerError"] = {}
+
+    def _resolve_once(repo_url: str, pin: str) -> "ProducerView | ProducerError":
+        key = (repo_url, pin)
+        if key not in _views:
+            _views[key] = factory(repo_url, pin)
+        return _views[key]
 
     for ap in manifest.approved_products:
         field_path = f"approved_products[{ap.repo}]"
@@ -442,7 +457,7 @@ def _consumer_findings_from_enclave_manifest(
 
         if not upgrades:
             # Summary-only finding (no upgrades path); kind stays None — never reaches a write command.
-            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {ap.source_path or '<primary>'})"
+            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})"
             findings.append(
                 CheckFinding(
                     severity="info",
@@ -476,12 +491,12 @@ def _consumer_findings_from_enclave_manifest(
             )
             continue
 
-        result_pin = factory(repo_url, ap.pin)
+        result_pin = _resolve_once(repo_url, ap.pin)
         if isinstance(result_pin, ProducerError):
             findings.append(_error_finding_for(manifest_path, field_path, result_pin))
             continue
 
-        result_head = factory(repo_url, "")
+        result_head = _resolve_once(repo_url, "")
         if isinstance(result_head, ProducerError):
             findings.append(_uptodate_finding_for(source=manifest_path, field_path=field_path))
             continue
