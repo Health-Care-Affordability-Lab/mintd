@@ -23,7 +23,7 @@ from .data import (
     BumpBlocked,
     ImportNotFound,
     PrimaryRemovedAtHead,
-    _find_consumer_finding_for_target,
+    _find_consumer_findings_for_target,
 )
 from .check import CheckFinding, _resolve_approved_product_url
 from .producer import MissingPrimaryDataProduct, ProducerView
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AlreadyApproved",
+    "AmbiguousSubscription",
     "AppendOnlyViolation",
     "ApprovedProduct",
     "DownloadedItem",
@@ -56,6 +57,7 @@ __all__ = [
     "enclave_pull",
     "enclave_remove",
     "enclave_verify",
+    "subscription_label",
 ]
 
 
@@ -80,12 +82,32 @@ class AppendOnlyViolation(Exception):
         self.changed_indices = changed_indices
 
 class AlreadyApproved(Exception):
-    def __init__(self, name: str, manifest_path: Path) -> None:
+    def __init__(self, name: str, manifest_path: Path, label: str) -> None:
         super().__init__(
-            f"{name!r} already in approved_products[] of {manifest_path}"
+            f"{name!r} ({label}) already in approved_products[] of {manifest_path}"
         )
         self.name = name
         self.manifest_path = manifest_path
+        self.label = label
+
+
+class AmbiguousSubscription(Exception):
+    """A repo-only selector named several subscriptions of one producer.
+
+    Since P5 a repo can hold more than one row, so `enclave remove <repo>` with
+    no selector stopped being unambiguous. Typed rather than a bare ValueError:
+    `pydantic.ValidationError` subclasses ValueError, so a blanket handler in
+    the CLI would swallow a malformed manifest under this exception's hint.
+    """
+
+    def __init__(self, name: str, manifest_path: Path, labels: list[str]) -> None:
+        super().__init__(
+            f"{name!r} has {len(labels)} subscriptions in {manifest_path}: "
+            + ", ".join(labels)
+        )
+        self.name = name
+        self.manifest_path = manifest_path
+        self.labels = labels
 
 class NothingToPackage(Exception):
     """`enclave_package` filtered `downloaded[]` to an empty set."""
@@ -166,6 +188,25 @@ class ApprovedProduct(BaseModel):
     source_path: str | None = None
     all: bool = False
 
+def subscription_label(ap: ApprovedProduct) -> str:
+    """How one subscription is named to a human.
+
+    A subscription is a `(repo, source_path|all)` PAIR, not a repo — that is
+    what `enclave_add`'s guard keys on since P5. Lifted from the `enclave add`
+    echo line so `enclave list`, `check` and the pull status all say the same
+    thing; the two that paraphrased it used to render an `--all` row
+    identically to a primary one.
+    """
+    # `is not None`, not truthiness: `enclave_add`'s guard keys on the triple,
+    # so a row with source_path "" is a DIFFERENT subscription from a bare
+    # primary. Collapsing them here would render two distinct rows identically
+    # on all five call sites — including the `enclave list` screen that
+    # AlreadyApproved's hint and D2's refusal both send the user to.
+    if ap.source_path is not None:
+        return ap.source_path or "<empty source_path>"
+    return "<all>" if ap.all else "<primary>"
+
+
 class DownloadedItem(BaseModel):
     model_config = ConfigDict(frozen=False)
     repo: str
@@ -218,12 +259,18 @@ class EnclaveManifest(BaseModel):
         _try_fsync_parent_dir(path)
 
     def apply_pin_bump(self, *, repo: str, new_pin: str) -> "EnclaveManifest":
-        for i, ap in enumerate(self.approved_products):
-            if ap.repo == repo:
-                new_products = list(self.approved_products)
-                new_products[i] = ap.model_copy(update={"pin": new_pin})
-                return self.model_copy(update={"approved_products": new_products})
-        raise ImportNotFound(f"{repo!r} not in approved_products[] in this manifest")
+        # EVERY row of the repo, not just the first. One repo can hold several
+        # subscriptions since P5, and D1 keeps them all at one pin, so a
+        # first-match return would strand rows 2+ at the old pin (the spec's
+        # ['new', 'old']). The membership test stays explicit — the rebuild
+        # below cannot signal "no such repo" on its own, and
+        # tests/test_enclave.py:117 pins that contract.
+        if not any(ap.repo == repo for ap in self.approved_products):
+            raise ImportNotFound(f"{repo!r} not in approved_products[] in this manifest")
+        return self.model_copy(update={"approved_products": [
+            ap.model_copy(update={"pin": new_pin}) if ap.repo == repo else ap
+            for ap in self.approved_products
+        ]})
 
 def _diff_transferred(existing: list[TransferredItem], current: list[TransferredItem]) -> list[int]:
     overlap = min(len(existing), len(current))
@@ -246,14 +293,49 @@ def enclave_add(
     repo_url = entry.repo_url
     if not repo_url:
         raise ValueError(f"catalog entry {name!r} has no repository.github_url")
+    existing_pin: str | None = None
     if manifest_path.exists():
         manifest = EnclaveManifest.load(manifest_path)
+        # A subscription is a (repo, source_path, all) TRIPLE, not a repo.
+        # Keying on the repo alone let an enclave hold exactly one product per
+        # producer, which is the defect this unit exists to fix (issue33).
+        #
+        # ORDERING IS LOAD-BEARING: AlreadyApproved must raise inside this loop,
+        # i.e. BEFORE the D1 pin-conflict ValueError below.
+        # tests/test_enclave_add.py:128 and tests/test_cli.py:1242 both re-add
+        # the same primary with a DIFFERENT pin and assert AlreadyApproved;
+        # checking the pin first flips both to ValueError (routed through
+        # cli.py's generic handler, a different message) and reddens them.
         for ap in manifest.approved_products:
-            if ap.repo == name:
-                raise AlreadyApproved(name, manifest_path)
+            if ap.repo != name:
+                continue
+            if ap.source_path == source_path and ap.all == all_:
+                raise AlreadyApproved(name, manifest_path, subscription_label(ap))
+            # Only a REAL pin is inheritable. A hand-edited manifest can carry
+            # `pin: ""` (check.py reports it as pin_missing), and inheriting it
+            # would silently mint a second unusable row instead of resolving
+            # HEAD. Unreachable before P5, when the repo-keyed guard refused
+            # every second add.
+            if ap.pin.strip():
+                existing_pin = ap.pin
     else:
         manifest = EnclaveManifest(enclave_name=manifest_path.parent.name)
-    if pin is None:
+    if existing_pin is not None:
+        # D1 (user, 2026-08-21) — ONE PIN PER REPO. `check` keys its consumer
+        # findings on the repo alone and `enclave bump` takes a repo, not a row,
+        # so divergent per-row pins would need a row-addressable field_path AND
+        # a row-addressable bump. A second add INHERITS the recorded pin; an
+        # explicit --pin that disagrees is refused rather than silently split.
+        # Consequence, surfaced by the CLI at add time: if the recorded pin
+        # predates this path, the add succeeds and the PULL is what fails.
+        if pin is not None and pin != existing_pin:
+            raise ValueError(
+                f"{name!r} is already pinned at {existing_pin} in this manifest; "
+                f"one pin per repo. Drop --pin to inherit it, or "
+                f"'mintd enclave bump {name} --force' to move every subscription."
+            )
+        resolved_pin = existing_pin
+    elif pin is None:
         factory = producer_view_factory or ProducerView.at_head
         head_view, resolved_pin = factory(repo_url)
         if source_path is None and not all_:
@@ -275,7 +357,7 @@ def enclave_add(
 
 def _validated_head_sha(
     client: CatalogClient,
-    target: ApprovedProduct,
+    rows: list[ApprovedProduct],
     name: str,
     producer_view_factory: Callable[[str], tuple[ProducerView, str]] | None,
 ) -> str:
@@ -286,15 +368,23 @@ def _validated_head_sha(
     `PrimaryRemovedAtHead`. Returns the resolved SHA only — no manifest
     mutation. Shared by the `--force` and drift paths so both keep the exact
     same resolve→validate semantics.
+
+    Takes ALL of the repo's rows, not one: repo identity is row-independent
+    (`_resolve_approved_product_url` reads `ap.repo` only), but the primary
+    check is not — see the gate below.
     """
-    repo_url = _resolve_approved_product_url(client, target)
+    repo_url = _resolve_approved_product_url(client, rows[0])
     factory = producer_view_factory or ProducerView.at_head
     head_view, head_sha = factory(repo_url)
-    # Only primary-output subscriptions depend on data_products.primary;
+    # ANY primary-output subscription of this repo forces the validation.
+    # Only primary subscriptions depend on data_products.primary;
     # source_path/all subscriptions do not (mirrors enclave_add, which skips
     # this check for them). Validating primary for those would wrongly block a
     # repin to a producer that legitimately has no primary.
-    if target.source_path is None and not target.all:
+    # Gating on `rows[0]` instead would be decided by ADD ORDER, and since
+    # apply_pin_bump now moves every row together an unvalidated bump would
+    # repin a primary subscription to a HEAD that has no primary — exit 0.
+    if any(ap.source_path is None and not ap.all for ap in rows):
         try:
             head_view.primary_or_raise()
         except MissingPrimaryDataProduct as e:
@@ -315,12 +405,8 @@ def enclave_bump(
     from .check import check_project
     project_path = project_path if project_path is not None else manifest_path.parent
     manifest = EnclaveManifest.load(manifest_path)
-    target: ApprovedProduct | None = None
-    for ap in manifest.approved_products:
-        if ap.repo == name:
-            target = ap
-            break
-    if target is None:
+    rows = [ap for ap in manifest.approved_products if ap.repo == name]
+    if not rows:
         raise ImportNotFound(f"{name!r} not in approved_products[] in {manifest_path}")
     # `--force` repins straight to the producer's validated HEAD, bypassing the
     # check_project finding gate entirely (which returns None on `up_to_date`
@@ -330,8 +416,10 @@ def enclave_bump(
     # validated at HEAD — the BumpBlocked-class gates (pin_missing, drift,
     # schema/metadata) are deliberately skipped under force.
     if force:
-        head_sha = _validated_head_sha(client, target, name, producer_view_factory)
-        if target.pin == head_sha:
+        head_sha = _validated_head_sha(client, rows, name, producer_view_factory)
+        # `all(...)`, not `rows[0].pin ==`: a hand-edited manifest whose rows
+        # disagree must still converge on the bump rather than strand rows 2+.
+        if all(ap.pin == head_sha for ap in rows):
             return None
         new_manifest = manifest.apply_pin_bump(repo=name, new_pin=head_sha)
         new_manifest.save(manifest_path)
@@ -341,18 +429,27 @@ def enclave_bump(
         if check_findings is not None
         else check_project(project_path, upgrades=True, client=client)
     )
-    finding = _find_consumer_finding_for_target(
+    repo_findings = _find_consumer_findings_for_target(
         findings, source=manifest_path, field_path=f"approved_products[{name}]"
     )
-    if finding is None:
+    if not repo_findings:
         raise ImportNotFound(f"no consumer finding for {name!r} (manifest={manifest_path})")
-    if finding.kind is None:
-        raise BumpBlocked(name, finding)
-    if finding.kind == "up_to_date":
+    # `check` emits one finding per ROW under a single repo-keyed field_path,
+    # and rows can disagree: _drift_finding_from_views short-circuits to
+    # up_to_date when a row's source_path is absent from the pinned outputs.
+    # Reading only the first match made this WRITE verb depend on YAML row
+    # order — `bump` moved the pin or printed "up to date" purely by which row
+    # was added first. Precedence: any blocked row blocks the whole repo (D1 =
+    # one pin, so a partial bump is not a thing), else drift wins, else up to
+    # date. `kind is None` falls into the blocked arm, as it did before.
+    blocked = next(
+        (f for f in repo_findings if f.kind not in ("drift", "up_to_date")), None
+    )
+    if blocked is not None:
+        raise BumpBlocked(name, blocked)
+    if not any(f.kind == "drift" for f in repo_findings):
         return None
-    if finding.kind != "drift":
-        raise BumpBlocked(name, finding)
-    head_sha = _validated_head_sha(client, target, name, producer_view_factory)
+    head_sha = _validated_head_sha(client, rows, name, producer_view_factory)
     new_manifest = manifest.apply_pin_bump(repo=name, new_pin=head_sha)
     new_manifest.save(manifest_path)
     return manifest_path
@@ -364,25 +461,80 @@ def enclave_remove(
     name: str,
     source_path: str | None = None,
     all_: bool = False,
+    primary: bool = False,
     downloads_root: Path | None = None,
 ) -> Path:
     del client
-    # all_ accepted for CLI parity but unused as bare `remove` wipes all entries
+    # Selectors, mutually exclusive at the CLI:
+    #   --source-path X  -> the row subscribed to X
+    #   --primary        -> the bare-primary row (source_path None, all False)
+    #   --all            -> EVERY row of the repo (what bare `remove` did before
+    #                       a repo could hold more than one subscription)
+    # NOTE `--all` means something different on `enclave add`, where it is the
+    # all-outputs subscription. Flagged, not resolved — see BACKLOG.
     manifest = EnclaveManifest.load(manifest_path)
     def _matches_approved(ap: ApprovedProduct) -> bool:
         if ap.repo != name:
             return False
         if source_path is not None:
             return ap.source_path == source_path
+        if primary:
+            return ap.source_path is None and not ap.all
         return True
-    matched = [ap for ap in manifest.approved_products if _matches_approved(ap)]
-    if not matched:
+    repo_rows = [ap for ap in manifest.approved_products if ap.repo == name]
+    if not repo_rows:
         raise ImportNotFound(f"{name!r} not in approved_products[] in {manifest_path}")
+    matched = [ap for ap in repo_rows if _matches_approved(ap)]
+    if not matched:
+        # Repo-level absence and SELECTOR-level absence are different failures,
+        # and reporting the first for the second is a lie the user can check:
+        # `enclave list` shows the repo right there. Reachable straight from
+        # AmbiguousSubscription's hint -- on a `[<path>, <all>]` repo the hint
+        # offers `--primary`, and no primary row exists.
+        raise ImportNotFound(
+            f"no subscription of {name!r} matches that selector in {manifest_path}; "
+            "it has: " + ", ".join(subscription_label(ap) for ap in repo_rows)
+        )
+    # D2 (user, 2026-08-21): bare `remove <repo>` was unambiguous only while a
+    # repo held one row. Refuse rather than wipe subscriptions the user did not
+    # name. Single-row repos behave exactly as before.
+    if len(matched) > 1 and source_path is None and not primary and not all_:
+        raise AmbiguousSubscription(
+            name, manifest_path, [subscription_label(ap) for ap in matched]
+        )
     new_approved = [ap for ap in manifest.approved_products if not _matches_approved(ap)]
-    new_downloaded = [
-        d for d in manifest.downloaded
-        if d.repo != name or (source_path is not None and d.output != source_path)
-    ]
+    # downloaded[] is the provenance record for what is on disk, and
+    # `enclave_package` selects straight off it — it never consults
+    # approved_products. So a row left behind for an unsubscribed product goes
+    # into the next transfer archive and crosses the air gap.
+    #
+    # WHEN IN DOUBT, DROP. A bare-primary row's resolved output is unknowable
+    # here without a producer fetch, so it may or may not be the output being
+    # unsubscribed, and the two errors are not symmetric:
+    #   drop a row a survivor still wanted -> the next `pull` re-imports it
+    #     (the fast-skip misses, `_already_downloaded` misses). Recoverable.
+    #   keep a row the user revoked        -> revoked bytes ship into an
+    #     enclave on a one-way transfer.   NOT recoverable.
+    # An earlier revision kept every row whenever a bare primary survived, on
+    # the reasoning that deleting provenance makes data un-packageable. That
+    # reads the asymmetry backwards: un-packageable costs a re-fetch.
+    surviving = [ap for ap in new_approved if ap.repo == name]
+    claimed_by_survivor = {ap.source_path for ap in surviving if ap.source_path is not None}
+    keeps_everything = any(ap.all for ap in surviving)
+
+    def _keep_downloaded(d: DownloadedItem) -> bool:
+        if d.repo != name:
+            return True
+        # A surviving `all` row genuinely claims every output of the repo.
+        if keeps_everything:
+            return True
+        if source_path is not None:
+            return d.output != source_path
+        if primary:
+            return d.output in claimed_by_survivor
+        return False  # --all / bare single-row: the repo goes entirely
+
+    new_downloaded = [d for d in manifest.downloaded if _keep_downloaded(d)]
     new_manifest = manifest.model_copy(
         update={"approved_products": new_approved, "downloaded": new_downloaded}
     )
@@ -445,6 +597,8 @@ def enclave_pull(
     new_downloaded: list[DownloadedItem] = list(manifest.downloaded)
     written: list[DownloadedItem] = []
     created_target_dirs: set[Path] = set()
+    # (output, pin) pairs imported during THIS call — see the dedup below.
+    written_this_run: set[tuple[str, str, str]] = set()
 
     def _save_downloaded() -> None:
         # Persist downloaded[] progress. Safe to call repeatedly:
@@ -457,14 +611,22 @@ def enclave_pull(
         manifest.model_copy(update={"downloaded": new_downloaded}).save(manifest_path)
 
     for i, ap in enumerate(targets, 1):
-        # Per-producer feedback (slice 38a). Fired BEFORE the idempotence
-        # skip so the (i/N) count reflects every producer, not just the
-        # ones that needed fetching.
+        # Per-subscription feedback (slice 38a). Fired BEFORE the idempotence
+        # skip so the (i/N) count reflects every subscription, not just the
+        # ones that needed fetching. N counts SUBSCRIPTIONS, not producers —
+        # one repo can contribute several rows since P5, so the label is what
+        # tells two of its lines apart.
         if reporter is not None:
-            reporter.update_status(f"Fetching {ap.repo}... ({i}/{len(targets)})")
+            reporter.update_status(
+                f"Fetching {ap.repo} [{subscription_label(ap)}]... ({i}/{len(targets)})"
+            )
         # Idempotence: skip resolving if all outputs are already present.
         # A skip mutates nothing, so it stays outside the try/save below.
-        if not force and _all_already_downloaded(manifest.downloaded, ap):
+        # `manifest.approved_products`, not `targets` — targets has already been
+        # filtered by the optional `repo` argument, which would hide siblings.
+        if not force and _all_already_downloaded(
+            manifest.downloaded, ap, manifest.approved_products
+        ):
              continue
 
         try:
@@ -474,7 +636,24 @@ def enclave_pull(
                 raise ValueError(f"catalog entry {ap.repo!r} has no repository.github_url")
             outputs = _resolve_outputs(ap, repo_url, factory)
             for output in outputs:
-                if not force and _already_downloaded(manifest.downloaded, ap.repo, output, ap.pin):
+                # `new_downloaded`, not the pre-run `manifest.downloaded`
+                # snapshot: two rows of one repo can resolve to overlapping
+                # outputs (e.g. `--source-path x` alongside `--all`, which
+                # became CLI-reachable when the add guard widened), and against
+                # the snapshot the second row re-imports x and appends a
+                # duplicate downloaded[] row to a custody manifest.
+                # Two guards, deliberately different:
+                #   `not force` + manifest.downloaded -> idempotence across RUNS,
+                #     which --force exists to override.
+                #   written_this_run                  -> two rows of ONE repo
+                #     resolving to the same output (e.g. `--source-path x`
+                #     alongside `--all`, newly reachable since the add guard
+                #     widened). Importing it twice in a single pull is never
+                #     what --force asked for, and it appends a duplicate
+                #     provenance row to a custody manifest.
+                if (ap.repo, output, ap.pin) in written_this_run:
+                    continue
+                if not force and _already_downloaded(new_downloaded, ap.repo, output, ap.pin):
                     continue
                 staging_dir = downloads_root / ap.repo / "_staging"
                 # Defensive: clear stale _staging from a prior interrupted run.
@@ -540,6 +719,7 @@ def enclave_pull(
                 )
                 new_downloaded.append(item)
                 written.append(item)
+                written_this_run.add((ap.repo, output, ap.pin))
         except BaseException:
             # A producer raised (bad pin, missing repo_url ValueError, missing
             # primary via _resolve_outputs, catalog/network, dvc import ->
@@ -581,7 +761,11 @@ def _already_downloaded(
         for d in downloaded
     )
 
-def _all_already_downloaded(downloaded: list[DownloadedItem], ap: ApprovedProduct) -> bool:
+def _all_already_downloaded(
+    downloaded: list[DownloadedItem],
+    ap: ApprovedProduct,
+    approved: list[ApprovedProduct],
+) -> bool:
     # An `all` product's output set can GROW (the producer may add outputs
     # later), so it must never be fast-skipped here — the inner
     # _already_downloaded check governs per-output re-fetch instead.
@@ -593,14 +777,22 @@ def _all_already_downloaded(downloaded: list[DownloadedItem], ap: ApprovedProduc
         # agree on one key representation.
         return _already_downloaded(downloaded, ap.repo, ap.source_path, ap.pin)
     # Primary product: the resolved output path is unknowable without the catalog
-    # fetch + producer-view resolve this fast-path exists to AVOID, so key on
-    # (repo, contract_pin). Correct because enclave_add rejects duplicate repos
-    # (AlreadyApproved) — a repo is unique in approved_products — and a non-`all`
-    # primary resolves to exactly one output; a pin bump changes ap.pin so
-    # stale-pin rows correctly miss. Known low-severity gap: a stale downloaded[]
-    # row recorded for this repo+pin under a source_path output (from a prior
-    # reconfiguration without a pin bump) could wrongly fast-skip this primary;
-    # the heavier dvc import stays guarded by the inner _already_downloaded check.
+    # fetch + producer-view resolve this fast-path exists to AVOID, so it can
+    # only key on (repo, contract_pin). That key is exact ONLY while a repo holds
+    # one subscription. It used to, because enclave_add rejected duplicate repos
+    # — and this comment cited that guard as its correctness proof. P5 deleted
+    # the guard, so a repo can now hold several rows, and a SIBLING row's
+    # downloaded[] entry satisfies (repo, pin) without the primary ever having
+    # been fetched: pull would exit 0 having fetched nothing.
+    #
+    # The check is on the row COUNT, not on the siblings' source_paths: an `all`
+    # sibling has source_path None and would contribute nothing to a set of
+    # sibling paths, leaving [--all row, primary row] silently skipping. A
+    # multi-row repo simply falls through to the resolve, where the per-output
+    # _already_downloaded check in the pull loop is exact. Costs one catalog
+    # fetch + one producer resolve per multi-row repo per pull.
+    if sum(1 for other in approved if other.repo == ap.repo) > 1:
+        return False
     return any(d.repo == ap.repo and d.contract_pin == ap.pin for d in downloaded)
 
 def _read_artifact_pin(dvc_path: Path) -> str:

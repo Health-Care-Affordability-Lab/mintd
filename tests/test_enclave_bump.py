@@ -379,3 +379,110 @@ def test_enclave_bump_missing_kind_raises_bump_blocked(tmp_path):
         enclave_bump(client, manifest_path=p, name="provider-xw", check_findings=[finding])
 
     assert ei.value.finding is finding
+
+
+# --- P5: one producer, many subscriptions (issue33) -------------------------
+
+NO_PRIMARY_METADATA = {**FULL_METADATA, "data_products": {"primary": None}}
+FIELD_PATH = "approved_products[provider-xw]"
+
+
+def _two_row_manifest(tmp_path: Path, rows) -> Path:
+    p = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=rows).save(p)
+    return p
+
+
+def _client() -> InMemoryCatalogClient:
+    c = InMemoryCatalogClient()
+    c.register("provider-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    return c
+
+
+def _head_factory(metadata=FULL_METADATA, sha=HEAD_SHA):
+    def factory(url):
+        return ProducerView(
+            repo="provider-xw", pin=sha, metadata=Metadata.model_validate(metadata)
+        ), sha
+    return factory
+
+
+def test_bump_validates_primary_when_primary_row_is_not_first(tmp_path):
+    """Fix 6. `apply_pin_bump` now moves EVERY row, so gating the primary check
+    on whichever row happens to be first would let a bump silently repin a
+    primary subscription to a HEAD that has no primary — decided by add order."""
+    p = _two_row_manifest(tmp_path, [
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA),
+    ])
+
+    with pytest.raises(PrimaryRemovedAtHead):
+        enclave_bump(_client(), manifest_path=p, name="provider-xw", force=True,
+                     producer_view_factory=_head_factory(NO_PRIMARY_METADATA))
+
+    assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [PIN_SHA, PIN_SHA]
+
+
+def test_bump_force_moves_a_row_left_behind_at_an_older_pin(tmp_path):
+    """The force no-op check is `all(...)`, not `rows[0].pin ==`: a manifest
+    whose rows disagree must converge rather than strand rows 2+."""
+    p = _two_row_manifest(tmp_path, [
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=HEAD_SHA,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/b"),
+    ])
+
+    enclave_bump(_client(), manifest_path=p, name="provider-xw", force=True,
+                 producer_view_factory=_head_factory())
+
+    assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [HEAD_SHA, HEAD_SHA]
+
+
+@pytest.mark.parametrize("kinds", [("up_to_date", "drift"), ("drift", "up_to_date")])
+def test_bump_is_not_decided_by_finding_order(tmp_path, kinds):
+    """N1. `check` emits one finding per ROW under a single repo-keyed
+    field_path, and rows disagree when one row's source_path is absent at the
+    pin. Reading only the first match made this WRITE verb depend on YAML row
+    order: one order bumped, the other printed 'up to date' and exited 0."""
+    p = _two_row_manifest(tmp_path, [
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/b"),
+    ])
+    findings = [
+        CheckFinding(severity="info", section="consumer", message=k, source=p,
+                     field_path=FIELD_PATH, kind=k)
+        for k in kinds
+    ]
+
+    result = enclave_bump(_client(), manifest_path=p, name="provider-xw",
+                          producer_view_factory=_head_factory(), check_findings=findings)
+
+    assert result == p
+    assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [HEAD_SHA, HEAD_SHA]
+
+
+def test_bump_blocked_row_blocks_the_whole_repo(tmp_path):
+    """Precedence: any blocked row blocks the repo. D1 means one pin, so a
+    partial bump is not a thing — drift on a sibling must not override it."""
+    p = _two_row_manifest(tmp_path, [
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="cat", pin=PIN_SHA,
+                        source_path="data/final/b"),
+    ])
+    findings = [
+        CheckFinding(severity="warning", section="consumer", message="drift", source=p,
+                     field_path=FIELD_PATH, kind="drift"),
+        CheckFinding(severity="error", section="consumer", message="pin missing", source=p,
+                     field_path=FIELD_PATH, kind="pin_missing"),
+    ]
+
+    with pytest.raises(BumpBlocked):
+        enclave_bump(_client(), manifest_path=p, name="provider-xw",
+                     producer_view_factory=_head_factory(), check_findings=findings)
+
+    assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [PIN_SHA, PIN_SHA]

@@ -13,6 +13,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 from rich.status import Status
+from rich.text import Text
 
 
 class _ProgressHandle:
@@ -42,8 +43,18 @@ class Reporter:
                  json_mode: bool = False, no_color: bool = False) -> None:
         self.json_mode = json_mode
         self.level = 1 + verbose - quiet
-        self._stderr = Console(file=sys.stderr, no_color=no_color, force_terminal=None)
-        self._stdout = Console(file=sys.stdout, no_color=no_color, force_terminal=None)
+        # markup=False: every string reaching a Reporter is a MESSAGE, never
+        # rich markup. With markup on, rich reads any `[...]` as a style tag and
+        # DELETES it -- `[s3]`, `[error]` and a subscription's `[data/final/x]`
+        # label all vanished from the user's screen -- and a bracketed token
+        # starting with `/` (an absolute --source-path) parses as a closing tag
+        # and raises MarkupError, which is not a ValueError and so escapes every
+        # CLI handler as a traceback. No caller passes intentional markup
+        # (grep-verified), so nothing is lost by turning it off.
+        self._stderr = Console(file=sys.stderr, no_color=no_color, force_terminal=None,
+                               markup=False)
+        self._stdout = Console(file=sys.stdout, no_color=no_color, force_terminal=None,
+                               markup=False)
         self._active_status: Optional[Status] = None
         self._active_progress: Optional[Progress] = None
         self._progress_task_id: Optional[TaskID] = None
@@ -65,7 +76,11 @@ class Reporter:
         # slow to drain). Prevents cross-block bleed into the new spinner.
         self._stderr_buf = ""
         self._status_base = msg
-        rich_status = self._stderr.status(msg)
+        # Text(), not the bare str: rich.Status builds a Spinner, and Spinner
+        # calls Text.from_markup UNCONDITIONALLY -- it does not consult the
+        # console's markup setting, so markup=False above does not cover this
+        # path. A Text instance is used as-is.
+        rich_status = self._stderr.status(Text(msg))
         self._active_status = rich_status
         # Wrap rich.Status in a context manager that ALSO resets
         # ``self._active_status`` on exit. Without the reset, a later
@@ -96,7 +111,23 @@ class Reporter:
         if self.json_mode or self._active_status is None:
             return
         self._status_base = msg
-        self._active_status.update(msg)
+        self._set_spinner(msg)
+
+    def _set_spinner(self, text: str) -> None:
+        """The ONLY way to write the spinner label — do not call
+        ``_active_status.update`` directly.
+
+        ``rich.Status`` builds a ``Spinner``, and ``Spinner`` calls
+        ``Text.from_markup`` UNCONDITIONALLY: it never consults the console's
+        ``markup`` setting, so the ``markup=False`` above does not cover this
+        path. Every label here is user data (a repo name, a ``--source-path``),
+        so a bracketed token gets silently deleted and one starting with ``/``
+        raises ``MarkupError`` out of whatever verb is running. Centralised
+        because the first fix patched one of the three call sites and review
+        found the other two.
+        """
+        if self._active_status is not None:
+            self._active_status.update(Text(text))
 
     def update_progress_desc(self, msg: str) -> None:
         """Update the active progress widget's description prefix. No-op when
@@ -203,9 +234,9 @@ class Reporter:
         if not complete_tick:
             return
         if self._status_base:
-            self._active_status.update(f"{self._status_base}  {complete_tick}")
+            self._set_spinner(f"{self._status_base}  {complete_tick}")
         else:
-            self._active_status.update(complete_tick)
+            self._set_spinner(complete_tick)
 
     @contextmanager
     def progress(self, total: int, *, desc: str) -> Iterator[_ProgressHandle]:
@@ -261,7 +292,10 @@ class Reporter:
                 # so any in-flight tail from pre-progress doesn't bleed in.
                 self._stderr_buf = ""
                 self._status_base = base
-                self._active_status = self._stderr.status(base)
+                # Text(), like status() and _set_spinner: this REBUILDS the
+                # spinner, so it is a Spinner construction site and parses
+                # markup just like the others.
+                self._active_status = self._stderr.status(Text(base))
                 self._active_status.start()
 
     def install_log_bridge(self) -> None:

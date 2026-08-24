@@ -821,3 +821,56 @@ def test_check_primary_mismatch_fires_for_non_data_type(tmp_path: Path):
     dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
     assert len(dp) == 1
     assert dp[0].kind == "data_products_primary_mismatch"
+
+
+def test_consumer_summary_distinguishes_all_from_primary(tmp_path: Path):
+    """P5: the summary render paraphrased `subscription_label` and lost the
+    `<all>` case, so an all-outputs subscription read as `<primary>`."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40, all=True),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40),
+    ]).save(manifest_path)
+    client = _client_with_provider_xw()
+
+    findings = check_project(tmp_path, client=client)
+    messages = [f.message for f in findings if f.source == manifest_path]
+
+    assert any("<all>" in m for m in messages)
+    assert sum("<primary>" in m for m in messages) == 1
+
+
+def test_consumer_walk_resolves_each_producer_view_once(tmp_path: Path):
+    """P5 made a repo able to hold several rows, and the walk resolved producer
+    HEAD once per ROW. `try_at(repo, "")` "always pays the round-trip" by its
+    own docstring, so a three-subscription repo tripled the network cost of
+    every `check --upgrades` -- and `enclave bump` pays it again."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40,
+                        source_path="data/final/b"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40),
+    ]).save(manifest_path)
+
+    calls: list[tuple[str, str]] = []
+    real = ProducerView.try_at
+
+    def counting_factory(repo_url: str, pin: str):
+        calls.append((repo_url, pin))
+        return real(repo_url, pin)
+
+    check_project(tmp_path, upgrades=True, client=_client_with_provider_xw(),
+                  producer_view_factory=counting_factory)
+
+    assert len(calls) == len(set(calls)), f"resolved the same view twice: {calls}"
+    # Three rows, one producer, two distinct pins asked for (the recorded one
+    # and the HEAD sentinel) -> at most two resolves, not six.
+    assert len(calls) <= 2, f"expected <=2 resolves for 3 rows of one repo, got {len(calls)}"

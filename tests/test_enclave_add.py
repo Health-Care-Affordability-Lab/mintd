@@ -257,3 +257,124 @@ def test_add_head_no_primary_with_source_path_succeeds(tmp_path: Path) -> None:
     ap = EnclaveManifest.load(path).approved_products[0]
     assert ap.source_path == "outputs/x.parquet"
     assert ap.pin == HEAD_SHA
+
+
+# --- P5: one producer, many subscriptions (issue33) -------------------------
+# The add guard used to key on `ap.repo` alone, so an enclave could hold exactly
+# one product per producer. It now keys on the (repo, source_path, all) triple.
+
+
+def test_add_second_source_path_appends_and_inherits_pin(tmp_path: Path) -> None:
+    """The ADD half of P5's binding invariant.
+
+    Drives `enclave_add` TWICE on purpose: the pull-side half builds its
+    manifest by instantiating ApprovedProduct directly and stays green on a
+    tree where the guard is fully intact, so it cannot pin this.
+
+    The factory raises, which is the assertion that an inheriting add never
+    resolves HEAD (D1) — and therefore also that it skips `primary_or_raise()`
+    (accepted, spec fix 6). Anyone "fixing" inheritance back to a fresh resolve
+    reddens this and has to re-make that decision deliberately.
+    """
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+
+    def _exploding_factory(repo_url: str) -> tuple[ProducerView, str]:
+        raise AssertionError("an inheriting add must not resolve HEAD")
+
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/a")
+    enclave_add(client, manifest_path=path, name="provider-xw",
+                source_path="data/final/b", producer_view_factory=_exploding_factory)
+
+    manifest = EnclaveManifest.load(path)
+    assert [ap.source_path for ap in manifest.approved_products] == [
+        "data/final/a", "data/final/b",
+    ]
+    assert [ap.pin for ap in manifest.approved_products] == [PIN_SHA, PIN_SHA]
+
+
+def test_add_primary_after_source_path_appends_and_inherits_pin(tmp_path: Path) -> None:
+    """The field-report shape: a path subscription, then the producer's primary."""
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/a")
+    enclave_add(client, manifest_path=path, name="provider-xw",
+                producer_view_factory=_factory_returning(_full_view()))
+
+    manifest = EnclaveManifest.load(path)
+    assert [ap.source_path for ap in manifest.approved_products] == ["data/final/a", None]
+    assert [ap.pin for ap in manifest.approved_products] == [PIN_SHA, PIN_SHA]
+
+
+def test_add_identical_source_path_raises_naming_the_path(tmp_path: Path) -> None:
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/a")
+
+    with pytest.raises(AlreadyApproved) as ei:
+        enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                    source_path="data/final/a")
+    assert "data/final/a" in str(ei.value)
+    assert ei.value.name == "provider-xw"
+
+
+def test_add_conflicting_explicit_pin_refuses(tmp_path: Path) -> None:
+    """D1: one pin per repo. A --pin that disagrees is refused, never split."""
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/a")
+
+    with pytest.raises(ValueError) as ei:
+        enclave_add(client, manifest_path=path, name="provider-xw", pin=HEAD_SHA,
+                    source_path="data/final/b")
+    assert PIN_SHA in str(ei.value)
+    assert "one pin per repo" in str(ei.value)
+    # Refused means nothing was written.
+    assert len(EnclaveManifest.load(path).approved_products) == 1
+
+
+def test_add_matching_explicit_pin_is_accepted(tmp_path: Path) -> None:
+    """Over-fire guard: the D1 refusal must fire on DISAGREEMENT, not on any --pin."""
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/a")
+
+    enclave_add(client, manifest_path=path, name="provider-xw", pin=PIN_SHA,
+                source_path="data/final/b")
+
+    assert len(EnclaveManifest.load(path).approved_products) == 2
+
+
+def test_add_does_not_inherit_an_empty_pin(tmp_path: Path) -> None:
+    """A hand-edited manifest can carry `pin: ""` (check reports it as
+    pin_missing). Inheriting it would silently mint a SECOND unusable row.
+    Unreachable before P5, when the repo-keyed guard refused every second add."""
+    client = _Client()
+    client.register("provider-xw")
+    path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(repo="provider-xw", registry_entry="x", pin="",
+                            source_path="data/final/a"),
+        ],
+    ).save(path)
+
+    enclave_add(
+        client, manifest_path=path, name="provider-xw", source_path="data/final/b",
+        producer_view_factory=_factory_returning(_full_view()),
+    )
+
+    pins = [ap.pin for ap in EnclaveManifest.load(path).approved_products]
+    assert pins == ["", HEAD_SHA], "the new row resolved HEAD instead of inheriting ''"

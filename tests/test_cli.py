@@ -3630,3 +3630,177 @@ def test_enclave_pull_missing_manifest_is_an_error_not_a_traceback(
     errors = [e for e in recording_reporter.events if e[0] == "error"]
     assert any("not found" in e[1] for e in errors), errors
     assert any(e[2] and "--manifest" in e[2] for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# P5 — one producer, many subscriptions (issue33)
+# ---------------------------------------------------------------------------
+
+
+def test_enclave_add_second_path_warns_pin_was_inherited(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """D1's consequence must reach the user AT ADD TIME. If the recorded pin
+    predates the newly added path the add still succeeds and the PULL is what
+    fails, so the add names the remedy.
+
+    Asserts SHORT tokens only: Reporter writes through a rich Console bound to
+    stderr, which soft-wraps at 80 columns off a tty, so a long phrase can be
+    split across lines.
+    """
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    cli.main([
+        "enclave", "add", "provider-xw", "--pin", "a" * 40,
+        "--source-path", "data/final/a", "--manifest", str(manifest),
+    ])
+    capsys.readouterr()  # discard first-add output
+
+    rc = cli.main([
+        "enclave", "add", "provider-xw",
+        "--source-path", "data/final/b", "--manifest", str(manifest),
+    ])
+
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "inherited" in err
+    assert "--force" in err
+    assert "provider-xw" in err
+
+
+def test_enclave_add_hints_only_name_flags_the_parser_accepts() -> None:
+    """The MissingPrimaryDataProduct hint used to say `--path`, a flag this
+    parser does not define — following it exited 64 with `unrecognized
+    arguments`. Ratchet over the whole handler rather than that one string, so
+    any future hint naming a nonexistent flag fails here too.
+
+    Static: no doubles, and no producer resolve (which is what raises the
+    exception in the first place, and would need a real repo to reach).
+    """
+    import inspect
+    import re as _re
+
+    parser = cli._build_parser()
+    enclave = parser._subparsers._group_actions[0].choices["enclave"]
+    add = enclave._subparsers._group_actions[0].choices["add"]
+    accepted = {opt for action in add._actions for opt in action.option_strings}
+
+    source = inspect.getsource(cli._handle_enclave_add)
+    hints = _re.findall(r'hint=(["\'])(.*?)\1', source, _re.S)
+    named = {f for _, text in hints for f in _re.findall(r"--[a-z][a-z0-9-]*", text)}
+
+    assert named, "no hints found; the regex or the handler moved"
+    assert "--source-path" in named
+    assert named <= accepted, f"hints name flags the parser rejects: {named - accepted}"
+
+
+def test_enclave_list_distinguishes_all_from_primary(
+    patched_clients, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """An `--all` row and a bare primary both have source_path None, so the
+    list rendered them identically — on the very screen the AlreadyApproved
+    hint and D2's refusal both send users to."""
+    manifest = tmp_path / "enclave_manifest.yaml"
+    manifest.write_text("""
+enclave_name: test-enclave
+approved_products:
+  - repo: provider-xw
+    registry_entry: e
+    pin: 4f7c2a1
+    source_path: data/final/a
+  - repo: provider-xw
+    registry_entry: e
+    pin: 4f7c2a1
+    all: true
+  - repo: provider-xw
+    registry_entry: e
+    pin: 4f7c2a1
+downloaded: []
+transferred: []
+""")
+
+    cli.main(["enclave", "list", "--manifest", str(manifest)])
+
+    out, _ = capsys.readouterr()
+    assert "data/final/a" in out
+    assert "<all>" in out
+    assert out.count("<primary>") == 1
+
+
+def test_enclave_remove_ambiguous_exits_one_without_traceback(
+    patched_clients, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """D2: refuse rather than wipe subscriptions the user did not name."""
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+    cli.main(["enclave", "add", "provider-xw", "--pin", "a" * 40,
+              "--source-path", "data/final/a", "--manifest", str(manifest)])
+    cli.main(["enclave", "add", "provider-xw",
+              "--source-path", "data/final/b", "--manifest", str(manifest)])
+    capsys.readouterr()
+    before = manifest.read_bytes()
+
+    rc = cli.main(["enclave", "remove", "provider-xw", "--manifest", str(manifest)])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "Traceback" not in err
+    assert "data/final/a" in err
+    assert "data/final/b" in err
+    assert manifest.read_bytes() == before
+
+
+def test_enclave_remove_primary_and_source_path_exits_64(
+    patched_clients, tmp_path: Path
+) -> None:
+    """argparse mutex: the three remove selectors conflict → exit 64."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "enclave", "remove", "provider-xw",
+            "--source-path", "data/final/a", "--primary",
+            "--manifest", str(tmp_path / "enclave_manifest.yaml"),
+        ])
+    assert exc.value.code == 64
+
+
+def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
+    patched_clients,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """The advisory must key on "this add INHERITED a pin", not on "the repo
+    now has more than one row". They diverge when the sibling's pin is not
+    inheritable -- here a hand-edited empty pin, which `enclave_add`
+    deliberately declines to inherit -- and the row-count version then names a
+    pin that was never recorded.
+
+    Needs no producer resolve: with the sibling's pin blank, an explicit --pin
+    is taken verbatim rather than refused by D1.
+    """
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(repo="provider-xw", registry_entry="x", pin="",
+                            source_path="data/final/a"),
+        ],
+    ).save(manifest)
+
+    rc = cli.main([
+        "enclave", "add", "provider-xw", "--pin", "b" * 40,
+        "--source-path", "data/final/b", "--manifest", str(manifest),
+    ])
+
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert len(EnclaveManifest.load(manifest).approved_products) == 2
+    assert "inherited" not in err, "nothing was inherited; the sibling pin is blank"
