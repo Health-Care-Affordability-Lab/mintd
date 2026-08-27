@@ -501,6 +501,10 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
 # is the good one.
 LICENSED_FAKES = {
     "dvc_ops",     # tests/test_dvc_ops_contract.py
+    "producer",    # tests/test_producer_contract.py — licensed for D-C, which
+                   # reads producer DVC pointers through fetch_path_at; an
+                   # unlicensed StaticFetcher would have made every drift
+                   # cell assert drift_unknown while proving nothing.
     "reporter",    # tests/test_reporter_contract.py
 }
 
@@ -511,7 +515,6 @@ UNLICENSED_FAKES = {
     "archive_ops",
     "fast_sync_ops",
     "init_ops",
-    "producer",
     "registry_git_ops",
 }
 
