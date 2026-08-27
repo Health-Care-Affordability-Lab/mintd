@@ -89,3 +89,38 @@ def test_yaml_is_flat_no_advisory_block():
 def _round(obj):
     """Normalize through json so datetime vs iso-string doesn't matter."""
     return json.loads(json.dumps(obj, default=str))
+
+
+def test_a_registry_entry_that_will_not_parse_is_a_named_error() -> None:
+    """A catalog entry is a file in someone else's repo. A merge-conflict
+    marker (unparseable YAML) and a shape `CatalogEntry` rejects are both
+    routine, and both escaped as a raw traceback through every verb that reads
+    the catalog — `data import --bump` newly among them, since it now resolves
+    the namespace from the entry.
+
+    One guard here because every reader routes through `deserialize`.
+
+    Mutation: drop the try/except -> `yaml.scanner.ScannerError` escapes.
+    """
+    import pytest
+
+    from mintd.catalog import CatalogEntryInvalid
+
+    conflicted = "<<<<<<< HEAD\nproject:\n  name: a\n=======\nproject:\n  name: b\n"
+    with pytest.raises(CatalogEntryInvalid) as ei:
+        deserialize(conflicted, source=Path("/registry/catalog/data/prod.yaml"))
+
+    assert "unreadable" in str(ei.value)
+    assert "prod.yaml" in str(ei.value)
+
+
+def test_a_scalar_where_a_mapping_belongs_is_the_same_named_error() -> None:
+    """The pydantic half. `CatalogEntry` is `extra="allow"` with no declared
+    fields, so only a non-mapping DOCUMENT is rejected here — the per-block v1
+    shapes are `data.py`'s `_section` to survive, not this function's."""
+    import pytest
+
+    from mintd.catalog import CatalogEntryInvalid
+
+    with pytest.raises(CatalogEntryInvalid):
+        deserialize("just a string\n")

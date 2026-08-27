@@ -54,6 +54,7 @@ from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
     CatalogClient,
+    CatalogEntryInvalid,
     CatalogFilter,
     CatalogNotFound,
     GitCatalogClient,
@@ -233,6 +234,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except ConfigError as e:
         args._reporter.error(str(e))
+        return 1
+    except CatalogEntryInvalid as e:
+        # Every verb that reads the catalog can hit this, and only one of them
+        # (`data import`, plain arm) happened to catch the pydantic half via
+        # its bare `ValueError`. One arm here rather than eleven below.
+        args._reporter.error(
+            str(e),
+            hint="fix the entry in the registry repo, then 'mintd registry sync'",
+        )
         return 1
     finally:
         args._reporter.uninstall_log_bridge()

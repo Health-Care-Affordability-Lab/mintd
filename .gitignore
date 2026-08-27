@@ -54,3 +54,8 @@ notes/
 .venv
 .claude
 .forge-scout/
+
+# A stray `dvc init` anywhere in this checkout makes every dvc command
+# resolve a phantom repo at the source root.
+/.dvc/
+/.dvcignore

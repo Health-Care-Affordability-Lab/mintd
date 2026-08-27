@@ -3804,3 +3804,31 @@ def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
     assert rc == 0
     assert len(EnclaveManifest.load(manifest).approved_products) == 2
     assert "inherited" not in err, "nothing was inherited; the sibling pin is blank"
+
+
+def test_a_corrupt_registry_entry_is_an_error_not_a_traceback(
+    patched_clients,
+    recording_reporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--bump` reads the catalog (product name -> namespace), which it did not
+    before. Neither `pydantic.ValidationError` nor `yaml.YAMLError` was caught
+    on that arm or in `main()`, so one merge-conflict marker in someone else's
+    registry file exited through a stack trace. `main()` catches it now, so
+    every catalog-reading verb is covered, not just this one.
+
+    Mutation: remove the `CatalogEntryInvalid` arm from `main()` -> raises.
+    """
+    from mintd.catalog import CatalogEntryInvalid
+
+    client, _ = patched_clients
+    monkeypatch.setattr(client, "fetch", lambda name: (_ for _ in ()).throw(
+        CatalogEntryInvalid("catalog entry is unreadable (/r/provider-xw.yaml): boom")
+    ))
+
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+
+    assert rc == 1
+    msg = recording_reporter.events_of("error")[-1][1]
+    assert "unreadable" in msg
+    assert "provider-xw.yaml" in msg

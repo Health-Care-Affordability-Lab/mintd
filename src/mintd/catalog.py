@@ -50,6 +50,12 @@ def _pr_url(registry_repo_url: str, pr_number: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+class CatalogEntryInvalid(Exception):
+    """A catalog entry exists but cannot be read — unparseable YAML, or a shape
+    `CatalogEntry` rejects. Distinct from `CatalogNotFound`: "run 'mintd data
+    list'" is the wrong advice for a file that is right there and broken."""
+
+
 class CatalogNotFound(Exception):
     """Raised by fetch()/update() when the named entry is not in the catalog."""
 
