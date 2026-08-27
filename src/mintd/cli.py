@@ -183,6 +183,7 @@ def _build_reporter(args: argparse.Namespace) -> Reporter:
 _KIND_PREFIX: dict[str | None, str] = {
     "up_to_date": "✓",
     "drift": "↑",
+    "drift_unknown": "⚠",
     "unreachable": "⚠",
     "schema_too_old": "⚠",
     "pin_missing": "✗",
@@ -193,7 +194,9 @@ _KIND_PREFIX: dict[str | None, str] = {
     None: "·",
 }
 
-_RECOVERABLE_KINDS: frozenset[str] = frozenset({"unreachable", "schema_too_old"})
+_RECOVERABLE_KINDS: frozenset[str] = frozenset(
+    {"unreachable", "schema_too_old", "drift_unknown"}
+)
 
 
 class _MintdArgumentParser(argparse.ArgumentParser):
@@ -2222,16 +2225,15 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
         # D1: this add INHERITED the repo's recorded pin, it did not resolve
         # HEAD. If the path did not exist at that pin the add still succeeds and
         # `pull` is what fails, so name the remedy now rather than in the notes.
-        # `--force` is not decoration: check's drift walk short-circuits a row to
-        # `up to date` exactly when its source_path is absent from the pinned
-        # outputs -- this state -- so bare `enclave bump` returns "up to date"
-        # with the pin unmoved. Narrow this to bare `bump` once the check-drift
-        # lane fixes that short-circuit.
+        # Bare `bump` suffices since the md5 drift rule: a path published at
+        # HEAD but absent at the pin reports as drift, so the bump moves the
+        # pin without `--force` (which skips every guard and was only ever a
+        # workaround for the retired short-circuit).
         reporter.warn(
             f"inherited the pin recorded for {ap.repo} ({ap.pin[:7]}) - one pin per repo. "
             f"If {subscription_label(ap)} is newer than that pin, "
             f"'mintd enclave pull' will fail; run "
-            f"'mintd enclave bump {ap.repo} --force' to move every subscription."
+            f"'mintd enclave bump {ap.repo}' to move every subscription."
         )
     return 0
 
@@ -2951,6 +2953,18 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
     kind = exc.finding.kind
     if kind == "unreachable":
         print("hint: retry when the network is available", file=sys.stderr)
+    elif kind == "drift_unknown":
+        # Five states reach this kind and only two are transport failures, so
+        # a fixed "check the network" misdiagnosed three of them at a network
+        # that was working. Prefer the finding's own hint, as
+        # `catalog_unresolved` below already does. Still `kind` dispatch.
+        print(
+            "hint: " + (
+                exc.finding.hint
+                or "'mintd check --upgrades' shows the row and the reason"
+            ),
+            file=sys.stderr,
+        )
     elif kind == "schema_too_old":
         print(
             "hint: ask the producer to update their metadata schema to 2.0",

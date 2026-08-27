@@ -3813,8 +3813,12 @@ def test_enclave_add_second_path_warns_pin_was_inherited(
     err = capsys.readouterr().err
     assert rc == 0
     assert "inherited" in err
-    assert "--force" in err
+    assert "bump" in err
     assert "provider-xw" in err
+    # The md5 drift rule reports a path published after the pin as drift, so
+    # bare `bump` moves the pin; the advisory must not send users through
+    # `--force`, which skips every guard (M17).
+    assert "--force" not in err
 
 
 def test_enclave_add_hints_only_name_flags_the_parser_accepts() -> None:
@@ -3949,6 +3953,31 @@ def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
     assert rc == 0
     assert len(EnclaveManifest.load(manifest).approved_products) == 2
     assert "inherited" not in err, "nothing was inherited; the sibling pin is blank"
+
+
+def test_render_findings_distinguishes_rows_by_message_not_field_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D-D's render half: `_render_findings` prints `prefix [severity]
+    source: message` — `field_path` is invisible outside `--json`, which is
+    why the per-row label had to land in the MESSAGE."""
+    source = Path("enclave_manifest.yaml")
+    findings = [
+        CheckFinding(severity="info", section="consumer",
+                     message=f"up to date ({label})", source=source,
+                     field_path="approved_products[provider-xw]",
+                     kind="up_to_date")
+        for label in ("data/final/a", "data/final/b", "<primary>")
+    ]
+
+    rc = cli._render_findings(findings, json_out=False)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "up to date (data/final/a)" in out
+    assert "up to date (data/final/b)" in out
+    assert "up to date (<primary>)" in out
+    assert "approved_products" not in out
 
 
 def test_data_import_escaping_path_is_reported_not_raised(

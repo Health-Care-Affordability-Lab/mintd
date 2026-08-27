@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import random
 import shlex
 import subprocess
@@ -440,6 +441,64 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     return outs
 
 
+def wdir_map(dvc_yaml_doc: object) -> dict[str, str | None]:
+    """``stage name -> wdir`` from an already-parsed ``dvc.yaml`` document.
+
+    Pure: takes the parsed document, not a path, because the two callers
+    acquire it differently — fast-sync ``open()``s a local checkout, while the
+    drift comparator has only ``Fetcher.fetch_path_at`` bytes at a remote rev
+    and no working tree to open. Sharing the *parsing* is the reuse that is
+    actually available; sharing the acquisition is not.
+
+    A stage with no ``wdir`` maps to ``"."``. An absolute ``wdir`` maps to
+    ``None`` — unresolvable against a project root, so callers skip the stage
+    rather than guess at it.
+    """
+    if not isinstance(dvc_yaml_doc, dict):
+        return {}
+    stages = dvc_yaml_doc.get("stages")
+    if not isinstance(stages, dict):
+        return {}
+    out: dict[str, str | None] = {}
+    for stage, stage_data in stages.items():
+        # A `foreach` stage nests the real stage body (wdir included) under
+        # `do:`; a `matrix` stage keeps it at the top level.
+        body = stage_data.get("do", stage_data) if isinstance(stage_data, dict) else {}
+        wdir = body.get("wdir", ".") if isinstance(body, dict) else "."
+        if posixpath.isabs(str(wdir)) or Path(str(wdir)).is_absolute():
+            logger.warning(
+                "absolute wdir in dvc.yaml stage %s: %s; skipping stage", stage, wdir
+            )
+            out[str(stage)] = None
+        else:
+            out[str(stage)] = str(wdir)
+    return out
+
+
+def stage_wdir(stage_wdirs: dict[str, str | None], stage: str) -> str | None:
+    """The `wdir` for one **dvc.lock** stage name.
+
+    `dvc.yaml` names a `foreach`/`matrix` stage `build`; `dvc.lock` names its
+    instances `build@main`. Looking the lock name up directly missed, every
+    such stage silently fell back to `wdir="."`, and a scaffold-shaped out
+    (`../data/final/`) then resolved outside the repo root and was dropped —
+    reported as "not published" at whichever rev the fan-out existed at.
+    """
+    return stage_wdirs.get(stage, stage_wdirs.get(stage.split("@", 1)[0], "."))
+
+
+def resolve_out(wdir: str, out_path: str) -> str:
+    """Resolve a stage ``out`` (recorded relative to ``wdir``) to a
+    project-root-relative POSIX path.
+
+    ``wdir="code", out="../data/final/"`` -> ``"data/final"``. Lexical on
+    purpose: the drift comparator resolves paths for a *remote* rev where
+    nothing exists on disk to `.resolve()` against. A result that still starts
+    with ``../`` escaped the project root and the caller must reject it.
+    """
+    return posixpath.normpath(posixpath.join(wdir or ".", out_path))
+
+
 def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     """Parse ``project_path/dvc.lock`` into ``DvcOut`` entries for pipeline-
     stage outputs (no per-output ``.dvc`` pointer files). Slice 37 — gives
@@ -455,22 +514,14 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     yaml_path = project_path / "dvc.yaml"
     lock_path = project_path / "dvc.lock"
 
-    wdir_map: dict[str, str] = {}
+    # Shared with the drift comparator (`check._pointer_md5`), which
+    # reaches the same document through `Fetcher.fetch_path_at` instead of
+    # `open()`. Only the acquisition differs; the walk is identical.
+    stage_wdirs: dict[str, str | None] = {}
     try:
         if yaml_path.exists():
             with open(yaml_path) as f:
-                data = yaml.safe_load(f)
-                if isinstance(data, dict) and "stages" in data:
-                    for stage, stage_data in data["stages"].items():
-                        wdir = stage_data.get("wdir", ".")
-                        if Path(wdir).is_absolute():
-                            logger.warning(
-                                "absolute wdir in dvc.yaml stage %s: %s; skipping stage",
-                                stage, wdir,
-                            )
-                            wdir_map[stage] = "SKIP"
-                        else:
-                            wdir_map[stage] = wdir
+                stage_wdirs = wdir_map(yaml.safe_load(f))
     except (FileNotFoundError, yaml.YAMLError, OSError):
         pass
 
@@ -485,11 +536,11 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
 
     outs: list[DvcOut] = []
     for stage, stage_data in lock_data["stages"].items():
-        if wdir_map.get(stage) == "SKIP":
-            continue
+        wdir = stage_wdir(stage_wdirs, stage)
+        if wdir is None:
+            continue  # absolute wdir: unresolvable against the project root
         if "outs" not in stage_data:
             continue
-        wdir = wdir_map.get(stage, ".")
         for out in stage_data["outs"]:
             has_md5 = bool(out.get("md5"))
             has_files = "files" in out

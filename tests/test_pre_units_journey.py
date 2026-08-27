@@ -609,6 +609,78 @@ def _imported_bytes(consumer: Path, rel_path: str) -> bytes:
     ).read_bytes()
 
 
+def test_import_bump_advances_the_pin_and_lands_new_bytes(
+    payload_journey, capsys
+) -> None:
+    """The drift chain, end to end: producer moves, consumer bumps, new bytes.
+
+    This is the journey `bump_import` exists for. The producer republishes a
+    refreshed payload at the SAME path — the commonest real case, invisible
+    under the old primary-path comparison (`check` said "up to date" however
+    many commits and bytes sat behind an unchanged path). Under the md5 rule
+    the pointer hash moves, `check` reports drift, and the bump takes the
+    data product name — the same identifier `import` takes (D-A); the old
+    local-stem key is retired.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    assert _imported_bytes(consumer, PRIMARY_OUT) == b"v1\n"
+    pin_before = _pins_of(consumer)["final"]
+
+    # New bytes, same path. `publish()` advances HEAD by exactly one commit
+    # (a peer of `commit_more()`, not a prelude to one).
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v2\n"}}, message="v2 payload")
+    register()
+
+    assert cli.main(["data", "import", PRODUCT, "--bump"]) == 0, _drain(capsys)
+
+    pins = _pins_of(consumer)
+    assert pins["final"] == producer.head_sha
+    assert pins["final"] != pin_before
+    assert _imported_bytes(consumer, PRIMARY_OUT) == b"v2\n", (
+        "the pin moved but the bytes did not — a bump that rewrites the "
+        "pointer without re-fetching is the failure this asserts against"
+    )
+    # The SAME `.dvc` was rewritten — no orphaned sibling pointer.
+    assert set(pins) == {"final"}
+
+
+def test_import_bump_of_a_non_primary_row_rewrites_that_row_only(
+    payload_journey, capsys
+) -> None:
+    """D-C2's proof at the real collaborator: bump a `--path` row and the
+    producer's primary is not consulted — THAT row's `.dvc` is rewritten,
+    the primary's is untouched, and nothing is orphaned."""
+    producer, consumer, register = payload_journey
+    producer.publish({
+        PRIMARY_OUT: {"part.csv": b"v1\n"},
+        "data/extract": {"part.csv": b"e1\n"},
+    })
+    register()
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    assert cli.main(["data", "import", PRODUCT, "--path", "data/extract"]) == 0, \
+        _drain(capsys)
+    final_pin_before = _pins_of(consumer)["final"]
+
+    producer.publish({"data/extract": {"part.csv": b"e2\n"}}, message="extract v2")
+    register()
+
+    assert cli.main(
+        ["data", "import", PRODUCT, "--path", "data/extract", "--bump"]
+    ) == 0, _drain(capsys)
+
+    pins = _pins_of(consumer)
+    assert pins["extract"] == producer.head_sha
+    assert pins["final"] == final_pin_before, (
+        "bumping the extract row moved the primary's pin — the bump touched "
+        "a sibling row"
+    )
+    assert _imported_bytes(consumer, "data/extract") == b"e2\n"
+    assert set(pins) == {"final", "extract"}
 
 
 def test_import_bump_at_head_is_a_no_op(payload_journey, capsys) -> None:
@@ -695,3 +767,69 @@ def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
     landed = sorted((consumer / "downloads").rglob("part.csv"))
     assert landed, f"nothing under downloads/: {sorted((consumer / 'downloads').rglob('*'))}"
     assert landed[0].read_bytes() == b"enclave\n"
+
+
+def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> None:
+    """R1, asserted where the harm lands: the manifest on disk.
+
+    The P5 shape — a second subscription inherits the repo's recorded pin,
+    and its path only exists at a LATER commit. The old drift walk
+    short-circuited that row to "up to date" (path absent from the pinned
+    outputs), so bare `enclave bump` returned "up to date" with the pin
+    unmoved and the advisory sent users through `--force`, which skips every
+    guard. Under the md5 rule the row is drift, and the guarded path moves
+    the pin.
+    """
+    import yaml as _yaml
+
+    producer, consumer, _register = payload_journey
+    producer.publish({"outputs/cms_based": {"part.csv": b"v1\n"}})
+    pin = producer.head_sha
+
+    data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "data_provider-xw"
+    data["repository"]["github_url"] = producer.url
+    data["data_products"]["primary"] = "outputs/cms_based/"
+    data["data_products"]["outputs"] = [
+        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
+         "last_published": ""}
+    ]
+    GitCatalogClient(
+        registry_repo_url=_registry_url_from_config(),
+        work_dir=consumer.parent / "enclave-seed",
+        git_ops=_FakeRegistryGitOps(),
+    ).register(Metadata.model_validate(data))
+
+    # The producer registers AND publishes a second output — after the pin.
+    producer.add_output("outputs/extra/")
+    producer.publish({"outputs/extra": {"part.csv": b"x1\n"}}, message="extra")
+    assert producer.head_sha != pin
+
+    (consumer / "enclave_manifest.yaml").write_text(
+        "schema_version: '2.0'\n"
+        "enclave_name: my_workspace\n"
+        "approved_products:\n"
+        "  - repo: provider-xw\n"
+        "    registry_entry: catalog/data/provider-xw.yaml\n"
+        f"    pin: {pin}\n"
+        "    source_path: outputs/cms_based/\n"
+        "  - repo: provider-xw\n"
+        "    registry_entry: catalog/data/provider-xw.yaml\n"
+        f"    pin: {pin}\n"  # inherited (D1) — predates outputs/extra/
+        "    source_path: outputs/extra/\n"
+        "downloaded: []\n"
+        "transferred: []\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["enclave", "bump", "provider-xw"]) == 0, _drain(capsys)
+
+    manifest = _yaml.safe_load(
+        (consumer / "enclave_manifest.yaml").read_text(encoding="utf-8")
+    )
+    pins = {ap["pin"] for ap in manifest["approved_products"]}
+    assert pins == {producer.head_sha}, (
+        f"bare bump left the manifest at {pins}; expected every row moved "
+        f"to {producer.head_sha}"
+    )
