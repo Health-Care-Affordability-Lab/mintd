@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,10 +10,11 @@ from typing import Any, Callable
 
 import pytest
 
-from mintd.catalog import CatalogNotFound, InMemoryCatalogClient
+from mintd.catalog import CatalogEntry, CatalogNotFound, InMemoryCatalogClient
 from mintd.data import (
     ImportDestinationExists,
     MissingPrimaryDataProduct,
+    UnknownProductPath,
     import_product,
 )
 from mintd.model import Metadata
@@ -81,7 +83,7 @@ def test_import_product_uses_primary_when_no_path(tmp_path: Path) -> None:
     assert call.repo_url == "https://github.com/example-org/provider_xw"
     # Slice 38: dest is namespaced by the producer's full_name so
     # multiple imports into the same dest_root don't collide.
-    assert call.dest == tmp_path / "data_provider_xw" / "main.parquet"
+    assert call.dest == tmp_path / "data_provider_xw" / "outputs" / "main.parquet"
 
 
 def test_import_product_path_override(tmp_path: Path) -> None:
@@ -94,7 +96,7 @@ def test_import_product_path_override(tmp_path: Path) -> None:
     )
 
     assert fake.calls[0].path == "outputs/other.csv"
-    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "other.csv"
+    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "outputs" / "other.csv"
 
 
 def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
@@ -115,6 +117,99 @@ def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
         "outputs/b.csv",
         "outputs/c.csv",
     ]
+
+
+def test_import_all_skips_an_output_nested_inside_another(tmp_path: Path) -> None:
+    """A product declaring a directory AND a file inside it. DVC cannot track
+    both — the file is already in the directory — so mirroring the producer's
+    paths (D-A) put pointer two INSIDE pointer one's payload, and real dvc
+    answered `The file '.../data/final/b.csv' already exists locally`: one
+    pointer written, exit 1, half done, nothing rolled back. Following mintd's
+    own `--force` remedy then failed differently (`bad DVC file name ... is
+    git-ignored`) and re-rendered as the same message.
+
+    The inner path was never a distinct product, so it is dropped, loudly.
+
+    Mutation: delete the `_drop_nested_paths` call -> two import calls, which
+    is the state real dvc rejects.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("data/final", "data/final/b.csv"))
+    fake = _FakeDvcOps()
+    reporter = _RecordingReporter()
+
+    produced = import_product(
+        client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+        dest_root=tmp_path, reporter=reporter,
+    )
+
+    assert [c.path for c in fake.calls] == ["data/final"]
+    assert len(produced) == 1
+    assert any("data/final/b.csv" in m and "data/final" in m for m in reporter.infos)
+
+
+def test_explicit_nested_paths_collapse_the_same_way(tmp_path: Path) -> None:
+    """Same guard, reached through `--path` rather than `--all` — the producer
+    is not the only source of an overlapping pair."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("data/final", "data/final/b.csv"))
+    fake = _FakeDvcOps()
+
+    import_product(
+        client, fake, "provider_xw", path=["data/final/b.csv", "data/final/"],
+        cwd=tmp_path, dest_root=tmp_path,
+    )
+
+    assert [c.path for c in fake.calls] == ["data/final/"]
+
+
+def test_a_failure_partway_through_all_names_what_landed(tmp_path: Path) -> None:
+    """`import_product` rolls nothing back. It must at least say which outputs
+    are already on disk, rather than exiting on a half-written import the user
+    cannot see."""
+    from mintd._dvc_ops import DvcOpError
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("outputs/a.csv", "outputs/b.csv"))
+    fake = _FakeDvcOps()
+    reporter = _RecordingReporter()
+    real_import = fake.import_
+
+    def fail_on_second(**kw: Any) -> Path:
+        if kw["path"] == "outputs/b.csv":
+            raise DvcOpError("dvc import failed (exit 1)")
+        return real_import(**kw)
+
+    fake.import_ = fail_on_second  # type: ignore[method-assign]
+
+    with pytest.raises(DvcOpError):
+        import_product(
+            client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+            dest_root=tmp_path, reporter=reporter,
+        )
+
+    assert any("1 of 2 outputs were imported" in m for m in reporter.warns)
+
+
+class _RecordingReporter:
+    """Only the three surfaces `import_product` reaches; `status` must be a
+    context manager because the import loop runs inside it."""
+
+    def __init__(self) -> None:
+        self.infos: list[str] = []
+        self.warns: list[str] = []
+
+    def info(self, msg: str) -> None:
+        self.infos.append(msg)
+
+    def warn(self, msg: str) -> None:
+        self.warns.append(msg)
+
+    def status(self, msg: str) -> Any:
+        return contextlib.nullcontext()
+
+    def update_status(self, msg: str) -> None:
+        pass
 
 
 def _producer_bytes(
@@ -274,7 +369,7 @@ def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
         client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
-    assert produced == [tmp_path / "data_provider_xw" / "main.parquet.dvc"]
+    assert produced == [tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc"]
     assert produced[0].exists()
 
 
@@ -282,8 +377,8 @@ def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "data_provider_xw").mkdir(parents=True)
-    (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_provider_xw" / "outputs").mkdir(parents=True)
+    (tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
 
     with pytest.raises(ImportDestinationExists):
         import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
@@ -294,8 +389,8 @@ def test_import_product_force_overwrites(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "data_provider_xw").mkdir(parents=True)
-    (tmp_path / "data_provider_xw" / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_provider_xw" / "outputs").mkdir(parents=True)
+    (tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
 
     produced = import_product(
         client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
@@ -318,7 +413,7 @@ def test_import_product_trailing_slash_in_path(tmp_path: Path) -> None:
         cwd=tmp_path, dest_root=tmp_path,
     )
 
-    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "cms_based"
+    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "outputs" / "cms_based"
 
 
 def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None:
@@ -342,4 +437,386 @@ def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None
 
     # Both dest_root and the per-producer namespace dir get auto-created.
     assert (nested_dest / "data_provider_xw").is_dir()
-    assert fake.calls[0].dest == nested_dest / "data_provider_xw" / "main.parquet"
+    assert fake.calls[0].dest == nested_dest / "data_provider_xw" / "outputs" / "main.parquet"
+
+
+# ---------------------------------------------------------------------------
+# issue09 fix 3 — force clears an existing directory destination
+# ---------------------------------------------------------------------------
+
+
+def test_import_product_force_clears_an_existing_directory_dest(
+    tmp_path: Path,
+) -> None:
+    """`dvc import -o <existing-dir>` nests the source inside the directory
+    and then refuses the overlap; 14 of 21 catalog products publish a
+    directory, so a force re-import must clear the old payload first. The
+    fake raises on an existing dir dest (mirroring real dvc), so this test
+    reddens if the rmtree is dropped (M14c)."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    (dest / "stale.csv").write_text("old payload")
+    (dest.parent / "cms_based.dvc").write_text("preexisting")
+
+    produced = import_product(
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
+    )
+
+    assert len(fake.calls) == 1
+    assert not (dest / "stale.csv").exists()
+    assert produced == [dest.parent / "cms_based.dvc"]
+
+
+def test_import_product_force_never_destroys_a_stray_directory(
+    tmp_path: Path,
+) -> None:
+    """The rmtree is guarded on the `.dvc` existing too: a directory at the
+    destination that mintd did NOT import (no pointer beside it) is user
+    data and must survive — the import fails instead."""
+    from mintd._dvc_ops import DvcImportDestinationExists
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    (dest / "precious.csv").write_text("not mintd's to delete")
+
+    with pytest.raises(DvcImportDestinationExists):
+        import_product(
+            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
+            force=True,
+        )
+
+    assert (dest / "precious.csv").read_text() == "not mintd's to delete"
+
+
+@pytest.mark.parametrize(
+    "escaping_path",
+    [
+        "../../../../elsewhere/raw/",
+        "/tmp/absolute/raw/",
+        "outputs/../../../../elsewhere/raw/",
+    ],
+    ids=["dotdot", "absolute", "dotdot-mid-path"],
+)
+def test_import_refuses_an_output_path_that_escapes_the_destination(
+    tmp_path: Path, escaping_path: str
+) -> None:
+    """D-A dropped the basename clamp, which was the only thing normalizing a
+    producer-controlled path. `outputs[].path` is a bare `str` on the model
+    and `_validate_requested_targets` never runs for import, so `..` escaped
+    the project and pathlib discards the whole left operand for an absolute
+    path — with the force-path `rmtree` following it out.
+
+    Mutation: drop the containment check -> these reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary(escaping_path))
+    fake = _FakeDvcOps()
+
+    with pytest.raises(UnknownProductPath):
+        import_product(
+            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
+        )
+
+    assert fake.calls == [], "refused before any dvc invocation"
+
+
+def test_import_never_deletes_outside_the_destination_on_force(
+    tmp_path: Path,
+) -> None:
+    """The harm the containment check exists to prevent: `--force` rmtree's
+    the dest, so an escaping path deletes a directory outside the project
+    entirely. Assert on the victim, not on the exception."""
+    victim = tmp_path / "elsewhere" / "raw"
+    victim.mkdir(parents=True)
+    (victim / "irreplaceable.csv").write_text("years of work")
+
+    project = tmp_path / "consumer"
+    project.mkdir()
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("../../../../elsewhere/raw/"))
+
+    with pytest.raises(UnknownProductPath):
+        import_product(
+            client, _FakeDvcOps(), "provider_xw",
+            cwd=project, dest_root=project / "data" / "imports", force=True,
+        )
+
+    assert (victim / "irreplaceable.csv").read_text() == "years of work"
+    assert victim.is_dir()
+
+
+def _stage_legacy_import(ns: Path, *, producer_path: str, leaf: str) -> Path:
+    """An import written by the pre-layout-change writer: the pointer sits
+    directly under the namespace folder, while recording a nested producer
+    path. Every real import on a consumer machine predates the change, so
+    this is the shape the writer must recognise."""
+    ns.mkdir(parents=True, exist_ok=True)
+    dvc = ns / f"{leaf}.dvc"
+    dvc.write_text(
+        "outs:\n"
+        "  - md5: e8f3a2b1c4d5e6f7a8b9c0d1e2f3a4b5\n"
+        "    size: 1\n"
+        f"    path: {leaf}\n"
+        "deps:\n"
+        f"  - path: {producer_path}\n"
+        "    repo:\n"
+        "      url: https://github.com/example-org/provider_xw\n"
+        "      rev: main\n"
+        '      rev_lock: "' + "a" * 40 + '"\n'
+    )
+    return dvc
+
+
+def test_reimport_of_a_legacy_import_is_refused_not_duplicated(
+    tmp_path: Path,
+) -> None:
+    """The `ImportDestinationExists` guard checked the NEW mirrored location,
+    so a legacy pointer was invisible to it: a plain re-import wrote a second
+    pointer for the same output (and, with real dvc, a second copy of the
+    payload), after which every `--bump` for that product died on
+    `AmbiguousImport`.
+
+    Mutation: drop the `_imports_index` lookup -> the re-import succeeds and
+    this reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/main.parquet"))
+    fake = _FakeDvcOps()
+    ns = tmp_path / "data_provider_xw"
+    legacy = _stage_legacy_import(ns, producer_path="outputs/main.parquet", leaf="main.parquet")
+
+    with pytest.raises(ImportDestinationExists) as ei:
+        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+
+    assert "main.parquet.dvc" in str(ei.value)
+    assert fake.calls == []
+    assert sorted(p.name for p in ns.rglob("*.dvc")) == ["main.parquet.dvc"]
+    assert legacy.exists()
+
+
+def test_force_reimport_of_a_legacy_import_rewrites_it_in_place(
+    tmp_path: Path,
+) -> None:
+    """The layout change moves nothing on disk, so a forced re-import of a
+    legacy import must rewrite THAT pointer rather than leave it orphaned
+    beside a new mirrored sibling — the same in-place rule `--bump` follows.
+
+    Mutation: drop the `target_dvc = existing` reassignment -> two pointers.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/main.parquet"))
+    fake = _FakeDvcOps()
+    ns = tmp_path / "data_provider_xw"
+    _stage_legacy_import(ns, producer_path="outputs/main.parquet", leaf="main.parquet")
+
+    produced = import_product(
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
+    )
+
+    assert [p.name for p in ns.rglob("*.dvc")] == ["main.parquet.dvc"]
+    assert produced == [ns / "main.parquet.dvc"]
+    assert fake.calls[0].dest == ns / "main.parquet"
+
+
+def _with_full_name(full_name: Any) -> Callable[[dict[str, Any]], None]:
+    def mutate(d: dict[str, Any]) -> None:
+        d["project"]["full_name"] = full_name
+
+    return mutate
+
+
+@pytest.mark.parametrize(
+    "namespace",
+    [".", "..", "/tmp/abs", "../scratch", "a/b", "..\\win", "data_a/"],
+    ids=["dot", "dotdot", "absolute", "escaping", "nested", "backslash", "trailing-slash"],
+)
+def test_import_refuses_a_namespace_that_is_not_one_folder(
+    tmp_path: Path, namespace: str
+) -> None:
+    """`full_name` names the `data/imports/` folder and is producer-supplied
+    (a bare `str` on the model, no validators). The containment check cannot
+    cover it: `.` makes `nested_root == dest_root`, which IS inside the
+    import root. So the namespace must be one plain path component — the
+    same rule `data clone` already applies to a product name.
+
+    Matched on the message, not just the type: `..` and an absolute
+    namespace are ALSO caught downstream by the containment check, so a rule
+    that let them through would still raise `UnknownProductPath` — with the
+    wrong diagnosis here, and (on `--bump`, which has no containment check)
+    no guard at all.
+
+    Mutations: accept `..` / accept `.` / accept absolute / accept
+    multi-component -> the matching case reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_full_name(namespace))
+    fake = _FakeDvcOps()
+
+    with pytest.raises(UnknownProductPath, match="single folder name"):
+        import_product(
+            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path / "imports"
+        )
+
+    assert fake.calls == [], "refused before any dvc invocation"
+
+
+def test_import_never_clobbers_another_products_import(tmp_path: Path) -> None:
+    """The harm the namespace rules exist to prevent, via the vector the
+    ONE-COMPONENT rule does not see: provider_b's entry declares provider_a's
+    `full_name` verbatim. Both namespaces are perfectly legal single
+    components, so shape says yes; `_imports_index` then hands back
+    provider_a's `.dvc`, the force path `shutil.rmtree`s provider_a's payload
+    and the import rewrites provider_a's pointer to provider_b — exit 0,
+    "✓ imported".
+
+    Filesystem-independent on purpose. The same aliasing arrives on macOS and
+    Windows as a mere recasing (`DATA_PROVIDER_A`) — GitHub renames are
+    case-preserving but case-insensitive, and so are APFS and NTFS — and via
+    a symlinked namespace folder. A duplicated `full_name` reproduces it on
+    every filesystem, including Linux CI.
+
+    Asserts on the victim, not on an exception type: a rule that raises the
+    wrong class still passes here, a rule that lets the delete through does
+    not.
+
+    Mutation: drop the `_require_owner` call from `import_product` -> this
+    reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, "provider_a", mutate=_with_primary("data/final/"))
+
+    def impostor(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = "data/final/"
+        d["project"]["full_name"] = "data_provider_a"  # provider_a's namespace
+
+    _register(client, "provider_b", mutate=impostor)
+    dest_root = tmp_path / "data" / "imports"
+
+    a_dvc = import_product(
+        client, _FakeDvcOps(), "provider_a", cwd=tmp_path, dest_root=dest_root
+    )[0]
+    payload = a_dvc.with_suffix("")
+    payload.mkdir(parents=True, exist_ok=True)
+    (payload / "irreplaceable.csv").write_text("years of work")
+
+    with contextlib.suppress(Exception):
+        import_product(
+            client, _FakeDvcOps(), "provider_b",
+            cwd=tmp_path, dest_root=dest_root, force=True,
+        )
+
+    assert (payload / "irreplaceable.csv").is_file(), "provider_a's payload was deleted"
+    assert "example-org/provider_a" in a_dvc.read_text(), (
+        "provider_a's .dvc now names another producer"
+    )
+
+
+def test_import_never_clobbers_a_sibling_namespace(tmp_path: Path) -> None:
+    """Third vector of the same clobber: namespace clean, ownership clean,
+    but the producer's OUTPUT path walks out of the namespace.
+    `../data_provider_a/data/final/` resolves INSIDE `dest_root` — so a
+    `dest_root`-anchored containment check passes — and lands on another
+    product's `.dvc`, whose payload the force path rmtree's. It never reaches
+    `_require_owner` either: the index only scans provider_b's OWN namespace,
+    where provider_a's pointer does not appear. The namespace rule is what
+    makes the tighter `nested_root` anchor safe to use.
+
+    Asserts on the victim, not on an exception type.
+
+    Mutation: anchor the containment check on `dest_root` -> this reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, "provider_a", mutate=_with_primary("data/final/"))
+    _register(
+        client, "provider_b",
+        mutate=_with_primary("../data_provider_a/data/final/"),
+    )
+    dest_root = tmp_path / "data" / "imports"
+
+    a_dvc = import_product(
+        client, _FakeDvcOps(), "provider_a", cwd=tmp_path, dest_root=dest_root
+    )[0]
+    payload = a_dvc.with_suffix("")
+    payload.mkdir(parents=True, exist_ok=True)
+    (payload / "irreplaceable.csv").write_text("years of work")
+    # provider_b's own namespace exists as soon as anything of theirs has
+    # been imported; without it the `..` walk dies on a missing intermediate.
+    (dest_root / "data_provider_b").mkdir(parents=True, exist_ok=True)
+
+    with contextlib.suppress(Exception):
+        import_product(
+            client, _FakeDvcOps(), "provider_b",
+            cwd=tmp_path, dest_root=dest_root, force=True,
+        )
+
+    assert (payload / "irreplaceable.csv").is_file(), "provider_a's payload was deleted"
+    assert "example-org/provider_a" in a_dvc.read_text(), (
+        "provider_a's .dvc now names another producer"
+    )
+
+
+def _raw_client(payload: dict[str, Any]) -> SimpleNamespace:
+    """Serves an entry exactly as the registry YAML deserializes it —
+    `InMemoryCatalogClient.register` takes a strict `Metadata`, which is
+    precisely the validation a v1-era registry entry never went through.
+    `CatalogEntry` is `extra="allow"`, so every value below reaches `data.py`.
+    """
+    entry = CatalogEntry.model_validate(payload)
+    return SimpleNamespace(fetch=lambda _name: entry)
+
+
+_V1_BASE: dict[str, Any] = {
+    "schema_version": "2.0",
+    "project": {"name": "provider_a", "full_name": "data_provider_a", "type": "data"},
+    "repository": {"github_url": "https://github.com/example-org/provider_a"},
+    "data_products": {"primary": "data/final/"},
+}
+
+
+@pytest.mark.parametrize(
+    "override,expected",
+    [
+        ({"project": "provider_a"}, None),
+        ({"data_products": {"primary": ["data/final/", "data/interim/"]}}, UnknownProductPath),
+        ({"repository": "https://github.com/example-org/provider_a"}, ValueError),
+        ({"data_products": "data/final/"}, MissingPrimaryDataProduct),
+    ],
+    ids=["project-scalar", "primary-list", "repository-scalar", "data_products-scalar"],
+)
+def test_import_reports_a_v1_shaped_entry_instead_of_tracebacking(
+    tmp_path: Path, override: dict[str, Any], expected: type[Exception] | None
+) -> None:
+    """A registry entry whose blocks are the wrong TYPE must fail as a
+    documented error, never as `AttributeError: 'str' object has no attribute
+    'get'`.
+
+    Not hypothetical: `metadata_migrate.py` documents v1 files where
+    `primary` is a list, and an entry registered before the v2 shape landed
+    sits in the registry as-is. `_section` is what makes the block readers
+    survive it; `project` as a scalar is a *degrade*, not an error — the
+    namespace simply falls back to the product name, which is what `or name`
+    always meant.
+
+    Mutation: revert any `_section(...)` call to `entry.get(...) or {}` ->
+    the matching case reddens with an AttributeError instead.
+    """
+    fake = _FakeDvcOps()
+    client = _raw_client({**_V1_BASE, **override})
+
+    if expected is None:
+        produced = import_product(
+            client, fake, "provider_a", cwd=tmp_path, dest_root=tmp_path
+        )
+        # namespace fell back to the product name; nothing crashed
+        assert produced == [tmp_path / "provider_a" / "data" / "final.dvc"]
+        return
+
+    with pytest.raises(expected):
+        import_product(client, fake, "provider_a", cwd=tmp_path, dest_root=tmp_path)
+    assert fake.calls == []

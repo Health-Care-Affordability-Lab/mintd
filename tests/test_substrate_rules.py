@@ -77,14 +77,16 @@ BANNED_TARGETS: dict[str, int] = {
     "mintd.publish.check_project": 6,
 }
 
-# PERMITTED: the other half of the same census — composition root (32 sites /
+# PERMITTED: the other half of the same census — composition root (33 sites /
 # 8 targets) plus process/network boundary (30 sites / 11 targets). Pinned so
 # the classifier above cannot be widened to launder a banned target.
+# `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
+# captures the config the factory receives, at the already-permitted site.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
     "mintd.cli._resolve_catalog_client": 6,
-    "mintd.cli._resolve_dvc_ops": 4,
+    "mintd.cli._resolve_dvc_ops": 5,
     "mintd.cli._resolve_fast_sync_ops": 6,
     "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
@@ -251,7 +253,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (193 sites / 47 targets), not
+    """The literals above are the *whole* census (194 sites / 47 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -262,14 +264,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (193 → 192), or drop ``patch`` (193 → 163).
+    ``monkeypatch``-receiver calls (194 → 193), or drop ``patch`` (194 → 164).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 193
+    assert sum(scanned.values()) == 194
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

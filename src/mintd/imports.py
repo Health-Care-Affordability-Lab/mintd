@@ -119,14 +119,26 @@ def scan_imports(
 
 
 def _dedup(deps: list[DataDependency]) -> list[DataDependency]:
-    seen: dict[tuple[str, str, str], DataDependency] = {}
+    seen: dict[tuple[str, ...], DataDependency] = {}
     for dep in deps:
-        key = (dep.producer_repo, dep.local_path, dep.contract_pin)
+        key: tuple[str, ...] = (dep.producer_repo, dep.local_path, dep.contract_pin)
         existing = seen.get(key)
         if existing is None:
             seen[key] = dep
         elif existing.kind == "dvc_lock_stage" and dep.kind == "dvc_file":
             seen[key] = dep
+        elif (
+            existing.kind == "dvc_file"
+            and dep.kind == "dvc_file"
+            and existing.output_path.rstrip("/") != dep.output_path.rstrip("/")
+        ):
+            # Two `.dvc` imports that share a local basename but record
+            # DIFFERENT producer paths are different imports, not duplicates.
+            # The mirrored layout makes this reachable for the first time
+            # (`data/final/` and `archive/final/` both land as `final`), and
+            # collapsing them here made one invisible to `check` and so
+            # unbumpable. Cross-kind collapse keeps the original key.
+            seen[key + (dep.output_path.rstrip("/"),)] = dep
     return list(seen.values())
 
 

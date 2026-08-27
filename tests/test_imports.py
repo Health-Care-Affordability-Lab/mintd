@@ -135,3 +135,37 @@ def test_data_dependency_is_frozen() -> None:
     dep = DataDependency.from_dvc_file(FIXTURES / "standalone_import.dvc")
     with pytest.raises(Exception):
         dep.producer_repo = "mutated"  # type: ignore[misc]
+
+
+def test_two_imports_sharing_a_basename_are_both_kept(tmp_path: Path) -> None:
+    """The mirrored layout (D-A) lets two imports of DIFFERENT producer paths
+    land under one namespace sharing a local basename — `data/final/` and
+    `archive/final/` both write `outs[0].path: final`. Keying dedup on
+    `local_path` alone collapsed them, so one became invisible to `check`
+    and could never be bumped.
+
+    Mutation: drop the differing-`output_path` arm of `_dedup` -> this test
+    sees one dep instead of two.
+    """
+    def _import_dvc(producer_path: str) -> str:
+        return (
+            "outs:\n"
+            "  - md5: e8f3a2b1c4d5e6f7a8b9c0d1e2f3a4b5\n"
+            "    size: 1\n"
+            "    path: final\n"
+            "deps:\n"
+            f"  - path: {producer_path}\n"
+            "    repo:\n"
+            "      url: https://github.com/example-org/provider-xw\n"
+            "      rev: main\n"
+            "      rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc\n"
+        )
+
+    ns = tmp_path / "data" / "imports" / "data_provider_xw"
+    _write(ns / "data" / "final.dvc", _import_dvc("data/final/"))
+    _write(ns / "archive" / "final.dvc", _import_dvc("archive/final/"))
+
+    deps = scan_imports(tmp_path)
+
+    assert len(deps) == 2
+    assert sorted(d.output_path for d in deps) == ["archive/final/", "data/final/"]

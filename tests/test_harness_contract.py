@@ -679,6 +679,37 @@ def test_two_producers_colliding_on_final_are_both_addressable(
     assert {d.contract_pin for d in deps} == {"a" * 40, "b" * 40}
 
 
+def test_colliding_imports_resolve_independently_via_the_namespace_index(
+    consumer_project,
+) -> None:
+    """The index half of issue09 (M1): keyed on the recorded producer path
+    within ONE product's namespace folder, two producers publishing the same
+    output path cannot shadow each other — the old `local_path` keying kept
+    exactly one of these."""
+    from mintd.data import _imports_index
+    from tests._harness.consumer import write_import
+
+    proj = consumer_project()
+    alpha = write_import(
+        proj,
+        Import(name="final", producer_url=ALPHA_URL, pin="a" * 40),
+        under="data/imports/data_alpha",
+    )
+    beta = write_import(
+        proj,
+        Import(name="final", producer_url=BETA_URL, pin="b" * 40),
+        under="data/imports/data_beta",
+    )
+
+    alpha_index = _imports_index(proj / "data/imports/data_alpha", name="alpha")
+    beta_index = _imports_index(proj / "data/imports/data_beta", name="beta")
+
+    # Both record the producer path `outputs/final/`; each namespace resolves
+    # its OWN file — nothing shadowed, nothing merged.
+    assert alpha_index == {"outputs/final": alpha}
+    assert beta_index == {"outputs/final": beta}
+
+
 def test_enclave_manifest_consumer_variant_loads(
     consumer_project, local_producer: LocalProducer, tmp_path: Path
 ) -> None:

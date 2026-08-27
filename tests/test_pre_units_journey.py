@@ -495,15 +495,11 @@ PRODUCT = "test_project"
 #: Matches `data_products.primary` in `metadata_v2_minimal.json` (`data/final/`),
 #: so the producer's own metadata needs no doctoring to describe its payload.
 PRIMARY_OUT = "data/final"
-#: `project.full_name` in the fixture — the directory an import is keyed on.
+#: `project.full_name` in the fixture — the `data/imports/` folder.
 FULL_NAME = "data_test_project"
-#: What `--bump` takes, and it is NOT `PRODUCT`. `data import <name>` keys on
-#: the CATALOG product name; `--bump` keys on the import's local-path name
-#: (`_imports_index`, `data.py:595`), i.e. the `.dvc` stem under
-#: `data/imports/<full_name>/`. Asymmetry in the CLI surface, recorded here
-#: rather than papered over — `data import test_project --bump` exits 1 with
-#: "'test_project' not imported in .".
-IMPORT_NAME = "final"
+#: D-A's contract: the positional is the DATA PRODUCT NAME (the catalog key)
+#: for `import` and `--bump` alike; the output is selected with `--path`.
+#: There is one identifier — the old local-stem key (`final`) is gone.
 
 
 @pytest.fixture
@@ -605,74 +601,14 @@ def _pins_of(consumer: Path) -> dict[str, str]:
     return {dep.local_path: dep.contract_pin for dep in scan_imports(consumer)}
 
 
-def _imported_bytes(consumer: Path, out_name: str) -> bytes:
-    # `<dest_root>/<full_name>/<basename of primary>` — the import is keyed on
-    # the product's full name, not on the producer's own directory layout.
+def _imported_bytes(consumer: Path, rel_path: str) -> bytes:
+    # `<dest_root>/<full_name>/<producer's own path>` — D-A mirrors the
+    # producer's path under the product's full-name folder.
     return (
-        consumer / "data" / "imports" / FULL_NAME / out_name / "part.csv"
+        consumer / "data" / "imports" / FULL_NAME / rel_path / "part.csv"
     ).read_bytes()
 
 
-def test_import_bump_advances_the_pin_and_lands_new_bytes(
-    payload_journey, capsys
-) -> None:
-    """The drift chain, end to end: producer moves, consumer bumps, new bytes.
-
-    This is the journey `bump_import` exists for and the one no test could
-    stage before, because staging it needs a producer that can *move* —
-    `commit_more()` and `rename_primary()` did not exist, and
-    `_view_with_primary` (`tests/test_check.py:170`) hands back a fixed view,
-    so "the producer advanced" was not expressible at all. The existing bump
-    tests (`tests/test_data.py:317`, `:342`) monkeypatch
-    `mintd.data.check_project` — the very detector the bump consults — so they
-    assert that the bump acts on a verdict the test supplied. Here the
-    producer really moves and the detector really runs.
-
-    **What counts as "the producer moved" is narrower than it sounds, and this
-    test is written to mintd's actual definition rather than the intuitive
-    one.** `_drift_finding_from_views` (`src/mintd/check.py:509-511`) reports
-    `drift` only when the producer's `data_products.primary` PATH changes; if
-    HEAD's primary equals the pin's primary it returns `up_to_date`, however
-    many new commits and however many new bytes sit behind it. So a producer
-    that republishes a refreshed file at the SAME path is invisible here and
-    `--bump` no-ops on it — see the close-out; that is a product gap this
-    journey found, not something this test asserts is correct.
-    """
-    producer, consumer, register = payload_journey
-    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
-    register()
-
-    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
-    assert _imported_bytes(consumer, "final") == b"v1\n"
-    pin_before = _pins_of(consumer)["final"]
-
-    # The producer ships a new version AT A NEW PATH and repoints `primary` at
-    # it — the shape `check` recognizes. `publish()` advances HEAD by exactly
-    # one commit (it is a peer of `commit_more()`, not a prelude to one) and
-    # `rename_primary()` advances it by one more.
-    producer.publish({"data/v2": {"part.csv": b"v2\n"}}, message="v2 payload")
-    producer.rename_primary("data/v2/")
-    register()
-
-    assert cli.main(["data", "import", IMPORT_NAME, "--bump"]) == 0, _drain(capsys)
-
-    pins = _pins_of(consumer)
-    assert pins["v2"] == producer.head_sha
-    assert pins["v2"] != pin_before
-    assert _imported_bytes(consumer, "v2") == b"v2\n", (
-        "the pin moved but the bytes did not — a bump that rewrites the "
-        "pointer without re-fetching is the failure this asserts against"
-    )
-
-    # RECORDED, NOT ENDORSED. A rename-shaped bump imports to a directory named
-    # after the NEW primary (`dest_root / basename(head_primary)`,
-    # `data.py:585`) and never removes the old pointer, so the consumer is left
-    # holding `final.dvc` pinned at the superseded commit alongside the fresh
-    # `v2.dvc`. `bump_import`'s docstring says it "rewrites its `.dvc` file",
-    # which is true only while the primary's basename is unchanged. Asserted so
-    # that a future fix reddens here deliberately instead of surprising someone.
-    assert pins["final"] == pin_before
-    assert set(pins) == {"final", "v2"}
 
 
 def test_import_bump_at_head_is_a_no_op(payload_journey, capsys) -> None:
@@ -685,7 +621,7 @@ def test_import_bump_at_head_is_a_no_op(payload_journey, capsys) -> None:
     assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
     pin_before = _pins_of(consumer)["final"]
 
-    assert cli.main(["data", "import", IMPORT_NAME, "--bump"]) == 0, _drain(capsys)
+    assert cli.main(["data", "import", PRODUCT, "--bump"]) == 0, _drain(capsys)
 
     assert _pins_of(consumer)["final"] == pin_before
     assert "up to date" in _drain(capsys)
