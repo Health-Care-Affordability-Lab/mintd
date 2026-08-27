@@ -96,3 +96,33 @@ def test_streaming_logs_argv_at_debug_level(caplog):
     argv_lines = [r.message for r in caplog.records if "subprocess argv:" in r.message]
     assert len(argv_lines) == 1
     assert "dvc checkout data/final.dvc" in argv_lines[0]
+
+
+def test_crlf_lines_are_captured_not_emptied():
+    """Windows. dvc and git terminate lines with `\\r\\n`, and the re-wrap in
+    `run_streaming` keeps `\\r` on purpose so progress ticks survive. Hunting
+    for the last `\\r` then found the TERMINATOR, and captured everything
+    after it — the empty string, for every line ever read on Windows.
+
+    Nothing noticed for a long time because the display path forwards the raw
+    chunk, so output still LOOKED correct. Only `stdout_lines` /
+    `stderr_lines` were empty — which is what `_is_dvc_module_missing`,
+    `dvc init`'s already-initialized tolerance, and every error
+    classification in `_dvc_ops` and the git ops read. On Windows all of them
+    were inert, and `dvc import` into an occupied destination surfaced as a
+    bare `DvcOpError` with no message at all.
+
+    Mutation: drop the `removesuffix("\\r")` -> both CRLF cases return [''].
+    """
+    def result_for(text: str):
+        proc = FakeProcess(stderr_text=text, returncode=1)
+        return run_streaming(["dvc", "import"], popen_factory=lambda *a, **k: proc)
+
+    plain = "ERROR: bad DVC file name 'final/final.dvc' is git-ignored."
+    assert result_for(plain + "\n").stderr_lines == [plain]
+    assert result_for(plain + "\r\n").stderr_lines == [plain]
+
+    # ...and a real progress tick still collapses to its last frame, which is
+    # the behaviour the `\\r` hunt exists for.
+    assert result_for("50%\r75%\r100%\n").stderr_lines == ["100%"]
+    assert result_for("50%\r75%\r100%\r\n").stderr_lines == ["100%"]

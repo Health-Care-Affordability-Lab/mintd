@@ -117,6 +117,16 @@ def run_streaming(
             line_buf += chunk
             while "\n" in line_buf:
                 line, _, line_buf = line_buf.partition("\n")
+                # Drop a CRLF terminator BEFORE hunting for progress ticks.
+                # The re-wrap above keeps `\r` deliberately, so on Windows
+                # every line arrives as `...\r`; taking the text after the
+                # LAST `\r` then took the text after the terminator, and
+                # captured the empty string for every line ever read. Nothing
+                # noticed because the display path forwards the raw chunk, so
+                # output still LOOKED right — only `stdout_lines` /
+                # `stderr_lines` were empty, which is what every error
+                # classification in `_dvc_ops` and the git ops reads.
+                line = line.removesuffix("\r")
                 display = line[line.rfind("\r") + 1:] if "\r" in line else line
                 captured_lines.append(display)
             # Display path: raw chunk to the forwarder.
