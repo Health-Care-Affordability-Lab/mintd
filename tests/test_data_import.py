@@ -13,8 +13,11 @@ import pytest
 from mintd.catalog import CatalogEntry, CatalogNotFound, InMemoryCatalogClient
 from mintd.data import (
     StaleBackupExists,
+    _tracked_output_targets,
+    _validate_requested_targets,
     ImportDestinationExists,
     MissingPrimaryDataProduct,
+    NoTrackedOutputs,
     UnknownProductPath,
     import_product,
 )
@@ -1019,3 +1022,91 @@ def test_import_reports_a_v1_shaped_entry_instead_of_tracebacking(
     with pytest.raises(expected):
         import_product(client, fake, "provider_a", cwd=tmp_path, dest_root=tmp_path)
     assert fake.calls == []
+
+
+@pytest.mark.parametrize("outputs", [True, "data/final", 7], ids=["bool", "str", "int"])
+def test_scalar_outputs_never_reaches_a_for_loop(outputs: Any) -> None:
+    """The sibling reader of `data_products.outputs`.
+
+    `--all`'s guard was added to `_resolve_paths` alone, so the same malformed
+    entry still exited `data clone --path` as a raw
+    `TypeError: 'bool' object is not iterable` from `_tracked_output_targets`.
+    Both readers go through `_rows` now; this pins the one the first fix
+    missed, so a third reader cannot quietly reintroduce `or []`.
+    """
+    assert _tracked_output_targets({"data_products": {"outputs": outputs}}) == []
+
+
+@pytest.mark.parametrize(
+    "outputs,fault",
+    [
+        pytest.param([], "lists no data_products.outputs", id="declared-empty"),
+        pytest.param(
+            [{"description": "no path key"}, "junk"],
+            "lists 2 data_products.outputs, none with a usable path",
+            id="rows-unusable",
+        ),
+        pytest.param(True, "lists no data_products.outputs", id="scalar-not-a-list"),
+    ],
+)
+def test_import_all_with_no_importable_outputs_refuses(
+    tmp_path: Path, outputs: Any, fault: str
+) -> None:
+    """`--all` against an entry listing no usable output imported 0 files and
+    exited 0 — a CI gate on that exit code passes on an import that moved
+    nothing. A producer registered before its first publish carries
+    `outputs: []`; a v1-era entry carries rows the resolver's isinstance
+    filter drops.
+
+    `outputs: true` is a v1 hand-edit away from valid and is TRUTHY, so it
+    survived the resolver's `or []` and tracebacked out of `data import --all`
+    as `TypeError: 'bool' object is not iterable` instead of refusing.
+
+    `primary` IS set in every case, so this is not the missing-primary path:
+    `--all` selects the outputs list, and an empty selection is a refusal,
+    never a silent fallback to the primary.
+
+    The message names WHICH fault it is: "no outputs" is the producer's to
+    fix by publishing, whereas rows that exist but carry no usable `path` are
+    a malformed entry. And the way out is the primary, not `--path`: `--all`
+    wins over a `--path` the user already passed, so advising `--path` reads
+    as advice they just followed.
+
+    Mutations: drop `_resolve_paths`'s `if not selected` guard -> every param
+    returns [] and `import_product` returns [] having called no dvc; drop its
+    `isinstance(outputs, list)` guard -> `scalar-not-a-list` raises TypeError;
+    collapse the two message arms into one -> `rows-unusable` reddens.
+    """
+    fake = _FakeDvcOps()
+    client = _raw_client(
+        {**_V1_BASE, "data_products": {"primary": "data/final/", "outputs": outputs}}
+    )
+
+    with pytest.raises(NoTrackedOutputs) as exc:
+        import_product(
+            client, fake, "provider_a", all_outputs=True,
+            cwd=tmp_path, dest_root=tmp_path,
+        )
+    assert fault in str(exc.value), str(exc.value)
+    assert "drop --all to import the primary ('data/final/')" in str(exc.value)
+    assert "--path" not in str(exc.value), "advises a flag --all already overrode"
+    assert fake.calls == []
+
+
+def test_a_non_string_path_row_is_dropped_by_both_readers() -> None:
+    """`_tracked_output_targets` filtered on `"path" in o` where
+    `_resolve_paths` filters on `isinstance(..., str)`, so `outputs:
+    [{path: 7}]` put an int into the tracked list and `data clone --path x`
+    died inside `normalize_target` with `AttributeError: 'int' object has no
+    attribute 'replace'` -- the raw traceback the sibling reader's own
+    docstring says cannot happen. Both readers apply the same test now.
+
+    Mutation: weaken either filter back to `"path" in o` -> this reddens.
+    """
+    entry = {"data_products": {"primary": None, "outputs": [{"path": 7}]}}
+
+    assert _tracked_output_targets(entry) == []
+
+    # And the user gets the listing error rather than an AttributeError.
+    with pytest.raises(UnknownProductPath, match="no tracked output"):
+        _validate_requested_targets(entry, requested=["data/final/"], name="provider_a")
