@@ -1780,3 +1780,65 @@ def test_enclave_head_unreachable_degrade_is_labelled_too(tmp_path: Path):
         "up to date (data/final/a)",
         "up to date (data/final/b)",
     ]
+
+
+# ---------------------------------------------------------------------------
+# An empty pin is refused by PLAIN `check`, not only by `--upgrades`
+# ---------------------------------------------------------------------------
+
+# `tests/test_producer.py` pins the same guard on both lanes under
+# `upgrades=True`. These are its `upgrades=False` siblings: an empty pin is a
+# pure manifest-validity fault needing no network, so gating it behind
+# `--upgrades` made plain `mintd check` (and `publish` / `registry register`,
+# which both call `check_project(upgrades=False)`) render an unpinned import
+# as a clean `[info]` summary line and exit 0.
+#
+# Parametrized over whitespace because the guard's `.strip()` had no killing
+# test on either lane, and this is the path where it matters: `try_at` reads
+# `"   "` as a real rev, so under `--upgrades` a whitespace pin still fails at
+# the producer, but here nothing resolves anything and it would render clean.
+#
+# `rev_lock:` (YAML null) and a deleted `rev_lock` key are the two spellings a
+# hand-edit actually produces, and both used to escape this guard by crashing
+# before it: `DataDependency` took `repo["rev_lock"]` straight, so `check`
+# (and `publish` / `registry register`) died with a raw pydantic
+# `ValidationError` / `KeyError` traceback instead of reporting `pin_missing`.
+
+
+@pytest.mark.parametrize(
+    "rev_lock_yaml",
+    ["rev_lock: ''", "rev_lock: '   '", "rev_lock:", ""],
+    ids=["empty", "whitespace", "null", "absent"],
+)
+def test_plain_check_refuses_an_empty_dvc_rev_lock(tmp_path: Path, rev_lock_yaml: str):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    dvc_file = tmp_path / "data" / "imports" / "standalone_import.dvc"
+    dvc_file.write_text(
+        dvc_file.read_text(encoding="utf-8").replace(f"rev_lock: {_PIN}", rev_lock_yaml),
+        encoding="utf-8",
+    )
+
+    findings = check_project(tmp_path)  # no --upgrades
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert [f.kind for f in consumer] == ["pin_missing"]
+    assert consumer[0].severity == "error"
+    assert consumer[0].source == dvc_file
+
+
+@pytest.mark.parametrize("pin_yaml", ["''", "'   '"])
+def test_plain_check_refuses_an_empty_manifest_pin(tmp_path: Path, pin_yaml: str):
+    _write_metadata(tmp_path)
+    manifest = _stage_enclave_manifest(tmp_path)
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(f"pin: {_PIN}", f"pin: {pin_yaml}"),
+        encoding="utf-8",
+    )
+
+    findings = check_project(tmp_path, client=_client_with_provider_xw())  # no --upgrades
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert [f.kind for f in consumer] == ["pin_missing"]
+    assert consumer[0].severity == "error"
+    assert consumer[0].field_path == "approved_products[provider-xw]"
