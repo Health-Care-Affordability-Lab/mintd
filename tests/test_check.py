@@ -327,6 +327,56 @@ def test_upgrades_reports_unreachable(tmp_path: Path):
     assert "git archive timed out" in consumer_findings[0].message
 
 
+def test_head_probe_failure_is_drift_unknown_not_up_to_date(tmp_path: Path):
+    """The pin resolves from the on-disk cache, HEAD needs the wire. Both
+    arms used to paint that green, so an offline or air-gapped consumer
+    reported every product clean forever."""
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+
+    factory = _factory_by_pin(
+        {
+            _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
+            "": ProducerError.unreachable("repo", "HEAD", "Could not resolve host: github.com"),
+        }
+    )
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    finding = consumer_findings[0]
+    assert finding.kind == "drift_unknown"
+    assert finding.severity == "warning"
+    assert finding.message == (
+        "cannot determine drift: cannot read the producer's HEAD "
+        "(unreachable: Could not resolve host: github.com)"
+    )
+    assert finding.hint is not None and _PIN[:7] in finding.hint
+    assert _PIN not in finding.hint  # the short sha, not the full one
+
+
+def test_head_probe_failure_reports_a_broken_head_too(tmp_path: Path):
+    """Not only transport: a producer whose metadata is unreadable at HEAD
+    was hidden by the same degrade, and the reason reaches the user."""
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+
+    factory = _factory_by_pin(
+        {
+            _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
+            "": ProducerError.metadata_missing("repo", "b" * 40),
+        }
+    )
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+    consumer_findings = [f for f in findings if f.section == "consumer"]
+
+    assert len(consumer_findings) == 1
+    assert consumer_findings[0].kind == "drift_unknown"
+    assert "metadata_missing" in consumer_findings[0].message
+
+
 def test_upgrades_reports_pin_missing(tmp_path: Path):
     _write_metadata(tmp_path)
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
@@ -436,8 +486,8 @@ def test_upgrades_factory_called_once_per_dep_when_factory_at_head_errors(tmp_pa
     consumer_findings = [f for f in findings if f.section == "consumer"]
 
     assert len(consumer_findings) == 1
-    assert consumer_findings[0].severity == "info"
-    assert consumer_findings[0].message == "up to date"
+    assert consumer_findings[0].severity == "warning"
+    assert consumer_findings[0].kind == "drift_unknown"
     assert calls == ["4f7c2a1abcd1234567890abcdef0123456789abc", ""]
 
 
@@ -1750,10 +1800,12 @@ def test_enclave_rows_carry_their_own_subscription_label(tmp_path: Path):
     ]
 
 
-def test_enclave_head_unreachable_degrade_is_labelled_too(tmp_path: Path):
-    """The HEAD-unreachable degrade otherwise prints N identical unlabeled
-    lines — the exact complaint D-D exists to fix."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
+def test_enclave_head_unreachable_is_labelled_and_not_up_to_date(tmp_path: Path):
+    """Parity with the dvc arm: an unreachable HEAD is `drift_unknown`, not
+    a clean row. Still one labelled line per row — unlabelled it prints N
+    identical lines, the exact complaint D-D exists to fix."""
+    from mintd.data import BumpBlocked
+    from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_bump
 
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
@@ -1776,7 +1828,22 @@ def test_enclave_head_unreachable_degrade_is_labelled_too(tmp_path: Path):
     )
     consumer = [f for f in findings if f.section == "consumer"]
 
+    assert {f.kind for f in consumer} == {"drift_unknown"}
+    # `enclave_bump` finds its rows by `source` AND `field_path`; get either
+    # wrong and the offline bump raises ImportNotFound instead of blocking.
+    assert {f.field_path for f in consumer} == {"approved_products[provider-xw]"}
+    assert all(f.hint and _PIN[:7] in f.hint for f in consumer)
     assert [f.message for f in consumer] == [
-        "up to date (data/final/a)",
-        "up to date (data/final/b)",
+        "cannot determine drift (data/final/a): cannot read the producer's "
+        "HEAD (unreachable: network down)",
+        "cannot determine drift (data/final/b): cannot read the producer's "
+        "HEAD (unreachable: network down)",
     ]
+
+    # The enclave twin of `test_bump_blocks_when_the_producer_head_is_unreachable`,
+    # and the only binding on the `source=` the enclave arm passes: offline,
+    # `enclave bump` must block rather than silently no-op.
+    with pytest.raises(BumpBlocked) as ei:
+        enclave_bump(client, manifest_path=manifest_path, name="provider-xw",
+                     check_findings=findings)
+    assert ei.value.finding.kind == "drift_unknown"

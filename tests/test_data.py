@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 
 from mintd.catalog import InMemoryCatalogClient
-from mintd.check import CheckFinding
+from mintd.check import CheckFinding, check_project
 from mintd.data import (
     AmbiguousImport,
     BumpBlocked,
@@ -29,7 +29,7 @@ from mintd.data import (
     bump_import,
 )
 from mintd.model import DataProductOutput, DataProducts, Metadata
-from mintd.producer import ProducerView
+from mintd.producer import ProducerError, ProducerView
 
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.producer import StaticFetcher
@@ -551,6 +551,34 @@ def test_bump_unreachable_raises_bump_blocked(tmp_path: Path) -> None:
         )
 
     assert ei.value.finding is finding
+    assert fake.calls == []
+
+
+def test_bump_blocks_when_the_producer_head_is_unreachable(tmp_path: Path) -> None:
+    """End-to-end through `check_project`, not an injected finding: offline,
+    the pin resolves from cache and HEAD does not, and `--bump` used to be a
+    silent no-op because that rendered as `up_to_date`."""
+    _stage_project(tmp_path)
+    fake = _FakeDvcOps()
+    client = InMemoryCatalogClient()
+
+    def factory(repo: str, pin: str):
+        if pin == "":
+            return ProducerError.unreachable(repo, "HEAD", "Could not resolve host")
+        return _view_with_primary("cms_based")
+
+    findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
+
+    with pytest.raises(BumpBlocked) as ei:
+        bump_import(
+            client,
+            fake,
+            project_path=tmp_path,
+            name="cms_based",
+            check_findings=findings,
+        )
+
+    assert ei.value.finding.kind == "drift_unknown"
     assert fake.calls == []
 
 
