@@ -74,7 +74,7 @@ class _FakeDvcOps:
     def __init__(self) -> None:
         self.init_calls: list[DvcInitCall] = []
         self.calls: list[DvcImportCall] = []
-        self.import_raises: Exception | None = None
+        self.import_raises: BaseException | None = None
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
         self.push_result: DvcPushResult = DvcPushResult(pushed=1, up_to_date=False)

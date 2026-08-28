@@ -191,6 +191,49 @@ def test_a_failure_partway_through_all_names_what_landed(tmp_path: Path) -> None
     assert any("1 of 2 outputs were imported" in m for m in reporter.warns)
 
 
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupted_import_still_names_what_landed(
+    tmp_path: Path, interrupt: type[BaseException]
+) -> None:
+    """Ctrl-C is not an `Exception`, and this is the one message that says
+    which half of a multi-output import is already on disk.
+
+    `run_streaming` re-raises `KeyboardInterrupt` unchanged (`_subprocess.py`,
+    the `proc.wait` handler), so interrupting the second of two `dvc import`
+    calls walked straight past the warning: the first output stayed on disk,
+    `main` printed only "interrupted by user", and nothing named the file the
+    user now has. Sibling of
+    `test_data.py::test_an_interrupted_bump_leaves_the_payload_in_place` --
+    the same interrupt-blind `except Exception`, in the other verb of the same
+    module, reachable from `mintd data import <name> --all`.
+
+    Mutation: `except BaseException` -> `except Exception` in `import_product`
+    -> both cells redden on the missing warning.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("outputs/a.csv", "outputs/b.csv"))
+    fake = _FakeDvcOps()
+    reporter = _RecordingReporter()
+    real_import = fake.import_
+
+    def interrupt_on_second(**kw: Any) -> Path:
+        if kw["path"] == "outputs/b.csv":
+            raise interrupt()
+        return real_import(**kw)
+
+    fake.import_ = interrupt_on_second  # type: ignore[method-assign]
+
+    with pytest.raises(interrupt):
+        import_product(
+            client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+            dest_root=tmp_path, reporter=reporter,
+        )
+
+    assert any("1 of 2 outputs were imported" in m for m in reporter.warns), (
+        "an interrupted import said nothing about the output already on disk"
+    )
+
+
 class _RecordingReporter:
     """Only the three surfaces `import_product` reaches; `status` must be a
     context manager because the import loop runs inside it."""

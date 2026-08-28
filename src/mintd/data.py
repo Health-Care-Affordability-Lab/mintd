@@ -259,10 +259,18 @@ def import_product(
                         extra_args=extra_dvc_args,
                     )
                 )
-    except Exception:
+    except BaseException:
         if produced and reporter is not None:
             # Nothing is rolled back. Say what landed, so the user is not left
             # guessing at a half-written import.
+            #
+            # BaseException for the same reason as `bump_import`'s restore:
+            # `run_streaming` re-raises KeyboardInterrupt unchanged, and Ctrl-C
+            # partway through a multi-output import is the case where this
+            # message matters most -- some of the payload is already on disk
+            # and only this line names it. The block is a single reporter call,
+            # so it cannot stall the interrupt, and the bare `raise` leaves the
+            # exit code and the CLI's rendering unchanged.
             reporter.warn(
                 f"{len(produced)} of {len(paths)} outputs were imported before "
                 f"this failure and remain on disk: "
@@ -724,9 +732,27 @@ def bump_import(
             force=True,
             extra_args=extra_dvc_args,
         )
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception: `run_streaming` re-raises
+        # KeyboardInterrupt unchanged, so Ctrl-C during the transfer walked
+        # past this restore and left the payload in the backup directory with
+        # nothing naming it. Same call, and for the same reason, as
+        # `enclave_pull`'s manifest flush. The block is local filesystem work
+        # only, so it cannot stall the interrupt; the bare `raise` keeps the
+        # exit code and the CLI's rendering unchanged.
         if moved:
-            shutil.rmtree(dest, ignore_errors=True)
+            # Whatever the failed import left at `dest` has to go first, and
+            # it is not always a directory: `rmtree` is a silent no-op on a
+            # file or a symlink (`ignore_errors` swallows its refusal), so
+            # `backup.rename(dest)` then met the leftover and raised
+            # `NotADirectoryError` — replacing the `DvcOpError` the CLI knows
+            # how to render with a traceback, payload still sitting in
+            # `.mintd-bump-backup`. Two ordinary shapes reach this: an output
+            # that is a single file at HEAD, and dvc's `cache.type = symlink`.
+            if dest.is_dir() and not dest.is_symlink():
+                shutil.rmtree(dest, ignore_errors=True)
+            else:
+                dest.unlink(missing_ok=True)
             backup.rename(dest)
         raise
     shutil.rmtree(backup, ignore_errors=True)

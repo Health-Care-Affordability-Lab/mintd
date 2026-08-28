@@ -170,6 +170,129 @@ def test_a_failed_bump_leaves_the_payload_in_place(tmp_path: Path) -> None:
     assert not list(payload.parent.glob("*.mintd-bump-backup"))
 
 
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_an_interrupted_bump_leaves_the_payload_in_place(
+    tmp_path: Path, interrupt: type[BaseException]
+) -> None:
+    """The rollback caught `Exception`, and Ctrl-C is not one.
+
+    `run_streaming` re-raises `KeyboardInterrupt` unchanged (`_subprocess.py`,
+    the `proc.wait` handler), so Ctrl-C during the `dvc import` of a large
+    product walked straight past the restore: the payload was left in
+    `<dest>.mintd-bump-backup`, the `.dvc` still at the old pin, and `main`
+    printed only "interrupted by user". Nothing named the moved directory.
+
+    Mutation: `except BaseException` -> `except Exception` in `bump_import`
+    -> both cells redden on `payload.is_dir()`.
+    """
+    dvc_path = _stage_project(tmp_path)
+    payload = dvc_path.with_suffix("")
+    payload.mkdir()
+    (payload / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+
+    fake = _FakeDvcOps()
+    fake.import_raises = interrupt()
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+
+    with pytest.raises(interrupt):
+        bump_import(
+            InMemoryCatalogClient(),
+            fake,
+            project_path=tmp_path,
+            name="cms_based",
+            producer_view_factory=factory,
+            check_findings=[_drift_finding(dvc_path)],
+        )
+
+    assert payload.is_dir(), "an interrupted bump left the payload moved aside"
+    assert (payload / "irreplaceable.csv").read_text() == "keep me\n"
+    assert not list(payload.parent.glob("*.mintd-bump-backup"))
+
+
+class _PartialThenFailDvcOps(_FakeDvcOps):
+    """dvc that writes part of the destination and then dies.
+
+    A real `dvc import` that loses its connection mid-transfer leaves a
+    partly-written `dest` behind. `_FakeDvcOps.import_raises` fires before
+    touching the disk, so no existing test reaches that shape.
+
+    `shape` is what the corpse looks like. A directory is the common case, but
+    not the only one: the output can be a single file at HEAD (exactly the
+    drift a bump acts on), and dvc's `cache.type = symlink` — the standard way
+    a lab avoids a second copy of a large product — leaves a symlink.
+    """
+
+    def __init__(self, shape: str = "dir") -> None:
+        super().__init__()
+        self.shape = shape
+
+    def import_(self, **kwargs: Any) -> Path:
+        from mintd._dvc_ops import DvcOpError
+
+        dest: Path = kwargs["dest"]
+        if self.shape == "dir":
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "half.csv").write_text("truncated\n", encoding="utf-8")
+        elif self.shape == "file":
+            dest.write_text("truncated\n", encoding="utf-8")
+        else:
+            cached = dest.with_name("half-cache")
+            cached.mkdir(parents=True, exist_ok=True)
+            (cached / "half.csv").write_text("truncated\n", encoding="utf-8")
+            dest.symlink_to(cached)
+        raise DvcOpError("dvc import failed (exit 1): connection reset by peer")
+
+
+@pytest.mark.parametrize("shape", ["dir", "file", "symlink"])
+def test_a_bump_that_fails_midway_restores_over_the_partial_destination(
+    tmp_path: Path, shape: str
+) -> None:
+    """The restore has to clear what the failed import left behind first.
+
+    Without the clear, `backup.rename(dest)` meets the leftover and raises
+    `OSError` — which replaces the dvc error the CLI knows how to render (the
+    `--bump` arm catches `DvcOpError`, not `OSError`), so the researcher gets
+    a traceback out of `main()` and the payload stays in `.mintd-bump-backup`
+    under a name nothing mentions.
+
+    The leftover is not always a directory, and `rmtree` alone is a silent
+    no-op on the other two shapes, so `file` and `symlink` both died on
+    `NotADirectoryError` inside the handler until the clear stopped assuming.
+
+    Mutations: drop the clear entirely -> `dir` reddens; narrow it back to a
+    bare `shutil.rmtree(dest, ignore_errors=True)` -> `file` and `symlink`
+    redden; drop `not dest.is_symlink()` from it -> `symlink` reddens. The
+    other failure tests kill none of these: their fake raises before writing
+    anything, so `dest` is absent and the bare rename succeeds.
+    """
+    from mintd._dvc_ops import DvcOpError
+
+    dvc_path = _stage_project(tmp_path)
+    payload = dvc_path.with_suffix("")
+    payload.mkdir()
+    (payload / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+
+    with pytest.raises(DvcOpError):
+        bump_import(
+            InMemoryCatalogClient(),
+            _PartialThenFailDvcOps(shape),
+            project_path=tmp_path,
+            name="cms_based",
+            producer_view_factory=factory,
+            check_findings=[_drift_finding(dvc_path)],
+        )
+
+    assert payload.is_dir() and not payload.is_symlink()
+    assert (payload / "irreplaceable.csv").read_text() == "keep me\n"
+    assert not (payload / "half.csv").exists()
+    assert not list(payload.parent.glob("*.mintd-bump-backup"))
+
+
 def test_bump_forwards_extra_dvc_args(tmp_path: Path) -> None:
     """`--jobs` rides `extra_args` as `-j <n>`, the same seam the plain import
     arm uses. `bump_import` had no parameter for it at all, so the CLI's
