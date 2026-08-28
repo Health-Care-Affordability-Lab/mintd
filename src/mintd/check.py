@@ -338,10 +338,6 @@ def _consumer_findings_from_dvc(
     factory = producer_view_factory if producer_view_factory is not None else ProducerView.try_at
 
     for dep in deps:
-        if not upgrades:
-            findings.append(_summary_finding(dep))
-            continue
-
         # An EMPTY `rev_lock` is user data, not the HEAD sentinel — the same
         # collision the enclave-manifest branch guards below, on the lane the
         # first cut of that guard missed. Without it BOTH `factory` calls
@@ -349,6 +345,12 @@ def _consumer_findings_from_dvc(
         # drift, and an import with no pin at all renders as `✓ up to date`
         # where it used to render as `[warning] producer unreachable`. That
         # also makes `data_bump` (data.py:568, gates on kind) silently no-op.
+        #
+        # Reading the pin needs no network, so this runs ABOVE the `upgrades`
+        # gate: below it, plain `check` rendered an unpinned import as a clean
+        # `[info] imported <path> from <repo>@` and exited 0, and `publish` /
+        # `registry register` (both `check_project(upgrades=False)`) let it
+        # through.
         if not dep.contract_pin.strip():
             findings.append(
                 CheckFinding(
@@ -357,8 +359,20 @@ def _consumer_findings_from_dvc(
                     message=f"import {dep.local_path} has an empty pin",
                     source=dep.source,
                     kind="pin_missing",
+                    # A pin-less `.dvc` is reachable without hand-editing:
+                    # `mintd data import --dvc-arg=--no-exec` writes one. Say
+                    # how to get back rather than only that the state is bad.
+                    hint=(
+                        "the .dvc file carries no rev_lock: re-run `mintd data import "
+                        "<name> --force` to rewrite it at a real commit, or set rev_lock "
+                        "by hand to the producer commit this import was taken from."
+                    ),
                 )
             )
+            continue
+
+        if not upgrades:
+            findings.append(_summary_finding(dep))
             continue
 
         result_pin = factory(dep.producer_repo, dep.contract_pin)
@@ -490,20 +504,6 @@ def _consumer_findings_from_enclave_manifest(
             )
             continue
 
-        if not upgrades:
-            # Summary-only finding (no upgrades path); kind stays None — never reaches a write command.
-            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})"
-            findings.append(
-                CheckFinding(
-                    severity="info",
-                    section="consumer",
-                    message=msg,
-                    source=manifest_path,
-                    field_path=field_path,
-                )
-            )
-            continue
-
         # An EMPTY pin here is user data, not the HEAD sentinel. `try_at`
         # treats `""` as "resolve HEAD" so that `factory(repo_url, "")` below
         # can ask that question, but `ap.pin` comes from a hand-editable
@@ -513,6 +513,9 @@ def _consumer_findings_from_enclave_manifest(
         # not exist, and `enclave_bump` would silently no-op instead of
         # blocking. Refuse it explicitly rather than letting the sentinel
         # swallow it.
+        #
+        # Above the `upgrades` gate for the same reason as the `.dvc` lane:
+        # the pin is read from the manifest, not the wire.
         if not ap.pin.strip():
             findings.append(
                 CheckFinding(
@@ -523,6 +526,26 @@ def _consumer_findings_from_enclave_manifest(
                     source=manifest_path,
                     field_path=field_path,
                     kind="pin_missing",
+                    hint=(
+                        f"set the pin for this row: `mintd enclave add {ap.repo} "
+                        "--pin=<commit>`, or edit approved_products[].pin in the "
+                        "manifest. An unset shell variable (`--pin=\"$SHA\"`) writes "
+                        "an empty one."
+                    ),
+                )
+            )
+            continue
+
+        if not upgrades:
+            # Summary-only finding (no upgrades path); kind stays None — never reaches a write command.
+            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})"
+            findings.append(
+                CheckFinding(
+                    severity="info",
+                    section="consumer",
+                    message=msg,
+                    source=manifest_path,
+                    field_path=field_path,
                 )
             )
             continue

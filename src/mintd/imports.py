@@ -51,7 +51,20 @@ class DataDependency(BaseModel):
             source=path,
             kind="dvc_file",
             producer_repo=repo["url"],
-            contract_pin=repo["rev_lock"],
+            # A null, absent or unquoted-numeric `rev_lock` is "no usable
+            # pin". None of the three is a parse error, and raising any of
+            # them out of `scan_imports` takes down every caller. They all
+            # read as the empty pin the `check` guard refuses; only a value
+            # YAML already handed over AS TEXT is the pin the user wrote.
+            #
+            # The `int` arm is not fussiness. YAML 1.1 resolves an unquoted
+            # `rev_lock: 0123456` as OCTAL, so it reaches this line as 42798
+            # and the digits the user typed no longer exist to recover --
+            # `str()` here would mint a different, valid-looking pin and
+            # `check` would compare against the wrong revision in silence.
+            # Refusing costs a hand-edited all-digit pin its quotes and buys
+            # a loud `pin_missing` in place of a quiet wrong answer.
+            contract_pin=_pin(repo),
             output_path=dep["path"],
             local_path=out.get("path", ""),
             artifact_md5=out.get("md5"),
@@ -76,7 +89,7 @@ class DataDependency(BaseModel):
                     source=lock_path,
                     kind="dvc_lock_stage",
                     producer_repo=repo["url"],
-                    contract_pin=repo["rev_lock"],
+                    contract_pin=_pin(repo),  # see `from_dvc_file`
                     output_path="",
                     local_path=dep.get("path", ""),
                     artifact_md5=dep.get("md5"),
@@ -140,6 +153,14 @@ def _dedup(deps: list[DataDependency]) -> list[DataDependency]:
             # unbumpable. Cross-kind collapse keeps the original key.
             seen[key + (dep.output_path.rstrip("/"),)] = dep
     return list(seen.values())
+
+
+def _pin(repo: dict[str, Any]) -> str:
+    """`rev_lock` exactly as YAML handed it over, or `""` when it did not hand
+    over text at all. See `DataDependency.from_dvc_file` for why a non-`str`
+    is refused rather than coerced."""
+    value = repo.get("rev_lock")
+    return value if isinstance(value, str) else ""
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
