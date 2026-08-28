@@ -161,8 +161,9 @@ def test_apply_writes_v2_atomically(tmp_path: Path) -> None:
     apply_metadata_migration(tmp_path)
     written = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
     assert written["schema_version"] == "2.0"
-    # Tmp sibling was renamed away cleanly.
-    assert not (tmp_path / "metadata.json.tmp").exists()
+    # Tmp sibling was renamed away cleanly. Globbed, not named: the temp
+    # carries a uuid4 token, so a fixed `metadata.json.tmp` can never fail.
+    assert not list(tmp_path.glob("*.tmp"))
     # And the resulting JSON round-trips through Metadata.
     Metadata.model_validate(written)
 

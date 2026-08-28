@@ -17,7 +17,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ._archive_ops import ArchiveOps, TarGzArchiveOps
-from ._atomic import _try_fsync_parent_dir
+from ._atomic import _atomic_write_text
 from .catalog import CatalogClient
 from .data import (
     BumpBlocked,
@@ -246,17 +246,12 @@ class EnclaveManifest(BaseModel):
             if changed:
                 raise AppendOnlyViolation(path, changed)
         content = yaml.safe_dump(self.model_dump(mode="json"), sort_keys=False)
-        # Atomic write (tmp -> fsync -> replace). enclave_pull now flushes this
-        # manifest from its BaseException handler, so a crashed/interrupted write
-        # (e.g. a second Ctrl-C mid-write) must never leave a truncated file —
-        # transferred[] provenance is append-only and not re-derivable.
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(content, encoding="utf-8")
-        with open(tmp, "r+") as f:
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(path)
-        _try_fsync_parent_dir(path)
+        # enclave_pull flushes this manifest from its BaseException handler, so a
+        # crashed/interrupted write (e.g. a second Ctrl-C mid-write) must never
+        # leave a truncated file — transferred[] provenance is append-only and
+        # not re-derivable. See ``_atomic._atomic_write_text`` for the temp-name
+        # and fsync discipline; this was the third copy of that body.
+        _atomic_write_text(path, content)
 
     def apply_pin_bump(self, *, repo: str, new_pin: str) -> "EnclaveManifest":
         # EVERY row of the repo, not just the first. One repo can hold several

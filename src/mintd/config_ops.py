@@ -13,7 +13,6 @@ write-side concerns.
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from pathlib import Path
@@ -22,7 +21,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from ._atomic import _try_fsync_parent_dir
+from ._atomic import _atomic_write_text
 from ._config import Config, ConfigError, _default_config_path
 
 
@@ -36,22 +35,12 @@ def _resolve_path(path: Path | None) -> Path:
 
 
 def _atomic_write_yaml(path: Path, content: str) -> None:
-    """Write ``content`` to ``path`` atomically.
+    """Write ``content`` to ``path`` atomically, creating ``path.parent``.
 
-    Sequence: tmp file → fsync the tmp's contents → rename → fsync the
-    parent directory. Mirrors the slice-15 ``_atomic_write_json`` pattern
-    in ``publish.py``; uses ``r+``/``f.flush()``/``os.fsync(fileno)``
-    rather than ``O_RDONLY``+``fsync`` because the latter only flushes
-    inode metadata on Linux, not the file contents.
+    See ``_atomic._atomic_write_text`` for the temp-name and fsync discipline.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    with open(tmp, "r+") as f:
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(path)
-    _try_fsync_parent_dir(path)
+    _atomic_write_text(path, content)
 
 
 # ---------------------------------------------------------------------------

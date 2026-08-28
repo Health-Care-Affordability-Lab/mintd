@@ -60,8 +60,9 @@ def test_apply_set_writes_atomic(tmp_path: Path) -> None:
     assert written["author"] == "someone"
     assert cfg.registry_url == "https://foo"
     assert cfg.author == "someone"
-    # Tmp file removed after atomic rename.
-    assert not (tmp_path / "cfg.yaml.tmp").exists()
+    # Tmp file removed after atomic rename. Globbed, not named: the temp
+    # carries a uuid4 token, so a fixed `cfg.yaml.tmp` can never fail.
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_apply_set_validates_types(tmp_path: Path) -> None:
