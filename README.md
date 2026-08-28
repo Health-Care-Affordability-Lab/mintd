@@ -163,14 +163,15 @@ mintd data clone my-cleaned-survey --rev v0.1.0 --primary
 # `data import --path` — an unknown path lists the valid outputs):
 mintd data clone my-cleaned-survey --path data/final/survey.parquet
 
-# Inside an existing analysis project, import a single output and
-# record the pin in this repo's .dvc files:
+# Inside an existing analysis project, import one or more outputs
+# (--path is repeatable) and record the pin in this repo's .dvc files:
 mintd data import my-cleaned-survey --path data/final/survey.parquet
 
 # Later, check whether anything you depend on has moved:
 mintd check --upgrades
-# And bump a pin when you're ready:
-mintd data import my-cleaned-survey --bump
+# And bump a pin when you're ready — same name, same --path selector
+# (--path picks the row once you have imported more than one output):
+mintd data import my-cleaned-survey --bump --path data/final/survey.parquet
 ```
 
 ## Example: enclave workflow

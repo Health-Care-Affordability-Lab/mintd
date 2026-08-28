@@ -435,8 +435,7 @@ def enclave_bump(
     if not repo_findings:
         raise ImportNotFound(f"no consumer finding for {name!r} (manifest={manifest_path})")
     # `check` emits one finding per ROW under a single repo-keyed field_path,
-    # and rows can disagree: _drift_finding_from_views short-circuits to
-    # up_to_date when a row's source_path is absent from the pinned outputs.
+    # and rows can disagree — one path drifted while another cannot be read.
     # Reading only the first match made this WRITE verb depend on YAML row
     # order — `bump` moved the pin or printed "up to date" purely by which row
     # was added first. Precedence: any blocked row blocks the whole repo (D1 =

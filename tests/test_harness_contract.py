@@ -679,6 +679,37 @@ def test_two_producers_colliding_on_final_are_both_addressable(
     assert {d.contract_pin for d in deps} == {"a" * 40, "b" * 40}
 
 
+def test_colliding_imports_resolve_independently_via_the_namespace_index(
+    consumer_project,
+) -> None:
+    """The index half of issue09 (M1): keyed on the recorded producer path
+    within ONE product's namespace folder, two producers publishing the same
+    output path cannot shadow each other — the old `local_path` keying kept
+    exactly one of these."""
+    from mintd.data import _imports_index
+    from tests._harness.consumer import write_import
+
+    proj = consumer_project()
+    alpha = write_import(
+        proj,
+        Import(name="final", producer_url=ALPHA_URL, pin="a" * 40),
+        under="data/imports/data_alpha",
+    )
+    beta = write_import(
+        proj,
+        Import(name="final", producer_url=BETA_URL, pin="b" * 40),
+        under="data/imports/data_beta",
+    )
+
+    alpha_index = _imports_index(proj / "data/imports/data_alpha", name="alpha")
+    beta_index = _imports_index(proj / "data/imports/data_beta", name="beta")
+
+    # Both record the producer path `outputs/final/`; each namespace resolves
+    # its OWN file — nothing shadowed, nothing merged.
+    assert alpha_index == {"outputs/final": alpha}
+    assert beta_index == {"outputs/final": beta}
+
+
 def test_enclave_manifest_consumer_variant_loads(
     consumer_project, local_producer: LocalProducer, tmp_path: Path
 ) -> None:
@@ -688,16 +719,17 @@ def test_enclave_manifest_consumer_variant_loads(
     but nothing composed a *project* around it, so `check.py`'s enclave walker
     was reached by no fixture. This is the variant unit A (position 8) needs.
     """
-    # The manifest approves `outputs/cms_based/`; a producer that never
-    # published that path short-circuits to "up to date" at check.py:506
-    # before the pin/HEAD comparison is reached, so the arm would be walked
-    # only as far as its first early return.
+    # The manifest approves `outputs/cms_based/`. Under the md5 drift rule
+    # the comparison reads the producer's own DVC pointer at pin and HEAD,
+    # so the payload must really exist — `publish()` DVC-tracks bytes and
+    # commits, which is exactly what moves the pointer.
     local_producer.rename_primary(APPROVED_PATH)
+    local_producer.publish({APPROVED_PATH: {"a.csv": b"v1"}})
     proj = consumer_project(enclave=True, enclave_pin=local_producer.head_sha)
 
-    # ... and now the producer moves the product, which is what the researcher
-    # is asking `check --upgrades` about.
-    local_producer.rename_primary("outputs/cms_v2/")
+    # ... and now the producer republishes new bytes at the SAME path — the
+    # researcher's actual drift case; no rename required.
+    local_producer.publish({APPROVED_PATH: {"a.csv": b"v2"}}, message="v2")
 
     client = _catalog_pointing_at(local_producer.url)
     cache = tmp_path / "pcache"
@@ -714,7 +746,8 @@ def test_enclave_manifest_consumer_variant_loads(
     consumer = [f for f in findings if f.section == "consumer"]
     assert [f.field_path for f in consumer] == ["approved_products[provider-xw]"]
     assert consumer[0].kind == "drift", consumer[0].message
-    assert "outputs/cms_v2/" in consumer[0].message
+    assert APPROVED_PATH in consumer[0].message
+    assert "changed at the producer's HEAD" in consumer[0].message
     assert consumer[0].source == proj / "enclave_manifest.yaml"
 
 
@@ -991,3 +1024,147 @@ def test_enclave_pull_caches_into_the_enclave_not_the_outer_repo(
     delivered = list((enclave / "downloads" / "prod").rglob("data.csv"))
     assert delivered, "the payload was not delivered into the enclave"
     assert delivered[0].read_bytes() == b"restricted-producer-bytes\n"
+
+
+#: The mintd data scaffold's stage shape (`src/mintd/files/dvc_data.yaml.j2`):
+#: the stage runs in the source dir and its out is recorded RELATIVE TO THAT
+#: WDIR, so dvc writes `path: ../shared/final/` into `dvc.lock`. `build.py` is
+#: seeded INTO the wdir because dvc refuses a stage whose `wdir` does not
+#: exist (`ReproductionError: failed to reproduce 'build'`, dvc 3.67.1).
+WDIR_BUILD_PY = (
+    b"import pathlib, sys\n"
+    b"d = pathlib.Path('../shared/final')\n"
+    b"d.mkdir(parents=True, exist_ok=True)\n"
+    b"(d / 'out.csv').write_bytes(sys.argv[1].encode() + b'\\n')\n"
+)
+
+#: The consumer subscribes to the REPO-RELATIVE path. `wdir` is nested and the
+#: out climbs to a sibling of `code/`, so "join the wdir" and "strip the
+#: leading `../`" give DIFFERENT answers (`code/shared/final` vs
+#: `shared/final`). With the scaffold's own `wdir: code` + `../data/final/`
+#: the two agree, and a comparator that never read `dvc.yaml` would pass.
+WDIR_SUBSCRIBED = "code/shared/final/"
+
+
+def _wdir_pipeline(style: str, tag: str) -> str:
+    """One scaffold-shaped stage, in each of dvc's three stage spellings."""
+    head, cmd = {
+        "plain": ("stages:\n  build:\n", f"python build.py {tag}"),
+        # dvc.yaml still names the stage `build`; dvc.lock names the
+        # instance `build@main`.
+        "matrix": (
+            "stages:\n  build:\n    matrix:\n      k:\n        - main\n",
+            f"python build.py {tag}-${{item.k}}",
+        ),
+        # `foreach` additionally hides the stage body — `wdir` included —
+        # under `do:`.
+        "foreach": (
+            "stages:\n  build:\n    foreach:\n      - main\n    do:\n",
+            f"python build.py {tag}-${{item}}",
+        ),
+    }[style]
+    body = (
+        "    wdir: code/steps\n"
+        f"    cmd: {cmd}\n"
+        "    deps:\n"
+        "      - build.py\n"
+        "    outs:\n"
+        "      - ../shared/final/\n"
+    )
+    if style == "foreach":
+        body = "".join("  " + line for line in body.splitlines(keepends=True))
+    return head + body
+
+
+@pytest.mark.parametrize(
+    "style,advance,expected",
+    [
+        ("plain", "republish", "drift"),
+        ("plain", "commit_only", "up_to_date"),
+        ("matrix", "republish", "drift"),
+        ("foreach", "republish", "drift"),
+    ],
+    ids=["bytes-moved", "producer-moved-product-did-not", "matrix", "foreach"],
+)
+def test_wdir_relative_lock_from_real_dvc_drives_check(
+    local_producer: LocalProducer,
+    consumer_project,
+    tmp_path: Path,
+    style: str,
+    advance: str,
+    expected: str,
+) -> None:
+    """The wdir comparator, against bytes dvc actually wrote.
+
+    `test_wdir_relative_lock_out_resolves` (`tests/test_check.py`) pins the
+    same rule against `_scaffold_lock` — bytes in the shape we BELIEVE dvc
+    emits. Nothing proved dvc emits it: `PIPELINE_YAML` declares no `wdir`,
+    and `publish()` uses `dvc add`, which writes a per-path `.dvc` that
+    `_pointer_md5` matches FIRST and so never reaches the lock branch.
+    The premise of the whole comparator — that dvc leaves the out
+    wdir-relative in the lock instead of normalizing it to the repo root —
+    was assumed, not measured.
+
+    Here the producer really runs `dvc repro`, and dvc 3.67.1 writes:
+
+        outs:
+        - path: ../shared/final/
+          hash: md5
+          md5: c99d7d56d905e5dfc25b0307c212dc6d.dir
+
+    The `matrix` and `foreach` cells are the same product under a fan-out:
+    dvc.yaml names the stage `build`, dvc.lock names the instance
+    `build@main`, and `foreach` moves `wdir` under `do:`. Both spellings once
+    resolved every out against `wdir="."`, dropped it as escaping the root,
+    and reported the product "not published at the producer's HEAD".
+
+    Mutations: make `resolve_out` ignore its `wdir` argument / make
+    `_stage_wdirs` return `{}` -> every cell reddens. Drop the `@` fallback
+    in `stage_wdir` -> matrix and foreach redden. Read `wdir` from the stage
+    instead of `do:` -> foreach reddens.
+
+    The `up_to_date` cell advances HEAD with `commit_more()` rather than
+    republishing identical bytes on purpose: dvc skips an unchanged stage
+    ("Stage 'build' didn't change, skipping") and `_commit_and_push` then
+    fails on a clean tree.
+    """
+    local_producer.publish_pipeline(
+        _wdir_pipeline(style, "v1"), seed={"code/steps/build.py": WDIR_BUILD_PY}
+    )
+    pin = local_producer.head_sha
+
+    lock = (local_producer.work / "dvc.lock").read_text(encoding="utf-8")
+    # The `../` is the premise; the trailing slash is dvc echoing our own
+    # spelling and is not asserted.
+    assert "path: ../shared/final" in lock, lock
+
+    proj = consumer_project(imports=[
+        Import(
+            name="final",
+            producer_url=local_producer.url,
+            pin=pin,
+            producer_path=WDIR_SUBSCRIBED,
+        )
+    ])
+
+    if advance == "republish":
+        local_producer.publish_pipeline(
+            _wdir_pipeline(style, "v2-longer"),
+            seed={"code/steps/build.py": WDIR_BUILD_PY},
+            message="v2",
+        )
+    else:
+        local_producer.commit_more()
+    head = local_producer.head_sha
+    assert head != pin
+
+    cache = tmp_path / "pcache"
+
+    def at(repo: str, rev: str):
+        # `""` is check.py's HEAD sentinel, as in the enclave case above.
+        return ProducerView.try_at(repo, rev or head, cache_dir=cache)
+
+    findings = check_project(proj, upgrades=True, producer_view_factory=at)
+
+    consumer = [f for f in findings if f.section == "consumer"]
+    assert [f.kind for f in consumer] == [expected], [f.message for f in consumer]

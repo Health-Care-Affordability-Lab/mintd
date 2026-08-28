@@ -188,3 +188,34 @@ def test_the_ops_fixture_returns_one_object(ops) -> None:
     assert not hasattr(sys.modules[__name__], "_is_real"), (
         "the real/fake branching helper is back; the two arms have diverged again"
     )
+
+
+def test_import_into_an_existing_directory_dest_is_refused(
+    ops, workspace: Path, tmp_path: Path
+) -> None:
+    """issue09 fixes 3/4, licensed on both arms: `dvc import -o` treats an
+    existing directory as a *container*, nests the source basename inside
+    it, and refuses the overlap — `--force` does not help (it only
+    overwrites the stage file). The fake raises on an existing dir dest so
+    the callers' clear-the-destination guard is testable at all; this case
+    is what keeps that fake behavior honest against real dvc.
+    """
+    from mintd._dvc_ops import DvcImportDestinationExists
+    from tests._harness.producer import build_local_producer
+
+    producer = build_local_producer(tmp_path / "prod")
+    producer.publish({"data/final": {"a.csv": b"v1\n"}})
+    dest = workspace / "final"
+
+    ops.import_(
+        repo_url=producer.url, path="data/final", dest=dest, cwd=workspace
+    )
+    # Real dvc materialized the payload; the fake records pointers only, so
+    # stage the directory it would have left behind.
+    dest.mkdir(exist_ok=True)
+
+    with pytest.raises(DvcImportDestinationExists):
+        ops.import_(
+            repo_url=producer.url, path="data/final", dest=dest,
+            cwd=workspace, force=True,
+        )

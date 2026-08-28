@@ -32,6 +32,7 @@ Slice 1 scope:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,11 +42,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
+from ._fast_sync_ops import resolve_out, stage_wdir, wdir_map
 from ._registry_git_ops import GitOpError
 from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
 from .model import Metadata
-from .producer import ProducerError, ProducerView
+from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
 
 if TYPE_CHECKING:
     # Avoid module-level import of enclave.py — enclave.py imports from this
@@ -75,6 +77,7 @@ class CheckFinding:
     source: Path | None = None  # NEW: which file the finding originated from
     kind: Literal[
         "drift",
+        "drift_unknown",
         "up_to_date",
         "unreachable",
         "schema_too_old",
@@ -108,6 +111,7 @@ def check_project(
     upgrades: bool = False,
     producer_view_factory: ProducerViewFactory | None = None,
     client: CatalogClient | None = None,
+    fetcher: Fetcher | None = None,
 ) -> list[CheckFinding]:
     """Validate a mintd project at `path` (the project directory).
 
@@ -129,6 +133,7 @@ def check_project(
             upgrades=upgrades,
             producer_view_factory=producer_view_factory,
             client=client,
+            fetcher=fetcher,
         )
     )
     return findings
@@ -282,12 +287,22 @@ def _consumer_findings(
     producer_view_factory: ProducerViewFactory | None,
     client: CatalogClient | None = None,
     imports_under: str = "data/imports",
+    fetcher: Fetcher | None = None,
 ) -> list[CheckFinding]:
+    active_fetcher: Fetcher = fetcher if fetcher is not None else GitArchiveFetcher()
+    # D-C reads the producer's DVC pointer at both pin and HEAD, per row.
+    # `_resolve_once` in the enclave walker memoizes VIEWS only; pointer reads
+    # and `dvc.yaml` reads share this one across both arms of a single walk.
+    # Keyed `(repo, rev, path)` for a pointer, `(repo, rev)` for a wdir map --
+    # different arity, so one dict holds both without collision.
+    memo: dict[tuple[str, ...], Any] = {}
     findings = _consumer_findings_from_dvc(
         project_path,
         upgrades=upgrades,
         producer_view_factory=producer_view_factory,
         imports_under=imports_under,
+        fetcher=active_fetcher,
+        memo=memo,
     )
     findings.extend(
         _consumer_findings_from_enclave_manifest(
@@ -295,6 +310,8 @@ def _consumer_findings(
             upgrades=upgrades,
             producer_view_factory=producer_view_factory,
             client=client,
+            fetcher=active_fetcher,
+            memo=memo,
         )
     )
     return findings
@@ -306,7 +323,13 @@ def _consumer_findings_from_dvc(
     upgrades: bool,
     producer_view_factory: ProducerViewFactory | None,
     imports_under: str = "data/imports",
+    fetcher: Fetcher | None = None,
+    memo: dict[tuple[str, ...], Any] | None = None,
 ) -> list[CheckFinding]:
+    if fetcher is None:
+        fetcher = GitArchiveFetcher()
+    if memo is None:
+        memo = {}
     deps = scan_imports(project_path, under=imports_under)
     if not deps:
         return []
@@ -350,7 +373,9 @@ def _consumer_findings_from_dvc(
             findings.append(_uptodate_finding(dep))
             continue
 
-        findings.append(_drift_finding(dep, result_pin, result_head))
+        findings.append(
+            _drift_finding(dep, result_pin, result_head, fetcher=fetcher, memo=memo)
+        )
 
     return findings
 
@@ -361,7 +386,13 @@ def _consumer_findings_from_enclave_manifest(
     upgrades: bool,
     producer_view_factory: ProducerViewFactory | None,
     client: CatalogClient | None,
+    fetcher: Fetcher | None = None,
+    memo: dict[tuple[str, ...], Any] | None = None,
 ) -> list[CheckFinding]:
+    if fetcher is None:
+        fetcher = GitArchiveFetcher()
+    if memo is None:
+        memo = {}
     manifest_path = project_path / "enclave_manifest.yaml"
     if not manifest_path.is_file():
         return []
@@ -498,7 +529,15 @@ def _consumer_findings_from_enclave_manifest(
 
         result_head = _resolve_once(repo_url, "")
         if isinstance(result_head, ProducerError):
-            findings.append(_uptodate_finding_for(source=manifest_path, field_path=field_path))
+            # HEAD-unreachable degrade. Labelled too (D-D): without it a
+            # multi-row repo prints N identical unlabeled lines here.
+            findings.append(
+                _uptodate_finding_for(
+                    source=manifest_path,
+                    field_path=field_path,
+                    label=subscription_label(ap),
+                )
+            )
             continue
 
         findings.append(
@@ -508,6 +547,10 @@ def _consumer_findings_from_enclave_manifest(
                 pin_view=result_pin,
                 head_view=result_head,
                 expected_output_path=ap.source_path,
+                fetcher=fetcher,
+                memo=memo,
+                all_outputs=ap.all,
+                label=subscription_label(ap),
             )
         )
     return findings
@@ -536,11 +579,13 @@ def _summary_finding(dep: DataDependency) -> CheckFinding:
     )
 
 
-def _uptodate_finding_for(*, source: Path, field_path: str | None = None) -> CheckFinding:
+def _uptodate_finding_for(
+    *, source: Path, field_path: str | None = None, label: str | None = None
+) -> CheckFinding:
     return CheckFinding(
         severity="info",
         section="consumer",
-        message="up to date",
+        message=f"up to date ({label})" if label else "up to date",
         source=source,
         field_path=field_path,
         kind="up_to_date",
@@ -551,6 +596,319 @@ def _uptodate_finding(dep: DataDependency) -> CheckFinding:
     return _uptodate_finding_for(source=dep.source)
 
 
+#: `drift_unknown` covers five distinct states and only two are transport
+#: failures, so the hint travels with the finding rather than being guessed
+#: from the kind at render time.
+NETWORK_HINT = "retry when the network is available, then 'mintd check --upgrades'"
+
+#: `_pointer_md5` verdict for "the rev is readable and the path's pointer is
+#: definitively not there" — distinct from `None`, which means "could not
+#: read" and must never quietly become a verdict.
+_POINTER_ABSENT = "<absent>"
+
+
+def _pointer_md5(
+    fetcher: Fetcher,
+    repo: str,
+    pin: str,
+    output_path: str,
+    memo: dict[tuple[str, ...], Any],
+) -> str | None:
+    """The producer's own DVC pointer md5 for `output_path` at `pin`, memoized.
+
+    Returns the matching out's `md5` verbatim — `.dir` hashes INCLUDED: a
+    directory manifest's hash moves when any file inside it moves, which is
+    exactly the signal drift needs (and exactly what `_match_out_files`
+    deliberately skips; do not reuse it).
+
+    Three states: the md5 string, `_POINTER_ABSENT` (readable rev, no pointer
+    for that path), or `None` (transport/parse failure — loud, never a
+    verdict).
+    """
+    key = (repo, pin, output_path)
+    if key in memo:
+        return memo[key]
+    clean = output_path.rstrip("/")
+    absent_so_far = True  # flipped by any failure that is not PATH_MISSING
+    for candidate, base_dir in _pointer_candidates(clean):
+        if candidate == "dvc.lock":
+            resolved = _resolved_lock(fetcher, repo, pin, memo)
+            if resolved is None:
+                absent_so_far = False
+                continue
+            data, dropped_a_stage = resolved
+            if dropped_a_stage:
+                # A stage whose `wdir` could not be resolved is invisible
+                # here, and an invisible out is indistinguishable from an
+                # absent one. Absence is evidence only when nothing was
+                # dropped — otherwise a stage that resolves at HEAD and not at
+                # the pin manufactures "published at HEAD but not at your pin"
+                # and `bump` re-pins on it.
+                absent_so_far = False
+        else:
+            try:
+                raw = fetcher.fetch_path_at(repo, pin, candidate)
+            except FetchError as e:
+                if e.reason != FetchError.Reason.PATH_MISSING:
+                    absent_so_far = False
+                continue
+            try:
+                data = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                absent_so_far = False
+                continue
+        md5 = _match_out_md5(data, clean, base_dir=base_dir)
+        if md5 is not None:
+            memo[key] = md5
+            return md5
+        # A readable document with no matching out is absence evidence.
+    memo[key] = verdict = _POINTER_ABSENT if absent_so_far else None
+    return verdict
+
+
+def _pointer_candidates(clean: str) -> list[tuple[str, str]]:
+    """`(pointer file, the directory it sits in)` to try for `clean`.
+
+    The first two are the product's own pointer and the pipeline lock. The
+    ancestors after them cover a subscription to a path INSIDE a tracked
+    directory out — `data/final/b.csv` when the producer tracks `data/final/`
+    — which DVC gives no pointer of its own. They are only ever fetched when
+    the first two produced no match, so the common shapes still cost what
+    they always did.
+
+    The directory travels with the file because a `.dvc` records `outs[].path`
+    relative to itself: `data/final.dvc` says `path: final`. Resolving against
+    it is what lets one rule serve every candidate.
+    """
+    parts = clean.split("/")
+    candidates = [(f"{clean}.dvc", "/".join(parts[:-1])), ("dvc.lock", "")]
+    candidates += [
+        ("/".join(parts[:i]) + ".dvc", "/".join(parts[: i - 1]))
+        for i in range(len(parts) - 1, 0, -1)
+    ]
+    return candidates
+
+
+def _resolved_lock(
+    fetcher: Fetcher, repo: str, pin: str, memo: dict[tuple[str, ...], Any]
+) -> tuple[Any, bool] | None:
+    """The producer's `dvc.lock` at `pin`, every out's path already resolved to
+    repo-relative, memoized on `(repo, pin)`.
+
+    One lock serves every subscribed path of that repo at that rev; before this
+    each path refetched and reparsed it, which is N round-trips per rev for an
+    enclave subscribed to N paths of one producer.
+
+    Returns `(document, whether a stage was dropped)`. `{}` is the document for
+    "the producer has no `dvc.lock`" — readable, matches nothing — and `None`
+    means it could not be read, which must never become a verdict. Same
+    `{}`-is-not-`None` discipline as `_stage_wdirs`, for the same reason.
+    """
+    key = ("lock", repo, pin)
+    if key in memo:
+        return memo[key]
+    result: tuple[Any, bool] | None
+    try:
+        data = yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.lock"))
+    except FetchError as e:
+        result = ({}, False) if e.reason == FetchError.Reason.PATH_MISSING else None
+    except yaml.YAMLError:
+        result = None
+    else:
+        # `dvc.lock` records each out relative to its stage's `wdir`, and the
+        # mintd data scaffold emits `wdir: code` + `../data/final/` where the
+        # consumer subscribes to `data/final/`. Normalize, or D-C is inert for
+        # every scaffolded producer.
+        stage_wdirs = _stage_wdirs(fetcher, repo, pin, memo)
+        result = (
+            None if stage_wdirs is None
+            else _lock_with_resolved_paths(data, stage_wdirs)
+        )
+    memo[key] = result
+    return result
+
+
+def _stage_wdirs(
+    fetcher: Fetcher, repo: str, pin: str, memo: dict[tuple[str, ...], Any]
+) -> dict[str, str | None] | None:
+    """The producer's `stage -> wdir` map at `pin`, memoized on `(repo, pin)` —
+    one `dvc.yaml` serves every subscribed path of that repo at that rev.
+
+    `{}` is NOT `None`. `{}` means the producer genuinely has no `dvc.yaml`,
+    so every stage defaults to `wdir="."` (correct for a `dvc add` producer);
+    `None` means it could not be read. Collapsing them made the scaffold shape
+    (`wdir: code`, `outs: - ../data/final/`) resolve to `../data/final`, get
+    dropped as escaping the root, and read back as `_POINTER_ABSENT` — an
+    "upgrade available" manufactured out of one network blip, which `bump`
+    then acts on.
+    """
+    key = (repo, pin)
+    if key in memo:
+        return memo[key]
+    resolved: dict[str, str | None] | None
+    try:
+        resolved = wdir_map(yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.yaml")))
+    except FetchError as e:
+        # Only "the file is not there" is evidence about the producer; every
+        # other reason is evidence about the network.
+        resolved = {} if e.reason == FetchError.Reason.PATH_MISSING else None
+    except yaml.YAMLError:
+        resolved = None
+    memo[key] = resolved
+    return resolved
+
+
+def _lock_with_resolved_paths(
+    data: Any, stage_wdirs: dict[str, str | None]
+) -> tuple[Any, bool]:
+    """A parsed `dvc.lock` with every out's `path` rewritten from wdir-relative
+    to repo-relative, plus whether any STAGE was dropped for an unresolvable
+    `wdir`. An out that escapes the repo root is dropped too but is not
+    reported: it is genuinely unaddressable by a subscription, whereas a
+    dropped stage merely hid outs the caller would otherwise have seen."""
+    if not isinstance(data, dict) or not isinstance(data.get("stages"), dict):
+        return data, False
+    stages: dict[str, Any] = {}
+    dropped = False
+    for stage, block in data["stages"].items():
+        wdir = stage_wdir(stage_wdirs, str(stage))
+        if wdir is None:
+            dropped = True  # absolute wdir: unresolvable against the repo root
+            continue
+        if not isinstance(block, dict) or not isinstance(block.get("outs"), list):
+            stages[stage] = block
+            continue
+        outs = []
+        for out in block["outs"]:
+            if not isinstance(out, dict) or "path" not in out:
+                outs.append(out)
+                continue
+            rel = resolve_out(wdir, str(out["path"]))
+            if rel.startswith("../"):
+                continue  # escapes the repo root; not addressable by a subscription
+            outs.append({**out, "path": rel})
+        stages[stage] = {**block, "outs": outs}
+    return {**data, "stages": stages}, dropped
+
+
+def _out_identity(out: dict[str, Any], subpath: str = "") -> str | None:
+    """The content identity of one parsed out, whichever shape dvc wrote.
+
+    `subpath` scopes the answer to one path INSIDE a directory out. In
+    files-format the per-file md5 is right there in the fetched document, so
+    the answer is exact and a sibling's change is correctly invisible. A
+    `.dir` pointer carries only the manifest hash — the manifest itself is a
+    cache object, never in git — so the whole directory's identity is the only
+    signal available: conservative, costing a churn re-pin when a sibling
+    moves, never a wrong "up to date".
+
+    ``md5: <hash>`` (a file) or ``md5: <hash>.dir`` (a directory manifest), or
+    else files-format — a ``files:`` list and **no top-level md5**, which dvc
+    writes for a directory out on a ``version_aware`` remote. ``_init_ops``
+    turns that on for every scaffolded producer, so it is the DEFAULT lab
+    shape: reading only ``md5`` reported `drift_unknown` forever and blocked
+    every bump.
+
+    For files-format we digest the sorted ``(relpath, md5)`` pairs rather than
+    reconstruct dvc's own directory hash — that serialization is a dvc
+    internal and would degrade *silently* if it shifted on an upgrade.
+
+    Accepted ceiling: a pointer that flips format between pin and HEAD reads
+    as drift once — loud and self-correcting, unlike a silent miss.
+    """
+    md5 = out.get("md5")
+    files = out.get("files")
+    if subpath:
+        if isinstance(files, list):
+            for entry in files:
+                if isinstance(entry, dict) and str(entry.get("relpath", "")) == subpath:
+                    return str(entry.get("md5") or "") or None
+            # Not in the directory at this rev — genuine absence, not a miss.
+            return None
+        return str(md5) if md5 else None
+    if md5:
+        return str(md5)
+    if not isinstance(files, list):
+        return None
+    pairs = sorted(
+        (str(f.get("relpath", "")), str(f.get("md5", "")))
+        for f in files
+        if isinstance(f, dict)
+    )
+    if not pairs:
+        return None
+    digest = hashlib.sha256(
+        json.dumps(pairs, separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"{digest}.files"
+
+
+def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | None:
+    """The content identity of the out matching `clean_path` in a parsed
+    `.dvc`/`dvc.lock` document.
+
+    Every out is resolved against `base_dir` first, so one rule serves both
+    shapes: a `.dvc` records `outs[].path` relative to itself (`data/final.dvc`
+    says `path: final`), and a `dvc.lock` out is repo-relative ONCE
+    `_lock_with_resolved_paths` has run, which `_pointer_md5` does before
+    calling here. Never match on the bare leaf — a sibling at another path
+    (`archive/final` for a subscribed `data/final`) would answer for a path
+    that is GONE at this rev.
+
+    An exact match wins. Failing that the NEAREST enclosing out answers, which
+    is how a subscription to a path inside a tracked directory gets a verdict
+    at all — see `_out_identity`'s `subpath`.
+    """
+    if not isinstance(data, dict):
+        return None
+    out_lists: list[list[Any]] = []
+    if isinstance(data.get("outs"), list):
+        out_lists.append(data["outs"])
+    stages = data.get("stages")
+    if isinstance(stages, dict):
+        for stage in stages.values():
+            if isinstance(stage, dict) and isinstance(stage.get("outs"), list):
+                out_lists.append(stage["outs"])
+
+    enclosing: tuple[int, dict[str, Any], str] | None = None
+    for outs in out_lists:
+        for out in outs:
+            if not isinstance(out, dict):
+                continue
+            raw = str(out.get("path", "")).rstrip("/")
+            if not raw:
+                continue
+            resolved = resolve_out(base_dir, raw)
+            if resolved == clean_path:
+                identity = _out_identity(out)
+                if identity is not None:
+                    return identity
+            elif clean_path.startswith(resolved + "/"):
+                depth = resolved.count("/")
+                if enclosing is None or depth > enclosing[0]:
+                    enclosing = (depth, out, clean_path[len(resolved) + 1 :])
+    if enclosing is None:
+        return None
+    return _out_identity(enclosing[1], enclosing[2])
+
+
+def _drift_unknown_finding(
+    *, source: Path, field_path: str | None, message: str, hint: str
+) -> CheckFinding:
+    # `severity="warning"`, deliberately: `check` exit codes are unchanged
+    # (R4). `drift_unknown` is non-actionable for bump — both write verbs
+    # treat any kind outside {drift, up_to_date} as blocked.
+    return CheckFinding(
+        severity="warning",
+        section="consumer",
+        message=message,
+        source=source,
+        field_path=field_path,
+        kind="drift_unknown",
+        hint=hint,
+    )
+
+
 def _drift_finding_from_views(
     *,
     source: Path,
@@ -558,29 +916,163 @@ def _drift_finding_from_views(
     pin_view: ProducerView,
     head_view: ProducerView,
     expected_output_path: str | None,
+    fetcher: Fetcher,
+    memo: dict[tuple[str, ...], Any],
+    all_outputs: bool = False,
+    label: str | None = None,
 ) -> CheckFinding:
-    if expected_output_path and expected_output_path not in pin_view.output_paths():
-        return _uptodate_finding_for(source=source, field_path=field_path)
+    """D-C: drift = the producer's DVC pointer md5 for your path differs
+    pin-vs-HEAD. Producer *metadata* carries no per-output content identity
+    (`last_published` is a per-publish stamp), so bytes committed without a
+    `mintd publish` still count — the pointer is the ground truth.
 
-    head_primary = head_view.metadata.data_products.primary
-    pin_primary = pin_view.metadata.data_products.primary
+    An unreadable pointer is `drift_unknown`, never `up_to_date`: silent
+    degradation to "up to date" is the bug class this lane exists to kill.
+    """
+    repo = pin_view.repo
+    pin, head = pin_view.pin, head_view.pin
+    labelled = f" ({label})" if label else ""
 
-    if head_primary == pin_primary:
-        return _uptodate_finding_for(source=source, field_path=field_path)
+    def md5_at(rev: str, path: str) -> str | None:
+        return _pointer_md5(fetcher, repo, rev, path, memo)
 
-    head_primary_str = head_primary if head_primary is not None else "(no primary)"
-    return CheckFinding(
-        severity="warning",
-        section="consumer",
-        message=f"upgrade available: producer now publishes {head_primary_str!r} (you have {expected_output_path!r})",
-        source=source,
-        field_path=field_path,
-        kind="drift",
-    )
+    if all_outputs:
+        # Compare the whole {path: md5} map; any UNREADABLE member is loud.
+        paths = sorted(set(pin_view.output_paths()) | set(head_view.output_paths()))
+        if not paths:
+            return _drift_unknown_finding(
+                source=source,
+                field_path=field_path,
+                message=f"cannot determine drift{labelled}: producer lists no outputs",
+                hint=(
+                    "ask the producer to declare data_products.outputs, or "
+                    "subscribe to one path with 'enclave add --source-path'"
+                ),
+            )
+        pin_map = {p: md5_at(pin, p) for p in paths}
+        head_map = {p: md5_at(head, p) for p in paths}
+        # `_POINTER_ABSENT` is a comparable VALUE, not a read failure — only
+        # `None` (transport/parse) is unreadable. `outputs[]` is
+        # hand-maintained metadata and nothing requires an entry to carry a
+        # top-level pointer, so folding absence in here let one pointer-less
+        # member veto the whole map and wedge `enclave bump` for the repo
+        # forever. Absent at both revs compares equal and contributes nothing;
+        # absent at one is real drift, and an `--all` bump re-resolves the
+        # output list at HEAD, so a member that vanished is simply not
+        # imported. (The single-path lane below differs on purpose: its one
+        # target vanishing leaves the bump nothing to aim at.)
+        unreadable = sorted(
+            p for p in paths if pin_map[p] is None or head_map[p] is None
+        )
+        if unreadable:
+            return _drift_unknown_finding(
+                source=source,
+                field_path=field_path,
+                message=(
+                    f"cannot determine drift{labelled}: no readable pointer for "
+                    f"{', '.join(unreadable)} at {pin[:7]}/{head[:7]}"
+                ),
+                hint=NETWORK_HINT,
+            )
+        changed = sorted(p for p in paths if pin_map[p] != head_map[p])
+        if changed:
+            return CheckFinding(
+                severity="warning",
+                section="consumer",
+                message=(
+                    f"upgrade available{labelled}: "
+                    f"{', '.join(changed)} changed at the producer's HEAD"
+                ),
+                source=source,
+                field_path=field_path,
+                kind="drift",
+            )
+        return _uptodate_finding_for(source=source, field_path=field_path, label=label)
+
+    # The `or primary` fallback is load-bearing: `from_dvc_lock_stage` records
+    # `output_path=""`, so without it every pipeline-stage import would
+    # resolve an empty path and report the same verdict forever.
+    path = expected_output_path or pin_view.metadata.data_products.primary
+    if not path:
+        return _drift_unknown_finding(
+            source=source,
+            field_path=field_path,
+            message=(
+                f"cannot determine drift{labelled}: no output path recorded "
+                f"and the producer has no primary at {pin[:7]}"
+            ),
+            hint=(
+                "re-import with --path so this pin records which output it "
+                "tracks, or ask the producer to set data_products.primary"
+            ),
+        )
+
+    # For a `source_path` row `subscription_label` IS the path, so the
+    # parenthetical would repeat what every message in this arm already says:
+    # "cannot determine drift for data/final/b.csv (data/final/b.csv)".
+    if label and label.rstrip("/") == path.rstrip("/"):
+        labelled = ""
+
+    pin_md5, head_md5 = md5_at(pin, path), md5_at(head, path)
+    if pin_md5 is None or head_md5 is None:
+        return _drift_unknown_finding(
+            source=source,
+            field_path=field_path,
+            message=(
+                f"cannot determine drift for {path}{labelled}: no readable "
+                f".dvc or dvc.lock at {pin[:7]}/{head[:7]}"
+            ),
+            hint=NETWORK_HINT,
+        )
+    if head_md5 == _POINTER_ABSENT:
+        # Removed at HEAD (or never published there): a bump has no target.
+        return _drift_unknown_finding(
+            source=source,
+            field_path=field_path,
+            message=(
+                f"cannot determine drift for {path}{labelled}: "
+                f"not published at the producer's HEAD ({head[:7]})"
+            ),
+            hint=(
+                "the producer no longer publishes this output; pin to an "
+                "older rev, or drop the subscription"
+            ),
+        )
+    if pin_md5 == _POINTER_ABSENT:
+        # Published after the pin — a real, bumpable upgrade.
+        return CheckFinding(
+            severity="warning",
+            section="consumer",
+            message=(
+                f"upgrade available{labelled}: {path} is published at the "
+                f"producer's HEAD but not at your pin {pin[:7]}"
+            ),
+            source=source,
+            field_path=field_path,
+            kind="drift",
+        )
+    if pin_md5 != head_md5:
+        return CheckFinding(
+            severity="warning",
+            section="consumer",
+            message=(
+                f"upgrade available{labelled}: {path} changed at the "
+                f"producer's HEAD"
+            ),
+            source=source,
+            field_path=field_path,
+            kind="drift",
+        )
+    return _uptodate_finding_for(source=source, field_path=field_path, label=label)
 
 
 def _drift_finding(
-    dep: DataDependency, pin_view: ProducerView, head_view: ProducerView
+    dep: DataDependency,
+    pin_view: ProducerView,
+    head_view: ProducerView,
+    *,
+    fetcher: Fetcher,
+    memo: dict[tuple[str, ...], Any],
 ) -> CheckFinding:
     return _drift_finding_from_views(
         source=dep.source,
@@ -588,6 +1080,8 @@ def _drift_finding(
         pin_view=pin_view,
         head_view=head_view,
         expected_output_path=dep.output_path,
+        fetcher=fetcher,
+        memo=memo,
     )
 
 

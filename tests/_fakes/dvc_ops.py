@@ -11,7 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from mintd._dvc_ops import DvcOpError, DvcPullError, DvcPushResult
+from mintd._dvc_ops import (
+    DvcImportDestinationExists,
+    DvcOpError,
+    DvcPullError,
+    DvcPushResult,
+)
 
 
 class DvcInitCall(NamedTuple):
@@ -69,6 +74,7 @@ class _FakeDvcOps:
     def __init__(self) -> None:
         self.init_calls: list[DvcInitCall] = []
         self.calls: list[DvcImportCall] = []
+        self.import_raises: Exception | None = None
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
         self.push_result: DvcPushResult = DvcPushResult(pushed=1, up_to_date=False)
@@ -134,6 +140,8 @@ class _FakeDvcOps:
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
+        if self.import_raises:
+            raise self.import_raises
         self.calls.append(
             DvcImportCall(
                 cwd=cwd, repo_url=repo_url, path=path, dest=dest, rev=rev,
@@ -148,6 +156,17 @@ class _FakeDvcOps:
             raise DvcOpError(
                 f"dvc import failed (exit 1): stage working dir "
                 f"'{dest.parent}' does not exist"
+            )
+        # Mirror real `dvc import -o <existing-dir>`: dvc treats the
+        # directory as a container, nests the source basename inside it, and
+        # refuses the overlap — mapped by SubprocessDvcOps to
+        # DvcImportDestinationExists. Without this the fake returns canned
+        # success and the force-clears-the-destination bug class is
+        # structurally untestable.
+        if dest.is_dir():
+            raise DvcImportDestinationExists(
+                f"destination '{dest}' already exists; remove the "
+                f"directory or pass force=True"
             )
         dvc_file = dest.parent / (dest.name + ".dvc")
         # Stub shape: enough for DataDependency.from_dvc_file to parse.

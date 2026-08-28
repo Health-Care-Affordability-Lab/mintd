@@ -116,6 +116,17 @@ class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
 
+class DvcDestinationGitIgnored(DvcOpError):
+    """dvc refused to write the pointer because its path is git-ignored.
+
+    A `DvcOpError` like every sibling, so existing handlers already render it —
+    but NOT a `DvcImportDestinationExists`, which is what it used to be
+    reported as. That message ("already exists; remove the directory or pass
+    force=True") named two remedies, both inert here, while dvc's own stderr —
+    the one thing that says which ignore rule bit — was discarded.
+    """
+
+
 class DvcImportDestinationExists(DvcOpError):
     """`dvc import` refused because the destination `.dvc` already exists.
 
@@ -422,9 +433,34 @@ class SubprocessDvcOps:
                 raise DvcImportPathNotFound(
                     f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"
                 )
-            if "already exists" in stderr or "use --force" in stderr:
+            # `is git-ignored` means two different things and the string
+            # cannot tell them apart — but the filesystem can. With the dest
+            # PRESENT it is the container-nesting refusal below wearing a
+            # different first-failing check (dvc wrote a `.gitignore` for the
+            # earlier import, and the nested stage file lands under it). With
+            # the dest ABSENT nothing is in the way and the ignore rule is the
+            # whole story, so "already exists; remove the directory or pass
+            # force=True" named two inert remedies and threw away the one fact
+            # that would have fixed it.
+            if "is git-ignored" in stderr and not dest.exists():
+                raise DvcDestinationGitIgnored(
+                    f"dvc will not write the pointer for '{dest}': that path "
+                    f"is git-ignored. Un-ignore it — a mintd scaffold's "
+                    f".gitignore already does, via '!/data/**/*.dvc' — or "
+                    f"choose another location with --dest-root. dvc said: "
+                    f"{stderr.strip()}"
+                )
+            if (
+                "already exists" in stderr
+                or "use --force" in stderr
+                # `-o <existing-dir>` makes dvc nest the source basename
+                # inside the directory, then refuse the overlap.
+                or "overlap and are thus in the same tracked directory" in stderr
+                or "is git-ignored" in stderr
+            ):
                 raise DvcImportDestinationExists(
-                    f"destination for '{dest}.dvc' already exists; pass force=True"
+                    f"destination '{dest}' already exists; remove the "
+                    f"directory or pass force=True"
                 )
             raise DvcOpError(
                 f"dvc import failed (exit {r.returncode}): {stderr.strip()}"

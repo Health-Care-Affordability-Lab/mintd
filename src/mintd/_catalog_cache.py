@@ -103,7 +103,7 @@ class CatalogCache:
         path = self._find_entry_path(name)
         if path is None:
             return None
-        return deserialize(path.read_text(encoding="utf-8"))
+        return deserialize(path.read_text(encoding="utf-8"), source=path)
 
     def list_entries(self, filter: CatalogFilter | None = None) -> list[CatalogEntry]:
         """Walk all catalog yaml files, optionally filter by project type."""
@@ -118,7 +118,7 @@ class CatalogCache:
             if not subdir.is_dir():
                 continue
             for path in sorted(subdir.glob("*.yaml")):
-                results.append(deserialize(path.read_text(encoding="utf-8")))
+                results.append(deserialize(path.read_text(encoding="utf-8"), source=path))
         return results
 
     # ------------------------------------------------------------------

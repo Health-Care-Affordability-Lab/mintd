@@ -88,6 +88,44 @@ class LocalProducer:
         self._write_metadata(meta)
         return self._commit_and_push(f"primary -> {new_path}")
 
+    def add_output(self, path: str, *, primary: bool = False) -> str:
+        """Advance HEAD and register `path` as a tracked output.
+
+        Metadata registration only — the bytes behind it are `publish()`'s
+        half. With `primary=True` the new entry also becomes
+        `data_products.primary` (demoting the previous holder)."""
+        meta = self.metadata()
+        outputs = meta["data_products"].setdefault("outputs", [])
+        if primary:
+            for out in outputs:
+                out["primary"] = False
+            meta["data_products"]["primary"] = path
+        outputs.append(
+            {
+                "path": path,
+                "description": f"harness output {path}",
+                "primary": primary,
+                "last_published": "",
+            }
+        )
+        self._write_metadata(meta)
+        return self._commit_and_push(f"add output {path}")
+
+    def restamp(self, path: str, stamp: str) -> str:
+        """Advance HEAD rewriting only `last_published` on `path`'s entry.
+
+        The md5 drift rule must ignore this: a stamp is a per-publish
+        timestamp, not a content identity."""
+        meta = self.metadata()
+        matched = False
+        for out in meta["data_products"].get("outputs") or []:
+            if out.get("path") == path:
+                out["last_published"] = stamp
+                matched = True
+        assert matched, f"no output {path!r} to restamp"
+        self._write_metadata(meta)
+        return self._commit_and_push(f"restamp {path}")
+
     # -- tags ---------------------------------------------------------------
 
     def tag(self, name: str, *, rev: str = "HEAD") -> None:

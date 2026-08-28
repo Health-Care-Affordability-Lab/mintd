@@ -54,12 +54,14 @@ from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
     CatalogClient,
+    CatalogEntryInvalid,
     CatalogFilter,
     CatalogNotFound,
     GitCatalogClient,
 )
 from .check import CheckFinding, check_project
 from .data import (
+    AmbiguousImport,
     BumpBlocked,
     ImportDestinationExists,
     ImportNotFound,
@@ -181,6 +183,7 @@ def _build_reporter(args: argparse.Namespace) -> Reporter:
 _KIND_PREFIX: dict[str | None, str] = {
     "up_to_date": "✓",
     "drift": "↑",
+    "drift_unknown": "⚠",
     "unreachable": "⚠",
     "schema_too_old": "⚠",
     "pin_missing": "✗",
@@ -191,7 +194,9 @@ _KIND_PREFIX: dict[str | None, str] = {
     None: "·",
 }
 
-_RECOVERABLE_KINDS: frozenset[str] = frozenset({"unreachable", "schema_too_old"})
+_RECOVERABLE_KINDS: frozenset[str] = frozenset(
+    {"unreachable", "schema_too_old", "drift_unknown"}
+)
 
 
 class _MintdArgumentParser(argparse.ArgumentParser):
@@ -233,6 +238,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     except ConfigError as e:
         args._reporter.error(str(e))
+        return 1
+    except CatalogEntryInvalid as e:
+        # Every verb that reads the catalog can hit this, and only one of them
+        # (`data import`, plain arm) happened to catch the pydantic half via
+        # its bare `ValueError`. One arm here rather than eleven below.
+        args._reporter.error(
+            str(e),
+            hint="fix the entry in the registry repo, then 'mintd registry sync'",
+        )
         return 1
     finally:
         args._reporter.uninstall_log_bridge()
@@ -358,14 +372,41 @@ def _build_parser() -> argparse.ArgumentParser:
     p_data = subs.add_parser("data", help="Data commands")
     p_data_sub = p_data.add_subparsers(dest="data_command")
     p_import = p_data_sub.add_parser("import", help="Import a producer's data product")
-    p_import.add_argument("name")
-    p_import.add_argument("--bump", action="store_true")
-    p_import.add_argument("--path", dest="import_path")
-    p_import.add_argument("--rev")
-    p_import.add_argument("--all", dest="all_outputs", action="store_true")
-    p_import.add_argument("--force", action="store_true")
     p_import.add_argument(
-        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root"
+        "name",
+        help="Registered data product name (the catalog key) — the same "
+             "identifier for import and for --bump",
+    )
+    p_import.add_argument(
+        "--bump", action="store_true",
+        help="Re-pin an existing import to the producer's HEAD; selects the "
+             "import with the same name/--path pair a plain import uses",
+    )
+    p_import.add_argument(
+        "--path", dest="import_path", action="append", default=[], metavar="PATH",
+        help="Import only this tracked output — a file or directory from the "
+             "product's data_products.outputs (repeatable; same selector as "
+             "`mintd data clone --path`). Default: the primary output.",
+    )
+    p_import.add_argument(
+        "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
+    )
+    p_import.add_argument(
+        "--all", dest="all_outputs", action="store_true",
+        help="Import every tracked output of the product",
+    )
+    p_import.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing import of the same output",
+    )
+    p_import.add_argument(
+        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root",
+        help="Directory imports land under (default: data/imports)",
+    )
+    p_import.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_import.add_argument(
+        "--timeout", type=float, default=None,
+        help="Wall-clock cap in seconds for the import (default: unbounded)",
     )
     p_import.add_argument(
         "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
@@ -693,6 +734,16 @@ def _resolve_catalog_client(config: Config) -> CatalogClient:
         registry_repo_url=config.registry_url,
         work_dir=config.resolved_cache_dir() / "registry",
     )
+
+
+def _timeouts_for(config: Config, timeout: float | None):
+    """Effective timeouts for a `--timeout` flag: `None` keeps the config's,
+    `0` lifts the transfer cap, anything else overrides it. One definition
+    for `data clone` and `data import` so the flag cannot drift."""
+    if timeout is None:
+        return config.timeouts
+    override = None if timeout == 0 else timeout
+    return config.timeouts.model_copy(update={"transfer": override})
 
 
 def _resolve_dvc_ops(config: Config, reporter: Optional[Reporter] = None) -> DvcOps:
@@ -1602,12 +1653,8 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     reporter = args._reporter
     t0 = time.monotonic()
     config = Config.load()
-    if args.timeout is None:
-        effective_timeouts = config.timeouts
-    else:
-        override = None if args.timeout == 0 else args.timeout
-        effective_timeouts = config.timeouts.model_copy(update={"transfer": override})
-    
+    effective_timeouts = _timeouts_for(config, args.timeout)
+
     client = _resolve_catalog_client(config)
     dvc_ops = SubprocessDvcOps(
         timeouts=effective_timeouts,
@@ -1807,13 +1854,25 @@ def _import_summary(produced: list[Path]) -> dict:
 
 
 def _handle_data_import(args: argparse.Namespace) -> int:
-    if args.bump and (args.import_path or args.rev or args.all_outputs):
-        args._parser.error("--bump cannot be combined with --path, --rev, or --all")
+    # `--rev` contradicts "move to HEAD"; bumping every output at once is
+    # not a thing. `--path` IS allowed with --bump (it selects the row),
+    # but only one — silently bumping the first of several is the exact
+    # last-writer-wins defect D-A killed.
+    if args.bump and (args.rev or args.all_outputs):
+        args._parser.error("--bump cannot be combined with --rev or --all")
+    if args.bump and len(args.import_path) > 1:
+        args._parser.error("--bump takes at most one --path")
 
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
+    config = config.model_copy(update={"timeouts": _timeouts_for(config, args.timeout)})
     client = _resolve_catalog_client(config)
     dvc_ops = _resolve_dvc_ops(config, reporter)
+    dvc_args = list(args.dvc_args)
+    if args.jobs:
+        # `dvc import` takes `-j`; riding extra_args keeps the DvcOps
+        # protocol (and its fakes) untouched.
+        dvc_args.extend(["-j", str(args.jobs)])
 
     if args.bump:
         try:
@@ -1823,12 +1882,28 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                     dvc_ops,
                     project_path=Path("."),
                     name=args.name,
-                    force=args.force,
+                    path=args.import_path[0] if args.import_path else None,
+                    extra_dvc_args=dvc_args or None,
                 )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
-        except (ImportNotFound, PrimaryRemovedAtHead) as exc:
+        except (
+            AmbiguousImport,
+            ImportNotFound,
+            PrimaryRemovedAtHead,
+            # The namespace/ownership guards' raise site on this arm.
+            UnknownProductPath,
+        ) as exc:
             reporter.error(str(exc))
+            return 1
+        except GitOpError as exc:
+            # `--bump` reads the catalog now (product name -> namespace),
+            # which it did not before, so an unreachable registry is a new
+            # failure mode on this path. `data clone` renders it the same way.
+            reporter.error(
+                str(exc),
+                hint="check git auth (gh auth status / ssh -T git@github.com)",
+            )
             return 1
         except DvcOpError as exc:
             reporter.error(str(exc), hint="check connectivity then retry: mintd config validate")
@@ -1858,24 +1933,55 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             args.name,
             cwd=Path("."),
             dest_root=args.dest_root,
-            path=args.import_path,
+            # `or None` is load-bearing: an empty list is not None, so
+            # without it `_resolve_paths` returns [] and a plain import
+            # exits 0 having written nothing (`data clone` carries the
+            # same guard).
+            path=args.import_path or None,
             rev=args.rev,
             all_outputs=args.all_outputs,
             force=args.force,
-            extra_dvc_args=args.dvc_args or None,
+            extra_dvc_args=dvc_args or None,
             reporter=reporter,
         )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")
         return 1
+    except UnknownProductPath as exc:
+        # The containment guard's raise site. `data clone` already renders
+        # this (see `_handle_data_clone`); without it here a leading slash in
+        # `--path`, or a catalog entry carrying an absolute/`..` output path,
+        # exits through `main()` as a raw traceback.
+        reporter.error(
+            str(exc),
+            hint="pass --path relative to the producer's repo root",
+        )
+        return 1
     except (
+        AmbiguousImport,
         MissingPrimaryDataProduct,
         ImportDestinationExists,
         ImportNotFound,
         PrimaryRemovedAtHead,
         ProducerError,
+        # `_require_repo_url`'s bare ValueError. `CatalogEntry` is
+        # `extra="allow"` with no required fields, so an entry with no
+        # `repository.github_url` reaches it. LAST in the tuple so
+        # `UnknownProductPath` — a ValueError subclass — keeps its own hint
+        # above; `_handle_data_clone` catches ValueError the same way.
+        ValueError,
     ) as exc:
         reporter.error(str(exc))
+        return 1
+    except GitOpError as exc:
+        # Not bump-only: the plain arm reads the catalog too (`client.fetch`
+        # -> `CatalogCache.ensure_fresh` -> git clone/fetch/reset), so an
+        # unreachable registry lands here as well. Same hint as `--bump`
+        # and `data clone`.
+        reporter.error(
+            str(exc),
+            hint="check git auth (gh auth status / ssh -T git@github.com)",
+        )
         return 1
     except DvcOpError as exc:
         reporter.error(
@@ -2119,16 +2225,15 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
         # D1: this add INHERITED the repo's recorded pin, it did not resolve
         # HEAD. If the path did not exist at that pin the add still succeeds and
         # `pull` is what fails, so name the remedy now rather than in the notes.
-        # `--force` is not decoration: check's drift walk short-circuits a row to
-        # `up to date` exactly when its source_path is absent from the pinned
-        # outputs -- this state -- so bare `enclave bump` returns "up to date"
-        # with the pin unmoved. Narrow this to bare `bump` once the check-drift
-        # lane fixes that short-circuit.
+        # Bare `bump` suffices since the md5 drift rule: a path published at
+        # HEAD but absent at the pin reports as drift, so the bump moves the
+        # pin without `--force` (which skips every guard and was only ever a
+        # workaround for the retired short-circuit).
         reporter.warn(
             f"inherited the pin recorded for {ap.repo} ({ap.pin[:7]}) - one pin per repo. "
             f"If {subscription_label(ap)} is newer than that pin, "
             f"'mintd enclave pull' will fail; run "
-            f"'mintd enclave bump {ap.repo} --force' to move every subscription."
+            f"'mintd enclave bump {ap.repo}' to move every subscription."
         )
     return 0
 
@@ -2848,6 +2953,18 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
     kind = exc.finding.kind
     if kind == "unreachable":
         print("hint: retry when the network is available", file=sys.stderr)
+    elif kind == "drift_unknown":
+        # Five states reach this kind and only two are transport failures, so
+        # a fixed "check the network" misdiagnosed three of them at a network
+        # that was working. Prefer the finding's own hint, as
+        # `catalog_unresolved` below already does. Still `kind` dispatch.
+        print(
+            "hint: " + (
+                exc.finding.hint
+                or "'mintd check --upgrades' shows the row and the reason"
+            ),
+            file=sys.stderr,
+        )
     elif kind == "schema_too_old":
         print(
             "hint: ask the producer to update their metadata schema to 2.0",

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from mintd._dvc_invoke import dvc_cmd
-from mintd._dvc_ops import DvcOps, SubprocessDvcOps
+from mintd._dvc_ops import DvcOpError, DvcOps, SubprocessDvcOps
 from mintd.imports import DataDependency
 from tests._fakes.dvc_ops import _FakeDvcOps
 
@@ -800,3 +800,102 @@ def test_a_cwd_that_is_a_regular_file_does_not_escape_as_a_traceback(
     # handler catches -- so pinning the class here pins "no traceback" too.
     with pytest.raises(DvcRepoPathError):
         ops.status(cwd=a_file)
+
+
+# ---------------------------------------------------------------------------
+# issue09 fix 4 — the `-o <existing-dir>` stderr shapes map to a typed error
+# ---------------------------------------------------------------------------
+
+
+class _CannedStderrDvcOps(SubprocessDvcOps):
+    """`import_` with `_spawn` replaced by a canned failing result — the
+    stderr classifier is the unit under test, no subprocess involved."""
+
+    def __init__(self, stderr: str) -> None:
+        from mintd._config import Timeouts
+
+        super().__init__(timeouts=Timeouts())
+        self._stderr = stderr
+
+    def _spawn(self, cmd, **kwargs):  # type: ignore[override]
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            returncode=1, stderr_lines=[self._stderr], stdout_lines=[]
+        )
+
+
+GIT_IGNORED_STDERR = "ERROR: bad DVC file name 'final/final.dvc' is git-ignored."
+
+
+@pytest.mark.parametrize(
+    "stderr,dest_exists",
+    [
+        # dvc's overlap refusal after nesting the source inside the existing
+        # directory dest ...
+        ("ERROR: Paths for outs:\n'final'\n'final/final'\noverlap and are thus in the same tracked directory.", False),
+        # ... and the gitignore-dependent variant of the SAME root cause: dvc
+        # wrote a `.gitignore` for the first import and the nested stage file
+        # lands under it. Only reachable with the destination present, which
+        # is what `[real]` in the contract suite exercises.
+        (GIT_IGNORED_STDERR, True),
+        # The classic pre-existing `.dvc` shape keeps mapping too.
+        ("ERROR: output 'final.dvc' already exists", False),
+    ],
+    ids=["overlap", "git-ignored-dest-present", "already-exists"],
+)
+def test_import_existing_dir_stderr_maps_to_destination_exists(
+    tmp_path: Path, stderr: str, dest_exists: bool
+) -> None:
+    from mintd._dvc_ops import DvcImportDestinationExists
+
+    ops = _CannedStderrDvcOps(stderr)
+    dest = tmp_path / "final"
+    if dest_exists:
+        dest.mkdir()
+
+    with pytest.raises(DvcImportDestinationExists) as ei:
+        ops.import_(
+            repo_url="https://example.org/repo",
+            path="data/final/",
+            dest=dest,
+            cwd=tmp_path,
+        )
+    # The message names the DIRECTORY to remove, not the `.dvc`.
+    assert str(dest) in str(ei.value)
+    assert f"{dest}.dvc" not in str(ei.value)
+
+
+def test_git_ignored_with_nothing_in_the_way_is_not_destination_exists(
+    tmp_path: Path,
+) -> None:
+    """Same stderr, destination ABSENT: a user-edited `.gitignore`, a global
+    `core.excludesFile`, or a `--dest-root` outside the scaffold's negation
+    rules. Reporting "already exists; remove the directory or pass force=True"
+    offered two remedies that do nothing here, and discarded dvc's own line —
+    the only place the responsible ignore rule is named. The user acts on the
+    advice, gets the identical message back, and loops.
+
+    Mutation: drop the `not dest.exists()` guard -> DvcImportDestinationExists.
+    """
+    from mintd._dvc_ops import DvcDestinationGitIgnored, DvcImportDestinationExists
+
+    dest = tmp_path / "final"
+    assert not dest.exists()
+
+    with pytest.raises(DvcDestinationGitIgnored) as ei:
+        _CannedStderrDvcOps(GIT_IGNORED_STDERR).import_(
+            repo_url="https://example.org/repo",
+            path="data/final/",
+            dest=dest,
+            cwd=tmp_path,
+        )
+
+    # Still a DvcOpError, so every existing handler renders it unchanged...
+    assert isinstance(ei.value, DvcOpError)
+    assert not isinstance(ei.value, DvcImportDestinationExists)
+    # ...but dvc's own line survives, and the remedies are the real ones.
+    assert "git-ignored" in str(ei.value)
+    assert "final/final.dvc" in str(ei.value)
+    assert "--dest-root" in str(ei.value)
+    assert "force=True" not in str(ei.value)

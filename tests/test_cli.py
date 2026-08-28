@@ -8,6 +8,8 @@ the ``_resolve_*`` factories to inject fakes. One subprocess smoke test
 
 from __future__ import annotations
 
+import ast
+import builtins
 import json
 import shutil
 import subprocess
@@ -356,6 +358,149 @@ def test_cli_data_import_threads_dvc_args(
     assert rc == 0
     assert len(dvc_ops.calls) == 1
     assert dvc_ops.calls[0].extra_args == ["--verbose"]
+
+
+def test_data_import_repeated_path_imports_each(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """D-B: `--path` is repeatable — each lands as its own `dvc import`.
+    Asserted on the dvc CALLS, not on `args.import_path`: a parser-only
+    assertion green-lights a signature that mishandles a list."""
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+    rc = cli.main([
+        "data", "import", "provider-xw",
+        "--dest-root", str(tmp_path),
+        "--path", "outputs/a.csv",
+        "--path", "outputs/b.csv",
+    ])
+    assert rc == 0
+    assert [c.path for c in dvc_ops.calls] == ["outputs/a.csv", "outputs/b.csv"]
+
+
+def test_data_import_plain_import_still_imports_the_primary(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """M8's falsifier: `--path`'s `default=[]` must become None before
+    `_resolve_paths`, or a plain import loops zero times and exits 0 having
+    written nothing."""
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    assert rc == 0
+    assert [c.path for c in dvc_ops.calls] == ["outputs/main.parquet"]
+
+
+def test_data_import_jobs_reaches_the_dvc_argv(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """`--jobs` rides `extra_args` as `-j <n>` (no DvcOps protocol change)."""
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+    rc = cli.main([
+        "data", "import", "provider-xw",
+        "--dest-root", str(tmp_path),
+        "--dvc-arg=--verbose",
+        "--jobs", "4",
+    ])
+    assert rc == 0
+    assert dvc_ops.calls[0].extra_args == ["--verbose", "-j", "4"]
+
+
+def test_data_import_forwards_the_dvc_argv_on_both_arms() -> None:
+    """`dvc_args` is assembled ABOVE the `if args.bump:` branch, and was only
+    ever passed on the plain one — so `--bump --jobs 8` exited 0, printed
+    nothing, and ran at default parallelism. `--timeout` on the same arm always
+    worked, which is what made the gap invisible.
+
+    Read from the SOURCE rather than through a double: the only runtime path
+    to `dvc_ops.import_` under `--bump` goes through `check_project`, and
+    stubbing either that or `bump_import` would grow the internal-stub census
+    `test_substrate_rules.py` pins shrink-only. `test_bump_forwards_extra_dvc_args`
+    (tests/test_data.py) covers the plumbing below this seam.
+
+    Mutation: drop `extra_dvc_args=` from either call -> this reddens.
+    """
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    handler = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_handle_data_import"
+    )
+    forwarded = {
+        node.func.id: {kw.arg for kw in node.keywords}
+        for node in ast.walk(handler)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"bump_import", "import_product"}
+    }
+
+    assert set(forwarded) == {"bump_import", "import_product"}, forwarded
+    for callee, kwargs in forwarded.items():
+        assert "extra_dvc_args" in kwargs, f"{callee} drops the assembled dvc argv"
+
+
+def test_data_import_timeout_reaches_the_dvc_ops_factory(
+    tmp_path: Path,
+    patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--timeout` overrides `timeouts.transfer` on the config the dvc-ops
+    factory receives — the same `_timeouts_for` seam `data clone` uses."""
+    _client, dvc_ops = patched_clients
+    _register_provider_xw(_client)
+    seen: list[Any] = []
+
+    def capturing(cfg: Any, reporter: Any = None, **_: Any) -> Any:
+        seen.append(cfg)
+        return dvc_ops
+
+    monkeypatch.setattr("mintd.cli._resolve_dvc_ops", capturing)
+    rc = cli.main([
+        "data", "import", "provider-xw",
+        "--dest-root", str(tmp_path),
+        "--timeout", "5",
+    ])
+    assert rc == 0
+    assert seen[0].timeouts.transfer == 5
+
+
+def test_data_import_and_clone_share_the_selector_flags() -> None:
+    """Parser parity: `--path` (repeatable), `--jobs` and `--timeout` parse
+    identically on `data import` and `data clone` — the clone help text
+    claims "same selector as `mintd data import --path`", which used to be
+    false."""
+    parser = cli._build_parser()
+
+    imp = parser.parse_args([
+        "data", "import", "x", "--path", "a", "--path", "b",
+        "--jobs", "3", "--timeout", "7",
+    ])
+    clone = parser.parse_args([
+        "data", "clone", "x", "--path", "a", "--path", "b",
+        "--jobs", "3", "--timeout", "7",
+    ])
+
+    assert imp.import_path == ["a", "b"]
+    assert clone.paths == ["a", "b"]
+    assert imp.jobs == clone.jobs == 3
+    assert imp.timeout == clone.timeout == 7.0
+
+
+def test_data_import_bump_rejects_more_than_one_path(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """Silently bumping the first of several `--path`s is the last-writer-
+    wins defect D-A killed; argparse misuse exits 64."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main([
+            "data", "import", "provider-xw", "--bump",
+            "--path", "a", "--path", "b",
+        ])
+    assert exc.value.code == 64
 
 
 def test_data_import_unknown_name_exits_one(
@@ -3668,8 +3813,12 @@ def test_enclave_add_second_path_warns_pin_was_inherited(
     err = capsys.readouterr().err
     assert rc == 0
     assert "inherited" in err
-    assert "--force" in err
+    assert "bump" in err
     assert "provider-xw" in err
+    # The md5 drift rule reports a path published after the pin as drift, so
+    # bare `bump` moves the pin; the advisory must not send users through
+    # `--force`, which skips every guard (M17).
+    assert "--force" not in err
 
 
 def test_enclave_add_hints_only_name_flags_the_parser_accepts() -> None:
@@ -3804,3 +3953,315 @@ def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
     assert rc == 0
     assert len(EnclaveManifest.load(manifest).approved_products) == 2
     assert "inherited" not in err, "nothing was inherited; the sibling pin is blank"
+
+
+def test_render_findings_distinguishes_rows_by_message_not_field_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D-D's render half: `_render_findings` prints `prefix [severity]
+    source: message` — `field_path` is invisible outside `--json`, which is
+    why the per-row label had to land in the MESSAGE."""
+    source = Path("enclave_manifest.yaml")
+    findings = [
+        CheckFinding(severity="info", section="consumer",
+                     message=f"up to date ({label})", source=source,
+                     field_path="approved_products[provider-xw]",
+                     kind="up_to_date")
+        for label in ("data/final/a", "data/final/b", "<primary>")
+    ]
+
+    rc = cli._render_findings(findings, json_out=False)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "up to date (data/final/a)" in out
+    assert "up to date (data/final/b)" in out
+    assert "up to date (<primary>)" in out
+    assert "approved_products" not in out
+
+
+def test_data_import_escaping_path_is_reported_not_raised(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """The containment guard's raise site must render like every other
+    documented failure. `data clone` already catches `UnknownProductPath`;
+    the import handler did not, so a leading slash in `--path` — an ordinary
+    typo — exited `main()` as a Python traceback.
+
+    Mutation: drop the `except UnknownProductPath` arm -> this reddens.
+    """
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+
+    rc = cli.main(
+        ["data", "import", "provider-xw", "--path", "/etc", "--dest-root", str(tmp_path)]
+    )
+
+    assert rc == 1
+    assert dvc_ops.calls == []
+    err = " ".join(capsys.readouterr().err.split())
+    assert "outside the import root" in err
+    # The hint is the only thing distinguishing this clause from the broad
+    # `except (... ValueError)` below it, which also renders the message.
+    assert "relative to the producer" in err
+
+
+def test_data_import_escaping_full_name_is_contained(
+    tmp_path: Path,
+    patched_clients,
+) -> None:
+    """The namespace comes from the SAME untrusted entry as the output path,
+    so a guard anchored on `dest_root / full_name` would measure an escaped
+    path against an equally escaped base and pass. Anchor is `dest_root`.
+
+    `_import_namespace`'s one-component rule now refuses `..` before the
+    containment check ever runs, so this test reddens on the namespace rule;
+    the containment anchor is owned by the output-path tests (and is now
+    `nested_root`, which the namespace rule is what makes safe).
+    """
+    client, dvc_ops = patched_clients
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "provider-xw"
+    data["project"]["full_name"] = "../../../../elsewhere"
+    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["data_products"]["primary"] = "outputs/main.parquet"
+    client.register(Metadata.model_validate(data))
+
+    rc = cli.main(
+        ["data", "import", "provider-xw", "--dest-root", str(tmp_path / "imports")]
+    )
+
+    assert rc == 1
+    assert dvc_ops.calls == []
+
+
+def test_data_import_bump_renders_an_unreachable_registry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """`--bump` reads the catalog now (product name -> namespace) where it
+    used to `del client`, so an unreachable registry became a NEW failure
+    mode on this path — and `GitCatalogClient.fetch` raises `GitOpError`,
+    which the bump handler did not catch. Offline / VPN-gated registries are
+    ordinary for this fleet, so it must render, not traceback.
+
+    Mutation: drop the `except GitOpError` arm -> this reddens.
+    """
+    client, _ = patched_clients
+    _register_provider_xw(client)
+
+    def _unreachable(*a: object, **k: object):
+        raise GitOpError(["git", "fetch"], "Could not resolve host: github.com")
+
+    monkeypatch.setattr(client, "fetch", _unreachable)
+
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Could not resolve host" in err
+
+
+def test_data_import_bump_renders_a_bad_namespace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """The namespace guard's raise site on the `--bump` arm. That arm's
+    except chain did not catch `UnknownProductPath` (a `ValueError`) and
+    neither does `main()`, so without the handler `mintd data import ..
+    --bump` exits through a raw traceback.
+
+    Whitespace-normalised because the reporter wraps long messages at the
+    terminal width, which can split the phrase across lines.
+
+    Mutation: drop `UnknownProductPath` from the bump arm's except tuple ->
+    this reddens.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli.main(["data", "import", "..", "--bump"])
+
+    assert rc == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "single folder name" in err
+
+
+_AMBIGUOUS_DVC = """\
+deps:
+- path: outputs/main.parquet
+  repo:
+    url: https://github.com/example-org/provider-xw
+    rev_lock: {sha}
+outs:
+- path: {out}
+  md5: d41d8cd98f00b204e9800998ecf8427e.dir
+"""
+
+
+def test_data_import_duplicate_pointer_reports_instead_of_tracebacking(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """Two `.dvc` under one namespace recording the same producer path make
+    `_imports_index` raise `AmbiguousImport` on the PLAIN import arm — the
+    handler caught it only under `--bump`, so a consumer holding a legacy
+    plus a mirrored pointer got a raw traceback out of `main()`.
+
+    Mutation: drop `AmbiguousImport` from `_handle_data_import`'s non-bump
+    `except` chain -> this reddens.
+    """
+    client, _dvc_ops = patched_clients
+    _register_provider_xw(client)
+    ns = tmp_path / "data_provider-xw"
+    ns.mkdir()
+    (ns / "main.parquet.dvc").write_text(_AMBIGUOUS_DVC.format(sha="a" * 40, out="main.parquet"))
+    (ns / "legacy.dvc").write_text(_AMBIGUOUS_DVC.format(sha="b" * 40, out="legacy"))
+
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+
+    assert rc == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "record the same producer path" in err
+    assert "remove one" in err
+
+
+def _reachable_raises(root: str) -> set[str]:
+    """Exception NAMES raised by `src/mintd/data.py` functions reachable from
+    `root`, following calls to other module-level functions in that file.
+
+    Derived, not listed: a raise site added to a helper `import_product`
+    already calls is picked up with no literal to remember. Three raise sites
+    in this unit (`UnknownProductPath`, `GitOpError`, `AmbiguousImport`)
+    shipped with no handler on this arm.
+
+    SCOPE HOLES, stated rather than closed: it sees `raise` statements only
+    (never an implicit `AttributeError` — `_section` is what covers those),
+    and only module-level `def`s in data.py (a helper moved to another module
+    disappears from the walk). `_EXPECTED_HINTS` below is the tripwire for
+    both: the set is pinned, so a name appearing OR vanishing fails loudly.
+    """
+    tree = ast.parse((Path(cli.__file__).parent / "data.py").read_text(encoding="utf-8"))
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    raised: set[str] = set()
+    seen: set[str] = set()
+    todo = [root]
+    while todo:
+        name = todo.pop()
+        if name in seen or name not in fns:
+            continue
+        seen.add(name)
+        for node in ast.walk(fns[name]):
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                func = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                if isinstance(func, ast.Attribute):  # ProducerError.unreachable(...)
+                    func = func.value
+                if isinstance(func, ast.Name):
+                    raised.add(func.id)
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                todo.append(node.func.id)
+    return raised
+
+
+#: Every exception the non-bump arm must render, and the hint fragment that
+#: proves it was rendered by ITS OWN clause rather than swallowed by a
+#: broader one. Without the hints, collapsing the whole chain into a single
+#: `except Exception` passes every case here.
+_EXPECTED_HINTS: dict[str, str | None] = {
+    "AmbiguousImport": None,
+    # Raised behind `client.fetch` (`CatalogCache.ensure_fresh` -> git
+    # clone/fetch/reset), so it is inside the handler's `try` without being
+    # visible to a scan of data.py.
+    "GitOpError": "check git auth",
+    "ImportDestinationExists": None,
+    "MissingPrimaryDataProduct": None,
+    "UnknownProductPath": "relative to the producer",
+    "ValueError": None,
+}
+
+#: Exception types whose constructor is not a bare message.
+_EXC_ARGS: dict[str, tuple[Any, ...]] = {"GitOpError": (["git", "fetch"], "boom")}
+
+
+def test_import_raise_sites_all_have_a_handler_case() -> None:
+    """The tripwire for `_reachable_raises`' two scope holes.
+
+    A NEW name means a raise site nothing renders — add the clause, then the
+    entry. A VANISHED name means the walk went blind (a helper moved out of
+    data.py), not that the raise site is gone.
+    """
+    assert _reachable_raises("import_product") | {"GitOpError"} == set(_EXPECTED_HINTS)
+
+
+@pytest.mark.parametrize("exc_name", sorted(_EXPECTED_HINTS))
+def test_data_import_renders_every_reachable_exception(
+    exc_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """Every exception type reachable inside `_handle_data_import`'s non-bump
+    `try` renders through the reporter with rc 1 — with its own hint — never
+    a raw traceback out of `main()` (which catches only KeyboardInterrupt /
+    WallTimeoutExceeded / ConfigError).
+
+    The type is raised from the `dvc_ops.import_` boundary — the last call in
+    the `try` — because what is under test is the handler's `except` chain,
+    not each raise site's own trigger.
+
+    Mutations: drop any name from that chain, fold a hinted clause into the
+    bare-message tuple, or collapse the chain into `except Exception` -> the
+    matching case reddens.
+    """
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client)
+    exc_type = getattr(cli, exc_name, None) or getattr(builtins, exc_name)
+
+    def _raise(**_: Any) -> Path:
+        raise exc_type(*_EXC_ARGS.get(exc_name, ("boom",)))
+
+    monkeypatch.setattr(dvc_ops, "import_", _raise)
+
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+
+    assert rc == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "boom" in err
+    hint = _EXPECTED_HINTS[exc_name]
+    if hint is not None:
+        assert hint in err, "rendered without its own clause's hint"
+
+
+def test_a_corrupt_registry_entry_is_an_error_not_a_traceback(
+    patched_clients,
+    recording_reporter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--bump` reads the catalog (product name -> namespace), which it did not
+    before. Neither `pydantic.ValidationError` nor `yaml.YAMLError` was caught
+    on that arm or in `main()`, so one merge-conflict marker in someone else's
+    registry file exited through a stack trace. `main()` catches it now, so
+    every catalog-reading verb is covered, not just this one.
+
+    Mutation: remove the `CatalogEntryInvalid` arm from `main()` -> raises.
+    """
+    from mintd.catalog import CatalogEntryInvalid
+
+    client, _ = patched_clients
+    monkeypatch.setattr(client, "fetch", lambda name: (_ for _ in ()).throw(
+        CatalogEntryInvalid("catalog entry is unreadable (/r/provider-xw.yaml): boom")
+    ))
+
+    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+
+    assert rc == 1
+    msg = recording_reporter.events_of("error")[-1][1]
+    assert "unreadable" in msg
+    assert "provider-xw.yaml" in msg

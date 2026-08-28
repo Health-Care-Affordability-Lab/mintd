@@ -35,6 +35,11 @@ from __future__ import annotations
 
 import argparse
 import posixpath
+
+# The production helper, not a copy: `check._pointer_md5` resolves the
+# same wdir-relative lock paths for a REMOTE rev, and the two must agree or a
+# scaffold this file blesses is one the drift comparator cannot read.
+from mintd._fast_sync_ops import resolve_out as _resolve_out
 import re
 import subprocess
 from pathlib import Path
@@ -81,11 +86,6 @@ def mintd_verb_path(cmd: str) -> list[str]:
     return verbs
 
 
-def _resolve_out(wdir: str, out: str) -> str:
-    """Resolve a stage ``out`` (relative to ``wdir``) to a project-root-relative
-    POSIX path. ``wdir="code"``, ``out="../schemas/v1/schema.json"`` ->
-    ``"schemas/v1/schema.json"``."""
-    return posixpath.normpath(posixpath.join(wdir or ".", out))
 
 
 def check_stage_outs(stages: dict, script_texts: list[str]) -> list[str]:
