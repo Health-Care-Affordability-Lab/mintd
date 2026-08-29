@@ -475,9 +475,16 @@ def test_import_product_force_never_destroys_a_stray_directory(
 ) -> None:
     """The rmtree is guarded on the `.dvc` existing too: a directory at the
     destination that mintd did NOT import (no pointer beside it) is user
-    data and must survive — the import fails instead."""
-    from mintd._dvc_ops import DvcImportDestinationExists
+    data and must survive a forced re-import.
 
+    This test used to expect `DvcImportDestinationExists` here — a refusal
+    the fake invented. Real dvc treats an untracked directory dest as a
+    *container*: it nests the source basename inside and exits 0 (licensed
+    on both arms by `test_import_into_an_untracked_directory_dest_nests_inside`
+    in tests/test_dvc_ops_contract.py). So the import PROCEEDS, one level
+    deep, and the stray's contents survive twice over: mintd's rmtree never
+    fires (drop the `target_dvc.exists()` conjunct and the precious.csv
+    assertion reddens), and dvc itself never clears the container."""
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
@@ -485,13 +492,20 @@ def test_import_product_force_never_destroys_a_stray_directory(
     dest.mkdir(parents=True)
     (dest / "precious.csv").write_text("not mintd's to delete")
 
-    with pytest.raises(DvcImportDestinationExists):
-        import_product(
-            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
-            force=True,
-        )
+    produced = import_product(
+        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
+        force=True,
+    )
 
     assert (dest / "precious.csv").read_text() == "not mintd's to delete"
+    # The import went through, nested inside the container as real dvc
+    # nests it, rather than failing on a rule dvc does not have.
+    assert len(fake.calls) == 1
+    assert (dest / "cms_based.dvc").is_file()
+    # The seam's return is computed from the original dest, so it names the
+    # un-nested pointer — which was never written (contract-pinned wart).
+    assert produced == [dest.parent / "cms_based.dvc"]
+    assert not produced[0].exists()
 
 
 @pytest.mark.parametrize(
