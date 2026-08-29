@@ -110,6 +110,21 @@ def _real_aws_credentials_are_unreachable(monkeypatch):
         )
 
     monkeypatch.setattr(_aws_credentials, "default_credentials_path", _boom)
+    # Same ratchet, other channel -- and the HERMETIC DEFAULT that keeps the
+    # boom from firing on every test. A developer's ambient
+    # $AWS_SHARED_CREDENTIALS_FILE must not steer Config.aws_profile_name,
+    # but merely deleting it sends resolution to the home fallback -- the
+    # boom -- from EVERY test that transitively touches aws_profile_name
+    # (113 of them, measured 2026-08-29 the moment resolution gained one
+    # chokepoint; before that they read the developer's REAL credentials
+    # file, green and unhermetic). Pointing the env var at a path that never
+    # exists gives every test "no file, no profile" deterministically. A test
+    # that wants a profile sets the env var itself; one that wants the HOME
+    # FALLBACK branch deletes the env var and overrides the boom at the
+    # default_credentials_path seam.
+    monkeypatch.setenv(
+        "AWS_SHARED_CREDENTIALS_FILE", "/mintd-tests-no-credentials-file"
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -141,6 +141,25 @@ def test_has_profile_false_when_keys_blank(tmp_path: Path) -> None:
     assert has_profile("mintd", credentials_path=creds) is False
 
 
+def test_has_profile_false_when_file_undecodable(tmp_path: Path) -> None:
+    """A non-UTF8 credentials file (e.g. UTF-16 from PowerShell Set-Content)
+    means 'no profile', not a UnicodeDecodeError traceback out of
+    `mintd config setup` — parity with Config.aws_profile_name on the same
+    bytes."""
+    creds = tmp_path / "credentials"
+    creds.write_bytes(b"\xff\xfe\x00binary[garbage")
+    assert has_profile("mintd", credentials_path=creds) is False
+
+
+def test_has_profile_false_when_file_malformed(tmp_path: Path) -> None:
+    """Syntactically broken INI means 'no profile' — pins the
+    configparser.Error half of the except tuple."""
+    creds = tmp_path / "credentials"
+    creds.write_text("[mintd\naws_access_key_id = x\n")
+    assert has_profile("mintd", credentials_path=creds) is False
+
+
+
 # ---------- crash safety ----------
 
 
@@ -225,3 +244,49 @@ def test_write_profile_update_leaves_the_file_at_0600(tmp_path: Path) -> None:
     write_profile("AKIA0001", "secret-1", credentials_path=creds)
     if os.name != "nt":
         assert stat.S_IMODE(os.stat(creds).st_mode) == 0o600
+
+
+def test_write_profile_unreadable_existing_file_is_an_error_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """An existing credentials file write_profile cannot parse (non-UTF8 or
+    malformed INI) raises CredentialsWriteError — it cannot preserve other
+    profiles it cannot read, so it must refuse rather than overwrite — and
+    leaves the file byte-identical. Previously raised bare
+    UnicodeDecodeError / MissingSectionHeaderError through the wizard's
+    `except CredentialsWriteError`, after the user had typed the secret."""
+    for payload in (b"\xff\xfe\x00binary[garbage", b"no section header\n"):
+        creds = tmp_path / "credentials"
+        creds.write_bytes(payload)
+        with pytest.raises(CredentialsWriteError, match="not modified"):
+            write_profile("AKIA", "sk", credentials_path=creds)
+        assert creds.read_bytes() == payload
+
+
+def test_write_profile_refuses_an_existing_file_it_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """A permission-denied credentials file must be a refusal, not a wipe.
+
+    This is the case the exception net above can never see:
+    `configparser.read` SWALLOWS OSError and skips the file, reporting it
+    only by absence from its return value. Parsed-as-empty, the write then
+    REPLACED the file -- destroying another team's profiles mintd could not
+    even read, exit 0, no warning. Reproduced live before the guard: the
+    file's [other-team] section was gone and only [mintd] remained.
+
+    Mutation: drop the `str(path) not in read_ok` check -> this test writes
+    over the unreadable file and the byte-identity assert fails.
+    """
+    if os.name == "nt" or os.geteuid() == 0:  # chmod 000 binds neither
+        pytest.skip("POSIX non-root only")
+    creds = tmp_path / "credentials"
+    payload = b"[other-team]\naws_access_key_id = THEIRS\n"
+    creds.write_bytes(payload)
+    creds.chmod(0o000)
+    try:
+        with pytest.raises(CredentialsWriteError, match="not modified"):
+            write_profile("AKIA", "sk", credentials_path=creds)
+    finally:
+        creds.chmod(0o600)
+    assert creds.read_bytes() == payload
