@@ -1,0 +1,40 @@
+* Batch entry point for the {{ project_name }} DVC pipeline stages.
+* Managed by mintd — do not modify. Invoked by run_stata.sh, never directly:
+*
+*     <stata_cmd> -b do _mintd_run.do <stage>
+*
+* Stata batch mode exits 0 even when a do-file aborts, so nothing in the
+* process exit status tells DVC the stage failed. This driver runs the stage
+* do-file under capture, then records the real return code in a sentinel
+* file (logs/.rc_<stage>) that run_stata.sh reads and converts into the
+* process exit status.
+
+args stage
+
+capture noisily do "`stage'.do"
+local rc = _rc
+
+* The stage stubs only call main from their trailing guard in interactive
+* mode, so in batch the do above executes definitions (plus any top-level
+* work) and the driver is what runs main — once, and only if the script
+* defines one and its top level completed cleanly.
+if `rc' == 0 {
+    capture program list main
+    if _rc == 0 {
+        capture noisily main
+        local rc = _rc
+    }
+}
+
+* Record the return code where run_stata.sh can read it. The wrapper treats
+* a missing sentinel as failure, so dying before this line still fails the
+* stage.
+capture mkdir "../logs"
+tempname fh
+file open `fh' using "../logs/.rc_`stage'", write text replace
+file write `fh' "`rc'"
+file close `fh'
+
+if `rc' != 0 {
+    display as error "`stage'.do failed with return code r(`rc')"
+}
