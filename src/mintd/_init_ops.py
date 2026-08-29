@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 from typing import Protocol
+from ._git_invoke import git_env
 from ._dvc_invoke import dvc_cmd, dvc_env
 
 
@@ -62,6 +63,7 @@ class SubprocessInitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env=git_env(),
                 check=False,
             )
         except FileNotFoundError:
@@ -82,6 +84,7 @@ class SubprocessInitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env=git_env(),
                 check=False,
             )
         except FileNotFoundError:
@@ -101,6 +104,7 @@ class SubprocessInitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env=git_env(),
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
@@ -131,6 +135,7 @@ class SubprocessInitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
+                env=git_env(),
                 check=False,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):

@@ -23,7 +23,7 @@ from ._registry_git_ops import (
     RegistryGitOps,
 )
 from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
-from .check import check_project
+from .check import _git_error_summary, check_project
 from .model import DataProductOutput, Metadata
 
 if TYPE_CHECKING:
@@ -158,6 +158,24 @@ def prepare_publish(
         catalog_diff = _diff_entries(existing, new_metadata.to_catalog_entry())
     except (CatalogNotFound, AttributeError):
         first_publish = True
+    except GitOpError as exc:
+        # The catalog read itself failed — `GitCatalogClient.fetch` refreshes
+        # the registry clone first. Refuse here rather than degrading to
+        # `first_publish`: step 5 refreshes the same cache, so the run cannot
+        # succeed either way, and degrading only moves the failure to after
+        # `dvc push`, the bump commit and the tag. An unreachable remote and a
+        # corrupt local cache are indistinguishable, so report git's own words
+        # instead of asserting a cause (same call as `check`'s).
+        raise PublishError(
+            f"cannot read the catalog entry for {current.project.name}: "
+            f"{_git_error_summary(exc)}",
+            recovery_hint=(
+                "check your network and `registry_url` in "
+                "~/.config/mintd/config.yaml; if both are fine, delete the "
+                "local registry cache (~/.cache/mintd/registry by default) "
+                "and retry"
+            ),
+        ) from exc
 
     return PublishPreview(
         project_name=current.project.name,

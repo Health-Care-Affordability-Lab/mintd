@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+
+from ._git_invoke import git_env
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -190,13 +192,17 @@ class SubprocessRegistryGitOps:
         try:
             r = run_streaming(
                 argv,
+                env=git_env(),
                 wall_timeout=wall_timeout,
                 reporter=self._reporter,
             )
         except FileNotFoundError as e:
             raise GitOpError(argv, "git not installed") from e
         if r.returncode != 0:
-            raise GitOpError(argv, "".join(r.stderr_lines) or "")
+            # run_streaming strips the newline off every captured segment,
+            # so joining with "" welds git's lines together
+            # ("...a git repositoryfatal: Could not read...").
+            raise GitOpError(argv, "\n".join(r.stderr_lines))
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)
@@ -336,6 +342,7 @@ class SubprocessRegistryGitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._fast_timeout,
+                env=git_env(),
                 check=True,
             )
         except FileNotFoundError as e:
@@ -355,6 +362,7 @@ class SubprocessRegistryGitOps:
                 capture_output=True,
                 text=True,
                 timeout=self._fast_timeout,
+                env=git_env(),
                 check=True,
             )
         except FileNotFoundError as e:
