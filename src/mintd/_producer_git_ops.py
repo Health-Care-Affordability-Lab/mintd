@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+
+from ._git_invoke import git_env
 import tarfile
 import tempfile
 from enum import StrEnum
@@ -290,6 +292,7 @@ def _run(
             capture_output=True,
             text=not binary_stdout,
             timeout=timeout,
+            env=git_env(),
             check=False,
         )
     except FileNotFoundError as e:
