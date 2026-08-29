@@ -2,7 +2,16 @@ import pytest
 from pathlib import Path
 from datetime import date, datetime
 from mintd._dvc_ops import DvcPullError
-from mintd.enclave import enclave_pull, ApprovedProduct, DownloadedItem, EnclaveManifest, ImportNotFound
+from mintd.enclave import (
+    enclave_package,
+    enclave_pull,
+    ApprovedProduct,
+    DownloadedItem,
+    EnclaveManifest,
+    ImportNotFound,
+    InvalidTransferManifest,
+    missing_downloads,
+)
 
 class _Client:
     def fetch(self, name):
@@ -710,3 +719,431 @@ def test_pull_force_still_imports_a_shared_output_only_once(tmp_path):
     assert [c[1] for c in dvc.calls] == ["data/final/x", "data/primary/"]
     outputs = [d.output for d in EnclaveManifest.load(m_path).downloaded]
     assert len(outputs) == len(set(outputs)), f"duplicate provenance rows: {outputs}"
+
+
+# D7 (notes/mintd-check/DECISIONS-20260828.md) — fresh-clone wedge. A fresh
+# clone tracks the manifest but not downloads/, so every row fast-skips off
+# downloaded[] without a stat and the pull ends in a bare "nothing to pull"
+# while `enclave package` then dies on the first missing dir. The fix: stat
+# each in-scope downloaded[] row and REPORT the missing ones by name; NEVER
+# auto-pull — a deliberate prune-after-transfer must stay pruned, and the
+# manifest records no prunes, so a missing path is indistinguishable from one.
+
+class _WarnRecorder:
+    def __init__(self):
+        self.warnings = []
+    def update_status(self, msg):
+        pass
+    def warn(self, msg):
+        self.warnings.append(msg)
+
+
+def test_fresh_clone_reports_missing_downloads_by_name(tmp_path):
+    m_path = tmp_path / "enclave_manifest.yaml"
+    gone = tmp_path / "downloads" / "acme" / "ppppppp-2026-01-01"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin1234abc",
+                        source_path="data/final/x"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="data/final/x", contract_pin="pin1234abc",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(), local_path=str(gone)),
+    ]).save(m_path)
+    dvc = _FakeDvcOps()
+    def factory(url, pin):
+        raise AssertionError("fast-skip must not resolve the producer")
+    rep = _WarnRecorder()
+    _, written = enclave_pull(_Client(), dvc, manifest_path=m_path,
+                              producer_view_factory=factory, reporter=rep)
+    assert dvc.calls == []  # never auto-pull: a pruned file stays pruned
+    assert written == []
+    row_warns = [w for w in rep.warnings if str(gone) in w]
+    assert len(row_warns) == 1
+    assert "acme" in row_warns[0]
+    assert "data/final/x" in row_warns[0]
+    assert "pin1234" in row_warns[0]
+    assert any("mintd enclave pull --force" in w for w in rep.warnings)
+
+
+def test_missing_report_scoped_to_repo_filter(tmp_path):
+    m_path = tmp_path / "enclave_manifest.yaml"
+    gone_a = tmp_path / "downloads" / "acme" / "x"
+    gone_b = tmp_path / "downloads" / "beta" / "y"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="1", source_path="out-a"),
+        ApprovedProduct(repo="beta", registry_entry="e", pin="1", source_path="out-b"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out-a", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                       local_path=str(gone_a)),
+        DownloadedItem(repo="beta", output="out-b", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                       local_path=str(gone_b)),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("fast-skip must not resolve the producer")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path, repo="beta",
+                 producer_view_factory=factory, reporter=rep)
+    assert any("out-b" in w for w in rep.warnings)
+    assert not any("out-a" in w for w in rep.warnings)
+    assert any("mintd enclave pull --force beta" in w for w in rep.warnings)
+
+
+def test_missing_report_silent_when_downloads_present(tmp_path):
+    m_path = tmp_path / "enclave_manifest.yaml"
+    present = tmp_path / "downloads" / "acme" / "ppppppp-2026-01-01"
+    present.mkdir(parents=True)
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="1", source_path="out"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                       local_path=str(present)),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("fast-skip must not resolve the producer")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 producer_view_factory=factory, reporter=rep)
+    assert rep.warnings == []
+
+
+def test_force_pull_clears_superseded_pin_rows_after_bump(tmp_path):
+    # Review round 1: `enclave bump` rewrites approved_products[].pin ONLY, so
+    # downloaded[] keeps its row at the old contract_pin. On a fresh clone that
+    # row stats missing and the D7 hint prescribes `--force` — which must
+    # actually clear it (the per-repo stale-pin prune drops rows at
+    # non-approved pins once the repo's imports succeed), or the warning
+    # recurs on every future pull and its own remediation is a lie.
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin2new", source_path="out"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="pin1old",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(tmp_path / "downloads" / "acme" / "aaaaaaa-2026-01-01")),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("source_path is set; factory must not be called")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path, force=True,
+                 producer_view_factory=factory, reporter=rep)
+    rows = [(d.output, d.contract_pin) for d in EnclaveManifest.load(m_path).downloaded]
+    assert rows == [("out", "pin2new")], f"superseded row survived --force: {rows}"
+    assert rep.warnings == []  # the hint's promise: --force clears the report
+
+
+def test_force_pull_sibling_failure_preserves_failing_siblings_row(tmp_path):
+    # Review round 3: multi-subscription repos (a supported shape as of
+    # ff40b00) broke the prune's own never-drop rule. The per-repo stale-pin
+    # prune fired after EACH subscription, so subscription 1's success pruned
+    # sibling 2's superseded row before sibling 2 re-imported -- and when
+    # sibling 2 then failed, its custody row was flushed away while its old
+    # data lingered on disk. The prune now runs AFTER the loop, which a
+    # failure never reaches (the except re-raises), so it is exactly "every
+    # in-scope subscription succeeded or skipped".
+    #
+    # Mutation: move the prune back inside the `for` body -> subscription 1's
+    # success drops sibling 2's pinBold row, the failure flush persists the
+    # loss, and this test fails on the vanished row.
+    from mintd._dvc_ops import DvcPullError
+    from mintd.enclave import EnclavePullError
+
+    class _SecondImportFails(_FakeDvcOps):
+        def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
+            if len(self.calls) >= 1:
+                self.calls.append((repo_url, path, dest, rev, force))
+                raise DvcPullError("network down mid-run")
+            return super().import_(repo_url, path, dest, cwd, rev, force, extra_args)
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        # Both subscriptions of one repo, both already bumped to new pins.
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pinAnew", source_path="out-a"),
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pinBnew", source_path="out-b"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out-a", contract_pin="pinAold",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(Path("downloads") / "acme" / "aaaaaaa-2026-01-01")),
+        DownloadedItem(repo="acme", output="out-b", contract_pin="pinBold",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(Path("downloads") / "acme" / "bbbbbbb-2026-01-01")),
+    ]).save(m_path)
+
+    def factory(url, pin):
+        raise AssertionError("source_path is set; factory must not be called")
+
+    with pytest.raises(EnclavePullError):
+        enclave_pull(_Client(), _SecondImportFails(), manifest_path=m_path,
+                     force=True, producer_view_factory=factory)
+
+    rows = {(d.output, d.contract_pin)
+            for d in EnclaveManifest.load(m_path).downloaded}
+    # Subscription 1 replaced its own row; subscription 2 failed, so BOTH its
+    # old row (custody record of the data still on disk) must survive.
+    assert ("out-b", "pinBold") in rows, (
+        f"failing sibling's custody row was pruned by its sibling's success: {rows}"
+    )
+    assert ("out-a", "pinAnew") in rows
+
+
+def test_missing_stat_resolves_relative_local_path_against_enclave_root(tmp_path):
+    # Review round 1: production rows carry enclave-relative local_paths
+    # (downloads_root derives from manifest_path.parent). The D7 stat must
+    # anchor there, not on the process cwd — this test deliberately does NOT
+    # chdir into the enclave.
+    m_path = tmp_path / "enclave_manifest.yaml"
+    rel = Path("downloads") / "acme" / "ppppppp-2026-01-01"
+    (tmp_path / rel).mkdir(parents=True)
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="1", source_path="out"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="1", artifact_pin="p",
+                       fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                       local_path=str(rel)),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("fast-skip must not resolve the producer")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 producer_view_factory=factory, reporter=rep)
+    assert rep.warnings == [], f"false missing report from foreign cwd: {rep.warnings}"
+
+
+def test_force_pull_clears_rows_of_outputs_dropped_across_bump(tmp_path):
+    # Review round 2: the (repo, output) force-prune only reaches a stale row
+    # whose output name is still in the current pin's resolved set. A producer
+    # that DROPPED or RENAMED an output across the bump leaves a row at the
+    # old pin matching no current output — it must go too, or the D7 report
+    # recurs on every pull and its own --force hint can never clear it.
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin2new", all=True),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="y", contract_pin="pin1old",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(tmp_path / "downloads" / "acme" / "aaa-old-y")),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        class View:
+            def output_paths(self): return ["x"]  # "y" is gone at pin2new
+        return View()
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path, force=True,
+                 producer_view_factory=factory, reporter=rep)
+    rows = [(d.output, d.contract_pin) for d in EnclaveManifest.load(m_path).downloaded]
+    assert rows == [("x", "pin2new")], f"dropped-output row survived --force: {rows}"
+    assert rep.warnings == []  # the hint's promise: --force clears the report
+
+
+def test_repo_scoped_force_prune_leaves_other_repos_rows_alone(tmp_path):
+    # The round-2 stale-pin prune must stay scoped to the repo whose imports
+    # completed: a `--force acme` pull may not judge beta's rows against
+    # acme's approved pins.
+    m_path = tmp_path / "enclave_manifest.yaml"
+    beta_dir = tmp_path / "downloads" / "beta" / "bbb-2026-01-01"
+    beta_dir.mkdir(parents=True)
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin2new", all=True),
+        ApprovedProduct(repo="beta", registry_entry="e", pin="pinBeta", source_path="out-b"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="y", contract_pin="pin1old",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(tmp_path / "downloads" / "acme" / "aaa-old-y")),
+        DownloadedItem(repo="beta", output="out-b", contract_pin="pinBeta",
+                       artifact_pin="q", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(), local_path=str(beta_dir)),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        class View:
+            def output_paths(self): return ["x"]
+        return View()
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path, repo="acme",
+                 force=True, producer_view_factory=factory, reporter=rep)
+    rows = [(d.repo, d.output, d.contract_pin)
+            for d in EnclaveManifest.load(m_path).downloaded]
+    assert ("beta", "out-b", "pinBeta") in rows, f"bystander row pruned: {rows}"
+    assert ("acme", "y", "pin1old") not in rows, f"stale row survived: {rows}"
+    assert ("acme", "x", "pin2new") in rows
+    assert rep.warnings == []
+
+
+def test_pull_with_relative_subdir_manifest_reports_no_false_missing(tmp_path, monkeypatch):
+    # Review round 2 (blast): a relative MULTI-SEGMENT manifest_path used to
+    # store local_path with the parent prefix ("sub/downloads/...") which
+    # missing_downloads re-prepended ("sub/sub/downloads/...") — so the very
+    # row this pull just wrote was reported missing, with a --force hint.
+    # Round 4 fixed the cause instead of the prefix: the stat no longer
+    # re-prepends anything, because it rebuilds the dir from THIS enclave's
+    # downloads_root + the row's version folder — `_row_download_dir`, the
+    # formula `enclave_package` already used.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "sub").mkdir()
+    m_path = Path("sub") / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="1", source_path="out"),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("source_path is set; factory must not be called")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 producer_view_factory=factory, reporter=rep)
+    assert rep.warnings == [], f"false missing report for a row just written: {rep.warnings}"
+    d = EnclaveManifest.load(m_path).downloaded[0]
+    # POSIX separators regardless of host OS (BACKLOG T-F; this pair is what
+    # the Windows CI job pins): the manifest crosses machines, and
+    # `str(WindowsPath(...))` records `sub\downloads\acme\...`, whose `.name`
+    # on a Linux reader is the WHOLE string — so both the stat and
+    # `enclave_package` would rebuild a dir that cannot exist. Vacuous on a
+    # POSIX runner, load-bearing on Windows, where dropping `.as_posix()`
+    # from the writer reddens both lines.
+    assert "\\" not in d.local_path, d.local_path
+    assert d.local_path == (
+        Path("sub") / "downloads" / d.repo / Path(d.local_path).name
+    ).as_posix(), d.local_path
+    # What the row now guarantees is its LAST segment: both readers rebuild
+    # <enclave>/downloads/<repo>/<version folder> from it. The prefix is a
+    # record of where this pull wrote, and nothing reads it.
+    assert (
+        Path("sub") / "downloads" / d.repo / Path(d.local_path).name
+    ).exists(), d.local_path
+
+
+def test_missing_report_and_package_agree_after_a_reclone(tmp_path):
+    """A re-clone at a new path, with the old clone still on disk.
+
+    Rows written by the old clone carry ITS absolute local_path — every pull
+    run with an absolute `--manifest` writes one, and real manifests are full
+    of them. The stat followed that path into the old clone, found the dir,
+    and reported NOTHING missing; `enclave package`, which has always rebuilt
+    the dir under the enclave it was handed, then died on "downloaded[] entry
+    references missing dir". That pair IS the wedge this branch exists to
+    close: "nothing to pull", then a hard failure on the very next command.
+    One formula (`_row_download_dir`) now answers both questions, so the
+    report and the packager cannot disagree about a row.
+
+    Mutation: stat `manifest_path.parent / d.local_path` in
+    missing_downloads again -> the missing list comes back empty while
+    package still raises on the same manifest.
+    """
+    version_folder = "aaaaaaa-2026-01-01"
+    (tmp_path / "old" / "downloads" / "acme" / version_folder).mkdir(parents=True)
+    new = tmp_path / "new"
+    new.mkdir()
+    m_path = new / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="pin1",
+                       artifact_pin="a" * 32, fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(tmp_path / "old" / "downloads" / "acme"
+                                      / version_folder)),
+    ]).save(m_path)
+
+    assert [d.output for d in missing_downloads(manifest_path=m_path)] == ["out"]
+    with pytest.raises(InvalidTransferManifest):
+        enclave_package(manifest_path=m_path, output_dir=new / "transfers")
+
+    # The converse half of the same agreement: bytes that DID come across with
+    # the clone are found by both, however the row spells its prefix.
+    landed = new / "downloads" / "acme" / version_folder
+    landed.mkdir(parents=True)
+    (landed / "data.csv").write_text("a,b\n1,2\n")
+    assert missing_downloads(manifest_path=m_path) == []
+    archive, _skipped = enclave_package(
+        manifest_path=m_path, output_dir=new / "transfers"
+    )
+    assert archive.exists()
+
+
+def test_missing_report_honours_a_downloads_root_override(tmp_path):
+    """The stat must look where THIS pull wrote.
+
+    `enclave_pull` takes a `downloads_root` override and now hands it to the
+    report, because the report locates rows the way the pull placed them. Left
+    to the default, a pull into a non-default root warned that every row it
+    had written seconds earlier was missing — the same class of false report
+    the relative-manifest case produced.
+
+    Mutation: drop `downloads_root=downloads_root` from enclave_pull's
+    missing_downloads call -> the fresh row is reported missing.
+    """
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="1", source_path="out"),
+    ]).save(m_path)
+    rep = _WarnRecorder()
+    def factory(url, pin):
+        raise AssertionError("source_path is set; factory must not be called")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 downloads_root=tmp_path / "elsewhere",
+                 producer_view_factory=factory, reporter=rep)
+    assert rep.warnings == [], f"false missing report under an override: {rep.warnings}"
+
+
+def test_plain_pull_prunes_superseded_pin_rows_like_force(tmp_path):
+    """`enclave bump` + a PLAIN pull used to leave the pre-bump row in
+    downloaded[], so `enclave package` selected both it and the new row,
+    keyed them apart by artifact_pin, and shipped the old AND the new bytes
+    out of the enclave — while the same manifest pulled with `--force`
+    shipped only the new. Both paths now ship only the approved pin.
+
+    Mutation: gate the post-loop prune on `force` again -> the pin1old row
+    survives a plain pull.
+    """
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin2new", source_path="out"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="pin1old",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path=str(tmp_path / "downloads" / "acme" / "aaaaaaa-2026-01-01")),
+    ]).save(m_path)
+    def factory(url, pin):
+        raise AssertionError("source_path is set; factory must not be called")
+    enclave_pull(_Client(), _FakeDvcOps(), manifest_path=m_path,
+                 producer_view_factory=factory)
+    rows = [(d.output, d.contract_pin) for d in EnclaveManifest.load(m_path).downloaded]
+    assert rows == [("out", "pin2new")], f"superseded row survived a plain pull: {rows}"
+
+
+def test_plain_pull_prunes_superseded_rows_with_nothing_to_fetch(tmp_path):
+    """The manifests that actually carry a superseded row TODAY carry a
+    current row beside it — a bump, then a pull that fetched the new pin
+    without pruning the old one. Such a repo fast-skips end to end, so a
+    prune living inside the fetch loop never ran on the plain path and those
+    manifests kept both rows forever (and `package` kept shipping the old
+    bytes), while `--force`, which never fast-skips, cleaned them. The prune
+    sits after the loop, which is reached only when every in-scope
+    subscription succeeded or skipped.
+
+    Mutation: move the prune back inside the `for` body -> the pin1old row
+    survives, with dvc.calls still [].
+    """
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="acme", registry_entry="e", pin="pin2new", source_path="out"),
+    ], downloaded=[
+        DownloadedItem(repo="acme", output="out", contract_pin="pin1old",
+                       artifact_pin="p", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path="downloads/acme/aaaaaaa-2026-01-01"),
+        DownloadedItem(repo="acme", output="out", contract_pin="pin2new",
+                       artifact_pin="q", fetch_strategy="dvc-import",
+                       downloaded_at=datetime.now(),
+                       local_path="downloads/acme/bbbbbbb-2026-02-02"),
+    ]).save(m_path)
+    dvc = _FakeDvcOps()
+    def factory(url, pin):
+        raise AssertionError("nothing needs fetching; the producer must not be resolved")
+    enclave_pull(_Client(), dvc, manifest_path=m_path, producer_view_factory=factory)
+    assert dvc.calls == []  # the fast-skip still skips; only the row goes
+    rows = [(d.output, d.contract_pin) for d in EnclaveManifest.load(m_path).downloaded]
+    assert rows == [("out", "pin2new")], f"superseded row survived a skip-only pull: {rows}"

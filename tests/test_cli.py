@@ -1670,6 +1670,139 @@ def test_enclave_pull_nothing_to_pull_message(
     assert "nothing to pull" in msg
 
 
+def test_enclave_pull_text_mode_drops_nothing_to_pull_when_files_are_missing(
+    patched_clients,
+    recording_reporter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 4: only the `--json` lane had been fixed. Text mode
+    printed the D7 warnings and then, one line later, "nothing to pull" —
+    the exact sentence this branch exists to stop saying, contradicting the
+    warnings above it in the same breath. Exit code stays 0 (D7: a missing
+    path is indistinguishable from a deliberate prune-after-transfer, so it
+    is a report, not a failure); only the line goes.
+
+    Mutation: print the info line unconditionally again -> "nothing to pull"
+    reappears beside the warnings.
+    """
+    from datetime import datetime
+    from mintd.enclave import DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        downloaded=[
+            DownloadedItem(
+                repo="provider-xw", output="outputs/main.parquet",
+                contract_pin="a" * 40, artifact_pin="f" * 32,
+                fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                local_path="downloads/provider-xw/fffffff-2026-05-20",
+            ),
+        ],
+    ).save(manifest)
+    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["enclave", "pull", "--manifest", str(manifest)])
+
+    assert rc == 0
+    assert not any(
+        "nothing to pull" in e[1] for e in recording_reporter.events_of("info")
+    ), recording_reporter.events_of("info")
+    assert any(
+        "outputs/main.parquet" in e[1] for e in recording_reporter.events_of("warn")
+    ), recording_reporter.events_of("warn")
+
+
+def test_enclave_pull_json_fresh_clone_reports_missing(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 1: `--json enclave pull` on a fresh clone used to emit
+    ZERO bytes at exit 0 — byte-identical to a healthy enclave — because
+    Reporter.warn is a no-op in json_mode and the handler only emitted a
+    result when something was pulled. The D7 missing report rides the json
+    result instead."""
+    from datetime import datetime
+    from mintd.enclave import DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        downloaded=[
+            DownloadedItem(
+                repo="provider-xw", output="outputs/main.parquet",
+                contract_pin="a" * 40, artifact_pin="f" * 32,
+                fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                local_path="downloads/provider-xw/fffffff-2026-05-20",
+            ),
+        ],
+    ).save(manifest)
+    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["--json", "enclave", "pull", "--manifest", str(manifest)])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pulled"] == []
+    assert [(m["repo"], m["output"]) for m in payload["missing"]] == [
+        ("provider-xw", "outputs/main.parquet")
+    ]
+
+
+def test_enclave_pull_json_missing_scoped_to_repo_arg(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 2 (vacuity): `--json enclave pull <repo>` must scope the
+    "missing" list to <repo>. The only prior json test omitted the repo arg,
+    so repo=None at the cli.py call site survived every gate file."""
+    from datetime import datetime
+    from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    def row(repo: str) -> DownloadedItem:
+        return DownloadedItem(
+            repo=repo, output="out", contract_pin="c" * 40,
+            artifact_pin="f" * 32, fetch_strategy="dvc-import",
+            downloaded_at=datetime.now(),
+            local_path=f"downloads/{repo}/fffffff-2026-05-20",
+        )
+
+    EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(
+                repo="provider-a", registry_entry="e", pin="c" * 40,
+                source_path="out",
+            ),
+            ApprovedProduct(
+                repo="provider-b", registry_entry="e", pin="c" * 40,
+                source_path="out",
+            ),
+        ],
+        downloaded=[row("provider-a"), row("provider-b")],
+    ).save(manifest)
+    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(
+        ["--json", "enclave", "pull", "provider-b", "--manifest", str(manifest)]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pulled"] == []
+    assert [m["repo"] for m in payload["missing"]] == ["provider-b"]
+
+
 # ---------------------------------------------------------------------------
 # Slice 14 — mintd init
 # ---------------------------------------------------------------------------
@@ -2655,6 +2788,10 @@ def test_cli_enclave_bump_shows_status(
 def test_cli_enclave_pull_shows_outer_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
 ) -> None:
+    from mintd.enclave import EnclaveManifest
+    # The fake pull leaves no manifest behind; the handler reads it back for
+    # the D7 missing report, which the real pull has always guaranteed exists.
+    EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
     monkeypatch.chdir(tmp_path)
     cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
@@ -2834,6 +2971,10 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
 
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", dvc_only_spy)
     monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
+    from mintd.enclave import EnclaveManifest
+    # The fake pull leaves no manifest behind; the handler reads it back for
+    # the D7 missing report, which the real pull has always guaranteed exists.
+    EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
 
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
@@ -3788,6 +3929,10 @@ def test_enclave_pull_allows_the_relative_default_manifest(
     monkeypatch.setattr(
         cli, "enclave_pull", lambda *a, **k: called.append(1) or (Path("."), []),
     )
+    from mintd.enclave import EnclaveManifest
+    # The fake pull leaves no manifest behind; the handler reads it back for
+    # the D7 missing report, which the real pull has always guaranteed exists.
+    EnclaveManifest(enclave_name="test").save(tmp_path / "enclave_manifest.yaml")
     monkeypatch.chdir(tmp_path)
 
     rc = cli.main(["enclave", "pull"])
