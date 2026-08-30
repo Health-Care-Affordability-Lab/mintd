@@ -627,6 +627,21 @@ def clone_and_pull_product(
     )
 
 
+def _remove_payload(path: Path) -> None:
+    """Delete whatever is at `path` — directory, file, symlink or nothing.
+
+    Neither primitive covers a payload path on its own: `shutil.rmtree` is a
+    silent no-op on a file or a symlink (`ignore_errors` swallows its refusal)
+    and `Path.unlink` refuses a directory. A payload is any of the three — a
+    directory, a single file, or dvc's `cache.type = symlink` — so every place
+    that clears one has to dispatch on the shape it finds.
+    """
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
 def bump_import(
     client: CatalogClient,
     dvc_ops: DvcOps,
@@ -718,9 +733,19 @@ def bump_import(
     # user ran with no `--force` anywhere. A rename inside the same directory
     # is atomic and costs no extra disk.
     backup = dest.with_name(dest.name + ".mintd-bump-backup")
-    moved = dvc_source.exists() and dest.is_dir() and not dest.is_symlink()
+    # D15: every payload shape gets the rename-aside, not just a directory.
+    # `dest.is_dir() and not dest.is_symlink()` left `moved` False for the two
+    # other ordinary shapes — an output that is a single file at HEAD, and
+    # dvc's `cache.type = symlink` layout — which meant NO BACKUP AT ALL and
+    # `--force` overwriting the payload with nothing to roll back to. The
+    # `is_symlink()` conjunct was never a decision to exclude links: `is_dir()`
+    # follows them, so it only separated a real directory from a link to one.
+    # `rename` moves all three identically. `is_symlink()` is kept as its own
+    # test because `exists()` is False for a DANGLING link (a pruned cache),
+    # and that link is the only record of where the payload was.
+    moved = dvc_source.exists() and (dest.exists() or dest.is_symlink())
     if moved:
-        shutil.rmtree(backup, ignore_errors=True)
+        _remove_payload(backup)
         dest.rename(backup)
     try:
         dvc_path = dvc_ops.import_(
@@ -749,13 +774,10 @@ def bump_import(
             # how to render with a traceback, payload still sitting in
             # `.mintd-bump-backup`. Two ordinary shapes reach this: an output
             # that is a single file at HEAD, and dvc's `cache.type = symlink`.
-            if dest.is_dir() and not dest.is_symlink():
-                shutil.rmtree(dest, ignore_errors=True)
-            else:
-                dest.unlink(missing_ok=True)
+            _remove_payload(dest)
             backup.rename(dest)
         raise
-    shutil.rmtree(backup, ignore_errors=True)
+    _remove_payload(backup)
     return BumpResult(
         changed=True, old_pin=dep.contract_pin, new_pin=head_sha, dvc_path=dvc_path,
     )

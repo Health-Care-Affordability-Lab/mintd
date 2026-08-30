@@ -232,6 +232,16 @@ class _PartialThenFailDvcOps(_FakeDvcOps):
         from mintd._dvc_ops import DvcOpError
 
         dest: Path = kwargs["dest"]
+        # `--force` clears whatever is at `dest` before writing. Only reachable
+        # once the backup covers non-directory payloads: until then `dest` was
+        # either absent or already renamed aside, so the fake never met one.
+        # Without it the fake dies on the payload it is meant to replace
+        # (`mkdir` over an existing file, `symlink_to` over an existing link)
+        # and raises `FileExistsError` instead of the dvc error under test.
+        if dest.is_dir() and not dest.is_symlink():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink(missing_ok=True)
         if self.shape == "dir":
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "half.csv").write_text("truncated\n", encoding="utf-8")
@@ -290,6 +300,113 @@ def test_a_bump_that_fails_midway_restores_over_the_partial_destination(
     assert payload.is_dir() and not payload.is_symlink()
     assert (payload / "irreplaceable.csv").read_text() == "keep me\n"
     assert not (payload / "half.csv").exists()
+    assert not list(payload.parent.glob("*.mintd-bump-backup"))
+
+
+@pytest.mark.parametrize("shape", ["file", "symlink", "dangling_symlink"])
+def test_a_failed_bump_restores_a_payload_that_is_not_a_directory(
+    tmp_path: Path, shape: str
+) -> None:
+    """D15: a single-file payload and a symlinked one deserve the rename-aside
+    a directory gets.
+
+    The backup was guarded by `dest.is_dir() and not dest.is_symlink()`, so
+    every other shape took NO BACKUP AT ALL and `dvc import --force` then
+    overwrote the payload with nothing to roll back to. Both shapes are
+    ordinary: an output that is a single file at HEAD (exactly the drift a
+    bump acts on), and dvc's `cache.type = symlink` layout. The restore side
+    already NAMES both — the fix acknowledged them while the backup side still
+    skipped them.
+
+    `not dest.is_symlink()` was never a decision to exclude symlinks:
+    `Path.is_dir()` follows them, so that conjunct only ever separated "a real
+    directory" from "a link to one". `dest.rename(backup)` works identically
+    for a directory, a file and a symlink.
+
+    A dangling link needs `is_symlink()` in its own right — `dest.exists()` is
+    False for one, so an `exists()`-only widening still skips it. A pruned dvc
+    cache leaves exactly that behind, and the link is the only record of where
+    the payload was.
+
+    Mutations: put `dest.is_dir() and not dest.is_symlink()` back -> all three
+    redden; widen to `dest.exists()` alone -> `dangling_symlink` reddens. The
+    directory cells above kill neither.
+    """
+    from mintd._dvc_ops import DvcOpError
+
+    dvc_path = _stage_project(tmp_path)
+    payload = dvc_path.with_suffix("")
+    store = tmp_path / "dvc-cache-store"
+    if shape == "file":
+        payload.write_text("keep me\n", encoding="utf-8")
+    else:
+        if shape == "symlink":
+            store.mkdir()
+            (store / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+        payload.symlink_to(store)
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+
+    with pytest.raises(DvcOpError):
+        bump_import(
+            InMemoryCatalogClient(),
+            _PartialThenFailDvcOps("dir"),
+            project_path=tmp_path,
+            name="cms_based",
+            producer_view_factory=factory,
+            check_findings=[_drift_finding(dvc_path)],
+        )
+
+    if shape == "file":
+        assert payload.is_file() and not payload.is_symlink(), (
+            "the single-file payload was destroyed by a bump that then failed"
+        )
+        assert payload.read_text(encoding="utf-8") == "keep me\n"
+    else:
+        assert payload.is_symlink(), (
+            "the symlinked payload was destroyed by a bump that then failed"
+        )
+        assert payload.readlink() == store
+        assert payload.exists() is (shape == "symlink")
+    if shape == "symlink":
+        assert (store / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
+    assert not list(payload.parent.glob("*.mintd-bump-backup"))
+
+
+def test_a_successful_bump_leaves_no_backup_beside_a_file_payload(
+    tmp_path: Path,
+) -> None:
+    """The backup is cleaned up with `shutil.rmtree(..., ignore_errors=True)`,
+    a silent no-op on anything that is not a directory.
+
+    Harmless while only directories were moved aside; once a single-file
+    payload is too (D15), every SUCCESSFUL bump leaves
+    `<name>.mintd-bump-backup` sitting in `data/imports/` — a stale copy of
+    the old payload under a name nothing mentions, growing one per bump.
+
+    Mutation: `_remove_payload(backup)` on the success path ->
+    `shutil.rmtree(backup, ignore_errors=True)` -> reddens. This is the cost
+    of the widening, so it cannot redden before it: with the old guard no
+    backup is taken here at all.
+    """
+    dvc_path = _stage_project(tmp_path)
+    payload = dvc_path.with_suffix("")
+    payload.write_text("stale\n", encoding="utf-8")
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+
+    result = bump_import(
+        InMemoryCatalogClient(),
+        _FakeDvcOps(),
+        project_path=tmp_path,
+        name="cms_based",
+        producer_view_factory=factory,
+        check_findings=[_drift_finding(dvc_path)],
+    )
+
+    assert result.changed is True
     assert not list(payload.parent.glob("*.mintd-bump-backup"))
 
 
