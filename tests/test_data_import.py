@@ -12,8 +12,10 @@ import pytest
 
 from mintd.catalog import CatalogEntry, CatalogNotFound, InMemoryCatalogClient
 from mintd.data import (
+    _tracked_output_targets,
     ImportDestinationExists,
     MissingPrimaryDataProduct,
+    NoTrackedOutputs,
     UnknownProductPath,
     import_product,
 )
@@ -819,4 +821,59 @@ def test_import_reports_a_v1_shaped_entry_instead_of_tracebacking(
 
     with pytest.raises(expected):
         import_product(client, fake, "provider_a", cwd=tmp_path, dest_root=tmp_path)
+    assert fake.calls == []
+
+
+@pytest.mark.parametrize("outputs", [True, "data/final", 7], ids=["bool", "str", "int"])
+def test_scalar_outputs_never_reaches_a_for_loop(outputs: Any) -> None:
+    """The sibling reader of `data_products.outputs`.
+
+    `--all`'s guard was added to `_resolve_paths` alone, so the same malformed
+    entry still exited `data clone --path` as a raw
+    `TypeError: 'bool' object is not iterable` from `_tracked_output_targets`.
+    Both readers go through `_rows` now; this pins the one the first fix
+    missed, so a third reader cannot quietly reintroduce `or []`.
+    """
+    assert _tracked_output_targets({"data_products": {"outputs": outputs}}) == []
+
+
+@pytest.mark.parametrize(
+    "outputs",
+    [
+        pytest.param([], id="declared-empty"),
+        pytest.param([{"description": "no path key"}, "junk"], id="rows-unusable"),
+        pytest.param(True, id="scalar-not-a-list"),
+    ],
+)
+def test_import_all_with_no_importable_outputs_refuses(
+    tmp_path: Path, outputs: Any
+) -> None:
+    """`--all` against an entry listing no usable output imported 0 files and
+    exited 0 — a CI gate on that exit code passes on an import that moved
+    nothing. A producer registered before its first publish carries
+    `outputs: []`; a v1-era entry carries rows the resolver's isinstance
+    filter drops.
+
+    `outputs: true` is a v1 hand-edit away from valid and is TRUTHY, so it
+    survived the resolver's `or []` and tracebacked out of `data import --all`
+    as `TypeError: 'bool' object is not iterable` instead of refusing.
+
+    `primary` IS set in every case, so this is not the missing-primary path:
+    `--all` selects the outputs list, and an empty selection is a refusal,
+    never a silent fallback to the primary.
+
+    Mutations: drop `_resolve_paths`'s `if not selected` guard -> every param
+    returns [] and `import_product` returns [] having called no dvc; drop its
+    `isinstance(outputs, list)` guard -> `scalar-not-a-list` raises TypeError.
+    """
+    fake = _FakeDvcOps()
+    client = _raw_client(
+        {**_V1_BASE, "data_products": {"primary": "data/final/", "outputs": outputs}}
+    )
+
+    with pytest.raises(NoTrackedOutputs, match="outputs"):
+        import_product(
+            client, fake, "provider_a", all_outputs=True,
+            cwd=tmp_path, dest_root=tmp_path,
+        )
     assert fake.calls == []

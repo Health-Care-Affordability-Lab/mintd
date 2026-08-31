@@ -393,6 +393,30 @@ def test_data_import_plain_import_still_imports_the_primary(
     assert [c.path for c in dvc_ops.calls] == ["outputs/main.parquet"]
 
 
+def test_data_import_all_with_no_outputs_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """`--all` against a product whose entry lists no outputs imported 0 files
+    and exited 0 — a CI gate on that exit code passes on an import that moved
+    nothing. A producer registered before its first publish has exactly this
+    entry.
+    """
+    client, dvc_ops = patched_clients
+    metadata = _register_provider_xw(client)
+    metadata.data_products.outputs = []
+    client.update(metadata)
+
+    rc = cli.main([
+        "data", "import", "provider-xw", "--all", "--dest-root", str(tmp_path),
+    ])
+
+    assert rc == 1
+    assert dvc_ops.calls == []
+    assert "outputs" in " ".join(capsys.readouterr().err.split())
+
+
 def test_data_import_jobs_reaches_the_dvc_argv(
     tmp_path: Path,
     patched_clients,
@@ -4181,6 +4205,7 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     "GitOpError": "check git auth",
     "ImportDestinationExists": None,
     "MissingPrimaryDataProduct": None,
+    "NoTrackedOutputs": None,
     "UnknownProductPath": "relative to the producer",
     "ValueError": None,
 }
