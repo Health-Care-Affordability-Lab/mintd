@@ -3298,6 +3298,44 @@ def test_cli_publish_registry_branch_exists_exits_one_with_hint(
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_cli_publish_unreachable_registry_exits_one_with_hint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recording_reporter,
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    """The read half of the same crash. `prepare_publish` reaches
+    `client.fetch` for the preview's catalog diff; `GitCatalogClient.fetch`
+    refreshes the registry clone, so an offline or VPN-gated registry raises
+    `GitOpError` there. `_handle_publish` catches only `PublishError`, and
+    `main()` catches neither — publish exited through a raw traceback on
+    every project without an enclave manifest.
+
+    Mutation: drop the `except GitOpError` arm in `prepare_publish` -> this
+    reddens (the GitOpError escapes `cli.main`).
+    """
+    client, dvc_ops = patched_clients
+    _publishable_project(tmp_path, client)
+
+    def _unreachable(*a: Any, **kw: Any) -> None:
+        raise GitOpError(["git", "fetch"], "fatal: Could not resolve host: github.com")
+
+    monkeypatch.setattr(client, "fetch", _unreachable)
+
+    rc = cli.main(["publish", "--path", str(tmp_path), "--yes"])
+
+    assert rc == 1
+    errs = recording_reporter.events_of("error")
+    assert len(errs) == 1
+    _, msg, hint = errs[0]
+    assert "Could not resolve host" in msg
+    assert hint is not None and "registry_url" in hint
+    # Refused before any side effect: no upload, no tag on the producer repo.
+    assert dvc_ops.push_calls == []
+    assert patched_git_ops.tag_calls == []
+
+
 def test_cli_registry_update_branch_exists_names_branch(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

@@ -557,9 +557,16 @@ def _consumer_findings_from_enclave_manifest(
 
 
 def _git_error_summary(exc: GitOpError) -> str:
-    """First non-blank line of git's own stderr; the command when it is empty."""
-    lines = (ln.strip() for ln in (exc.stderr or "").splitlines() if ln.strip())
-    return next(lines, " ".join(exc.command))
+    """Git's own diagnosis: its first `fatal:` line, else the first non-blank
+    line, else the command.
+
+    A failed `clone` writes progress to stderr too, so its first line is
+    `Cloning into '<the registry cache path>'...` — a directory the user never
+    chose, ahead of the reason they are being shown this at all.
+    """
+    lines = [ln.strip() for ln in (exc.stderr or "").splitlines() if ln.strip()]
+    fatal = (ln for ln in lines if ln.startswith("fatal:"))
+    return next(fatal, lines[0] if lines else " ".join(exc.command))
 
 
 def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) -> str:
