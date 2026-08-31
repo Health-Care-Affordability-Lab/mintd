@@ -334,7 +334,8 @@ class SubprocessDvcOps:
     def _env(self) -> dict[str, str]:
         """Subprocess env for dvc: ``dvc_env()`` plus AWS_PROFILE, so dvc's
         boto3 picks up mintd's [mintd] credentials (no [default] profile
-        required in ~/.aws/credentials).
+        required in the shared credentials file -- $AWS_SHARED_CREDENTIALS_FILE
+        when set, else ~/.aws/credentials; boto3 honors the redirect natively).
 
         Always a dict now, never ``None``. It used to inherit the parent env
         unchanged when no profile was configured, which also inherited dvc's

@@ -78,18 +78,32 @@ class Config(BaseModel):
 
     @property
     def aws_profile_name(self) -> str | None:
-        """Returns 'mintd' if ~/.aws/credentials has a [mintd] section, else None
-        (= boto3 default credential chain)."""
-        import configparser
-        from pathlib import Path
+        """Returns 'mintd' if the AWS shared credentials file has a [mintd]
+        section, else None (= boto3 default credential chain).
 
-        cred_path = Path.home() / ".aws" / "credentials"
+        Resolves the file the way the AWS SDK does — $AWS_SHARED_CREDENTIALS_FILE
+        when set (how a sandbox that fences ~/.aws redirects it; set-but-empty
+        means "no file", exactly as boto3 reads it, NOT a fallback to home),
+        else ~/.aws/credentials — so detection and DVC's boto3 read the same
+        file. An unreadable or undecodable file means no profile, never a
+        traceback.
+        """
+        import configparser
+
+        # One resolver, shared with the setup wizard -- see its docstring for
+        # the expansion rules (vars then user, never raising; set-but-empty
+        # means "no file", exactly as boto3 reads it, NOT a home fallback --
+        # Path("") resolves to ".", a directory, so it falls out of is_file()
+        # below as None).
+        from ._aws_credentials import shared_credentials_path
+
+        cred_path = shared_credentials_path()
         if not cred_path.is_file():
             return None
         cp = configparser.ConfigParser()
         try:
             cp.read(cred_path)
-        except configparser.Error:
+        except (configparser.Error, UnicodeDecodeError):
             return None
         return "mintd" if cp.has_section("mintd") else None
 

@@ -154,19 +154,33 @@ def test_validate_schema_only_when_config_invalid(tmp_path: Path) -> None:
 def test_validate_reports_aws_profile_when_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    home = tmp_path / "home"
-    (home / ".aws").mkdir(parents=True)
-    (home / ".aws" / "credentials").write_text("[mintd]\naws_access_key_id = 123\n")
-    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    # The env var, not a Path.home monkeypatch: resolution goes through the
+    # one shared_credentials_path chokepoint, whose home fallback is the
+    # conftest ratchet's boom -- the env var is the injection point.
+    creds = tmp_path / "credentials"
+    creds.write_text("[mintd]\naws_access_key_id = 123\n")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     steps = validate_config(cfg)
     profile_step = next(s for s in steps if s.name == "aws_profile")
     assert profile_step.status == "ok"
-    assert "mintd" in profile_step.message
+    # Not `"mintd" in message`: BOTH branches are status ok and both
+    # messages contain "mintd" ("'mintd' profile found ..." vs "... (no
+    # [mintd] section)"), so that assertion passed with the profile absent
+    # and this test pinned nothing. "found" appears only on the found branch.
+    assert "found" in profile_step.message, profile_step.message
 
 
-def test_validate_s3_head_bucket_success(tmp_path: Path) -> None:
+def test_validate_s3_head_bucket_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # These two moto tests never patched anything credential-shaped, so they
+    # read the developer's REAL ~/.aws/credentials for as long as they have
+    # existed -- invisible to the conftest ratchet because the old resolver
+    # inlined Path.home(). Routing through shared_credentials_path is what
+    # finally surfaced it.
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     with mock_aws():
@@ -178,7 +192,10 @@ def test_validate_s3_head_bucket_success(tmp_path: Path) -> None:
     assert "200" in s3_step.message
 
 
-def test_validate_s3_head_bucket_failure(tmp_path: Path) -> None:
+def test_validate_s3_head_bucket_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     with mock_aws():
@@ -193,7 +210,7 @@ def test_validate_s3_client_uses_config_storage_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The head_bucket client is built against the configured storage_endpoint."""
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\nstorage_endpoint: https://s3.wasabisys.com\n")
     captured: dict = {}
@@ -218,10 +235,12 @@ def test_validate_s3_profile_branch_uses_config_storage_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The profile-based Session client also gets the configured storage_endpoint."""
-    home = tmp_path / "home"
-    (home / ".aws").mkdir(parents=True)
-    (home / ".aws" / "credentials").write_text("[mintd]\naws_access_key_id = 123\n")
-    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    # The env var, not a Path.home monkeypatch: resolution goes through the
+    # one shared_credentials_path chokepoint, whose home fallback is the
+    # conftest ratchet's boom -- the env var is the injection point.
+    creds = tmp_path / "credentials"
+    creds.write_text("[mintd]\naws_access_key_id = 123\n")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\nstorage_endpoint: https://s3.wasabisys.com\n")
     captured: dict = {}
@@ -250,7 +269,7 @@ def test_validate_s3_client_endpoint_none_without_storage_endpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without storage_endpoint the client gets endpoint_url=None (AWS default)."""
-    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path / "home")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     captured: dict = {}
@@ -356,9 +375,7 @@ def test_validate_happy_path_no_bucket_skips_s3(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The common case: schema ok + aws_profile ok + s3 skipped (no bucket)."""
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setattr("pathlib.Path.home", lambda: home)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     steps = validate_config(cfg)
@@ -556,6 +573,35 @@ def test_interactive_setup_skips_aws_when_mintd_already_present(
     body = creds.read_text()
     assert "EXISTING" in body
     assert "sk-existing" in body
+
+
+def test_interactive_setup_default_creds_path_honours_the_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit aws_credentials_path, the wizard resolves the SAME
+    file every reader does: $AWS_SHARED_CREDENTIALS_FILE when set.
+
+    It used to call default_credentials_path() -- the home file -- so under a
+    sandbox that redirects the env var, setup prompted for keys and wrote
+    them where boto3, dvc and aws_profile_name would never look: setup
+    "succeeded" into a file nothing reads. Here the redirected file already
+    holds [mintd], so a correctly-routed wizard skips the prompt entirely;
+    the mis-routed one consults the home fallback, which is the conftest
+    ratchet's boom.
+
+    Mutation: wizard back to `aws_credentials_path or
+    default_credentials_path()` -> this test errors on the ratchet.
+    """
+    p = tmp_path / "cfg.yaml"
+    creds = tmp_path / "redirected-credentials"
+    creds.write_text(
+        "[mintd]\naws_access_key_id = EXISTING\naws_secret_access_key = sk\n"
+    )
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
+
+    interactive_setup(p, prompt_fn=_scripted_prompt())
+
+    assert "EXISTING" in creds.read_text()
 
 
 # --- v1 → v2 migration -----------------------------------------------------
