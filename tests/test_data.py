@@ -23,6 +23,7 @@ from mintd.check import CheckFinding
 from mintd.data import (
     AmbiguousImport,
     BumpBlocked,
+    ImportDestinationExists,
     ImportNotFound,
     PrimaryRemovedAtHead,
     UnknownProductPath,
@@ -372,6 +373,80 @@ def test_a_failed_bump_restores_a_payload_that_is_not_a_directory(
     if shape == "symlink":
         assert (store / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
     assert not list(payload.parent.glob("*.mintd-bump-backup"))
+
+
+@pytest.mark.parametrize("case", ["partial-dest", "no-dest", "dangling-backup"])
+def test_a_bump_refuses_a_stale_backup_instead_of_destroying_it(
+    tmp_path: Path, case: str
+) -> None:
+    """D14: `.mintd-bump-backup` already there means the LAST bump never
+    finished, and what is in it is the only complete payload left.
+
+    `except BaseException` covers a soft failure, not a hard kill — power
+    loss, SIGKILL, an OOM reaper. One of those mid-transfer leaves a complete
+    payload in `.mintd-bump-backup` and a half-written `dest`. On the retry
+    `_remove_payload(backup)` ran unconditionally one line before
+    `dest.rename(backup)`, so the retry deleted the only complete copy and
+    moved the partial corpse into its place; if that import also failed, the
+    restore handed the researcher the corpse.
+
+    `no-dest` is the same kill a moment earlier — after the rename, before
+    dvc wrote anything. `moved` is then False, so the retry takes no backup,
+    succeeds, and the success path's `_remove_payload(backup)` deletes the old
+    payload silently. The refusal has to sit ABOVE `if moved:` to cover it.
+
+    `dangling-backup` is dvc's `cache.type = symlink` layout after the cache
+    was pruned: `backup.exists()` is False for a dangling link, and that link
+    is the only record of where the payload was — the same reason `moved`
+    tests `is_symlink()` in its own right.
+
+    Nothing on this path may delete anything: refuse, name the backup, and let
+    the user look.
+
+    Mutations: drop the refusal -> all three redden; narrow it to
+    `backup.exists()` -> `dangling-backup` reddens; move it inside `if moved:`
+    -> `no-dest` reddens.
+    """
+    dvc_path = _stage_project(tmp_path)
+    payload = dvc_path.with_suffix("")
+    backup = payload.with_name(payload.name + ".mintd-bump-backup")
+    store = tmp_path / "pruned-dvc-cache"
+
+    if case == "dangling-backup":
+        backup.symlink_to(store)
+    else:
+        backup.mkdir()
+        (backup / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+    if case != "no-dest":
+        payload.mkdir()
+        (payload / "half.csv").write_text("truncated\n", encoding="utf-8")
+
+    fake = _FakeDvcOps()
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+
+    with pytest.raises(ImportDestinationExists) as excinfo:
+        bump_import(
+            InMemoryCatalogClient(),
+            fake,
+            project_path=tmp_path,
+            name="cms_based",
+            producer_view_factory=factory,
+            check_findings=[_drift_finding(dvc_path)],
+        )
+
+    assert str(backup) in str(excinfo.value), "the refusal must name the backup"
+    assert fake.calls == [], "the import ran over a payload nobody had looked at"
+    if case == "dangling-backup":
+        assert backup.is_symlink(), "the only record of where the payload was is gone"
+        assert backup.readlink() == store
+    else:
+        assert (backup / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n", (
+            "the retry destroyed the last complete payload"
+        )
+    if case != "no-dest":
+        assert (payload / "half.csv").read_text(encoding="utf-8") == "truncated\n"
 
 
 def test_a_successful_bump_leaves_no_backup_beside_a_file_payload(

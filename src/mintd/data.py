@@ -733,6 +733,25 @@ def bump_import(
     # user ran with no `--force` anywhere. A rename inside the same directory
     # is atomic and costs no extra disk.
     backup = dest.with_name(dest.name + ".mintd-bump-backup")
+    # D14: a backup that is ALREADY there means the last bump never finished.
+    # `except BaseException` covers a soft failure, not a hard kill — power
+    # loss, SIGKILL, an OOM reaper — and one of those mid-transfer leaves a
+    # COMPLETE payload here and a half-written `dest`. The clear below used to
+    # run unconditionally one line before `dest.rename(backup)`, so the retry
+    # deleted the only complete copy and moved the partial corpse into its
+    # place. Refuse and name the path: nothing on this path may delete
+    # anything. Above `if moved:` deliberately — a kill between the rename and
+    # dvc's first write leaves no `dest` at all, and `moved` is then False, so
+    # a check inside it would let the success path's clear eat the payload
+    # silently. `is_symlink()` in its own right because `exists()` is False for
+    # a dangling link (a pruned `cache.type = symlink`), and that link is the
+    # only record of where the payload was.
+    if backup.exists() or backup.is_symlink():
+        raise ImportDestinationExists(
+            f"{backup} already exists: an earlier bump of {name!r} was "
+            f"interrupted and left the previous payload there. Check it, then "
+            f"either move it back over {dest} or delete it, and retry"
+        )
     # D15: every payload shape gets the rename-aside, not just a directory.
     # `dest.is_dir() and not dest.is_symlink()` left `moved` False for the two
     # other ordinary shapes — an output that is a single file at HEAD, and
@@ -745,7 +764,6 @@ def bump_import(
     # and that link is the only record of where the payload was.
     moved = dvc_source.exists() and (dest.exists() or dest.is_symlink())
     if moved:
-        _remove_payload(backup)
         dest.rename(backup)
     try:
         dvc_path = dvc_ops.import_(

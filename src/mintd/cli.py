@@ -1887,6 +1887,13 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                 )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
+        except ImportDestinationExists as exc:
+            # D14: a stale `.mintd-bump-backup`. Raised on the plain-import arm
+            # too (that handler is below), but the reason differs, so does the
+            # hint: there the destination is in the user's way, here mintd is
+            # refusing to touch the last complete copy of their payload.
+            reporter.error(str(exc), hint="nothing was deleted or overwritten")
+            return 1
         except (
             AmbiguousImport,
             ImportNotFound,
