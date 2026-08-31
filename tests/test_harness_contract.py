@@ -747,7 +747,7 @@ def test_enclave_manifest_consumer_variant_loads(
     assert [f.field_path for f in consumer] == ["approved_products[provider-xw]"]
     assert consumer[0].kind == "drift", consumer[0].message
     assert APPROVED_PATH in consumer[0].message
-    assert "changed at the producer's HEAD" in consumer[0].message
+    assert "producer's HEAD differs from your pin" in consumer[0].message
     assert consumer[0].source == proj / "enclave_manifest.yaml"
 
 

@@ -442,7 +442,8 @@ def _consumer_findings_from_enclave_manifest(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=f"catalog client not provided; cannot resolve producer URL for {ap.repo}",
+                    message=f"catalog client not provided; cannot resolve producer"
+                    f" URL for {ap.repo} ({subscription_label(ap)})",
                     source=manifest_path,
                     field_path=field_path,
                     kind="catalog_unresolved",
@@ -477,7 +478,7 @@ def _consumer_findings_from_enclave_manifest(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=message,
+                    message=f"{message} ({subscription_label(ap)})",
                     source=manifest_path,
                     field_path=field_path,
                     kind="catalog_unresolved",
@@ -514,7 +515,8 @@ def _consumer_findings_from_enclave_manifest(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=f"approved product {ap.repo!r} has an empty pin",
+                    message=f"approved product {ap.repo!r} has an empty pin"
+                    f" ({subscription_label(ap)})",
                     source=manifest_path,
                     field_path=field_path,
                     kind="pin_missing",
@@ -524,7 +526,14 @@ def _consumer_findings_from_enclave_manifest(
 
         result_pin = _resolve_once(repo_url, ap.pin)
         if isinstance(result_pin, ProducerError):
-            findings.append(_error_finding_for(manifest_path, field_path, result_pin))
+            findings.append(
+                _error_finding_for(
+                    manifest_path,
+                    field_path,
+                    result_pin,
+                    label=subscription_label(ap),
+                )
+            )
             continue
 
         result_head = _resolve_once(repo_url, "")
@@ -738,8 +747,8 @@ def _stage_wdirs(
     so every stage defaults to `wdir="."` (correct for a `dvc add` producer);
     `None` means it could not be read. Collapsing them made the scaffold shape
     (`wdir: code`, `outs: - ../data/final/`) resolve to `../data/final`, get
-    dropped as escaping the root, and read back as `_POINTER_ABSENT` — an
-    "upgrade available" manufactured out of one network blip, which `bump`
+    dropped as escaping the root, and read back as `_POINTER_ABSENT` — a
+    `drift` finding manufactured out of one network blip, which `bump`
     then acts on.
     """
     key = (repo, pin)
@@ -980,8 +989,8 @@ def _drift_finding_from_views(
                 severity="warning",
                 section="consumer",
                 message=(
-                    f"upgrade available{labelled}: "
-                    f"{', '.join(changed)} changed at the producer's HEAD"
+                    f"producer's HEAD differs from your pin{labelled}: "
+                    f"{', '.join(changed)} changed"
                 ),
                 source=source,
                 field_path=field_path,
@@ -1039,13 +1048,16 @@ def _drift_finding_from_views(
             ),
         )
     if pin_md5 == _POINTER_ABSENT:
-        # Published after the pin — a real, bumpable upgrade.
+        # Present at HEAD, absent at your pin — drift. Whether that is an
+        # upgrade needs an ancestry query the ProducerView seam does not
+        # carry (a filesystem-path producer's HEAD can be BEHIND the pin),
+        # so the message states only what the pointers establish.
         return CheckFinding(
             severity="warning",
             section="consumer",
             message=(
-                f"upgrade available{labelled}: {path} is published at the "
-                f"producer's HEAD but not at your pin {pin[:7]}"
+                f"producer's HEAD differs from your pin{labelled}: {path} is "
+                f"published at HEAD but not at your pin {pin[:7]}"
             ),
             source=source,
             field_path=field_path,
@@ -1056,8 +1068,8 @@ def _drift_finding_from_views(
             severity="warning",
             section="consumer",
             message=(
-                f"upgrade available{labelled}: {path} changed at the "
-                f"producer's HEAD"
+                f"producer's HEAD differs from your pin{labelled}: "
+                f"{path} changed"
             ),
             source=source,
             field_path=field_path,
@@ -1086,7 +1098,11 @@ def _drift_finding(
 
 
 def _error_finding_for(
-    source: Path, field_path: str | None, err: ProducerError
+    source: Path,
+    field_path: str | None,
+    err: ProducerError,
+    *,
+    label: str | None = None,
 ) -> CheckFinding:
     kind: Literal[
         "unreachable",
@@ -1120,6 +1136,9 @@ def _error_finding_for(
         severity = "error"
         message = f"producer error at pin {err.pin[:7]}: {err.detail}"
         kind = None
+
+    if label:
+        message = f"{message} ({label})"
 
     return CheckFinding(
         severity=severity,

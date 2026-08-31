@@ -307,7 +307,7 @@ def test_upgrades_reports_drift(tmp_path: Path):
     assert consumer_findings[0].kind == "drift"
     assert (
         consumer_findings[0].message
-        == "upgrade available: outputs/cms_based/ changed at the producer's HEAD"
+        == "producer's HEAD differs from your pin: outputs/cms_based/ changed"
     )
 
 
@@ -960,6 +960,30 @@ def test_md5_rule_truth_table(tmp_path: Path, pin_ptr, head_ptr, expected_kind):
     assert consumer[0].severity in ("info", "warning")
 
 
+def test_absent_at_pin_drift_message_states_the_difference_not_a_direction(
+    tmp_path: Path,
+):
+    """BACKLOG 1b review-round-3 item 3: the md5 rule establishes INEQUALITY
+    only — nothing asks whether HEAD descends from the pin (an ancestry query
+    the ProducerView seam does not carry). A producer whose HEAD is behind the
+    pin — a filesystem-path producer, or a remote HEAD that is not the default
+    branch — must not read as an "upgrade"; the message states the one fact
+    that is known."""
+    factory = _staged_pair(tmp_path)
+    findings = check_project(
+        tmp_path, upgrades=True, producer_view_factory=factory,
+        fetcher=_fetcher_serving(
+            {(_VIEW_REPO, _HEAD, _OUT_PTR): _pointer_doc("c" * 32)}
+        ),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+    assert [f.kind for f in consumer] == ["drift"]
+    assert consumer[0].message == (
+        "producer's HEAD differs from your pin: outputs/cms_based/ is "
+        "published at HEAD but not at your pin 4f7c2a1"
+    )
+
+
 def test_drift_ignores_last_published_stamps(tmp_path: Path):
     """M13c's falsifier, both directions: bytes changed with the stamp
     unchanged is DRIFT (the user's case — producer committed, never ran
@@ -1282,7 +1306,7 @@ def test_unreadable_dvc_yaml_is_never_a_verdict(tmp_path: Path):
     """`PATH_MISSING` (the producer has no dvc.yaml) and a TRANSPORT failure
     are not interchangeable. Collapsing both to `{}` meant that, for the
     scaffold shape, an unresolvable out was dropped as escaping the root and
-    read back as `_POINTER_ABSENT` — manufacturing "upgrade available" out of
+    read back as `_POINTER_ABSENT` — manufacturing a `drift` finding out of
     one network blip, which `bump` then acts on.
 
     The md5s here are IDENTICAL at both revs: the honest answer is
@@ -1446,7 +1470,9 @@ def test_all_outputs_row_ignores_a_member_with_no_pointer(tmp_path: Path):
     consumer = [f for f in findings if f.section == "consumer"]
 
     assert [f.kind for f in consumer] == ["drift"], consumer[0].message
-    assert "data/final/" in consumer[0].message
+    assert consumer[0].message == (
+        "producer's HEAD differs from your pin (<all>): data/final/ changed"
+    )
 
 
 def test_all_outputs_row_reaches_the_comparator_from_the_manifest(tmp_path: Path):
@@ -1780,3 +1806,123 @@ def test_enclave_head_unreachable_degrade_is_labelled_too(tmp_path: Path):
         "up to date (data/final/a)",
         "up to date (data/final/b)",
     ]
+
+
+def test_enclave_error_findings_are_labelled_too(tmp_path: Path):
+    """An unreachable repo with three subscription rows otherwise prints
+    three identical unlabeled error lines — `_error_finding_for` kept the
+    twin of the defect D-D fixed in the up-to-date and degrade arms."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/b"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN),
+    ]).save(manifest_path)
+
+    def factory(repo: str, pin: str):
+        return ProducerError.unreachable(repo, pin, "network down")
+
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory, fetcher=_fetcher_serving({}),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert {f.kind for f in consumer} == {"unreachable"}
+    assert [f.message for f in consumer] == [
+        "producer unreachable: network down (data/final/a)",
+        "producer unreachable: network down (data/final/b)",
+        "producer unreachable: network down (<primary>)",
+    ]
+
+
+def test_enclave_empty_pin_findings_are_labelled_too(tmp_path: Path):
+    """Two same-repo rows both with an empty pin otherwise produce two
+    byte-identical unlabeled error lines (same message, same field_path) —
+    the empty-pin arm kept the defect D-D fixed three lines below it."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="",
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="",
+                        source_path="data/final/b"),
+    ]).save(manifest_path)
+
+    def factory(repo: str, pin: str):
+        return ProducerError.unreachable(repo, pin, "network down")
+
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory, fetcher=_fetcher_serving({}),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert {f.kind for f in consumer} == {"pin_missing"}
+    assert [f.message for f in consumer] == [
+        "approved product 'provider-xw' has an empty pin (data/final/a)",
+        "approved product 'provider-xw' has an empty pin (data/final/b)",
+    ]
+
+
+def test_enclave_catalog_client_none_findings_are_labelled_too(tmp_path: Path):
+    """Two same-repo rows with no catalog client otherwise print two
+    byte-identical unlabeled error lines (same message, same field_path) —
+    the client-None arm kept the defect D-D fixed in its sibling arms."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/b"),
+    ]).save(manifest_path)
+
+    findings = check_project(tmp_path)
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert {f.kind for f in consumer} == {"catalog_unresolved"}
+    assert [f.message for f in consumer] == [
+        "catalog client not provided; cannot resolve producer URL for"
+        " provider-xw (data/final/a)",
+        "catalog client not provided; cannot resolve producer URL for"
+        " provider-xw (data/final/b)",
+    ]
+
+
+def test_enclave_catalog_resolve_failure_findings_are_labelled_too(tmp_path: Path):
+    """Two same-repo rows against an unreachable registry otherwise print two
+    byte-identical unlabeled error lines — the resolve-failure arm was the
+    last unlabeled per-row error emission in the enclave walk."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    _write_metadata(tmp_path)
+    manifest_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/a"),
+        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+                        source_path="data/final/b"),
+    ]).save(manifest_path)
+
+    findings = check_project(tmp_path, client=_UnreachableRegistryClient())
+    consumer = [f for f in findings if f.section == "consumer"]
+
+    assert {f.kind for f in consumer} == {"catalog_unresolved"}
+    msgs = [f.message for f in consumer]
+    assert msgs[0].endswith(" (data/final/a)")
+    assert msgs[1].endswith(" (data/final/b)")
+    # Identical apart from the label: same repo-level failure, but each line
+    # says which subscription row it belongs to.
+    assert msgs[0].removesuffix(" (data/final/a)") == msgs[1].removesuffix(
+        " (data/final/b)"
+    )
