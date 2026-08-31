@@ -477,7 +477,7 @@ def test_data_import_bump_renders_the_stale_backup_refusal() -> None:
             h for h in bump_try.handlers
             if h.type is not None
             and any(
-                isinstance(n, ast.Name) and n.id == "ImportDestinationExists"
+                isinstance(n, ast.Name) and n.id == "StaleBackupExists"
                 for n in ast.walk(h.type)
             )
         ),
@@ -4232,6 +4232,12 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # visible to a scan of data.py.
     "GitOpError": "check git auth",
     "ImportDestinationExists": None,
+    # D16 made the stale-backup refusal reachable from the PLAIN import arm as
+    # well as `--bump`. Its own type, and its own hint, because the general
+    # arm's advice ("remove the existing directory") names the backup holding
+    # the last complete copy of the payload — the one action D14 exists to
+    # prevent.
+    "StaleBackupExists": "nothing was deleted or overwritten",
     "MissingPrimaryDataProduct": None,
     "UnknownProductPath": "relative to the producer",
     "ValueError": None,
