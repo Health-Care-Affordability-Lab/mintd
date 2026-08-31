@@ -1594,6 +1594,94 @@ def test_enclave_pull_nothing_to_pull_message(
     assert "nothing to pull" in msg
 
 
+def test_enclave_pull_json_fresh_clone_reports_missing(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 1: `--json enclave pull` on a fresh clone used to emit
+    ZERO bytes at exit 0 — byte-identical to a healthy enclave — because
+    Reporter.warn is a no-op in json_mode and the handler only emitted a
+    result when something was pulled. The D7 missing report rides the json
+    result instead."""
+    from datetime import datetime
+    from mintd.enclave import DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(
+        enclave_name="test",
+        downloaded=[
+            DownloadedItem(
+                repo="provider-xw", output="outputs/main.parquet",
+                contract_pin="a" * 40, artifact_pin="f" * 32,
+                fetch_strategy="dvc-import", downloaded_at=datetime.now(),
+                local_path="downloads/provider-xw/fffffff-2026-05-20",
+            ),
+        ],
+    ).save(manifest)
+    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["--json", "enclave", "pull", "--manifest", str(manifest)])
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pulled"] == []
+    assert [(m["repo"], m["output"]) for m in payload["missing"]] == [
+        ("provider-xw", "outputs/main.parquet")
+    ]
+
+
+def test_enclave_pull_json_missing_scoped_to_repo_arg(
+    patched_clients,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Review round 2 (vacuity): `--json enclave pull <repo>` must scope the
+    "missing" list to <repo>. The only prior json test omitted the repo arg,
+    so repo=None at the cli.py call site survived every gate file."""
+    from datetime import datetime
+    from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
+
+    manifest = tmp_path / "enclave_manifest.yaml"
+
+    def row(repo: str) -> DownloadedItem:
+        return DownloadedItem(
+            repo=repo, output="out", contract_pin="c" * 40,
+            artifact_pin="f" * 32, fetch_strategy="dvc-import",
+            downloaded_at=datetime.now(),
+            local_path=f"downloads/{repo}/fffffff-2026-05-20",
+        )
+
+    EnclaveManifest(
+        enclave_name="test",
+        approved_products=[
+            ApprovedProduct(
+                repo="provider-a", registry_entry="e", pin="c" * 40,
+                source_path="out",
+            ),
+            ApprovedProduct(
+                repo="provider-b", registry_entry="e", pin="c" * 40,
+                source_path="out",
+            ),
+        ],
+        downloaded=[row("provider-a"), row("provider-b")],
+    ).save(manifest)
+    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(
+        ["--json", "enclave", "pull", "provider-b", "--manifest", str(manifest)]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pulled"] == []
+    assert [m["repo"] for m in payload["missing"]] == ["provider-b"]
+
+
 # ---------------------------------------------------------------------------
 # Slice 14 — mintd init
 # ---------------------------------------------------------------------------
