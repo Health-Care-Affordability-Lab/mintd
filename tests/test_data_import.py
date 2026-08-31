@@ -12,6 +12,7 @@ import pytest
 
 from mintd.catalog import CatalogEntry, CatalogNotFound, InMemoryCatalogClient
 from mintd.data import (
+    StaleBackupExists,
     ImportDestinationExists,
     MissingPrimaryDataProduct,
     UnknownProductPath,
@@ -511,6 +512,147 @@ def test_import_product_force_clears_an_existing_directory_dest(
     assert len(fake.calls) == 1
     assert not (dest / "stale.csv").exists()
     assert produced == [dest.parent / "cms_based.dvc"]
+
+
+@pytest.mark.parametrize("shape", ["dir", "file", "symlink"])
+def test_a_failed_forced_import_restores_the_payload(
+    tmp_path: Path, shape: str
+) -> None:
+    """D16: `--force` means "overwrite the destination", not "destroy it and
+    leave me nothing if the network drops halfway".
+
+    The forced clear was a bare `shutil.rmtree(dest)` — no rename-aside, no
+    restore — so an import that died mid-transfer took the payload with it.
+    That is the defect `bump_import` had already fixed one function away, and
+    the standing rule is that when two paths do the same job the weaker one
+    sets the posture. Both now share `_payload_backup`.
+
+    Parametrised over every shape because the old branch was narrow as well
+    (`dest.is_dir() and not dest.is_symlink()`): a file or a symlinked
+    destination was never cleared, so it was never backed up either.
+
+    The fake writes a corpse at `dest` before dying, which is what makes these
+    cells real: with a fake that raises before touching disk, "restored" and
+    "never moved" are indistinguishable and all three pass against a helper
+    that does nothing at all — including one with `engage` re-narrowed to the
+    pre-D15 dir-only guard, which is exactly the change this test exists to
+    pin. That mutation survived the entire suite before the fake was fixed.
+    """
+    from mintd._dvc_ops import DvcOpError
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+
+    class _PartialThenFailDvcOps(_FakeDvcOps):
+        """dvc that writes PART of the destination and then dies.
+
+        Raising before touching disk (the obvious fake) makes "restored from
+        the backup" and "never moved at all" observationally identical, so
+        every assertion below would be satisfied by inaction and the test
+        would pass against a helper that does nothing. Writing a corpse at
+        `dest` first is the only state in which restore differs from no-op.
+        """
+
+        def import_(self, **kwargs: Any) -> Path:
+            corpse: Path = kwargs["dest"]
+            corpse.mkdir(parents=True, exist_ok=True)
+            (corpse / "half.csv").write_text("truncated\n", encoding="utf-8")
+            raise DvcOpError("dvc import failed (exit 1): connection reset by peer")
+
+    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest.parent.mkdir(parents=True)
+    # The pointer beside it is what makes this destination mintd's to move.
+    (dest.parent / "cms_based.dvc").write_text("preexisting")
+
+    if shape == "dir":
+        dest.mkdir()
+        (dest / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+    elif shape == "file":
+        dest.write_text("keep me\n", encoding="utf-8")
+    else:
+        # Inside the import root on purpose: `dest.resolve()` in the
+        # containment check FOLLOWS an existing symlink, so a link pointing
+        # anywhere outside is refused as an escaping path before the backup is
+        # ever reached. That is pre-existing and out of scope here; see the
+        # `_payload_backup` follow-up in notes/BACKLOG.md.
+        target = dest.parent / "dvc-cache-payload"
+        target.mkdir()
+        (target / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+        dest.symlink_to(target)
+
+    with pytest.raises(DvcOpError):
+        import_product(
+            client, _PartialThenFailDvcOps(), "provider_xw", cwd=tmp_path,
+            dest_root=tmp_path, force=True,
+        )
+
+    if shape == "file":
+        assert dest.read_text(encoding="utf-8") == "keep me\n"
+    else:
+        assert (dest / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
+    if shape == "symlink":
+        assert dest.is_symlink(), "restored as a copy, not as the link dvc wrote"
+    # The payload is back under its own name, not stranded in the backup.
+    assert not list(dest.parent.glob("*.mintd-bump-backup"))
+
+
+def test_a_plain_import_leaves_a_stray_backup_alone(tmp_path: Path) -> None:
+    """The refusal and the success-path clear are gated on each other.
+
+    `bump` can only ever pass `engage=True` (it derives `dest` from the `.dvc`
+    it is rewriting), so nothing exercised `_payload_backup` with `engage`
+    False until `import` became the second caller. On that path the helper
+    moves nothing and deletes nothing, so a `.mintd-bump-backup` beside the
+    destination is none of its business.
+
+    Ungating either half alone is a bug, in opposite directions: an ungated
+    REFUSAL aborts plain imports that worked before, with a message asserting
+    an import was interrupted where none ever ran; an ungated success-path
+    CLEAR silently deletes a backup the helper never created — the exact
+    destroy D14 was written to stop. This test is the tripwire for the second,
+    which is the dangerous one because it exits 0.
+    """
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest.parent.mkdir(parents=True)
+    # No `.dvc` and no `dest`: nothing here is mintd's to move. The stray is a
+    # remnant of a killed bump against an older layout.
+    stray = dest.with_name(dest.name + ".mintd-bump-backup")
+    stray.mkdir()
+    (stray / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+
+    import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+
+    assert (stray / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_a_forced_import_refuses_a_stale_backup_instead_of_destroying_it(
+    tmp_path: Path,
+) -> None:
+    """D14 on the import arm, reachable for the first time since the two verbs
+    share the backup. `--force` after a hard kill must refuse, not clear."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    (dest / "partial.csv").write_text("half\n", encoding="utf-8")
+    (dest.parent / "cms_based.dvc").write_text("preexisting")
+    backup = dest.with_name(dest.name + ".mintd-bump-backup")
+    backup.mkdir()
+    (backup / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
+
+    with pytest.raises(StaleBackupExists) as excinfo:
+        import_product(
+            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
+            force=True,
+        )
+
+    assert str(backup) in str(excinfo.value)
+    assert (backup / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
+    assert not fake.calls, "refused after already asking dvc to import"
 
 
 def test_import_product_force_never_destroys_a_stray_directory(

@@ -212,6 +212,17 @@ def test_an_interrupted_bump_leaves_the_payload_in_place(
     assert not list(payload.parent.glob("*.mintd-bump-backup"))
 
 
+def _link_target(p: Path) -> Path:
+    r"""The path a symlink points at, without Windows' extended-length prefix.
+
+    `Path.readlink()` returns `\\?\C:\...` on Windows and the bare target on
+    POSIX. That prefix is a Win32 API artifact, not part of the identity these
+    tests assert — "the payload came back as the same link", not "the string
+    round-trips byte for byte".
+    """
+    return Path(str(p.readlink()).removeprefix("\\\\?\\"))
+
+
 class _PartialThenFailDvcOps(_FakeDvcOps):
     """dvc that writes part of the destination and then dies.
 
@@ -368,7 +379,7 @@ def test_a_failed_bump_restores_a_payload_that_is_not_a_directory(
         assert payload.is_symlink(), (
             "the symlinked payload was destroyed by a bump that then failed"
         )
-        assert payload.readlink() == store
+        assert _link_target(payload) == store
         assert payload.exists() is (shape == "symlink")
     if shape == "symlink":
         assert (store / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
@@ -440,7 +451,7 @@ def test_a_bump_refuses_a_stale_backup_instead_of_destroying_it(
     assert fake.calls == [], "the import ran over a payload nobody had looked at"
     if case == "dangling-backup":
         assert backup.is_symlink(), "the only record of where the payload was is gone"
-        assert backup.readlink() == store
+        assert _link_target(backup) == store
     else:
         assert (backup / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n", (
             "the retry destroyed the last complete payload"

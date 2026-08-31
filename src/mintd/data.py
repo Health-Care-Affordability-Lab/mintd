@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -81,6 +81,19 @@ class CloneResult:
 class ImportDestinationExists(Exception):
     """A `.dvc` file already exists at the destination. The consumer resolves
     by passing `force=True` or removing the file first."""
+
+
+class StaleBackupExists(ImportDestinationExists):
+    """A `<dest>.mintd-bump-backup` is already there, so the last transfer never
+    finished and what is in it is the only complete payload left.
+
+    A subclass so every existing `except ImportDestinationExists` still catches
+    it — but its own type, because the two need OPPOSITE advice. The plain
+    refusal means "the destination is in your way, clear it"; this one means
+    "mintd will not touch the last copy of your data", and rendering it with
+    the other's hint tells the researcher to delete exactly what D14 exists to
+    protect.
+    """
 
 
 class ImportNotFound(Exception):
@@ -235,33 +248,40 @@ def import_product(
                     raise ImportDestinationExists(
                         f"{target_dvc} already exists; pass force=True or remove it"
                     )
-                if force and target_dvc.exists() and dest.is_dir() and not dest.is_symlink():
-                    # `dvc import -o <existing-dir>` treats the directory as a
-                    # *container*, nests the source basename inside it, and then
-                    # rejects the overlap; neither mintd's `force` nor dvc's
-                    # `--force` clears it. The `.dvc` guard keeps a stray
-                    # unrelated directory from being destroyed.
-                    shutil.rmtree(dest)
                 # `dvc import` requires the destination's parent directory to
                 # already exist; it doesn't auto-create it. Create here so a
                 # fresh consumer project (no `data/imports/<namespace>/` yet)
                 # doesn't fail with the cryptic "stage working dir ... does not
                 # exist".
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                produced.append(
-                    dvc_ops.import_(
-                        repo_url=repo_url,
-                        path=p,
-                        dest=dest,
-                        cwd=cwd,
-                        rev=rev,
-                        force=force,
-                        extra_args=extra_dvc_args,
+                # D16: `--force` used to `rmtree` the destination outright — no
+                # rename-aside, no restore — so an import that died mid-transfer
+                # left the researcher with nothing. `--force` means "overwrite
+                # the destination", not "destroy it and leave nothing if the
+                # network drops". Same helper, same guarantees, as `bump`. The
+                # `target_dvc.exists()` half of `engage` is the load-bearing
+                # guard the old branch carried: without it a forced import
+                # destroys a stray unrelated directory that shares the name.
+                with _payload_backup(
+                    dest,
+                    engage=force and target_dvc.exists(),
+                    name=name,
+                ):
+                    produced.append(
+                        dvc_ops.import_(
+                            repo_url=repo_url,
+                            path=p,
+                            dest=dest,
+                            cwd=cwd,
+                            rev=rev,
+                            force=force,
+                            extra_args=extra_dvc_args,
+                        )
                     )
-                )
     except BaseException:
         if produced and reporter is not None:
-            # Nothing is rolled back. Say what landed, so the user is not left
+            # EARLIER outputs are not rolled back — the failing one is, by
+            # `_payload_backup`. Say what landed, so the user is not left
             # guessing at a half-written import.
             #
             # BaseException for the same reason as `bump_import`'s restore:
@@ -642,6 +662,97 @@ def _remove_payload(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+@contextmanager
+def _payload_backup(dest: Path, *, engage: bool, name: str) -> Iterator[None]:
+    """Rename `dest` aside for the duration of the body, and put it back if the
+    body raises. D16: one dance for `bump` and for `import --force`.
+
+    dvc treats an existing directory dest as a CONTAINER, nests the source
+    basename inside it and then refuses the overlap, so the destination has to
+    go — but not before its replacement exists. Deleting it outright meant a
+    transfer that died mid-flight left the payload gone and the pointer still
+    at the old rev, from a command the user ran with no `--force` anywhere. A
+    rename inside the same directory is atomic and costs no extra disk.
+
+    `engage` is the caller's own answer to "is this destination mine to move":
+    `bump` derives `dest` from the `.dvc` it is rewriting, and `import` will
+    only touch a destination that already has a pointer beside it. That second
+    guard is load-bearing — without it a forced import destroys a stray
+    unrelated directory that merely shares the name.
+    """
+    backup = dest.with_name(dest.name + ".mintd-bump-backup")
+    # D14: a backup that is ALREADY there means the last run never finished.
+    # `except BaseException` covers a soft failure, not a hard kill — power
+    # loss, SIGKILL, an OOM reaper — and one of those mid-transfer leaves a
+    # COMPLETE payload here and a half-written `dest`. Clearing it used to run
+    # unconditionally one line before the rename, so the retry deleted the only
+    # complete copy and moved the partial corpse into its place. Refuse and
+    # name the path: nothing on this path may delete anything. Above the
+    # `moved` test deliberately — a kill between the rename and dvc's first
+    # write leaves no `dest` at all, `moved` is then False, and a check below
+    # would let the success path's clear eat the payload silently.
+    # `is_symlink()` in its own right because `exists()` is False for a
+    # dangling link (a pruned `cache.type = symlink`), and that link is the
+    # only record of where the payload was.
+    # Gated on `engage` for the same reason the clear below is gated on
+    # `moved`: on a path where this helper will move nothing and delete
+    # nothing, a `.mintd-bump-backup` beside the destination is none of its
+    # business, and refusing there aborts imports that worked before while
+    # asserting something false about a destination nothing ever imported.
+    # The two gates are load-bearing FOR EACH OTHER — gate one without the
+    # other and a plain import silently deletes the stray instead of refusing.
+    # `bump` cannot tell the difference (its `engage` is true by construction);
+    # `import` is the first caller that can pass False.
+    if engage and (backup.exists() or backup.is_symlink()):
+        raise StaleBackupExists(
+            f"{backup} already exists: an earlier mintd transfer of {name!r} "
+            f"was interrupted and left the previous payload there. Check it, "
+            f"then either move it back over {dest} or delete it, and retry"
+        )
+    # D15: every payload shape gets the rename-aside, not just a directory. A
+    # `dest.is_dir() and not dest.is_symlink()` test left this False for the
+    # two other ordinary shapes — an output that is a single file at HEAD, and
+    # dvc's `cache.type = symlink` layout — which meant NO BACKUP AT ALL and
+    # `--force` overwriting the payload with nothing to roll back to. That
+    # `is_symlink()` conjunct was never a decision to exclude links: `is_dir()`
+    # follows them, so it only separated a real directory from a link to one.
+    # `rename` moves all three identically.
+    moved = engage and (dest.exists() or dest.is_symlink())
+    if moved:
+        dest.rename(backup)
+    try:
+        yield
+    except BaseException:
+        # BaseException, not Exception: `run_streaming` re-raises
+        # KeyboardInterrupt unchanged, so Ctrl-C during the transfer walked
+        # past this restore and left the payload in the backup directory with
+        # nothing naming it. Same call, and for the same reason, as
+        # `enclave_pull`'s manifest flush. The block is local filesystem work
+        # only, so it cannot stall the interrupt; the bare `raise` keeps the
+        # exit code and the CLI's rendering unchanged.
+        if moved:
+            # Whatever the failed import left at `dest` has to go first, and it
+            # is not always a directory: `rmtree` is a silent no-op on a file or
+            # a symlink (`ignore_errors` swallows its refusal), so the rename
+            # back then met the leftover and raised `NotADirectoryError` —
+            # replacing the `DvcOpError` the CLI knows how to render with a
+            # traceback, payload still sitting in `.mintd-bump-backup`.
+            _remove_payload(dest)
+            backup.rename(dest)
+        raise
+    # Gated on `moved` — see the refusal above, which this is paired with. An
+    # ungated clear deletes a `.mintd-bump-backup` this helper never created.
+    # KNOWN EDGE, filed not fixed (T-E in notes/BACKLOG.md): if the body
+    # reports success WITHOUT materialising `dest` — `--no-exec` and
+    # `--no-download` are forwarded to dvc verbatim and never post-checked —
+    # this clears a payload the command only meant to re-point. Not fixed here
+    # because `dest.exists()` cannot tell that case from an ordinary success,
+    # and the flag-sniffing alternative puts dvc's CLI surface inside this
+    # helper.
+    if moved:
+        _remove_payload(backup)
+
+
 def bump_import(
     client: CatalogClient,
     dvc_ops: DvcOps,
@@ -726,46 +837,12 @@ def bump_import(
     # Rewrite the SAME `.dvc` file — deriving dest from the file being bumped
     # is layout-independent and guarantees nothing is orphaned.
     dest = dvc_source.with_suffix("")
-    # dvc treats an existing directory dest as a CONTAINER and then refuses the
-    # overlap, so it has to go — but not before the replacement exists.
-    # Deleting outright meant a producer that went unreachable mid-bump left
-    # the payload gone and the `.dvc` still at the old pin, from a command the
-    # user ran with no `--force` anywhere. A rename inside the same directory
-    # is atomic and costs no extra disk.
-    backup = dest.with_name(dest.name + ".mintd-bump-backup")
-    # D14: a backup that is ALREADY there means the last bump never finished.
-    # `except BaseException` covers a soft failure, not a hard kill — power
-    # loss, SIGKILL, an OOM reaper — and one of those mid-transfer leaves a
-    # COMPLETE payload here and a half-written `dest`. The clear below used to
-    # run unconditionally one line before `dest.rename(backup)`, so the retry
-    # deleted the only complete copy and moved the partial corpse into its
-    # place. Refuse and name the path: nothing on this path may delete
-    # anything. Above `if moved:` deliberately — a kill between the rename and
-    # dvc's first write leaves no `dest` at all, and `moved` is then False, so
-    # a check inside it would let the success path's clear eat the payload
-    # silently. `is_symlink()` in its own right because `exists()` is False for
-    # a dangling link (a pruned `cache.type = symlink`), and that link is the
-    # only record of where the payload was.
-    if backup.exists() or backup.is_symlink():
-        raise ImportDestinationExists(
-            f"{backup} already exists: an earlier bump of {name!r} was "
-            f"interrupted and left the previous payload there. Check it, then "
-            f"either move it back over {dest} or delete it, and retry"
-        )
-    # D15: every payload shape gets the rename-aside, not just a directory.
-    # `dest.is_dir() and not dest.is_symlink()` left `moved` False for the two
-    # other ordinary shapes — an output that is a single file at HEAD, and
-    # dvc's `cache.type = symlink` layout — which meant NO BACKUP AT ALL and
-    # `--force` overwriting the payload with nothing to roll back to. The
-    # `is_symlink()` conjunct was never a decision to exclude links: `is_dir()`
-    # follows them, so it only separated a real directory from a link to one.
-    # `rename` moves all three identically. `is_symlink()` is kept as its own
-    # test because `exists()` is False for a DANGLING link (a pruned cache),
-    # and that link is the only record of where the payload was.
-    moved = dvc_source.exists() and (dest.exists() or dest.is_symlink())
-    if moved:
-        dest.rename(backup)
-    try:
+    # D16: one backup dance, shared with `import --force`. `dvc_source` comes
+    # from a fresh `rglob` off disk, so `engage` here is true by construction —
+    # kept as the caller's own guard so both call sites read the same way.
+    with _payload_backup(
+        dest, engage=dvc_source.exists(), name=name
+    ):
         dvc_path = dvc_ops.import_(
             repo_url=dep.producer_repo,
             path=target,
@@ -775,27 +852,6 @@ def bump_import(
             force=True,
             extra_args=extra_dvc_args,
         )
-    except BaseException:
-        # BaseException, not Exception: `run_streaming` re-raises
-        # KeyboardInterrupt unchanged, so Ctrl-C during the transfer walked
-        # past this restore and left the payload in the backup directory with
-        # nothing naming it. Same call, and for the same reason, as
-        # `enclave_pull`'s manifest flush. The block is local filesystem work
-        # only, so it cannot stall the interrupt; the bare `raise` keeps the
-        # exit code and the CLI's rendering unchanged.
-        if moved:
-            # Whatever the failed import left at `dest` has to go first, and
-            # it is not always a directory: `rmtree` is a silent no-op on a
-            # file or a symlink (`ignore_errors` swallows its refusal), so
-            # `backup.rename(dest)` then met the leftover and raised
-            # `NotADirectoryError` — replacing the `DvcOpError` the CLI knows
-            # how to render with a traceback, payload still sitting in
-            # `.mintd-bump-backup`. Two ordinary shapes reach this: an output
-            # that is a single file at HEAD, and dvc's `cache.type = symlink`.
-            _remove_payload(dest)
-            backup.rename(dest)
-        raise
-    _remove_payload(backup)
     return BumpResult(
         changed=True, old_pin=dep.contract_pin, new_pin=head_sha, dvc_path=dvc_path,
     )
