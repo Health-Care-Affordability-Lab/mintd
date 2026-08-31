@@ -4,7 +4,9 @@
 * writes data/raw/.
 *
 * To activate:
-*   1. Uncomment the `fetch` stage block in dvc.yaml.
+*   1. Uncomment the `fetch` stage block in dvc.yaml. Keep its cmd as
+*      `sh run_stata.sh fetch ${stata_cmd}` — a bare `-b do fetch.do`
+*      exits 0 even on abort, so DVC would cache a failed fetch as clean.
 *   2. Implement the download logic in fetch_raw_data below.
 *   3. Run: dvc repro fetch
 *

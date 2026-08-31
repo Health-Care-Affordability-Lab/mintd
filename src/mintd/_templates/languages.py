@@ -71,6 +71,8 @@ LANGUAGES: dict[str, dict[str, Any]] = {
         "data_files": lambda source_dir: [
             ("stata-packages.txt", "stata-packages.txt.j2"),
             (f"{source_dir}/_mintd_utils.do", "_mintd_utils.do.j2"),
+            (f"{source_dir}/_mintd_run.do", "_mintd_run.do.j2"),
+            (f"{source_dir}/run_stata.sh", "run_stata.sh.j2"),
             (f"{source_dir}/fetch.do", "fetch.do.j2"),
             (f"{source_dir}/ingest.do", "ingest.do.j2"),
             (f"{source_dir}/validate.do", "validate.do.j2"),

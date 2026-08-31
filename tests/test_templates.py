@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -282,6 +283,203 @@ def test_run_all_r_fails_loud_on_missing_config(tmp_path: Path) -> None:
     assert '"00_setup"' not in run_all, (
         "run_all.R must not reference the phantom code/00_setup/ dir"
     )
+
+
+# --- stata batch failure propagation ---------------------------------------
+#
+# Stata batch mode exits 0 even when a do-file aborts, so a bare
+# `${stata_cmd} -b do ingest.do` stage lets DVC cache broken output and mark
+# the stage clean. The scaffold routes stata stages through run_stata.sh,
+# which reads the return code _mintd_run.do records in a sentinel file
+# (logs/.rc_<stage>) and turns it into the process exit status. See
+# notes/issues/issue-stata-batch-errors-not-propagated.md.
+
+_posix_sh_only = pytest.mark.skipif(
+    os.name == "nt",
+    reason="run_stata.sh is POSIX-only and rendered with CRLF on nt (Windows "
+    "GA tracks .ps1 siblings — see project_windows_support_followup)",
+)
+
+
+def _render_stata_data(tmp_path: Path) -> Path:
+    """Render a data/stata scaffold; return its code/ dir."""
+    render_scaffold(
+        project_type="data", name="foo", language="stata", target_dir=tmp_path
+    )
+    return tmp_path / "code"
+
+
+def _write_fake_stata(tmp_path: Path, sentinel_value: str | None) -> Path:
+    """A fake Stata binary: exits 0 unconditionally (the real batch-mode
+    behavior this issue is about) and, unless ``sentinel_value`` is None,
+    writes the sentinel the driver do-file would have written for the stage
+    named by its last argument."""
+    write = ""
+    if sentinel_value is not None:
+        write = (
+            "mkdir -p ../logs\n"
+            f"printf '%s' \"{sentinel_value}\" > \"../logs/.rc_$stage\"\n"
+        )
+    fake = tmp_path / "fake-stata"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do stage="$a"; done\n'
+        f"{write}"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+def _run_wrapper(code_dir: Path, fake: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["sh", "run_stata.sh", "ingest", str(fake)],
+        cwd=code_dir,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_stata_dvc_stages_route_through_wrapper(tmp_path: Path) -> None:
+    """Every active stata stage cmd must go through run_stata.sh; a bare
+    `-b do` invocation swallows do-file aborts (Stata batch exits 0)."""
+    import yaml
+
+    code_dir = _render_stata_data(tmp_path)
+    assert (code_dir / "run_stata.sh").is_file()
+    driver = (code_dir / "_mintd_run.do").read_text(encoding="utf-8")
+    # The driver must trap the stage script's abort (capture), record the
+    # return code in the sentinel, and act as the batch entry point that
+    # runs `main` (the stage stubs' interactive guard skips it in batch).
+    assert "capture noisily do \"`stage'.do\"\nlocal rc = _rc" in driver, (
+        "driver must capture the stage do-file AND record its return code"
+    )
+    assert "file write `fh' \"`rc'\"" in driver, (
+        "driver must write the captured rc — not a constant — to the sentinel"
+    )
+    assert ".rc_" in driver
+    # The main invocation must stay gated: only after the stage do-file
+    # completed cleanly (rc == 0), and only if it defines a `main`
+    # program (the `program list main` probe). Ungated, an aborted stage
+    # do is followed by a clean `main` whose _rc overwrites rc with 0 —
+    # sentinel says 0, wrapper exits 0, DVC caches the broken output:
+    # the exact bug class this slice exists to fix.
+    assert (
+        "if `rc' == 0 {\n"
+        "    capture program list main\n"
+        "    if _rc == 0 {\n"
+        "        capture noisily main\n"
+        "        local rc = _rc\n"
+        "    }\n"
+        "}"
+    ) in driver, "main must run gated on rc==0 and on main existing"
+
+    raw_text = (tmp_path / "dvc.yaml").read_text(encoding="utf-8")
+    assert "-b do" not in raw_text, (
+        "dvc.yaml must not invoke Stata batch directly — exit 0 on abort"
+    )
+    stages = yaml.safe_load(raw_text)["stages"]
+    assert stages["ingest"]["cmd"] == "sh run_stata.sh ingest ${stata_cmd}"
+    assert stages["validate"]["cmd"] == "sh run_stata.sh validate ${stata_cmd}"
+    # The wrapper and driver must be DEPS of both stages: without these
+    # lines dvc never re-runs a stage when the wrapper or driver changes in
+    # a scaffolded repo -- the stage looks clean while its harness rotted.
+    # (Nothing else in the suite binds them; deleting all four lines left
+    # every gate green until this loop existed.)
+    for stage_name in ("ingest", "validate"):
+        for dep in ("_mintd_run.do", "run_stata.sh"):
+            assert dep in stages[stage_name]["deps"], (
+                f"{dep} must be a dep of {stage_name}: dvc cannot see "
+                "wrapper/driver changes otherwise"
+            )
+    # The optional fetch block must steer stata users through the wrapper
+    # too: `${stata_cmd} -b do fetch.do` is an exit-0 no-op in batch (the
+    # stub's guard skips main, so its `exit 198` tripwire never fires).
+    assert "#    cmd: sh run_stata.sh fetch ${stata_cmd}" in raw_text, (
+        "commented fetch example must route through run_stata.sh"
+    )
+    gitignore = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "logs/.rc_*" in gitignore, (
+        "rc sentinels persist after success and must be git-ignored"
+    )
+
+
+@_posix_sh_only
+def test_run_stata_wrapper_succeeds_on_rc_zero(tmp_path: Path) -> None:
+    code_dir = _render_stata_data(tmp_path)
+    fake = _write_fake_stata(tmp_path, "0")
+    result = _run_wrapper(code_dir, fake)
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "logs" / ".rc_ingest").read_text(encoding="utf-8") == "0"
+
+
+@_posix_sh_only
+@pytest.mark.parametrize("rc", ["601", "256"])
+def test_run_stata_wrapper_fails_on_nonzero_rc(tmp_path: Path, rc: str) -> None:
+    """Nonzero sentinel -> nonzero exit. rc=256 guards the mod-256 trap:
+    `exit 256` would wrap around to status 0."""
+    code_dir = _render_stata_data(tmp_path)
+    fake = _write_fake_stata(tmp_path, rc)
+    result = _run_wrapper(code_dir, fake)
+    assert result.returncode != 0
+    assert rc in result.stderr, result.stderr
+
+
+@_posix_sh_only
+def test_run_stata_wrapper_fails_on_corrupt_sentinel(tmp_path: Path) -> None:
+    """A non-numeric sentinel means the driver was cut off mid-write (or
+    the file was mangled); fail closed instead of guessing."""
+    code_dir = _render_stata_data(tmp_path)
+    fake = _write_fake_stata(tmp_path, "r(601);")
+    result = _run_wrapper(code_dir, fake)
+    assert result.returncode == 1
+    assert "corrupt" in result.stderr, result.stderr
+
+
+@_posix_sh_only
+def test_run_stata_wrapper_fails_when_sentinel_missing(tmp_path: Path) -> None:
+    """A Stata process that dies before the driver writes the sentinel must
+    fail the stage, not pass it."""
+    code_dir = _render_stata_data(tmp_path)
+    fake = _write_fake_stata(tmp_path, None)
+    result = _run_wrapper(code_dir, fake)
+    assert result.returncode != 0
+    # The missing-sentinel guard, not the corrupt-sentinel fallback: the
+    # user must be told Stata died before recording, not "corrupt file".
+    assert "without writing" in result.stderr, result.stderr
+    assert ".rc_ingest" in result.stderr, result.stderr
+
+
+@_posix_sh_only
+def test_run_stata_wrapper_ignores_stale_sentinel(tmp_path: Path) -> None:
+    """A leftover rc-0 sentinel from a previous run must not mask a Stata
+    process that wrote nothing this run."""
+    code_dir = _render_stata_data(tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / ".rc_ingest").write_text("0", encoding="utf-8")
+    fake = _write_fake_stata(tmp_path, None)
+    result = _run_wrapper(code_dir, fake)
+    # Exit 1 from the wrapper's own missing-sentinel check — not 127
+    # ("run_stata.sh: not found") and not 0 (the stale sentinel believed).
+    assert result.returncode == 1
+    assert ".rc_ingest" in result.stderr, result.stderr
+
+
+@_posix_sh_only
+def test_run_stata_wrapper_usage_error_without_args(tmp_path: Path) -> None:
+    """Missing <stata_cmd...> is a usage error: exit 2 with the usage
+    line, not a set -u abort partway through the script."""
+    code_dir = _render_stata_data(tmp_path)
+    result = subprocess.run(
+        ["sh", "run_stata.sh", "ingest"],
+        cwd=code_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "usage:" in result.stderr, result.stderr
 
 
 # --- correctness invariants -----------------------------------------------
