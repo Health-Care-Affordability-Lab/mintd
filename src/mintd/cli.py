@@ -64,6 +64,7 @@ from .data import (
     AmbiguousImport,
     BumpBlocked,
     ImportDestinationExists,
+    StaleBackupExists,
     ImportNotFound,
     PrimaryRemovedAtHead,
     UnknownProductPath,
@@ -1887,6 +1888,13 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                 )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
+        except StaleBackupExists as exc:
+            # D14. Its own type rather than a reason-guess on the message: the
+            # plain refusal means "the destination is in your way, clear it",
+            # this one means "mintd will not touch the last copy of your data".
+            # Both arms carry both reasons since D16, so both need this split.
+            reporter.error(str(exc), hint="nothing was deleted or overwritten")
+            return 1
         except (
             AmbiguousImport,
             ImportNotFound,
@@ -1956,6 +1964,15 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             str(exc),
             hint="pass --path relative to the producer's repo root",
         )
+        return 1
+    except StaleBackupExists as exc:
+        # Ahead of the bare-message tuple below, which would render this
+        # hintless, and ahead of `ImportDestinationExists` in it — D16 made the
+        # stale-backup refusal reachable from the PLAIN import arm too, and the
+        # two need opposite advice. The general arm's "remove the existing
+        # directory" names the `.mintd-bump-backup` holding the last complete
+        # copy of the payload: the one action D14 exists to prevent.
+        reporter.error(str(exc), hint="nothing was deleted or overwritten")
         return 1
     except (
         AmbiguousImport,

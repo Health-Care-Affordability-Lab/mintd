@@ -442,6 +442,58 @@ def test_data_import_forwards_the_dvc_argv_on_both_arms() -> None:
         assert "extra_dvc_args" in kwargs, f"{callee} drops the assembled dvc argv"
 
 
+def test_data_import_bump_renders_the_stale_backup_refusal() -> None:
+    """D14 makes `bump_import` raise `ImportDestinationExists` when a stale
+    `.mintd-bump-backup` is sitting there. The `--bump` arm never caught it —
+    it is raised on the plain-import arm, which has its own handler — so the
+    refusal that exists to make the researcher LOOK at their last complete
+    payload would have come out of `main()` as a traceback instead.
+
+    Read from the SOURCE for the same reason as
+    `test_data_import_forwards_the_dvc_argv_on_both_arms`: the only runtime
+    path to the raise under `--bump` goes through `check_project`, and
+    stubbing that or `bump_import` would grow the internal-stub census
+    `test_substrate_rules.py` pins shrink-only.
+
+    Mutation: drop `ImportDestinationExists` from the `--bump` arm's handlers
+    -> this reddens.
+    """
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    handler = next(
+        n for n in tree.body
+        if isinstance(n, ast.FunctionDef) and n.name == "_handle_data_import"
+    )
+    bump_try = next(
+        node for node in ast.walk(handler)
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            and c.func.id == "bump_import"
+            for stmt in node.body for c in ast.walk(stmt)
+        )
+    )
+    arm = next(
+        (
+            h for h in bump_try.handlers
+            if h.type is not None
+            and any(
+                isinstance(n, ast.Name) and n.id == "StaleBackupExists"
+                for n in ast.walk(h.type)
+            )
+        ),
+        None,
+    )
+    assert arm is not None, "the --bump arm lets the refusal out as a traceback"
+    rendered = [
+        c for stmt in arm.body for c in ast.walk(stmt)
+        if isinstance(c, ast.Call)
+        and isinstance(c.func, ast.Attribute)
+        and c.func.attr == "error"
+    ]
+    assert rendered, "the refusal is caught but never shown"
+    assert any("hint" in {kw.arg for kw in c.keywords} for c in rendered)
+
+
 def test_data_import_timeout_reaches_the_dvc_ops_factory(
     tmp_path: Path,
     patched_clients,
@@ -4180,6 +4232,12 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # visible to a scan of data.py.
     "GitOpError": "check git auth",
     "ImportDestinationExists": None,
+    # D16 made the stale-backup refusal reachable from the PLAIN import arm as
+    # well as `--bump`. Its own type, and its own hint, because the general
+    # arm's advice ("remove the existing directory") names the backup holding
+    # the last complete copy of the payload — the one action D14 exists to
+    # prevent.
+    "StaleBackupExists": "nothing was deleted or overwritten",
     "MissingPrimaryDataProduct": None,
     "UnknownProductPath": "relative to the producer",
     "ValueError": None,
