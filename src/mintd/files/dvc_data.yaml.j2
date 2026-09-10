@@ -10,9 +10,18 @@ stages:
 #
 #  fetch:
 #    wdir: {{ source_dir }}
+{% if language == "stata" %}
+#    cmd: sh run_stata.sh fetch ${stata_cmd}
+#    deps:
+#      - fetch.do
+#      - _mintd_utils.do
+#      - _mintd_run.do
+#      - run_stata.sh
+{% else %}
 #    cmd: YOUR_FETCH_CMD              # e.g. ${python_cmd} fetch.py
 #    deps:
 #      - YOUR_FETCH_SCRIPT           # e.g. fetch.py
+{% endif %}
 #    outs:
 #      - ../data/raw/
 # ---------------------------------------------------------------------------
@@ -29,7 +38,7 @@ stages:
 {% elif language == "r" %}
     cmd: ${r_cmd} ingest.R
 {% elif language == "stata" %}
-    cmd: ${stata_cmd} -b do ingest.do
+    cmd: sh run_stata.sh ingest ${stata_cmd}
 {% endif %}
     deps:
 {% if language == "python" %}
@@ -39,6 +48,8 @@ stages:
 {% elif language == "stata" %}
       - ingest.do
       - _mintd_utils.do
+      - _mintd_run.do
+      - run_stata.sh
 {% endif %}
       - ../data/raw/
     outs:
@@ -51,7 +62,7 @@ stages:
 {% elif language == "r" %}
     cmd: ${r_cmd} validate.R
 {% elif language == "stata" %}
-    cmd: ${stata_cmd} -b do validate.do
+    cmd: sh run_stata.sh validate ${stata_cmd}
 {% endif %}
     deps:
 {% if language == "python" %}
@@ -61,6 +72,8 @@ stages:
 {% elif language == "stata" %}
       - validate.do
       - _mintd_utils.do
+      - _mintd_run.do
+      - run_stata.sh
 {% endif %}
       - ../data/intermediate/
     outs:

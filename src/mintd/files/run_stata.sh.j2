@@ -1,0 +1,53 @@
+#!/bin/sh
+# Run one DVC pipeline stage's do-file in Stata batch mode and propagate
+# failure. Managed by mintd for {{ project_name }} — do not modify.
+#
+# Stata batch mode exits 0 even when the do-file aborts, so DVC would cache
+# broken output and mark the stage clean. _mintd_run.do records the stage's
+# real return code in a sentinel file (logs/.rc_<stage>); this wrapper turns
+# that into the process exit status DVC sees. The sentinel — not Stata's own
+# exit status — is the contract: a missing sentinel means Stata died before
+# recording anything, and that is a failure too.
+#
+# Usage (from dvc.yaml, wdir code/):  sh run_stata.sh <stage> <stata_cmd...>
+set -u
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: sh run_stata.sh <stage> <stata_cmd...>" >&2
+    exit 2
+fi
+
+stage="$1"
+shift
+
+cd "$(dirname "$0")" || exit 1
+
+rc_file="../logs/.rc_${stage}"
+mkdir -p ../logs
+rm -f "${rc_file}"
+
+"$@" -b do _mintd_run.do "${stage}"
+stata_status=$?
+
+if [ ! -f "${rc_file}" ]; then
+    echo "ERROR: Stata exited (status ${stata_status}) without writing ${rc_file}." >&2
+    echo "The process died before _mintd_run.do could record a return code; treating ${stage}.do as failed." >&2
+    exit 1
+fi
+
+rc="$(cat "${rc_file}")"
+case "${rc}" in
+    0)
+        exit 0
+        ;;
+    *[!0-9]*|"")
+        echo "ERROR: sentinel ${rc_file} is corrupt (contents: '${rc}'); treating ${stage}.do as failed." >&2
+        exit 1
+        ;;
+    *)
+        # Never exit with ${rc} itself: exit statuses are mod 256, so e.g.
+        # rc 256 would wrap around to 0 and report success.
+        echo "ERROR: ${stage}.do failed with Stata return code r(${rc})." >&2
+        exit 1
+        ;;
+esac
