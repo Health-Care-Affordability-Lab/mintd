@@ -4,6 +4,36 @@ Records every `import_` call and writes a parseable stub `.dvc` file to disk
 so downstream `scan_imports()` can pick it up. The stub mirrors the real
 `dvc import` shape closely enough that `DataDependency.from_dvc_file` parses
 it cleanly (see tests/test_dvc_ops.py for the round-trip).
+
+**The rule is one-directional: this fake may be LAXER than real dvc, never
+STRICTER.** Accepting what dvc refuses costs a test that passes where
+production would fail -- bad, but it surfaces the first time the code runs
+for real. Refusing what dvc ACCEPTS makes a legal call untestable and sends
+whoever hits it off to "fix" working production code against a double that
+was wrong. That is how `GraphAwareDvcOps` died; see `_reject_unknown_targets`
+for the measured accept-side boundary. When a case is unmeasured, accept it.
+
+`add()` models real dvc's pointer shape for both target kinds: a plain md5
+for a file, and for a directory an `.dir`-suffixed md5 plus a recursive
+`nfiles` count — the suffix is the only dir marker in a `.dvc` file, and
+production dispatches on exactly it. Hash values themselves are fake.
+
+`import_()` models real dvc's destination rules, measured on both contract
+arms: the stage working dir (`dest.parent`) must already exist; a
+dvc-TRACKED directory dest — its pointer beside it — is refused with
+`DvcImportDestinationExists`, and `force` does not help; an UNTRACKED
+directory dest is a *container* — the source basename is nested inside it
+and the call succeeds, while the returned pointer path is still computed
+from the original `dest` and so names a file that was never written.
+
+Strict target resolution reads EVERY `dvc.yaml` in the workspace -- root or
+subdirectory -- plus each one's sibling `dvc.lock`, and every `*.dvc`
+pointer, mirroring real dvc: outs and `<path>:<stage>` addresses resolve
+wherever the pipeline file lives, while BARE stage and instance names
+resolve against the root `dvc.yaml` only (measured; see
+`_declared_targets`).
+
+Licensed by tests/test_dvc_ops_contract.py -- one body, two arms.
 """
 
 from __future__ import annotations
@@ -157,25 +187,35 @@ class _FakeDvcOps:
                 f"dvc import failed (exit 1): stage working dir "
                 f"'{dest.parent}' does not exist"
             )
-        # Mirror real `dvc import -o <existing-dir>`: dvc treats the
-        # directory as a container, nests the source basename inside it, and
-        # refuses the overlap — mapped by SubprocessDvcOps to
-        # DvcImportDestinationExists. Without this the fake returns canned
-        # success and the force-clears-the-destination bug class is
-        # structurally untestable.
+        # Mirror real `dvc import -o <existing-dir>` (both cases measured,
+        # licensed by tests/test_dvc_ops_contract.py):
+        # - dest is a dvc-TRACKED directory (its pointer sits beside it):
+        #   dvc nests the source basename inside, hits the overlap with the
+        #   tracked dir, and refuses — SubprocessDvcOps maps that stderr to
+        #   DvcImportDestinationExists. `--force` does not help; without this
+        #   arm the force-clears-the-destination bug class is structurally
+        #   untestable.
+        # - dest is an UNTRACKED directory: a *container*, not a conflict.
+        #   dvc nests the source basename inside it and exits 0. This fake
+        #   used to raise on ANY existing dir dest — stricter than dvc, the
+        #   failure class that killed GraphAwareDvcOps.
         if dest.is_dir():
-            raise DvcImportDestinationExists(
-                f"destination '{dest}' already exists; remove the "
-                f"directory or pass force=True"
-            )
-        dvc_file = dest.parent / (dest.name + ".dvc")
+            if (dest.parent / (dest.name + ".dvc")).exists():
+                raise DvcImportDestinationExists(
+                    f"destination '{dest}' already exists; remove the "
+                    f"directory or pass force=True"
+                )
+            out = dest / Path(path.rstrip("/")).name
+        else:
+            out = dest
+        dvc_file = out.parent / (out.name + ".dvc")
         # Stub shape: enough for DataDependency.from_dvc_file to parse.
         rev_lock = rev if (rev and len(rev) == 40) else "fake0pin" + "0" * 32
         dvc_file.write_text(
             "outs:\n"
             f"  - md5: {'f' * 32}\n"
             "    size: 0\n"
-            f"    path: {dest.name}\n"
+            f"    path: {out.name}\n"
             "deps:\n"
             f"  - path: {path}\n"
             "    repo:\n"
@@ -183,7 +223,10 @@ class _FakeDvcOps:
             f"      rev: {rev or 'main'}\n"
             f"      rev_lock: {rev_lock}\n"
         )
-        return dvc_file
+        # Like SubprocessDvcOps, the return is computed from the ORIGINAL
+        # dest — after nesting it names a `<dest>.dvc` that was never
+        # written, on the real arm and this one alike (contract-pinned).
+        return dest.parent / (dest.name + ".dvc")
 
     def push(
         self,
@@ -236,12 +279,26 @@ class _FakeDvcOps:
         # `test_dvc_ops_contract.py::test_add_writes_a_parseable_dvc_file`
         # is what caught the gap: it passed on the real arm and failed on
         # the fake with `no outs block: {}`.
-        dvc_file.write_text(
-            "outs:\n"
-            f"  - md5: {'a' * 32}\n"
-            "    size: 0\n"
-            f"    path: {path.name}\n"
-        )
+        # Dispatch on target kind, like real dvc: a DIRECTORY gets an
+        # `.dir`-suffixed md5 — the only dir marker a `.dvc` file has;
+        # production branches on exactly it (`is_dir=md5.endswith(".dir")`
+        # in `_fast_sync_ops`) — plus `nfiles`, a RECURSIVE file count. A
+        # plain md5 here made every downstream reader see a FILE where the
+        # caller added a directory: not laxer, wrong-shaped. Licensed by
+        # `test_add_on_a_directory_writes_a_dir_pointer` (both arms).
+        if path.is_dir():
+            nfiles = sum(1 for p in path.rglob("*") if p.is_file())
+            out_head = (
+                f"  - md5: {'a' * 32}.dir\n"
+                "    size: 0\n"
+                f"    nfiles: {nfiles}\n"
+            )
+        else:
+            out_head = (
+                f"  - md5: {'a' * 32}\n"
+                "    size: 0\n"
+            )
+        dvc_file.write_text("outs:\n" + out_head + f"    path: {path.name}\n")
         return dvc_file
 
     def status(self, targets: list[str] | None = None, *, cwd: Path) -> dict[str, str]:
@@ -338,7 +395,8 @@ class _FakeDvcOps:
     def _declared_targets(self, root: Path) -> tuple[set[str], list[str]]:
         """What this workspace declares, as (names, out-paths).
 
-        Anchored on ``dvc.yaml`` and ``.dvc`` files, deliberately NOT on
+        Anchored on every ``dvc.yaml`` in the workspace (root or
+        subdirectory) and on ``.dvc`` files, deliberately NOT on
         ``dvc.lock``. A lock can carry a stage no ``dvc.yaml`` declares, and
         real dvc rejects that stage's out -- measured at dvc 3.67.1:
 
@@ -404,50 +462,113 @@ class _FakeDvcOps:
             wdir = dvc_file.parent.relative_to(root).as_posix()
             for out in body.get("outs") or []:
                 raw = (out or {}).get("path") if isinstance(out, dict) else None
-                if raw:
+                # `isinstance` and not truthiness alone: YAML hands over an
+                # unquoted `path: 7` as an int, and real dvc refuses the file
+                # with a clean rc=1 validation error where `posixpath.join`
+                # raises TypeError. Same rule at every `path:`/`wdir:` read in
+                # this function -- a non-string scalar declares nothing.
+                if isinstance(raw, str) and raw:
                     paths.append(posixpath.normpath(posixpath.join(wdir, raw)))
 
-        yaml_path = root / "dvc.yaml"
-        if not yaml_path.is_file():
-            return names, paths
-        names.add("dvc.yaml")
+        # EVERY `dvc.yaml`, not just the root one: real dvc resolves stage
+        # outs wherever the `dvc.yaml` lives, with the sibling `dvc.lock`
+        # next to it. But BARE stage/instance names resolve against the ROOT
+        # `dvc.yaml` only; a subdirectory's stage is addressable as
+        # `sub/dvc.yaml:stage`. Measured, dvc 3.67.1, `sub/dvc.yaml` repro'd,
+        # every pull from the workspace root (the full table is in
+        # `test_strict_fake_agrees_with_real_dvc_on_a_subdir_pipeline`):
+        #
+        #     sub/data/built.csv    rc=0    build      rc=1
+        #     sub/dvc.yaml:build    rc=0    fan@a      rc=1
+        #     sub/dvc.yaml:fan@a    rc=0
+        for yaml_path in sorted(root.rglob("dvc.yaml")):
+            rel = yaml_path.relative_to(root).as_posix()
+            names.add(rel)
+            is_root = rel == "dvc.yaml"
 
-        try:
-            stages = (yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}).get(
-                "stages"
-            ) or {}
-            lock = (
-                yaml.safe_load((root / "dvc.lock").read_text(encoding="utf-8")) or {}
-            ).get("stages") or {}
-        except (OSError, yaml.YAMLError):
-            return names, paths
-        names.update(stages)
-
-        for stage, body in lock.items():
-            # `foreach` splits the name: `dvc.yaml` says `base`, `dvc.lock`
-            # says `base@a`. Match on the base so foreach instances are
-            # accepted while genuine orphans stay rejected.
-            base = stage.split("@", 1)[0]
-            if base not in stages:
+            try:
+                doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+                lock_doc = yaml.safe_load(
+                    (yaml_path.parent / "dvc.lock").read_text(encoding="utf-8")
+                )
+            except (OSError, yaml.YAMLError):
                 continue
-            # The INSTANCE name is itself a legal target: `dvc pull base@a` is
-            # the only way real dvc lets you target one instance of a `foreach`
-            # stage, and it exits 0 (measured, dvc 3.67.1, fresh clone per
-            # target: base@a rc=0 fetching only a.parquet, base@zzz rc=1).
-            # Adding it here rather than beside `names.update(stages)` is what
-            # keeps orphan rejection intact — a lock-only stage is skipped by
-            # the guard above before it can be added.
-            names.add(stage)
-            wdir = (stages[base] or {}).get("wdir", ".")
-            for out in (body or {}).get("outs") or []:
-                raw = out.get("path")
-                if not raw:
+            # Valid YAML is not always a mapping: a top-level LIST in either
+            # file crashed this scan with AttributeError where real dvc exits
+            # 1 cleanly (measured, 3.67.1: list dvc.yaml, list dvc.lock, and
+            # bare-string lock outs below). Same guard the `*.dvc` loop above
+            # already carries; a wrong-shape file declares nothing, so its
+            # targets fall through to the reject at the end.
+            stages = doc.get("stages") if isinstance(doc, dict) else {}
+            if not isinstance(stages, dict):
+                stages = {}
+            lock = lock_doc.get("stages") if isinstance(lock_doc, dict) else {}
+            if not isinstance(lock, dict):
+                lock = {}
+            if is_root:
+                names.update(stages)
+            # The qualified address works for every pipeline file, root
+            # included — measured rc=0 for `dvc.yaml:build`, `dvc.yaml:fan`
+            # and their `sub/dvc.yaml:` twins.
+            names.update(f"{rel}:{stage}" for stage in stages)
+
+            for stage, body in lock.items():
+                # An unquoted all-digit stage key (`7:`) reaches here as an
+                # int; real dvc exits 1 on the file, `.split` raises. Skip it
+                # -- see the `isinstance(raw, str)` note above.
+                if not isinstance(stage, str):
                     continue
-                try:
-                    resolved = (root / wdir / raw).resolve()
-                    paths.append(resolved.relative_to(root.resolve()).as_posix())
-                except (ValueError, OSError):
+                # `foreach` splits the name: `dvc.yaml` says `base`, `dvc.lock`
+                # says `base@a`. Match on the base so foreach instances are
+                # accepted while genuine orphans stay rejected.
+                base = stage.split("@", 1)[0]
+                if base not in stages:
                     continue
+                # The INSTANCE name is itself a legal target: `dvc pull base@a`
+                # is the only way real dvc lets you target one instance of a
+                # `foreach` stage, and it exits 0 (measured, dvc 3.67.1, fresh
+                # clone per target: base@a rc=0 fetching only a.parquet,
+                # base@zzz rc=1) — but, like every bare name, only for the
+                # ROOT pipeline (`fan@a` on a subdir stage: rc=1). Adding it
+                # here rather than beside `names.update(stages)` is what
+                # keeps orphan rejection intact — a lock-only stage is skipped
+                # by the guard above before it can be added.
+                if is_root:
+                    names.add(stage)
+                # Qualified instance: `sub/dvc.yaml:fan@a` rc=0,
+                # `sub/dvc.yaml:fan@zzz` rc=1 — lock-derived, so the zzz row
+                # stays rejected by construction.
+                names.add(f"{rel}:{stage}")
+                # `foreach` hides the stage body -- `wdir` included --
+                # under `do:`; plain and `matrix` stages carry it at the top
+                # level. Reading only the top level anchored a foreach
+                # instance's lock out at the pipeline file instead of its
+                # wdir -- wrong in BOTH directions at once (measured, dvc
+                # 3.67.1, `wdir: work` under `do:`: `work/out_a.csv` rc=0
+                # yet rejected, `out_a.csv` rc=1 yet accepted). Pinned by
+                # `test_strict_fake_agrees_with_real_dvc_on_a_foreach_wdir_pipeline`.
+                spec = stages[base] if isinstance(stages[base], dict) else {}
+                if isinstance(spec.get("do"), dict):
+                    spec = spec["do"]
+                wdir = spec.get("wdir", ".")
+                if not isinstance(wdir, str):
+                    # `wdir: [a, b]` / `wdir: 7` -- real dvc fails the file's
+                    # validation (rc=1); joining a list raises. Declares
+                    # nothing.
+                    continue
+                outs = body.get("outs") if isinstance(body, dict) else None
+                for out in outs or []:
+                    # Lock outs are mappings; a bare-string entry is a
+                    # malformed lock real dvc refuses (rc=1) -- declare
+                    # nothing rather than crash.
+                    raw = out.get("path") if isinstance(out, dict) else None
+                    if not isinstance(raw, str) or not raw:
+                        continue
+                    try:
+                        resolved = (yaml_path.parent / wdir / raw).resolve()
+                        paths.append(resolved.relative_to(root.resolve()).as_posix())
+                    except (ValueError, OSError):
+                        continue
         return names, paths
 
     def _reject_unknown_targets(self, targets: list[str] | None, *, root: Path) -> None:
@@ -470,6 +591,8 @@ class _FakeDvcOps:
         anything in the first list is a second source of truth, not a
         double.
         """
+        import posixpath
+
         from mintd._fast_sync_ops import normalize_target
 
         names, paths = self._declared_targets(root)
@@ -480,7 +603,13 @@ class _FakeDvcOps:
             # dvc, which is the one direction this flag must never be.
             if not target.strip():
                 continue
-            nt = normalize_target(target)
+            # `normalize_target` strips only a LEADING `./`; dvc collapses
+            # `.` and `..` anywhere in the argument, LEXICALLY -- measured at
+            # 3.67.1 against one `dvc add`ed out, `data/sub/../final.csv` is
+            # rc=0 even though `data/sub` does not exist. posixpath, not
+            # os.path: these are posix strings on every platform, and
+            # `os.path.normpath` would rewrite the separators on Windows.
+            nt = posixpath.normpath(normalize_target(target))
             # An ABSOLUTE path inside the workspace is legal — measured rc=0
             # against a declared out. `normalize_target` passes absolute paths
             # through unchanged, so re-anchor here. Deliberately NOT
@@ -498,6 +627,19 @@ class _FakeDvcOps:
                     # Genuinely outside the workspace (`/etc/passwd`). dvc
                     # rejects these — measured rc=1 — so fall through.
                     pass
+            # A `../` target that lexically RE-ENTERS the workspace through
+            # its own directory name (`../ws/data/final.csv`, run from inside
+            # `ws`) is rc=0 in real dvc — measured at 3.67.1 with a local
+            # remote. Anchor it against `root` the same way as the absolute
+            # branch above, and with the same symlink stance: lexical, no
+            # `resolve()`. One that lands elsewhere falls through unchanged;
+            # what dvc does with those is unmeasured, and guessing an accept
+            # would be leniency this guard cannot license (law 11).
+            elif nt.startswith("../"):
+                anchored = posixpath.normpath(posixpath.join(root.as_posix(), nt))
+                root_prefix = f"{root.as_posix()}/"
+                if anchored.startswith(root_prefix):
+                    nt = anchored[len(root_prefix):]
             if target in names or nt in names or nt in paths:
                 continue
             # Under a directory out: dvc resolves into the `.dir` manifest.
