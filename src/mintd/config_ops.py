@@ -262,7 +262,7 @@ def validate_config(
         profile_step = ValidationStep(
             name="aws_profile",
             status="ok",
-            message="'mintd' profile found in ~/.aws/credentials",
+            message="'mintd' profile found in the AWS shared credentials file",
         )
     else:
         profile_step = ValidationStep(
@@ -473,8 +473,8 @@ def interactive_setup(
 
     from ._aws_credentials import (
         CredentialsWriteError,
-        default_credentials_path,
         has_profile,
+        shared_credentials_path,
         write_profile,
     )
 
@@ -529,10 +529,14 @@ def interactive_setup(
     # Slice 30: optionally capture AWS credentials into ~/.aws/credentials.
     # Decoupled from config.yaml because the keys go to a different file
     # (security-sensitive, mode 0600) and the prompt is opt-in.
-    creds_path = aws_credentials_path or default_credentials_path()
+    # shared_credentials_path, not default_credentials_path: under a sandbox
+    # that redirects $AWS_SHARED_CREDENTIALS_FILE the wizard used to write the
+    # home file while every reader (boto3, dvc, aws_profile_name) read the
+    # redirected one -- setup "succeeded" into a file nothing would read.
+    creds_path = aws_credentials_path or shared_credentials_path()
     if write and not has_profile("mintd", credentials_path=creds_path):
         print()
-        print("AWS profile [mintd] not found in ~/.aws/credentials.")
+        print(f"AWS profile [mintd] not found in {creds_path}.")
         print("DVC needs S3 access keys to push/pull data. Set them up now?")
         try:
             answer = prompt_fn("  Configure [mintd] profile now? [Y/n]: ").strip().lower()

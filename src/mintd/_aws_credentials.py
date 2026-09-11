@@ -36,6 +36,25 @@ def default_credentials_path() -> Path:
     return Path.home() / ".aws" / "credentials"
 
 
+def shared_credentials_path() -> Path:
+    """The file boto3 actually reads: ``$AWS_SHARED_CREDENTIALS_FILE`` when
+    set (how a sandbox that fences ``~/.aws`` redirects it), expanded the way
+    botocore does -- vars, then user, never raising -- else
+    ``~/.aws/credentials``.
+
+    One resolver for readers AND the setup wizard: the wizard used to prompt
+    for keys and write them to the home file while boto3, dvc and
+    ``Config.aws_profile_name`` all read the redirected one, so setup
+    "succeeded" into a file nothing would ever read. Set-but-empty expands to
+    ``Path("")``, which no reader finds and any write refuses loudly --
+    matching boto3, where set-but-empty means "no file", never a fallback.
+    """
+    env_path = os.environ.get("AWS_SHARED_CREDENTIALS_FILE")
+    if env_path is None:
+        return default_credentials_path()
+    return Path(os.path.expanduser(os.path.expandvars(env_path)))
+
+
 def has_profile(
     profile_name: str = "mintd",
     *,
@@ -49,7 +68,7 @@ def has_profile(
     cp = configparser.ConfigParser()
     try:
         cp.read(path)
-    except configparser.Error:
+    except (configparser.Error, UnicodeDecodeError):
         return False
     if not cp.has_section(profile_name):
         return False
@@ -106,7 +125,29 @@ def write_profile(
 
     cp = configparser.ConfigParser()
     if path.exists():
-        cp.read(path)
+        try:
+            read_ok = cp.read(path)
+        except (configparser.Error, UnicodeDecodeError) as exc:
+            # Unparseable -> other profiles can't be preserved -> refuse to
+            # overwrite rather than destroy sections mintd never wrote.
+            raise CredentialsWriteError(
+                f"could not read existing {path}: {exc}\n"
+                "  hint: your existing credentials file was not modified — "
+                "fix or remove it and retry"
+            ) from exc
+        # The except above can never see a permission-denied file:
+        # `configparser.read` SWALLOWS OSError and skips the file, reporting
+        # it only by absence from its return value. Without this check an
+        # existing-but-unreadable file parsed as empty, and the write below
+        # then REPLACED it -- destroying profiles mintd could not even read,
+        # exit 0. Same refusal as the unparseable case: it is the same
+        # cannot-preserve situation arriving without an exception.
+        if str(path) not in read_ok:
+            raise CredentialsWriteError(
+                f"could not read existing {path} (permission denied?)\n"
+                "  hint: your existing credentials file was not modified — "
+                "fix its permissions or remove it and retry"
+            )
 
     sections = [profile_name]
     if sync_default:

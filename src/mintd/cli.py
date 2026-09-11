@@ -862,8 +862,9 @@ def _handle_init(args: argparse.Namespace) -> int:
     endpoint = config.storage_endpoint
     # Slice 30: write the AWS profile into .dvc/config so consumers
     # running raw `dvc pull` (outside mintd) pick up the right
-    # credentials. Config.aws_profile_name returns "mintd" iff
-    # ~/.aws/credentials has a [mintd] section; otherwise None.
+    # credentials. Config.aws_profile_name returns "mintd" iff the shared
+    # credentials file ($AWS_SHARED_CREDENTIALS_FILE when set, else
+    # ~/.aws/credentials) has a [mintd] section; otherwise None.
     profile = config.aws_profile_name
 
     try:
