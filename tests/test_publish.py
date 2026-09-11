@@ -888,3 +888,48 @@ def test_apply_publish_pushes_the_project_path_not_the_process_cwd(
 
     assert [c.cwd for c in dvc.push_calls] == [proj]
     assert dvc.push_calls[0].cwd != Path.cwd()
+
+
+def test_publish_refuses_when_the_catalog_is_unreachable(tmp_path):
+    """`prepare_publish` fetches the catalog entry to build the preview diff.
+    An offline or VPN-gated registry makes `CatalogCache.ensure_fresh` raise
+    `GitOpError`, which `except (CatalogNotFound, AttributeError)` does not
+    cover — so it left `main()` as a raw traceback for every project without
+    an enclave manifest, i.e. the common case.
+
+    Refusing (rather than degrading to `first_publish`) is deliberate: step 5
+    refreshes the very same cache, so this run cannot succeed either way, and
+    degrading would only move the failure to after `dvc push`, the bump commit
+    and `git tag` — the tagged-but-unpublished state.
+
+    Mutation: drop the `except GitOpError` arm in `prepare_publish` -> this
+    reddens with the raw GitOpError.
+    """
+    proj = _seed_project(tmp_path)
+    dvc = _FakeDvcOps()
+    git = _FakeRegistryGitOps()
+
+    class _UnreachableClient(_FakeCatalogClient):
+        def fetch(self, name):
+            raise GitOpError(
+                ["git", "fetch"], "fatal: Could not resolve host: github.com"
+            )
+
+    with pytest.raises(PublishError) as excinfo:
+        publish_project(
+            project_path=proj,
+            client=_UnreachableClient(),
+            dvc_ops=dvc,
+            git_ops=git,
+        )
+
+    # git's own words, not an asserted cause: a corrupt local cache fails here
+    # identically to an unreachable remote.
+    assert "Could not resolve host" in str(excinfo.value)
+    assert "registry_url" in excinfo.value.recovery_hint
+    # Nothing happened yet, and the error must say so.
+    assert not excinfo.value.pushed
+    assert not excinfo.value.tagged
+    assert not excinfo.value.catalog_updated
+    assert dvc.push_calls == []
+    assert git.tag_calls == []

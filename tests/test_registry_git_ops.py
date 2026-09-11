@@ -28,6 +28,7 @@ from mintd._registry_git_ops import (
     RegistryBranchExists,
     SubprocessRegistryGitOps,
 )
+from mintd.check import _git_error_summary
 
 from tests._harness.git import _git
 
@@ -167,3 +168,252 @@ def test_timeouts_surface_as_git_op_error(
     with pytest.raises(GitOpError) as exc:
         call(SubprocessRegistryGitOps(), tmp_path)
     assert "timed out" in exc.value.stderr
+
+
+def test_failed_clone_reports_gits_fatal_line_not_the_progress_blob(
+    tmp_path: Path,
+) -> None:
+    """A cold registry cache is a `clone`, and `run_streaming` captures stderr
+    as newline-STRIPPED segments. Joined with `""`, git's five lines became one
+    blob — `...does not appear to be a git repositoryfatal: Could not read from
+    remote repository.Please make sure you have the correct access rightsand
+    the repository exists.` — and `_git_error_summary`'s first-non-blank-line
+    rule then returned that whole blob, led by a `Cloning into '<temp cache
+    path>'...` progress line naming a directory the user never chose.
+
+    That is what `mintd publish` printed to anyone who followed its own
+    recovery hint and deleted the cache. `fetch` never showed it (it goes
+    through `_git`/`capture_output`, which keeps real newlines), so the
+    warm-cache path looked fine and no fake could see the difference: this
+    needs the real `clone`.
+
+    Mutations: `"\\n".join` -> `"".join` in `clone`, or dropping the
+    `Cloning into` skip in `_git_error_summary` -> this reddens.
+    """
+    with pytest.raises(GitOpError) as exc:
+        SubprocessRegistryGitOps().clone(
+            (tmp_path / "nope.git").as_uri(), tmp_path / "cache"
+        )
+
+    assert len(exc.value.stderr.splitlines()) > 1
+    summary = _git_error_summary(exc.value)
+    # The CAUSE, not merely a `fatal:` prefix: git names the unusable path on
+    # its own second line, ahead of the generic `Could not read from remote
+    # repository.`, and that first one is the line the user needs.
+    assert "does not appear to be a git repository" in summary, summary
+    assert "Cloning into" not in summary
+
+
+def test_summary_keeps_the_ssh_cause_that_precedes_gits_generic_fatal() -> None:
+    """Over SSH the informative line arrives BEFORE `fatal:`.
+
+    Captured from real `git clone` against an unresolvable host. A `fatal:`
+    preference returns `Could not read from remote repository.`, which names
+    neither the host nor the reason; the first non-progress line names both.
+    Registry URLs are HTTPS in this lab's own config, so nothing in CI walks
+    this path -- hence the recorded stderr rather than a live clone.
+
+    Mutation: prefer `fatal:` in `_git_error_summary` -> this reddens.
+    """
+    ssh_stderr = (
+        "Cloning into '/var/folders/tmp/cache'...\n"
+        "ssh: Could not resolve hostname r.example: nodename nor servname "
+        "provided, or not known\n"
+        "fatal: Could not read from remote repository.\n"
+        "\n"
+        "Please make sure you have the correct access rights\n"
+        "and the repository exists.\n"
+    )
+    summary = _git_error_summary(GitOpError(["git", "clone", "…"], ssh_stderr))
+    assert summary.startswith("ssh: Could not resolve hostname r.example"), summary
+
+    # HTTPS, where git puts the cause on the `fatal:` line itself: same rule,
+    # same answer -- so the skip costs the common case nothing.
+    https_stderr = (
+        "Cloning into '/var/folders/tmp/cache'...\n"
+        "fatal: unable to access 'https://r.example/x.git/': "
+        "Could not resolve host: r.example\n"
+    )
+    summary = _git_error_summary(GitOpError(["git", "clone", "…"], https_stderr))
+    assert summary.startswith("fatal: unable to access"), summary
+
+
+def test_git_env_pins_the_message_language() -> None:
+    """`git_env()` is the whole fix, so pin its two keys and its inheritance.
+
+    Mutation: drop either key from `_git_invoke.git_env` -> this test fails.
+    """
+    from mintd._git_invoke import git_env
+
+    env = git_env()
+
+    assert env["LC_ALL"] == "C"
+    # gettext consults LANGUAGE ahead of LC_ALL, so pinning LC_ALL alone is
+    # not enough on a machine that exports both.
+    assert env["LANGUAGE"] == ""
+    # It is the parent env PLUS those two, not a replacement: a git that
+    # cannot see PATH, HOME or SSH_AUTH_SOCK cannot reach a remote at all.
+    assert "PATH" in env
+
+
+def test_git_speaks_english_to_mintd_even_when_the_user_does_not() -> None:
+    """The defect, end to end, against the real git binary.
+
+    `check`'s `_git_error_summary` picks git's `fatal:` line out of a failed
+    clone's stderr so the user sees the cause rather than the
+    `Cloning into '<temp cache path>'...` progress line naming a directory
+    they never chose. git translates that word: under a German locale it is
+    `Schwerwiegend:`, the prefix never matches, and the summary falls back to
+    the progress line -- the exact symptom, reintroduced on any machine whose
+    locale is not English, with a green suite everywhere else.
+
+    Skipped rather than xfailed where the locale is unavailable: a runner
+    without German generated has git answering in English regardless, so the
+    assertion would pass for the wrong reason.
+
+    Mutation: revert `git_env` to `dict(os.environ)` -> this test sees
+    `Schwerwiegend:`. It spawns git DIRECTLY, so it says nothing about whether
+    any call site passes `git_env()`; that is
+    `test_every_parsed_git_spawn_actually_passes_git_env`'s job.
+    """
+    import os
+    import subprocess
+
+    from mintd._git_invoke import git_env
+
+    hostile = {**os.environ, "LC_ALL": "de_DE.UTF-8", "LANGUAGE": "de"}
+    argv = ["git", "clone", "/nonexistent-repo-for-this-test.git", "/tmp/never-created"]
+
+    speaks_german = subprocess.run(argv, capture_output=True, text=True, env=hostile)
+    if "Schwerwiegend" not in speaks_german.stderr:
+        pytest.skip("this machine's git has no German locale, so there is nothing to defeat")
+
+    with_pin = subprocess.run(argv, capture_output=True, text=True, env={**hostile, **git_env()})
+
+    first = next(ln for ln in with_pin.stderr.splitlines() if ln.strip())
+    assert first.startswith("fatal:"), f"git answered mintd in the user's language: {first!r}"
+
+
+def test_every_function_that_spawns_git_passes_an_explicit_env() -> None:
+    """No git spawn in `src/mintd/` may inherit the ambient environment.
+
+    Twin of `test_every_function_that_spawns_dvc_passes_an_explicit_env`, and
+    for a sharper reason: dvc's inherited env leaked telemetry, git's leaks the
+    user's LANGUAGE into output mintd then parses. `git_env()` only helps the
+    call sites that pass it.
+
+    Mutation: delete `env=git_env()` from any git spawn in `_init_ops.py`,
+    `_registry_git_ops.py` or `_producer_git_ops.py`, or weaken one to
+    `env=None` -- which is an `env` keyword and still inherits.
+    """
+    import ast
+
+    src = Path(__file__).resolve().parents[1] / "src" / "mintd"
+    spawners = {"run", "Popen", "run_streaming"}
+    offenders: list[str] = []
+    checked = 0
+
+    for path in sorted(src.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = (
+                    node.func.attr
+                    if isinstance(node.func, ast.Attribute)
+                    else getattr(node.func, "id", None)
+                )
+                if name not in spawners:
+                    continue
+                # Scanned per CALL on the argv itself, not per function: git is
+                # spawned from three modules with no shared chokepoint, and the
+                # argv is always a literal list starting with "git".
+                argv = node.args[0] if node.args else None
+                first = None
+                if isinstance(argv, (ast.List, ast.Tuple)) and argv.elts:
+                    head = argv.elts[0]
+                    if isinstance(head, ast.Constant):
+                        first = head.value
+                if first != "git":
+                    continue
+                checked += 1
+                env_kw = next((k for k in node.keywords if k.arg == "env"), None)
+                value = env_kw.value if env_kw is not None else None
+                builder = None
+                if isinstance(value, ast.Call):
+                    builder = (
+                        value.func.attr
+                        if isinstance(value.func, ast.Attribute)
+                        else getattr(value.func, "id", None)
+                    )
+                if builder != "git_env":
+                    offenders.append(
+                        f"{path.name}:{node.lineno} in {fn.name}() — "
+                        f"env={ast.unparse(value) if value is not None else 'ABSENT'}"
+                    )
+
+    assert offenders == [], f"git spawned with an inherited env: {offenders}"
+    # Guard the scanner itself: a matcher that finds nothing passes vacuously.
+    # 4 = `_init_ops.py`'s git_init / git_add / git_rm_cached / git_origin_url,
+    # whose stderr mintd never parses. The four sites that matter build their
+    # argv into a local first (`cmd`, `argv`) and this scanner cannot see them
+    # at all -- `test_every_parsed_git_spawn_actually_passes_git_env` covers
+    # those. `>=` not `==`: a correct new literal-argv spawn should not redden
+    # a test about inherited envs, while a FALLING count means one moved out
+    # of view.
+    assert checked >= 4, f"literal-argv git spawn sites moved: {checked}"
+
+
+@pytest.mark.parametrize(
+    "spawn",
+    ["clone", "_git", "_gh", "producer_run"],
+)
+def test_every_parsed_git_spawn_actually_passes_git_env(
+    spawn: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The four spawn sites whose output mintd PARSES, driven for real.
+
+    The AST scanner above only matches a literal `["git", ...]` argv, so it
+    sees none of these four -- delete `env=git_env()` from all of them and it
+    still passes, as does every other test in this file. They are also the
+    only four whose stderr is classified (`_git_error_summary`,
+    `_classify_stderr`), which is exactly where a translated message does
+    damage.
+
+    Each entry point is called for real and the spawn primitive is replaced
+    with a recorder that raises immediately: the env is built before the
+    process would start, so nothing has to run for the assertion to hold.
+
+    Mutation: drop `env=git_env()` from `SubprocessRegistryGitOps.clone`,
+    `._git`, `._gh` or `_producer_git_ops._run` -> the matching case reddens.
+    """
+    from mintd import _subprocess
+    from mintd._producer_git_ops import GitArchiveFetcher
+
+    seen: list[dict[str, str]] = []
+
+    def record(*args: object, **kwargs: object) -> None:
+        env = kwargs.get("env")
+        seen.append(dict(env) if isinstance(env, dict) else {})
+        raise FileNotFoundError("recorded the env; no process needed")
+
+    monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(_subprocess, "run_streaming", record)
+
+    ops = SubprocessRegistryGitOps()
+    with pytest.raises(Exception):
+        if spawn == "clone":
+            ops.clone("https://r.example/x.git", tmp_path / "cache")
+        elif spawn == "_git":
+            ops.fetch(tmp_path)
+        elif spawn == "_gh":
+            ops.pr_exists_for_branch(tmp_path, "some-branch")
+        else:
+            GitArchiveFetcher().fetch_metadata_at("https://r.example/x.git", "deadbeef")
+
+    assert seen, f"{spawn} never reached a spawn primitive"
+    assert seen[0].get("LC_ALL") == "C", f"{spawn} inherited the user's locale: {seen[0]}"
+    assert seen[0].get("LANGUAGE") == "", f"{spawn} inherited LANGUAGE: {seen[0]}"
