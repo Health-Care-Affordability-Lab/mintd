@@ -181,6 +181,49 @@ def _md5_dvc(path: str) -> str:
     )
 
 
+def _foreach_pipeline(proj: Path) -> None:
+    """A declared `foreach` stage under a `wdir`, with the lock dvc writes.
+
+    dvc.yaml names the stage `fan`; dvc.lock names the instances `fan@a` /
+    `fan@b` and records each out relative to `wdir: code`, so the tracked
+    paths are `code/out/{a,b}.csv`.
+    """
+    _write(
+        proj / "dvc.yaml",
+        "stages:\n"
+        "  fan:\n"
+        "    foreach:\n"
+        "      a: {}\n"
+        "      b: {}\n"
+        "    do:\n"
+        "      wdir: code\n"
+        "      cmd: run\n"
+        "      outs:\n"
+        "        - out/${item}.csv\n",
+    )
+    _write(
+        proj / "dvc.lock",
+        "schema: '2.0'\n"
+        "stages:\n"
+        "  fan@a:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "    - path: out/a.csv\n"
+        "      md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        "      cloud:\n"
+        "        origin:\n"
+        "          version_id: v-a\n"
+        "  fan@b:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "    - path: out/b.csv\n"
+        "      md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        "      cloud:\n"
+        "        origin:\n"
+        "          version_id: v-b\n",
+    )
+
+
 def test_guard_trips_on_dvc_pointer_under_cache(tmp_path: Path) -> None:
     (tmp_path / ".dvc").mkdir()
     _write(tmp_path / "cache" / "model.dvc", _path_based_dvc("model"))
@@ -221,6 +264,88 @@ def test_guard_trips_on_dvc_lock_stage_out_under_cache(tmp_path: Path) -> None:
     )
     with pytest.raises(CacheCollisionError):
         guard_no_dvc_outs_under_cache(tmp_path, "origin")
+
+
+def test_guard_ignores_a_lock_stage_dvc_yaml_no_longer_declares(tmp_path: Path) -> None:
+    """The collision guard must not wedge a repo over a stage dvc has forgotten.
+
+    Same lock as `test_guard_trips_on_dvc_lock_stage_out_under_cache`; the
+    `cloud:` block is MANDATORY. Without a version_id `s3_key_for_out` raises
+    and `_dvc_outs_under_cache` skips the out, which would make this test pass
+    both before and after the guard -- pinning nothing.
+
+    Adding a dvc.yaml that declares only some OTHER stage makes `build` an
+    orphan. The loosening is correct: dvc no longer knows that stage, so
+    `dvc push`/`dvc pull` will never own those bytes and there is no key left
+    for the repo file cache to collide with.
+
+    Mutation: delete the guard's three lines in `parse_dvc_lock_outs` ->
+    `build` is enumerated again and this reddens with CacheCollisionError.
+    """
+    (tmp_path / ".dvc").mkdir()
+    _write(
+        tmp_path / "dvc.lock",
+        "schema: '2.0'\n"
+        "stages:\n"
+        "  build:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "    - path: cache/pipe\n"
+        "      md5: abc\n"
+        "      cloud:\n"
+        "        origin:\n"
+        "          version_id: v1\n",
+    )
+    _write(
+        tmp_path / "dvc.yaml",
+        "stages:\n"
+        "  other:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "      - data/other.csv\n",
+    )
+    guard_no_dvc_outs_under_cache(tmp_path, "origin")  # does not raise
+
+
+def test_orphan_lock_stage_out_is_not_dvc_tracked(tmp_path: Path) -> None:
+    """The second deny screen the orphan guard relaxes, recorded on purpose.
+
+    `dvc_tracked_paths` decides both cache refusals (push at `_cache_ops.py`
+    `:647`, pull at `:1194`). Dropping orphans from the enumeration means
+    `cache push <orphan out>` goes from refused to ACCEPTED. That is correct
+    -- dvc no longer knows that stage, so `dvc push`/`dvc pull` will never own
+    those bytes and `mintd data push` cannot claim them either -- but it is a
+    loosening, so it is pinned here rather than left to be "re-fixed" by
+    someone re-adding orphans to `_all_dvc_outs`.
+
+    Mutation: delete the guard's three lines in `parse_dvc_lock_outs` ->
+    `data/raw.csv` returns to the tracked set and this reddens.
+    """
+    (tmp_path / ".dvc").mkdir()
+    _write(
+        tmp_path / "dvc.yaml",
+        "stages:\n"
+        "  clean:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "      - data/clean.csv\n",
+    )
+    _write(
+        tmp_path / "dvc.lock",
+        "schema: '2.0'\n"
+        "stages:\n"
+        "  clean:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "    - path: data/clean.csv\n"
+        "      md5: 11111111111111111111111111111111\n"
+        "  ingest:\n"
+        "    cmd: run\n"
+        "    outs:\n"
+        "    - path: data/raw.csv\n"
+        "      md5: 22222222222222222222222222222222\n",
+    )
+    assert c.dvc_tracked_paths(tmp_path, "origin") == {"data/clean.csv"}
 
 
 def test_guard_ignores_md5_keyed_out_under_cache(tmp_path: Path) -> None:
@@ -664,6 +789,36 @@ def test_push_dvc_tracked_path_refused_uploads_nothing(s3_versioned, tmp_path: P
     assert "tracked by DVC" in str(ei.value)
     assert "data/final.parquet" in str(ei.value)
     assert "mintd data push" in (ei.value.hint or "")
+    assert "Contents" not in s3.list_objects_v2(Bucket=bucket)  # bucket empty
+
+
+def test_cache_push_refuses_a_foreach_pipeline_out_under_its_wdir(
+    s3_versioned, tmp_path: Path,
+) -> None:
+    """The cache lane's DVC-tracked screen must see foreach outs under a wdir.
+
+    `parse_dvc_lock_outs -> partition_pipeline_outs -> _all_dvc_outs ->
+    dvc_tracked_paths` IS this refusal. Before the shipped wdir fixes the
+    tracked set held the phantom `out/a.csv`, so pushing the real
+    `code/out/a.csv` was ACCEPTED and a pipeline output was uploaded into the
+    repo file cache namespace. This file authors `dvc.yaml` 0 other times and
+    `foreach` 0 other times -- the lane moved with no cache test noticing.
+
+    Mutation: in `wdir_map`, `body = stage_data` (drop the `do:` read) -> the
+    tracked set becomes `out/a.csv` and the push is accepted; this reddens.
+    Mutation: in `stage_wdir`, drop the `@` fallback -> same; this reddens.
+    """
+    s3, bucket = s3_versioned
+    proj = _project(tmp_path, bucket)
+    _foreach_pipeline(proj)
+    (proj / "code" / "out").mkdir(parents=True)
+    (proj / "code" / "out" / "a.csv").write_bytes(b"tracked" * 10)
+
+    with pytest.raises(CacheError) as ei:
+        c.cache_push(project_path=proj, paths=["code/out/a.csv"], config=_cfg(),
+                     reporter=Reporter(json_mode=True), s3_client_factory=_factory(s3))
+    assert "tracked by DVC" in str(ei.value)
+    assert "code/out/a.csv" in str(ei.value)
     assert "Contents" not in s3.list_objects_v2(Bucket=bucket)  # bucket empty
 
 
@@ -1162,6 +1317,37 @@ def test_pull_refuses_object_mapping_to_dvc_tracked_path(s3_versioned, tmp_path:
     assert len(summary.failed) == 1
     assert "DVC-tracked" in (summary.failed[0].reason or "")
     assert not (dest / "data" / "final.parquet").exists()  # never written
+
+
+def test_cache_pull_refuses_restoring_over_a_foreach_pipeline_out(
+    s3_versioned, tmp_path: Path,
+) -> None:
+    """The pull twin of the push refusal, per the two-paths-parity rule.
+
+    A planted key mapping onto a foreach stage's out under a `wdir` must be
+    refused, or the cache clobbers a pipeline output that `mintd data pull`
+    owns. Same enumeration chain as the push screen, so the same wdir bugs
+    would silently open it.
+
+    Mutation: in `wdir_map`, `body = stage_data` -> the tracked set holds the
+    phantom `out/a.csv`, `code/out/a.csv` is restored, and this reddens.
+    Mutation: in `stage_wdir`, drop the `@` fallback -> same; this reddens.
+    """
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {"scratch/ok.bin": b"o" * 10})
+    s3.put_object(
+        Bucket=bucket, Key="lab/proj/cache/code/out/a.csv", Body=b"pwn",
+        Metadata={"mintd-sha256": "0" * 64},
+    )
+    dest = _project(tmp_path / "clone", bucket)
+    _foreach_pipeline(dest)
+
+    summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                           s3_client_factory=_factory(s3))
+    assert summary.pulled == 1  # scratch/ok.bin
+    assert len(summary.failed) == 1
+    assert "DVC-tracked" in (summary.failed[0].reason or "")
+    assert not (dest / "code" / "out" / "a.csv").exists()  # never written
 
 
 def test_pull_refuses_object_mapping_under_git_or_dvc(s3_versioned, tmp_path: Path) -> None:

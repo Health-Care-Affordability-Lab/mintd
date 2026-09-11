@@ -864,6 +864,85 @@ def test_strict_fake_agrees_with_real_dvc_on_a_foreach_wdir_pipeline(
     assert True in real_verdict.values() and False in real_verdict.values()
 
 
+#: Three stages covering every shape `parse_dvc_lock_outs` must get right at
+#: once: a `foreach` hiding `wdir` under `do:`, a plain stage whose out climbs
+#: ABOVE its `wdir`, and a third stage that is deleted from `dvc.yaml` after
+#: `repro` so it survives only in `dvc.lock` — a real drift state (someone
+#: edits dvc.yaml and does not re-run).
+ORPHAN_WDIR_PIPELINE_YAML = (
+    "stages:\n"
+    "  fan:\n"
+    "    foreach:\n"
+    "      - a\n"
+    "      - b\n"
+    "    do:\n"
+    "      wdir: code\n"
+    "      cmd: python -c \"import pathlib; p=pathlib.Path('out/${item}.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'x\\n')\"\n"
+    "      outs:\n"
+    "        - out/${item}.csv\n"
+    "  climb:\n"
+    "    wdir: code\n"
+    "    cmd: python -c \"import pathlib; "
+    "p=pathlib.Path('../data/final/plain.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'y\\n')\"\n"
+    "    outs:\n"
+    "      - ../data/final/plain.csv\n"
+    "  ingest:\n"
+    "    cmd: python -c \"import pathlib; p=pathlib.Path('data/raw.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'z\\n')\"\n"
+    "    outs:\n"
+    "      - data/raw.csv\n"
+)
+
+#: `ingest` removed — the stage stays in `dvc.lock`, so its out is an orphan.
+ORPHAN_WDIR_PIPELINE_YAML_PRUNED = ORPHAN_WDIR_PIPELINE_YAML.split("  ingest:\n")[0]
+
+
+def test_parse_dvc_lock_outs_agrees_with_real_dvc_on_foreach_wdir(
+    tmp_path: Path, real_dvc
+) -> None:
+    """The oracle: what mintd enumerates is what real dvc will accept.
+
+    `parse_dvc_lock_outs` exists to hand `dvc pull` a target list. Every out
+    it returns that dvc rejects becomes an exit 1 for the whole pull; every
+    out it drops that dvc would accept is data silently not delivered. So the
+    only honest test is agreement with dvc itself, on one graph carrying all
+    three shapes at once.
+
+    Measured here, dvc 3.67.1, no remote configured (a configured target is
+    "up to date" at rc 0; an unknown one is rc 1, which is exactly the
+    accept/reject signal this compares):
+
+        code/out/a.csv        rc=0   foreach instance, wdir from `do:`
+        data/final/plain.csv  rc=0   out climbing above its wdir
+        data/raw.csv          rc=1   orphan: in dvc.lock, not in dvc.yaml
+
+    RED before the orphan guard on the `data/raw.csv` row: mintd enumerated
+    it and dvc refuses it. The guard IS this test's mutation -- an
+    orphan-free graph here would land green and never touch the change.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init"], cwd=ws, check=True)
+    (ws / "code").mkdir()  # dvc will not run a stage whose wdir does not exist
+    (ws / "dvc.yaml").write_text(ORPHAN_WDIR_PIPELINE_YAML, encoding="utf-8")
+    real_dvc(["repro"], cwd=ws, check=True)
+    # Orphan `ingest`: drop it from dvc.yaml, leave it in the lock dvc wrote.
+    (ws / "dvc.yaml").write_text(ORPHAN_WDIR_PIPELINE_YAML_PRUNED, encoding="utf-8")
+
+    targets = ["code/out/a.csv", "data/final/plain.csv", "data/raw.csv"]
+    enumerated = {o.path for o in parse_dvc_lock_outs(ws, "storage")}
+
+    real = {t: real_dvc(["pull", t], cwd=ws).returncode == 0 for t in targets}
+    mintd = {t: t in enumerated for t in targets}
+
+    assert mintd == real
+    # Without both verdicts present, a change that empties one side passes.
+    assert True in real.values() and False in real.values()
+
+
 # ---------------------------------------------------------------------------
 # consumer_project
 # ---------------------------------------------------------------------------
