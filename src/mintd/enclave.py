@@ -57,6 +57,7 @@ __all__ = [
     "enclave_pull",
     "enclave_remove",
     "enclave_verify",
+    "missing_downloads",
     "subscription_label",
 ]
 
@@ -599,9 +600,9 @@ def enclave_pull(
         # EnclaveManifest.save's append-only guard (_diff_transferred) protects
         # transferred[] ONLY, and enclave_pull never mutates transferred[] — so
         # incremental saves of downloaded[] can never raise AppendOnlyViolation.
-        # Reads new_downloaded at call time, so it sees the force-prune rebind
-        # below (enclosing-scope late binding); a coder promoting this to a
-        # module helper must pass new_downloaded in.
+        # Reads new_downloaded at call time, so it sees both the force-replace
+        # and the stale-pin prune rebinds below (enclosing-scope late binding);
+        # a coder promoting this to a module helper must pass new_downloaded in.
         manifest.model_copy(update={"downloaded": new_downloaded}).save(manifest_path)
 
     for i, ap in enumerate(targets, 1):
@@ -697,6 +698,10 @@ def enclave_pull(
                 # would let the failure flush below persist a manifest missing
                 # the row of a product whose re-import failed, silently dropping
                 # its provenance record while its old data lingers on disk.
+                # Rows at OTHER contract_pins (superseded by `enclave bump`)
+                # are owned by the per-repo prune after this loop — which also
+                # reaches rows whose output was renamed or dropped across the
+                # bump, something a per-output key here never could.
                 if force:
                     new_downloaded = [
                         d for d in new_downloaded
@@ -709,7 +714,19 @@ def enclave_pull(
                     artifact_pin=artifact_pin,
                     fetch_strategy="dvc-import",
                     downloaded_at=datetime.now(),
-                    local_path=str(target_dir),
+                    # `.as_posix()`, not `str()`: this string is written into
+                    # the manifest, and the manifest is the artifact that
+                    # CROSSES MACHINES. `str()` yields OS-native separators, so
+                    # a manifest written on Windows records
+                    # `downloads\acme\...`, whose `Path(...).name` on a Linux
+                    # reader is the WHOLE string — and _row_download_dir, which
+                    # both the D7 stat and `enclave_package` locate rows
+                    # through, then resolves every row to a dir that cannot
+                    # exist. Forward slashes read correctly on both.
+                    # Absolute-vs-relative is NOT normalized: only the last
+                    # segment is read back (_row_download_dir), so the prefix
+                    # is a record of where this pull wrote, nothing more.
+                    local_path=target_dir.as_posix(),
                 )
                 new_downloaded.append(item)
                 written.append(item)
@@ -731,9 +748,123 @@ def enclave_pull(
         # A fully-fetched product is persisted NOW so a later producer's failure
         # or an interrupt can't discard it (the primary Defect-1 fix:
         # SAVE-PER-PRODUCT). Covers every mutation path above, including the
-        # force-prune branch that rebinds new_downloaded.
+        # force-replace branch that rebinds new_downloaded.
         _save_downloaded()
+    # A row at a contract_pin no longer approved for this repo is a superseded
+    # transfer record left behind by `enclave bump`: apply_pin_bump rewrites
+    # approved_products[].pin only, and D1 keeps a repo at exactly one approved
+    # pin. Such rows ARE consumed: `enclave_package` selects every downloaded[]
+    # row of the repo and dedups on (repo, artifact_pin), so a superseded row
+    # whose bytes differ from the new pin's is a second key and the bundle
+    # ships BOTH the old and the new bytes. It also made the D7 missing report
+    # PERMANENT on a fresh clone: never re-fetchable (targets carry only
+    # current pins) and, when the output was RENAMED or DROPPED across the
+    # bump, not reachable by the per-output replace either, so the report's own
+    # `--force` hint could never clear it and `enclave package` still died on
+    # the missing dir.
+    #
+    # Pruned on EVERY pull, not just `--force`: the two paths otherwise ship
+    # different bytes out of the enclave from the same manifest, and the
+    # smaller export is the right one. Only the row goes; the old folder may
+    # linger under downloads/, which nothing treats as an error (`package`
+    # walks downloaded[], `verify` and `land.py` work on the transfer manifest
+    # and data_root) — the same end state `--force` already reached.
+    #
+    # AFTER the loop, never inside it: an exception re-raises from the except
+    # above, so reaching this line at all means every in-scope subscription
+    # succeeded or was skipped as already-present. That is the
+    # never-prune-on-a-failed-replacement rule (a failing sibling used to lose
+    # its custody row to a successful sibling's prune while its old data
+    # lingered on disk), and it is also why a repo whose subscriptions all
+    # fast-skip still gets pruned — the pre-existing manifests that carry a
+    # superseded row ALONGSIDE a current one are exactly the ones a plain pull
+    # skips end to end. Scoped to `targets`, so a `--repo` pull never judges a
+    # bystander repo's rows.
+    in_scope = {ap.repo for ap in targets}
+    # Membership, not "!= ap.pin": a repo holding several subscriptions may
+    # hold several approved pins, and any one of them keeps a row.
+    approved_pins = {
+        (p.repo, p.pin) for p in manifest.approved_products if p.repo in in_scope
+    }
+    kept = [
+        d
+        for d in new_downloaded
+        if d.repo not in in_scope or (d.repo, d.contract_pin) in approved_pins
+    ]
+    if kept != new_downloaded:
+        new_downloaded = kept
+        _save_downloaded()
+    # D7 (DECISIONS-20260828): stat each in-scope downloaded[] row and report
+    # the missing ones BY NAME; never fetch them unasked. A fresh clone tracks
+    # the manifest but not downloads/, so every row above skips off the
+    # manifest alone and the pull used to end in a bare "nothing to pull"
+    # while `enclave package` then died on the first missing dir. Reporting is
+    # the WHOLE fix: the manifest records no prunes (rejected as a format
+    # change every existing enclave carries), so a missing path is
+    # indistinguishable from a deliberate prune-after-transfer, and fetching
+    # here would silently undo one. `--force` is the user-asked re-fetch.
+    if reporter is not None:
+        # missing_downloads reloads from disk; that equals new_downloaded here
+        # because every mutation path above ends in _save_downloaded().
+        missing = missing_downloads(
+            manifest_path=manifest_path, repo=repo, downloads_root=downloads_root
+        )
+        for d in missing:
+            reporter.warn(
+                f"{d.repo}: {d.output} @ {d.contract_pin[:7]} is recorded as "
+                f"downloaded but missing on disk ({d.local_path})"
+            )
+        if missing:
+            scope = f" {repo}" if repo is not None else ""
+            reporter.warn(
+                f"{len(missing)} recorded download(s) missing on disk — a fresh "
+                f"clone, or files pruned after transfer; nothing is re-fetched "
+                f"unasked. To re-fetch: mintd enclave pull --force{scope}"
+            )
     return manifest_path, written
+
+def _row_download_dir(downloads_root: Path, d: DownloadedItem) -> Path:
+    """Where a downloaded[] row's bytes live under THIS enclave.
+
+    The one formula behind both the D7 missing report and `enclave_package`,
+    so the two cannot disagree about a row. `local_path` is a RECORD of where
+    a past pull put the bytes, not an address to stat: it is absolute whenever
+    `--manifest` was (real manifests carry such rows), so a re-clone at a new
+    path leaves it pointing into the OLD clone. Statting it there found a dir
+    that exists and reported nothing missing, while `enclave_package` — which
+    has always rebuilt `downloads_root/<repo>/<version folder>` — died on
+    `downloaded[] entry references missing dir`: the exact wedge. Only the
+    LAST segment is load-bearing, and it is the version folder both sides key
+    on.
+    """
+    return downloads_root / d.repo / Path(d.local_path).name
+
+
+def missing_downloads(
+    *,
+    manifest_path: Path,
+    repo: str | None = None,
+    downloads_root: Path | None = None,
+) -> list[DownloadedItem]:
+    """downloaded[] rows whose bytes are absent on disk (the D7 report).
+
+    One definition for both consumers: enclave_pull's warns AND the CLI's
+    `--json` lane — Reporter.warn is a no-op in json_mode, so the json result
+    carries this list instead of the warns.
+
+    Rows are located through `_row_download_dir`, the same formula
+    `enclave_package` uses — "pull says nothing is missing" and "package finds
+    the dir" are then the same question. `downloads_root` defaults the way
+    both of them default, and enclave_pull passes its own so an override stats
+    where that pull actually wrote.
+    """
+    manifest = EnclaveManifest.load(manifest_path)
+    root = downloads_root or (manifest_path.parent / "downloads")
+    return [
+        d
+        for d in manifest.downloaded
+        if (repo is None or d.repo == repo) and not _row_download_dir(root, d).exists()
+    ]
 
 def _resolve_outputs(
     ap: ApprovedProduct,
@@ -928,8 +1059,8 @@ def enclave_package(
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
         for d in targets:
-            version_folder = Path(d.local_path).name
-            src = downloads_root / d.repo / version_folder
+            src = _row_download_dir(downloads_root, d)
+            version_folder = src.name
             if not src.exists():
                 raise InvalidTransferManifest(
                     f"downloaded[] entry references missing dir: {src}"

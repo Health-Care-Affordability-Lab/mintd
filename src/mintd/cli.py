@@ -117,6 +117,7 @@ from .enclave import (
     enclave_pull,
     enclave_remove,
     enclave_verify,
+    missing_downloads,
     subscription_label,
 )
 from .imports import scan_imports
@@ -2378,18 +2379,42 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
     ) as exc:
         reporter.error(str(exc))
         return 1
-    if not written:
-        reporter.info("nothing to pull")
-        return 0
+    # Computed ONCE for both lanes. Text mode already got the D7 report as
+    # warns from enclave_pull, but it used to print "nothing to pull" straight
+    # after them — the line the whole branch exists to stop saying, since what
+    # is recorded as downloaded is precisely NOT on disk.
+    missing = missing_downloads(manifest_path=args.manifest, repo=args.repo)
     if reporter.json_mode:
+        # BEFORE the not-written early return, and with a "missing" key:
+        # Reporter.warn is a no-op in json_mode, so the D7 missing report
+        # (enclave_pull's warns) never reaches a `--json` caller — a fresh
+        # clone used to print ZERO bytes at exit 0, byte-identical to a
+        # healthy up-to-date enclave. The result is emitted even when both
+        # lists are empty so json output is never "bare nothing".
         reporter.result(
             {
                 "pulled": [
                     {"repo": i.repo, "pin": i.contract_pin, "local_path": str(i.local_path)}
                     for i in written
-                ]
+                ],
+                "missing": [
+                    {
+                        "repo": d.repo,
+                        "output": d.output,
+                        "pin": d.contract_pin,
+                        "local_path": str(d.local_path),
+                    }
+                    for d in missing
+                ],
             }
         )
+        return 0
+    if not written:
+        # Exit 0 either way (D7: a missing path is indistinguishable from a
+        # deliberate prune-after-transfer, so it is a report, not a failure) —
+        # only the contradicting line goes.
+        if not missing:
+            reporter.info("nothing to pull")
         return 0
     by_repo: dict[str, list] = {}
     for item in written:
