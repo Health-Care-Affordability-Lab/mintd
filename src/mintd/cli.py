@@ -66,6 +66,7 @@ from .data import (
     ImportDestinationExists,
     StaleBackupExists,
     ImportNotFound,
+    NoTrackedOutputs,
     PrimaryRemovedAtHead,
     UnknownProductPath,
     bump_import,
@@ -1980,6 +1981,7 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         MissingPrimaryDataProduct,
         ImportDestinationExists,
         ImportNotFound,
+        NoTrackedOutputs,
         PrimaryRemovedAtHead,
         ProducerError,
         # `_require_repo_url`'s bare ValueError. `CatalogEntry` is

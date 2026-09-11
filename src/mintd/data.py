@@ -40,6 +40,7 @@ __all__ = [
     "ImportDestinationExists",
     "ImportNotFound",
     "MissingPrimaryDataProduct",
+    "NoTrackedOutputs",
     "PrimaryRemovedAtHead",
     "ProducerError",
     "UnknownProductPath",
@@ -120,6 +121,11 @@ class UnknownProductPath(ValueError):
     message lists the product's `data_products.outputs[].path` values (and
     primary) so the user can pick a real target instead of decoding a raw
     DVC "no such target" stderr."""
+
+
+class NoTrackedOutputs(Exception):
+    """`--all` selected the product's `data_products.outputs` and found none
+    usable. Importing nothing is a refusal, not a success."""
 
 
 class BumpBlocked(Exception):
@@ -344,6 +350,18 @@ def _section(entry: dict[str, Any], key: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _rows(section: dict[str, Any], key: str) -> list[Any]:
+    """One list-valued field of a block — `[]` unless the value really is a
+    list. `_section`'s twin, for the same reason: every value in a registry
+    entry is arbitrary, so `section.get(k) or []` hands a scalar straight to a
+    `for` loop and `data import --all` / `data clone --path` exit on
+    `TypeError: 'bool' object is not iterable` rather than on a message. One
+    reader for every list so a second caller cannot drift from the first.
+    """
+    value = section.get(key)
+    return value if isinstance(value, list) else []
+
+
 def _resolve_paths(
     entry: dict[str, Any],
     *,
@@ -363,12 +381,46 @@ def _resolve_paths(
     data_products = _section(entry, "data_products")
 
     if all_outputs:
-        outputs = data_products.get("outputs") or []
-        return [
+        # `outputs` is raw registry YAML and need not be a list: a truthy
+        # scalar (`outputs: true`) survived `or []` and reached the loop
+        # below, exiting `data import --all` as a raw `TypeError: 'bool'
+        # object is not iterable`. Same hazard `_section` guards for blocks.
+        # An unusable value carries no usable output, so normalising it to
+        # `[]` lands it on the refusal below.
+        outputs = _rows(data_products, "outputs")
+        selected = [
             o["path"]
             for o in outputs
             if isinstance(o, dict) and isinstance(o.get("path"), str)
         ]
+        if not selected:
+            # Importing nothing is a refusal, not a success: the caller
+            # loops zero times, writes no pointer and exits 0, so a CI gate
+            # on that exit code passes on an import that moved nothing.
+            #
+            # Two different faults reach here and the user cannot act on
+            # them the same way, so the message names which one it is: an
+            # entry with NO outputs is the producer's to fix, while rows
+            # that exist but carry no usable `path` are a malformed entry.
+            # And the way out is not `--path` -- `--all` wins over a `--path`
+            # the user already passed, so suggesting it reads as advice they
+            # just followed. Point at the primary when there is one.
+            primary = data_products.get("primary")
+            fault = (
+                "lists no data_products.outputs"
+                if not outputs
+                else f"lists {len(outputs)} data_products.outputs, none with a usable path"
+            )
+            way_out = (
+                f"drop --all to import the primary ({primary!r})"
+                if isinstance(primary, str) and primary
+                else "wait for the producer to publish one"
+            )
+            raise NoTrackedOutputs(
+                f"catalog entry {name!r} {fault}; --all has nothing to "
+                f"import ({way_out})"
+            )
+        return selected
 
     if path is not None:
         return [path] if isinstance(path, str) else list(path)
@@ -394,8 +446,17 @@ def _tracked_output_targets(entry: dict[str, Any]) -> list[str]:
     """The product's tracked outputs (`data_products.outputs[].path`), plus
     the primary if it isn't already listed among them."""
     data_products = _section(entry, "data_products")
-    outputs = data_products.get("outputs") or []
-    tracked = [o["path"] for o in outputs if isinstance(o, dict) and "path" in o]
+    outputs = _rows(data_products, "outputs")
+    # `isinstance(..., str)`, not `"path" in o`: the same row test
+    # `_resolve_paths` uses. With the weaker one, `outputs: [{path: 7}]` put a
+    # non-string into `tracked`, and `data clone --path x` died in
+    # `normalize_target`'s `.replace` with `AttributeError: 'int' object has
+    # no attribute 'replace'` instead of listing the real outputs.
+    tracked = [
+        o["path"]
+        for o in outputs
+        if isinstance(o, dict) and isinstance(o.get("path"), str)
+    ]
     primary = data_products.get("primary")
     if primary and normalize_target(primary) not in {
         normalize_target(t) for t in tracked
