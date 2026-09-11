@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from ._atomic import _atomic_write_text
 from ._dvc_ops import DvcOpError, DvcOps
 from ._registry_git_ops import (
     GhAuthError,
@@ -407,22 +408,8 @@ def _overlay(raw: Any, dumped: Any) -> Any:
 
 
 def _atomic_write_json(path: Path, content: str) -> None:
-    """Write `content` to `path` atomically.
-
-    Sequence: write to a sibling tmp file → fsync the tmp file's contents →
-    rename onto `path` → fsync the parent directory. The parent-dir fsync
-    ensures the rename is durable on POSIX. NOT calling `os.sync()` —
-    that's a system-wide flush which can stall on slow filesystems.
-    """
-    import os
-    from ._atomic import _try_fsync_parent_dir
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    with open(tmp, "r+") as f:
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(path)
-    _try_fsync_parent_dir(path)
+    """Write `content` to `path` atomically. See `_atomic._atomic_write_text`."""
+    _atomic_write_text(path, content)
 
 
 # Public alias so other modules (slice 22's metadata_migrate) can reuse the
