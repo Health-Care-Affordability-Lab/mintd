@@ -369,8 +369,11 @@ def _consumer_findings_from_dvc(
         # Compare to HEAD — empty string sentinel is a test contract.
         result_head = factory(dep.producer_repo, "")
         if isinstance(result_head, ProducerError):
-            # We could resolve the pin but not HEAD — degrade to "up to date"
-            findings.append(_uptodate_finding(dep))
+            findings.append(
+                _head_unreadable_finding(
+                    source=dep.source, pin=dep.contract_pin, err=result_head
+                )
+            )
             continue
 
         findings.append(
@@ -529,12 +532,14 @@ def _consumer_findings_from_enclave_manifest(
 
         result_head = _resolve_once(repo_url, "")
         if isinstance(result_head, ProducerError):
-            # HEAD-unreachable degrade. Labelled too (D-D): without it a
-            # multi-row repo prints N identical unlabeled lines here.
+            # Labelled (D-D): without it a multi-row repo prints N identical
+            # lines here.
             findings.append(
-                _uptodate_finding_for(
+                _head_unreadable_finding(
                     source=manifest_path,
                     field_path=field_path,
+                    pin=ap.pin,
+                    err=result_head,
                     label=subscription_label(ap),
                 )
             )
@@ -590,10 +595,6 @@ def _uptodate_finding_for(
         field_path=field_path,
         kind="up_to_date",
     )
-
-
-def _uptodate_finding(dep: DataDependency) -> CheckFinding:
-    return _uptodate_finding_for(source=dep.source)
 
 
 #: `drift_unknown` covers five distinct states and only two are transport
@@ -906,6 +907,45 @@ def _drift_unknown_finding(
         field_path=field_path,
         kind="drift_unknown",
         hint=hint,
+    )
+
+
+def _head_unreadable_finding(
+    *,
+    source: Path,
+    pin: str,
+    err: ProducerError,
+    field_path: str | None = None,
+    label: str | None = None,
+) -> CheckFinding:
+    """The pin resolved but the producer's HEAD did not.
+
+    Both arms used to collapse this to `up_to_date`, so an offline or
+    air-gapped consumer reported every product clean forever and `--bump`
+    was a permanent no-op (`ProducerView.at` serves the pin from the
+    on-disk cache; `at_head` always needs the wire). A producer whose
+    metadata is broken at HEAD was hidden the same way.
+
+    `drift_unknown` and not `unreachable`: the pin is fine and nothing is
+    wrong with the consumer's own state — what failed is the COMPARISON,
+    which is exactly what `drift_unknown` means everywhere else here. It
+    also keeps `check`'s exit code (severity `warning`, so still 0) while
+    blocking both write verbs, which already refuse any kind outside
+    {drift, up_to_date}.
+    """
+    labelled = f" ({label})" if label else ""
+    reason = f"{err.reason}: {err.detail}" if err.detail else str(err.reason)
+    return _drift_unknown_finding(
+        source=source,
+        field_path=field_path,
+        message=(
+            f"cannot determine drift{labelled}: cannot read the producer's "
+            f"HEAD ({reason})"
+        ),
+        hint=(
+            f"your pin {pin[:7]} is intact; re-run 'mintd check --upgrades' "
+            "when the producer's HEAD is readable"
+        ),
     )
 
 
