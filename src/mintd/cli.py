@@ -64,6 +64,7 @@ from .data import (
     AmbiguousImport,
     BumpBlocked,
     ImportDestinationExists,
+    StaleBackupExists,
     ImportNotFound,
     PrimaryRemovedAtHead,
     UnknownProductPath,
@@ -862,8 +863,9 @@ def _handle_init(args: argparse.Namespace) -> int:
     endpoint = config.storage_endpoint
     # Slice 30: write the AWS profile into .dvc/config so consumers
     # running raw `dvc pull` (outside mintd) pick up the right
-    # credentials. Config.aws_profile_name returns "mintd" iff
-    # ~/.aws/credentials has a [mintd] section; otherwise None.
+    # credentials. Config.aws_profile_name returns "mintd" iff the shared
+    # credentials file ($AWS_SHARED_CREDENTIALS_FILE when set, else
+    # ~/.aws/credentials) has a [mintd] section; otherwise None.
     profile = config.aws_profile_name
 
     try:
@@ -1887,6 +1889,13 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                 )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
+        except StaleBackupExists as exc:
+            # D14. Its own type rather than a reason-guess on the message: the
+            # plain refusal means "the destination is in your way, clear it",
+            # this one means "mintd will not touch your last complete working copy".
+            # Both arms carry both reasons since D16, so both need this split.
+            reporter.error(str(exc), hint="nothing was deleted or overwritten")
+            return 1
         except (
             AmbiguousImport,
             ImportNotFound,
@@ -1956,6 +1965,15 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             str(exc),
             hint="pass --path relative to the producer's repo root",
         )
+        return 1
+    except StaleBackupExists as exc:
+        # Ahead of the bare-message tuple below, which would render this
+        # hintless, and ahead of `ImportDestinationExists` in it — D16 made the
+        # stale-backup refusal reachable from the PLAIN import arm too, and the
+        # two need opposite advice. The general arm's "remove the existing
+        # directory" names the `.mintd-bump-backup` holding the last complete
+        # working copy of the payload: the one action D14 exists to prevent.
+        reporter.error(str(exc), hint="nothing was deleted or overwritten")
         return 1
     except (
         AmbiguousImport,

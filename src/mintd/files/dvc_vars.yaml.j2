@@ -10,4 +10,7 @@ r_cmd: Rscript
 
 # Stata command
 # Options: stata, stata-mp, StataMP-64.exe, etc.
+# Note: the scaffolded stata stages run through a POSIX sh wrapper
+# (run_stata.sh), so on Windows they need a sh-providing shell such as
+# Git Bash; the executable name alone does not make the pipeline native.
 stata_cmd: {{ stata_executable }}

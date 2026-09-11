@@ -605,6 +605,10 @@ def test_strict_fake_agrees_with_real_dvc_on_one_graph(
     real dvc, and the fake rejected both. `/etc/passwd` and `.dvc` are the
     matching negatives, so accept and reject are covered on the same axis
     rather than one being assumed.
+
+    The three `dvc.yaml:` rows pin the ROOT-qualified addresses: review r2
+    proved a mutation dropping them survived the entire suite, so the accept
+    the fake's own comment calls measured was bound by no test at all.
     """
     clone = _graph(local_producer, tmp_path)
     fake = _strict_fake(clone)
@@ -628,6 +632,9 @@ def test_strict_fake_agrees_with_real_dvc_on_one_graph(
         "fan@a",                # a foreach INSTANCE, only nameable via the lock
         "data/fan_a.csv",       # that instance's out
         "fan@zzz",              # an instance that does not exist
+        "dvc.yaml:build",       # root-QUALIFIED stage address
+        "dvc.yaml:fan@a",       # root-qualified foreach instance
+        "dvc.yaml:fan@zzz",     # qualified instance the lock never made
     ]
 
     real_verdict, fake_verdict = {}, {}
@@ -644,6 +651,216 @@ def test_strict_fake_agrees_with_real_dvc_on_one_graph(
 
     # Belt and braces: an oracle where everything landed on one side would
     # agree trivially. Assert the graph actually exercised both directions.
+    assert True in real_verdict.values() and False in real_verdict.values()
+
+
+#: A pipeline living in a SUBDIRECTORY's `dvc.yaml` — dvc resolves stage outs
+#: wherever the `dvc.yaml` lives, not only at the workspace root. Same two
+#: stage kinds as `PIPELINE_YAML` (plain out + `foreach`), but a FILE out,
+#: because every row asserted below was measured against exactly this shape.
+SUBDIR_PIPELINE_YAML = (
+    "stages:\n"
+    "  build:\n"
+    "    cmd: python -c \"import pathlib; "
+    "d=pathlib.Path('data'); d.mkdir(parents=True, exist_ok=True); "
+    "(d/'built.csv').write_bytes(b'x\\n')\"\n"
+    "    outs:\n"
+    "      - data/built.csv\n"
+    "  fan:\n"
+    "    foreach:\n"
+    "      a: {out: data/fan_a.csv}\n"
+    "      b: {out: data/fan_b.csv}\n"
+    "    do:\n"
+    "      cmd: python -c \"import pathlib; "
+    "pathlib.Path('${item.out}').write_bytes(b'${key}\\n')\"\n"
+    "      outs:\n"
+    "        - ${item.out}\n"
+)
+
+
+def test_strict_fake_agrees_with_real_dvc_on_a_subdir_pipeline(
+    tmp_path: Path, real_dvc
+) -> None:
+    """The oracle again, for a `dvc.yaml` that does NOT live at the root.
+
+    `_declared_targets` used to read `root / "dvc.yaml"` and nothing else, so
+    every out a subdirectory's pipeline declares was refused — stricter than
+    dvc, the one direction substrate rule 2 forbids. Measured, dvc 3.67.1,
+    `sub/dvc.yaml` repro'd from inside `sub`, every pull from the workspace
+    ROOT, no remote configured:
+
+        sub/data/built.csv      rc=0   the stage out, root-relative
+        sub/data/fan_a.csv      rc=0   a foreach INSTANCE's out
+        sub/dvc.yaml            rc=0   the pipeline file itself
+        sub/dvc.yaml:build      rc=0   qualified stage address
+        sub/dvc.yaml:fan        rc=0   qualified foreach base name
+        sub/dvc.yaml:fan@a      rc=0   qualified foreach instance
+        sub/dvc.yaml:fan@zzz    rc=1   instance the lock never made
+        build                   rc=1   BARE names resolve against the root
+        fan@a                   rc=1   `dvc.yaml` only — "'dvc.yaml' does
+                                       not exist"
+        sub/data/nothing.csv    rc=1   nothing declares it
+
+    The reject half matters as much as the accept half: bare stage names are
+    root-only in real dvc, so a scan that widened them to every `dvc.yaml`
+    would be lenient exactly where this table says dvc refuses.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init"], cwd=ws, check=True)
+    sub = ws / "sub"
+    sub.mkdir()
+    (sub / "dvc.yaml").write_text(SUBDIR_PIPELINE_YAML, encoding="utf-8")
+    real_dvc(["repro"], cwd=sub, check=True)
+
+    fake = _strict_fake(ws)
+    targets = [
+        "sub/data/built.csv",
+        "sub/data/fan_a.csv",
+        "sub/dvc.yaml",
+        "sub/dvc.yaml:build",
+        "sub/dvc.yaml:fan",
+        "sub/dvc.yaml:fan@a",
+        "sub/dvc.yaml:fan@zzz",
+        "build",
+        "fan@a",
+        "sub/data/nothing.csv",
+    ]
+
+    real_verdict, fake_verdict = {}, {}
+    for target in targets:
+        real_verdict[target] = real_dvc(["pull", target], cwd=ws).returncode == 0
+        try:
+            fake.pull(targets=[target], cwd=ws)
+        except DvcOpError:
+            fake_verdict[target] = False
+        else:
+            fake_verdict[target] = True
+
+    assert fake_verdict == real_verdict
+    assert True in real_verdict.values() and False in real_verdict.values()
+
+
+def test_strict_fake_survives_a_lockless_pipeline_file_earlier_in_scan_order(
+    tmp_path: Path, real_dvc
+) -> None:
+    """A lockless `dvc.yaml` earlier in scan order must not end the scan.
+
+    A pipeline file that was declared but never repro'd has no sibling
+    `dvc.lock`, so the fake's per-file parse raises `OSError` on the lock
+    read. While that handler said `return` instead of `continue`, the root
+    file's missing lock silently dropped EVERY later-sorted `dvc.yaml` from
+    the scan, and the fake refused a subdirectory's declared outs that real
+    dvc pulls -- stricter than dvc, the one direction the module docstring
+    forbids. Nothing else in the suite puts a lockless pipeline file ahead
+    of a locked one, so the shape is pinned here, against the real-dvc
+    oracle rather than a hand-written verdict table.
+
+    Mutation: revert the `except (OSError, yaml.YAMLError)` handler in
+    `_declared_targets` from `continue` to `return names, paths` -> the two
+    accept rows below go red.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init"], cwd=ws, check=True)
+    # Root pipeline declared but never repro'd: no root `dvc.lock`, and
+    # `dvc.yaml` sorts before `sub/dvc.yaml`.
+    (ws / "dvc.yaml").write_text(
+        "stages:\n"
+        "  never:\n"
+        "    cmd: python -c pass\n"
+        "    outs:\n"
+        "      - data/never.csv\n",
+        encoding="utf-8",
+    )
+    sub = ws / "sub"
+    sub.mkdir()
+    (sub / "dvc.yaml").write_text(SUBDIR_PIPELINE_YAML, encoding="utf-8")
+    real_dvc(["repro"], cwd=sub, check=True)
+
+    fake = _strict_fake(ws)
+    targets = [
+        "sub/data/built.csv",
+        "sub/dvc.yaml:build",
+        "sub/data/nothing.csv",
+    ]
+
+    real_verdict, fake_verdict = {}, {}
+    for target in targets:
+        real_verdict[target] = real_dvc(["pull", target], cwd=ws).returncode == 0
+        try:
+            fake.pull(targets=[target], cwd=ws)
+        except DvcOpError:
+            fake_verdict[target] = False
+        else:
+            fake_verdict[target] = True
+
+    assert fake_verdict == real_verdict
+    assert True in real_verdict.values() and False in real_verdict.values()
+
+
+#: A ROOT pipeline whose `foreach` stage hides `wdir` under `do:` — the same
+#: spelling `_wdir_pipeline(style="foreach")` ships. `dvc.lock` records the
+#: instance's out RELATIVE TO THE WDIR (`path: out_a.csv`, no `wdir` key), so
+#: a scan that reads `wdir` only from the stage's top level anchors the out
+#: at the pipeline file and is wrong in BOTH directions at once.
+FOREACH_WDIR_PIPELINE_YAML = (
+    "stages:\n"
+    "  fan:\n"
+    "    foreach:\n"
+    "      - a\n"
+    "    do:\n"
+    "      wdir: work\n"
+    "      cmd: python -c \"import pathlib; "
+    "pathlib.Path('out_${item}.csv').write_bytes(b'x\\n')\"\n"
+    "      outs:\n"
+    "        - out_${item}.csv\n"
+)
+
+
+def test_strict_fake_agrees_with_real_dvc_on_a_foreach_wdir_pipeline(
+    tmp_path: Path, real_dvc
+) -> None:
+    """`wdir` under `do:` anchors a foreach instance's lock out, like real dvc.
+
+    Measured for review r2, dvc 3.67.1, the graph above repro'd at the root:
+
+        work/out_a.csv   rc=0   the out, root-relative
+        out_a.csv        rc=1   the lock's wdir-relative spelling
+
+    Reading `wdir` from the stage's TOP level only — where `foreach` never
+    puts it — made the fake reject `work/out_a.csv` and accept `out_a.csv`:
+    stricter than dvc on the real out and laxer on a phantom, the double
+    failure the module docstring forbids, on a shape the harness itself
+    authors (`_wdir_pipeline(style="foreach")`).
+
+    Mutation: revert `_declared_targets` to `wdir = (stages[base] or
+    {}).get("wdir", ".")` -> both rows go red.
+    """
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init"], cwd=ws, check=True)
+    (ws / "work").mkdir()
+    (ws / "dvc.yaml").write_text(FOREACH_WDIR_PIPELINE_YAML, encoding="utf-8")
+    real_dvc(["repro"], cwd=ws, check=True)
+
+    fake = _strict_fake(ws)
+    targets = ["work/out_a.csv", "out_a.csv"]
+
+    real_verdict, fake_verdict = {}, {}
+    for target in targets:
+        real_verdict[target] = real_dvc(["pull", target], cwd=ws).returncode == 0
+        try:
+            fake.pull(targets=[target], cwd=ws)
+        except DvcOpError:
+            fake_verdict[target] = False
+        else:
+            fake_verdict[target] = True
+
+    assert fake_verdict == real_verdict
     assert True in real_verdict.values() and False in real_verdict.values()
 
 

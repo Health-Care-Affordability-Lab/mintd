@@ -91,6 +91,25 @@ def test_c1_dvc_out_closure(rendered_matrix: dict, lang: str) -> None:
     )
 
 
+def test_stata_sync_hook_watches_the_wrapper(rendered_matrix: dict) -> None:
+    """The stata pipeline's cmd is `sh run_stata.sh ...`, so an edit to the
+    wrapper changes the pipeline without touching any `.py`/`.do` file the
+    hook's pattern watches. Without its own alternation the hook waves the
+    commit through and dvc.lock silently drifts -- the exact blindness the
+    hook exists to catch, on the file the stata fix just made load-bearing.
+
+    Mutation: drop the run_stata alternation from the stata branch of
+    check-dvc-sync.sh.j2 -> this test fails.
+    """
+    hook = rendered_matrix[("data", "stata")].files["scripts/check-dvc-sync.sh"]
+    pattern = next(
+        line for line in hook.splitlines() if line.startswith("PIPELINE_PATTERNS=")
+    )
+    assert "run_stata\\.sh$" in pattern, (
+        f"the stata sync hook does not watch the wrapper: {pattern}"
+    )
+
+
 def test_c1_helper_rejects_phantom_mintd_out() -> None:
     """Teeth proof for the mintd-tool-outs branch: a phantom out on a
     ``mintd``-cmd stage fails; the table-matching out passes."""

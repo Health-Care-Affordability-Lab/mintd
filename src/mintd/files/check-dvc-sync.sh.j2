@@ -15,7 +15,7 @@ if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
 fi
 
 {% if language == "stata" %}
-PIPELINE_PATTERNS="{{ source_dir }}/.*\.(py|do)$|configs/.*\.do$|dvc\.yaml$|dvc_vars\.yaml$"
+PIPELINE_PATTERNS="{{ source_dir }}/.*\.(py|do)$|{{ source_dir }}/run_stata\.sh$|configs/.*\.do$|dvc\.yaml$|dvc_vars\.yaml$"
 {% else %}
 PIPELINE_PATTERNS="{{ source_dir }}/.*\.py$|dvc\.yaml$|dvc_vars\.yaml$"
 {% endif %}
