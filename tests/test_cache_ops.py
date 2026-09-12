@@ -1394,6 +1394,57 @@ def test_is_tracked_is_case_insensitive() -> None:
     assert not c._is_tracked("data/isolate.bin", tracked)
 
 
+@pytest.mark.parametrize(
+    "declared,expect_is_tracked,expect_resolves,direction",
+    [
+        ("data/final/a.parquet", True, True, "1 — equality"),
+        ("data/final/a.parquet/x", True, True, "2 — under a tracked out"),
+        ("data/FINAL/A.PARQUET", True, True, "casefold"),
+        # THE DOCUMENTED DIVERGENCE. See the docstring.
+        ("data/final", False, True, "3 — outs BENEATH the declared path"),
+        ("data/nothing", False, False, "no match"),
+        ("data/final/a.parquet2", False, False, "string prefix, not a path prefix"),
+    ],
+)
+def test_is_tracked_agrees_with_outs_matching(
+    tmp_path: Path, declared: str, expect_is_tracked: bool, expect_resolves: bool,
+    direction: str,
+) -> None:
+    """`_is_tracked` and `outs_matching` answer the same question over the same
+    shared rule (`_dvc_state.path_covers`) — and DELIBERATELY disagree on one row.
+
+    `outs_matching` has three directions; `_is_tracked` keeps two. Direction 3
+    is excluded from `_is_tracked` on purpose, because that guard is also asked
+    about DIRECTORY arguments (`_cache_ops.py:696`, `_classify` on a directory).
+    Widening it turns `cache push data/final` over a directory holding one
+    tracked out plus an untracked `notes.txt` from
+
+        items=['data/final/notes.txt'], refused=[('data/final/a.parquet', 'dvc_tracked')]
+
+    into
+
+        items=[], refused=[('data/final', 'dvc_tracked')]
+
+    i.e. the untracked sibling silently stops being cacheable. The full suite is
+    green either way, so nothing else in the tree would catch it. This is a
+    recorded deviation from `PLAN-clone-resolver.md`'s S3 criterion, which had
+    `_is_tracked` gain direction 3; the divergence is pinned WITH its reason
+    rather than erased.
+
+    Mutation: make `_is_tracked` also test `path_covers(rel_posix, t)` -> the
+    direction-3 row reddens here, and the cache-push regression above ships
+    unpinned.
+    """
+    from mintd._dvc_state import outs_matching
+
+    _write(tmp_path / "data" / "final" / "a.parquet.dvc", _path_based_dvc("a.parquet"))
+    tracked = c.dvc_tracked_paths(tmp_path, "origin")
+    assert tracked == {"data/final/a.parquet"}, tracked
+
+    assert c._is_tracked(declared, tracked) is expect_is_tracked, direction
+    assert bool(outs_matching(tmp_path, declared, "origin")) is expect_resolves, direction
+
+
 @pytest.mark.skipif(os.name == "nt", reason="case-fold write test is POSIX-oriented")
 def test_pull_refuses_case_variant_git_key_no_clobber(s3_versioned, tmp_path: Path) -> None:
     # End-to-end reshape P1: a planted '.GIT/...' key must be refused, even with

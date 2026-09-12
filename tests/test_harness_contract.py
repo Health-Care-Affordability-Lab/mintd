@@ -943,6 +943,124 @@ def test_parse_dvc_lock_outs_agrees_with_real_dvc_on_foreach_wdir(
     assert True in real.values() and False in real.values()
 
 
+#: Four stages covering every lock shape `outs_matching` must expand: a
+#: `foreach` fan under `data/final/hhi/`, a plain stage landing a lock out in a
+#: prefix that ALSO holds a `.dvc` pointer (the mixed row), a `wdir`-anchored
+#: stage, and a `foreach` whose out climbs above its `wdir`.
+RESOLVER_PIPELINE_YAML = (
+    "stages:\n"
+    "  hhi:\n"
+    "    foreach:\n"
+    "      - t1\n"
+    "      - t2\n"
+    "    do:\n"
+    "      cmd: python -c \"import pathlib; "
+    "p=pathlib.Path('data/final/hhi/${item}.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'${item}\\n')\"\n"
+    "      outs:\n"
+    "        - data/final/hhi/${item}.csv\n"
+    "  mixedlock:\n"
+    "    cmd: python -c \"import pathlib; "
+    "p=pathlib.Path('data/final/mixed/lock.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'L\\n')\"\n"
+    "    outs:\n"
+    "      - data/final/mixed/lock.csv\n"
+    "  wd:\n"
+    "    wdir: code\n"
+    "    cmd: python -c \"import pathlib; p=pathlib.Path('out/p.csv'); "
+    "p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(b'P\\n')\"\n"
+    "    outs:\n"
+    "      - out/p.csv\n"
+)
+
+
+def test_outs_matching_agrees_with_real_dvc_on_one_graph(
+    local_producer: LocalProducer, tmp_path: Path, real_dvc
+) -> None:
+    """The oracle that licenses `outs_matching`: what it expands, dvc accepts
+    AND lands; what it expands FROM, dvc rejects.
+
+    Three assertions, and the shape of each is load-bearing:
+
+    (a) REJECT, **per row and direction-3 only.** A blanket "the declared path
+        dvc rejects" loop false-reds, because a direction-2 subpath UNDER a
+        tracked directory out is rc 0 on real dvc (measured: `dvc pull
+        data/parts/p1.csv` rc=0). Only the direction-3 prefixes are rejected.
+
+    (b) ACCEPT, as ONE fresh clone and ONE `dvc pull` of the WHOLE expansion,
+        asserting the landed FILE SET. Pulling one target per clone passes
+        under both the correct stamp and the broken one, which is exactly how
+        the `X.dvc` stamp defect survived review: a mixed argv of `.dvc` paths
+        and bare out paths trips dvc 3.67.1's `index_from_targets` defect
+        (`notes/issues/issue-dvc-checkout-mixed-argv.md`) and under-delivers at
+        exit 0. The targets go in `_all_dvc_outs` enumeration order —
+        pointers first, the failing order.
+
+    (c) TRAP CONTROL. `dvc pull ""` is rc 0 and lands outs from OUTSIDE the
+        declared prefix, which is what licenses (b)'s landed-set assertion as
+        the thing an exit code cannot prove.
+
+    Mutation: return `out` instead of `dataclasses.replace(out, target=rel)` in
+    `outs_matching` -> (b) fails, because a `target=''` among the argv makes
+    dvc pull the whole repo and the landed set exceeds the expansion.
+    """
+    from mintd._dvc_state import outs_matching
+
+    # Pointers: two under data/final/, one sharing data/final/mixed/ with a lock
+    # out, plus PAYLOAD's `data/parts` directory out for the direction-2 row.
+    local_producer.publish({
+        "data/final/a.parquet": b"A\n",
+        "data/final/b.parquet": b"B\n",
+        "data/final/mixed/ptr.csv": b"P\n",
+        "data/parts": {"p1.csv": b"1\n", "p2.csv": b"2\n"},
+    })
+    # dvc will not run a stage whose `wdir` does not exist.
+    (local_producer.work / "code").mkdir(exist_ok=True)
+    local_producer.publish_pipeline(
+        RESOLVER_PIPELINE_YAML, seed={"code/keep.txt": b"k\n"},
+    )
+
+    clone = _clone(local_producer, tmp_path / "reject")
+
+    # (a) reject -- direction-3 prefixes only, one verdict per row.
+    for prefix in ("data/final", "data/final/hhi", "data/final/mixed", "code/out"):
+        rc = real_dvc(["pull", prefix], cwd=clone).returncode
+        assert rc == 1, f"expected dvc to reject {prefix!r}, got rc={rc}"
+    # ...and the direction-2 subpath is NOT rejected, which is why (a) is per-row.
+    assert real_dvc(["pull", "data/parts/p1.csv"], cwd=clone).returncode == 0
+
+    # (b) accept and land -- one clone, one combined pull, exact landed set.
+    outs = outs_matching(clone, "data/final/", "storage")
+    assert outs, "direction 3 expanded to nothing"
+    assert all(o.target for o in outs), [o.target for o in outs]
+    targets = [o.target for o in outs]          # enumeration order: pointers first
+    expected = {
+        "data/final/a.parquet", "data/final/b.parquet",
+        "data/final/mixed/ptr.csv", "data/final/mixed/lock.csv",
+        "data/final/hhi/t1.csv", "data/final/hhi/t2.csv",
+    }
+    assert set(targets) == expected, sorted(targets)
+
+    fresh = _clone(local_producer, tmp_path / "accept")
+    r = real_dvc(["pull", *targets], cwd=fresh)
+    assert r.returncode == 0, f"dvc rejected the expansion:\n{r.stdout}\n{r.stderr}"
+    landed = {
+        p.relative_to(fresh).as_posix()
+        for p in (fresh / "data").rglob("*")
+        if p.is_file() and p.suffix != ".dvc" and p.name != ".gitignore"
+    }
+    assert landed == expected, f"landed {sorted(landed)}"
+    # Nothing outside the declared prefix came along.
+    assert not (fresh / "code" / "out" / "p.csv").exists()
+
+    # (c) trap control -- the empty target is rc 0 and pulls beyond the prefix.
+    trap = _clone(local_producer, tmp_path / "trap")
+    assert real_dvc(["pull", ""], cwd=trap).returncode == 0
+    assert (trap / "code" / "out" / "p.csv").exists(), (
+        "dvc pull '' should have pulled outs outside data/final/"
+    )
+
+
 # ---------------------------------------------------------------------------
 # consumer_project
 # ---------------------------------------------------------------------------
