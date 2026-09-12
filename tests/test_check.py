@@ -1615,6 +1615,66 @@ def test_a_stage_dropped_for_an_absolute_wdir_is_never_a_verdict(
     assert "no readable" in consumer[0].message
 
 
+def test_an_orphan_lock_stage_leaves_absence_a_verdict(tmp_path: Path) -> None:
+    """Where the orphan guard lives is a `check` decision, not only a
+    fast-sync one — and this is the ONLY test that pins it.
+
+    The guard belongs in `parse_dvc_lock_outs`'s own loop. Put it in the
+    shared `stage_wdir` instead and it returns `None` for an orphan, which to
+    this comparator already means "absolute wdir, stage dropped": the lock
+    walker sets `dropped`, `_pointer_md5` flips `absent_so_far`, and every
+    absent path on a producer carrying ONE stale stage stops being a verdict
+    and becomes `drift_unknown`. Both existing wdir pins stay green under
+    either placement (measured), so without this test the decision is prose.
+
+    The second assertion states the accepted cost in the open:
+    `_lock_with_resolved_paths` still resolves an orphan stage's outs, so a
+    subscription to one still gets a byte verdict on data no `dvc pull` can
+    fetch. S1 deliberately does not close that — it is a check-side fix.
+
+    Mutation: move the guard from `parse_dvc_lock_outs` into `stage_wdir`,
+    returning `None` for an orphan -> `data/nowhere.csv` flips `'<absent>'`
+    -> `None` and `data/raw.csv` flips `'b'*32` -> `None`; this reddens while
+    `test_a_stage_dropped_for_an_absolute_wdir_is_never_a_verdict` and
+    `test_wdir_relative_lock_from_real_dvc_drives_check` stay green.
+    """
+    from mintd.check import _POINTER_ABSENT, _pointer_md5
+
+    fetcher = _fetcher_serving({
+        (_VIEW_REPO, _PIN, "dvc.yaml"): (
+            b"stages:\n"
+            b"  clean:\n"
+            b"    wdir: code\n"
+            b"    cmd: run\n"
+            b"    outs:\n"
+            b"      - ../data/clean.csv\n"
+        ),
+        (_VIEW_REPO, _PIN, "dvc.lock"): (
+            b"schema: '2.0'\n"
+            b"stages:\n"
+            b"  clean:\n"
+            b"    cmd: run\n"
+            b"    outs:\n"
+            b"    - path: ../data/clean.csv\n"
+            b"      md5: " + b"a" * 32 + b"\n"
+            b"  ingest:\n"
+            b"    cmd: run\n"
+            b"    outs:\n"
+            b"    - path: data/raw.csv\n"
+            b"      md5: " + b"b" * 32 + b"\n"
+        ),
+    })
+
+    # A path nothing tracks stays ABSENT — evidence, not "cannot tell".
+    assert _pointer_md5(
+        fetcher, _VIEW_REPO, _PIN, "data/nowhere.csv", {},
+    ) == _POINTER_ABSENT
+    # The accepted cost: the orphan's own out still reads back a verdict.
+    assert _pointer_md5(
+        fetcher, _VIEW_REPO, _PIN, "data/raw.csv", {},
+    ) == "b" * 32
+
+
 def test_a_subpath_row_no_longer_blocks_its_drifting_sibling(tmp_path: Path) -> None:
     """The compound shape D1 makes dangerous: one repo, two rows, one of them a
     path inside the other. `enclave_bump` blocks the WHOLE repo on any row it

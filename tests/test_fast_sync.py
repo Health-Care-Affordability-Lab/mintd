@@ -1657,6 +1657,285 @@ def test_parse_dvc_lock_outs_missing_dvc_yaml_degrades_to_default_wdir(
     assert outs[0].path == "data/final/foo.parquet"
 
 
+def test_parse_dvc_lock_outs_resolves_foreach_wdir_from_the_do_block(
+    tmp_path: Path,
+) -> None:
+    """A foreach stage nests its body -- wdir included -- under `do:`.
+
+    Read `wdir` from the stage's top level instead and every instance falls
+    back to `wdir="."`, so the out resolves to `out/a.csv` instead of
+    `code/out/a.csv` and fast-sync addresses a path that does not exist.
+
+    Mutation: in `wdir_map`, `body = stage_data` (drop the `do:` read) ->
+    path becomes `out/a.csv` and this reddens.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  base:\n"
+            "    foreach:\n"
+            "      a: {}\n"
+            "    do:\n"
+            "      wdir: code\n"
+            "      cmd: run\n"
+            "      outs:\n"
+            "        - out/${item}.csv\n"
+        ),
+        body=(
+            "stages:\n"
+            "  base@a:\n"
+            "    outs:\n"
+            "      - path: out/a.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert [o.path for o in outs] == ["code/out/a.csv"]
+
+
+def test_parse_dvc_lock_outs_foreach_out_above_the_wdir_is_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """The scaffold's own shape: `wdir: code` writing `../data/final/`.
+
+    This needs BOTH halves of the shipped fix at once -- `wdir_map` reading
+    `do:` AND `stage_wdir` falling back from `base@a` to `base`. With either
+    one alone the out resolves against the wrong root, escapes the project
+    directory, and is dropped with a "path resolution failed" warning,
+    leaving zero outs.
+
+    Mutation: in `wdir_map`, `body = stage_data` -> zero outs, this reddens.
+    Mutation: in `stage_wdir`, `return stage_wdirs.get(stage, ".")` (drop the
+    `@` fallback) -> zero outs, this reddens. Either alone is enough.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  base:\n"
+            "    foreach:\n"
+            "      a: {}\n"
+            "      b: {}\n"
+            "    do:\n"
+            "      wdir: code\n"
+            "      cmd: run\n"
+            "      outs:\n"
+            "        - ../data/final/${item}.csv\n"
+        ),
+        body=(
+            "stages:\n"
+            "  base@a:\n"
+            "    outs:\n"
+            "      - path: ../data/final/a.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "  base@b:\n"
+            "    outs:\n"
+            "      - path: ../data/final/b.csv\n"
+            "        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert sorted(o.path for o in outs) == ["data/final/a.csv", "data/final/b.csv"]
+
+
+@pytest.mark.parametrize(
+    "yaml_body",
+    ["vars:\n  - x: 1\n", "stages: {}\n"],
+    ids=["vars-only", "empty-stages"],
+)
+def test_parse_dvc_lock_outs_stages_only_dvc_yaml_is_not_a_declaration(
+    tmp_path: Path, yaml_body: str,
+) -> None:
+    """The orphan guard's OFF control, and its green twin.
+
+    "dvc.yaml declares stages" is `bool(stage_wdirs)`, not
+    `dvc.yaml.exists()`. A `vars:`-only file and a `stages: {}` file both
+    declare nothing, so the guard must stay off and every lock out survives.
+    A guard that keyed on file existence would drop all of them -- the
+    refuse-everything fix that passes the orphan tests perfectly.
+
+    Mutation: change the guard's `stage_wdirs and` to `yaml_path.exists()
+    and` -> both cells lose every out and redden.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=yaml_body,
+        body=(
+            "stages:\n"
+            "  clean:\n"
+            "    outs:\n"
+            "      - path: data/clean.csv\n"
+            "        md5: 11111111111111111111111111111111\n"
+            "  ingest:\n"
+            "    outs:\n"
+            "      - path: data/raw.csv\n"
+            "        md5: 22222222222222222222222222222222\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert sorted(o.path for o in outs) == ["data/clean.csv", "data/raw.csv"]
+
+
+def test_parse_dvc_lock_outs_drops_a_true_orphan_stage(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lock stage dvc.yaml no longer declares is skipped.
+
+    Real `dvc pull` rejects such an out ("does not exist as an output or a
+    stage name in 'dvc.yaml'"), so enumerating it hands DVC a target it will
+    refuse -- turning one stale stage into a whole-pull exit 1 while the
+    other outputs land unreported.
+
+    The skip must be SURFACED, not silent. Pinned via caplog rather than by
+    asserting the level, so info-vs-warning stays a rendering choice.
+
+    Mutation: delete the guard's three lines in `parse_dvc_lock_outs` ->
+    `data/raw.csv` reappears and this reddens.
+    """
+    import logging
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  clean:\n"
+            "    cmd: run\n"
+            "    outs:\n"
+            "      - data/clean.csv\n"
+        ),
+        body=(
+            "stages:\n"
+            "  clean:\n"
+            "    outs:\n"
+            "      - path: data/clean.csv\n"
+            "        md5: 11111111111111111111111111111111\n"
+            "  ingest:\n"
+            "    outs:\n"
+            "      - path: data/raw.csv\n"
+            "        md5: 22222222222222222222222222222222\n"
+        ),
+    )
+    with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
+        outs = parse_dvc_lock_outs(tmp_path, "x")
+
+    assert [o.path for o in outs] == ["data/clean.csv"]
+    skipped = [r for r in caplog.records if "ingest" in r.message]
+    assert len(skipped) == 1
+    assert "no longer in dvc.yaml" in skipped[0].message
+
+
+def test_parse_dvc_lock_outs_keeps_foreach_instances_under_the_orphan_guard(
+    tmp_path: Path,
+) -> None:
+    """The guard keys on the `@`-base, because dvc.yaml names a foreach stage
+    `base` while dvc.lock names its instances `base@a` / `base@b`.
+
+    issue06's spec wrote the guard as `stage not in wdir_map` alone. Applied
+    literally that drops EVERY foreach instance: on one lab pipeline, 3
+    declared foreach stages expand to 39 lock stages carrying 104 outs, and
+    all 104 would vanish.
+
+    Mutation: delete the `stage.split("@", 1)[0] not in stage_wdirs` clause
+    -> `data/a.csv` and `data/b.csv` vanish and this reddens.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  base:\n"
+            "    foreach:\n"
+            "      a: {}\n"
+            "      b: {}\n"
+            "    do:\n"
+            "      cmd: run\n"
+            "      outs:\n"
+            "        - data/${item}.csv\n"
+            "  clean:\n"
+            "    cmd: run\n"
+            "    outs:\n"
+            "      - data/clean.csv\n"
+        ),
+        body=(
+            "stages:\n"
+            "  base@a:\n"
+            "    outs:\n"
+            "      - path: data/a.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "  base@b:\n"
+            "    outs:\n"
+            "      - path: data/b.csv\n"
+            "        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+            "  clean:\n"
+            "    outs:\n"
+            "      - path: data/clean.csv\n"
+            "        md5: 11111111111111111111111111111111\n"
+            "  ingest:\n"
+            "    outs:\n"
+            "      - path: data/raw.csv\n"
+            "        md5: 22222222222222222222222222222222\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert sorted(o.path for o in outs) == [
+        "data/a.csv", "data/b.csv", "data/clean.csv",
+    ]
+
+
+def test_parse_dvc_lock_outs_keeps_a_stale_foreach_instance_known_residual(
+    tmp_path: Path,
+) -> None:
+    """The orphan guard's KNOWN BOUNDARY, pinned so it is not assumed covered.
+
+    The guard keys on the stage name and its `@`-base, so it catches a stage
+    deleted whole. It does NOT catch a `foreach`/`matrix` list that shrank:
+    `dvc.yaml` reduced from `[a, b]` to `[a]` leaves `fan@b` in `dvc.lock`
+    with `fan` still declared, so `fan@b` keeps its base and survives -- and
+    real dvc then rejects `data/b.csv`.
+
+    Measured, dvc 3.67.1, repro'd at `[a, b]` then reduced to `[a]`:
+
+        wdir_map            -> {'fan': '.'}     (instances never expanded)
+        dvc pull data/a.csv -> rc 0
+        dvc pull data/b.csv -> rc 1  does not exist as an output or a stage name
+
+    Closing it needs the instance names, and `foreach` may be a `${vars}`
+    reference only dvc's templating can expand; guessing it would drop LIVE
+    instances, which is silent non-delivery -- strictly worse than this
+    over-keep. The strict fake carries the same `@`-base heuristic
+    (`tests/_fakes/dvc_ops.py:524`), so no fake-driven test can redden on it.
+
+    This test asserts today's behaviour deliberately. Fixing the residual
+    SHOULD redden it -- update it then, with intent.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  fan:\n"
+            "    foreach:\n"
+            "      - a\n"
+            "    do:\n"
+            "      cmd: run\n"
+            "      outs:\n"
+            "        - data/${item}.csv\n"
+        ),
+        body=(
+            "stages:\n"
+            "  fan@a:\n"
+            "    outs:\n"
+            "      - path: data/a.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "  fan@b:\n"
+            "    outs:\n"
+            "      - path: data/b.csv\n"
+            "        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    # `data/b.csv` is stale and dvc rejects it -- but the guard keeps it.
+    assert sorted(o.path for o in outs) == ["data/a.csv", "data/b.csv"]
+
+
 def test_try_fast_pull_early_abort_routes_pipeline_outs_to_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

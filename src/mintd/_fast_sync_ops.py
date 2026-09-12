@@ -509,6 +509,20 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     lock-relative ``out.path`` resolves correctly to project-relative.
     When ``dvc.yaml`` is missing, every stage's ``wdir`` defaults to ``.``.
 
+    Once ``dvc.yaml`` declares any stage at all, a lock stage whose name AND
+    ``@``-base are both undeclared there is skipped: real ``dvc pull`` rejects
+    its outs ("does not exist as an output or a stage name"), so enumerating
+    them turns one stale stage into a failed pull. When ``dvc.yaml`` declares
+    nothing — missing, ``vars:``-only, ``stages: {}``, or unparseable — the
+    skip stays off rather than dropping every out on the strength of a
+    document that taught us nothing.
+
+    Not caught: a ``foreach``/``matrix`` list that SHRANK. ``fan@b`` left in
+    the lock while ``dvc.yaml`` still declares ``fan`` keeps its base, so it
+    survives here and dvc still rejects it. Closing that needs the instance
+    names, and ``foreach`` may be a ``${vars}`` reference only dvc's
+    templating can expand — guessing it would drop live instances instead.
+
     Returns ``[]`` when ``dvc.lock`` is missing or malformed.
     """
     yaml_path = project_path / "dvc.yaml"
@@ -536,6 +550,9 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
 
     outs: list[DvcOut] = []
     for stage, stage_data in lock_data["stages"].items():
+        if stage_wdirs and stage not in stage_wdirs and stage.split("@", 1)[0] not in stage_wdirs:
+            logger.info("dvc.lock stage %s no longer in dvc.yaml; skipping", stage)
+            continue
         wdir = stage_wdir(stage_wdirs, stage)
         if wdir is None:
             continue  # absolute wdir: unresolvable against the project root
