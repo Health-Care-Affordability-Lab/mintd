@@ -779,6 +779,38 @@ def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
     return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
 
 
+def _require_fast_sync_ops(config: Config, reporter: Reporter) -> FastSyncOps | None:
+    """Resolve fast-sync for `data pull` / `data clone`, or report and fail.
+
+    Returns None ONLY when boto3 is not importable -- the one degraded case
+    `_resolve_fast_sync_ops` has. boto3 is a required dependency, so that
+    state is a broken install and never a supported configuration; both
+    callers exit 2, the posture a missing bundled `dvc` already takes.
+
+    There used to be a third option. `data_ops.data_pull` carried a
+    `fast_sync_ops is None` branch that issued one blanket `dvc pull` and
+    then reported the number of targets REQUESTED as the number landed --
+    `pulled 0` on a pull-all that fetched a file, `pulled 1` on a targeted
+    pull that fetched nothing -- with no warning at all under `--json`. It
+    was DELETED, not flag-gated: it also skipped pull-all discovery,
+    per-target classification, checkout-before-pull and the entire error
+    accounting, and its blanket `dvc pull` re-entered two DVC bugs
+    `data_ops` carries explicit workarounds for. No lab environment runs
+    mintd without boto3 (DECISIONS-20260828 D1), so there is nothing for a
+    flag to serve.
+
+    `reporter.error`, not `warn`: `warn` is json-suppressed, which is how
+    the deleted lane stayed completely invisible to a `--json` consumer.
+    """
+    fast_sync_ops = _resolve_fast_sync_ops(config)
+    if fast_sync_ops is None:
+        reporter.error(
+            "mintd's boto3 dependency is missing — reinstall mintd",
+            hint="see notes/INSTALL.md, or: pip install 'dvc[s3]'",
+        )
+    return fast_sync_ops
+
+
 def _resolve_s3_listing_ops(config: Config):
     """Return the listing callable; tests monkeypatch this seam.
 
@@ -928,7 +960,9 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     reporter = args._reporter
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    fast_sync_ops = _resolve_fast_sync_ops(config)
+    fast_sync_ops = _require_fast_sync_ops(config, reporter)
+    if fast_sync_ops is None:
+        return 2
     try:
         summary = data_pull(
             project_path=project_path,
@@ -1666,8 +1700,10 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         aws_profile_name=config.aws_profile_name,
     )
     registry_git_ops = SubprocessRegistryGitOps(timeouts=effective_timeouts, reporter=reporter)
-    fast_sync_ops = _resolve_fast_sync_ops(config)
-    
+    fast_sync_ops = _require_fast_sync_ops(config, reporter)
+    if fast_sync_ops is None:
+        return 2
+
     reporter.debug(f"resolved registry_url={config.registry_url}")
     try:
         clone_result = clone_and_pull_product(

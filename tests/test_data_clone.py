@@ -22,6 +22,7 @@ from mintd.model import Metadata
 from mintd.producer import ProducerError
 
 from tests._fakes.dvc_ops import _FakeDvcOps
+from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.registry_git_ops import CloneCall, _FakeRegistryGitOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -49,6 +50,9 @@ def _register(
 class _NoopCloneGitOps(_FakeRegistryGitOps):
     """Records clone calls and `mkdir`s the dest; does NOT shell out to git."""
 
+    #: Tracked outputs the cloned repo carries, as `<path>.dvc` pointers.
+    tracks: tuple[str, ...] = ()
+
     def clone(
         self,
         url: str,
@@ -60,6 +64,23 @@ class _NoopCloneGitOps(_FakeRegistryGitOps):
         self.clone_calls.append(CloneCall(url, Path(dest), shallow, branch))
         Path(dest).mkdir(parents=True, exist_ok=True)
         (Path(dest) / ".dvc").mkdir()
+        for target in self.tracks:
+            f = Path(dest) / f"{target}.dvc"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(
+                f"outs:\n  - md5: {'b' * 32}\n    size: 0\n"
+                f"    path: {Path(target).name}\n"
+            )
+
+
+def _fast() -> _FakeFastSyncOps:
+    """A FastSyncOps double that serves nothing and hands every target to the
+    fallback ``dvc pull`` — which is the seam these tests observe. Before
+    issue18 they passed ``None`` here and got that same ``dvc pull`` from
+    ``data_pull``'s degraded branch."""
+    fake = _FakeFastSyncOps()
+    fake.fallback_all = True
+    return fake
 
 
 # ---------- tests --------------------------------------------------------
@@ -73,9 +94,10 @@ def test_clone_and_pull_product_happy_path(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     dest = clone_and_pull_product(
-        client, dvc, git, None,
+        client, dvc, git, _fast(),
         name="provider-xw",
     )
 
@@ -85,8 +107,8 @@ def test_clone_and_pull_product_happy_path(
     assert git.clone_calls[0].branch is None
     assert git.clone_calls[0].url == "https://github.com/example-org/provider-xw"
     assert len(dvc.pull_calls) == 1
-    # Default now pulls everything (targets=None); --primary narrows to primary path.
-    assert dvc.pull_calls[0].targets is None
+    # Default pulls every DISCOVERED output; --primary narrows to the primary.
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
 
 
 def test_clone_and_pull_product_with_explicit_dest(
@@ -100,7 +122,7 @@ def test_clone_and_pull_product_with_explicit_dest(
 
     dest_arg = tmp_path / "x"
     dest = clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", dest=dest_arg,
+        client, dvc, git, _fast(), name="provider-xw", dest=dest_arg,
     )
 
     assert dest.dest == dest_arg.resolve()
@@ -117,7 +139,7 @@ def test_clone_and_pull_product_with_rev(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", rev="v1.2",
+        client, dvc, git, _fast(), name="provider-xw", rev="v1.2",
     )
 
     assert git.clone_calls[0].branch == "v1.2"
@@ -132,12 +154,13 @@ def test_clone_and_pull_product_default_pulls_all_outputs(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
     )
 
-    assert dvc.pull_calls[0].targets is None
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
 
 
 def test_clone_and_pull_product_with_primary_only(
@@ -151,7 +174,7 @@ def test_clone_and_pull_product_with_primary_only(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", primary_only=True,
+        client, dvc, git, _fast(), name="provider-xw", primary_only=True,
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
@@ -173,7 +196,7 @@ def test_clone_and_pull_product_normalizes_windows_primary(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", primary_only=True,
+        client, dvc, git, _fast(), name="provider-xw", primary_only=True,
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
@@ -192,7 +215,7 @@ def test_clone_and_pull_product_refuses_existing_nonempty_dest(
 
     with pytest.raises(ImportDestinationExists) as exc:
         clone_and_pull_product(
-            client, _FakeDvcOps(), _NoopCloneGitOps(), None,
+            client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
             name="provider-xw",
         )
     assert "non-empty" in str(exc.value)
@@ -213,7 +236,7 @@ def test_clone_and_pull_product_raises_when_no_primary(
 
     with pytest.raises(MissingPrimaryDataProduct):
         clone_and_pull_product(
-            client, _FakeDvcOps(), _NoopCloneGitOps(), None,
+            client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
             name="provider-xw", primary_only=True,
         )
 
@@ -245,7 +268,7 @@ def test_clone_and_pull_product_rejects_bad_name(
             _AssertNotFetchedClient(),  # type: ignore[arg-type]
             _FakeDvcOps(),
             _NoopCloneGitOps(),
-            None,
+            _fast(),
             name=bad_name,
         )
 
@@ -259,7 +282,7 @@ def test_clone_and_pull_product_strips_legacy_prefix_in_dest(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    dest = clone_and_pull_product(client, dvc, git, None, name="data_aha")
+    dest = clone_and_pull_product(client, dvc, git, _fast(), name="data_aha")
 
     assert dest.dest == (tmp_path / "data_aha").resolve()
 
@@ -278,7 +301,7 @@ def test_clone_and_pull_product_code_type_uses_bare_name(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    dest = clone_and_pull_product(client, dvc, git, None, name="foo")
+    dest = clone_and_pull_product(client, dvc, git, _fast(), name="foo")
 
     assert dest.dest == (tmp_path / "foo").resolve()
 
@@ -304,7 +327,7 @@ def test_clone_and_pull_product_translates_git_failure_to_producer_error(
 
     with pytest.raises(ProducerError) as exc:
         clone_and_pull_product(
-            client, _FakeDvcOps(), _RaisingCloneGitOps(), None,
+            client, _FakeDvcOps(), _RaisingCloneGitOps(), _fast(),
             name="provider-xw",
         )
     msg = str(exc.value)
@@ -330,9 +353,11 @@ def test_clone_and_pull_product_passes_the_clone_dest_as_cwd(
     client = InMemoryCatalogClient()
     _register(client)
     dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, _NoopCloneGitOps(), None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
     )
 
     assert [c.cwd for c in dvc.pull_calls] == [tmp_path / "data_provider-xw"]
@@ -359,9 +384,12 @@ def test_clone_and_pull_product_never_changes_the_process_cwd(
     client = InMemoryCatalogClient()
     _register(client)
 
+    git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
+
     with pytest.raises(DvcOpError):
         clone_and_pull_product(
-            client, _DvcPullErrorOps(), _NoopCloneGitOps(), None,
+            client, _DvcPullErrorOps(), git, _fast(),
             name="provider-xw",
         )
 
@@ -395,7 +423,7 @@ def test_clone_and_pull_product_with_path_pulls_only_that_file(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
         paths=["data/intermediate/markets/defs_30min.parquet"],
     )
 
@@ -416,7 +444,7 @@ def test_clone_and_pull_product_with_path_directory_output(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", paths=["data/final/"],
+        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
     )
 
     assert dvc.pull_calls[0].targets == ["data/final"]
@@ -432,7 +460,7 @@ def test_clone_and_pull_product_with_repeated_paths_pulls_both(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
         paths=["data/final/", "data/intermediate/markets/defs_30min.parquet"],
     )
 
@@ -455,7 +483,7 @@ def test_clone_and_pull_product_path_accepts_primary_itself(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
         paths=["outputs/main.parquet"],
     )
 
@@ -474,7 +502,7 @@ def test_clone_and_pull_product_normalizes_path_spellings(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw",
+        client, dvc, git, _fast(), name="provider-xw",
         paths=[".\\data\\final\\"],
     )
 
@@ -493,7 +521,7 @@ def test_clone_and_pull_product_paths_plus_primary_is_usage_error(
     with pytest.raises(ValueError, match="mutually exclusive"):
         clone_and_pull_product(
             _AssertNotFetchedClient(),  # type: ignore[arg-type]
-            dvc, git, None,
+            dvc, git, _fast(),
             name="provider-xw",
             paths=["data/final/"],
             primary_only=True,
@@ -518,7 +546,7 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, None, name="provider-xw",
+            client, dvc, git, _fast(), name="provider-xw",
             paths=["data/nope.csv"],
         )
 
@@ -533,7 +561,7 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
 
     # The corrected retry just works — no leftover clone in the way.
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", paths=["data/final/"],
+        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
     )
     assert len(git.clone_calls) == 1
     assert dvc.pull_calls[0].targets == ["data/final"]
@@ -555,7 +583,7 @@ def test_clone_and_pull_product_missing_primary_fails_before_clone(
 
     with pytest.raises(MissingPrimaryDataProduct):
         clone_and_pull_product(
-            client, _FakeDvcOps(), git, None,
+            client, _FakeDvcOps(), git, _fast(),
             name="provider-xw", primary_only=True,
         )
 
@@ -610,7 +638,7 @@ def test_clone_and_pull_product_rev_validates_against_cloned_metadata(
     )
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
         paths=["data/intermediate/old_defs.parquet"],
     )
 
@@ -633,7 +661,7 @@ def test_clone_and_pull_product_rev_unknown_path_removes_clone(
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, None, name="provider-xw", rev="v1.0",
+            client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
             paths=["data/typo.parquet"],
         )
 
@@ -644,7 +672,7 @@ def test_clone_and_pull_product_rev_unknown_path_removes_clone(
 
     # Corrected retry works against the same (now absent) dest.
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
         paths=["data/rev-only.parquet"],
     )
     assert dvc.pull_calls[0].targets == ["data/rev-only.parquet"]
@@ -662,14 +690,14 @@ def test_clone_and_pull_product_rev_falls_back_to_catalog_without_metadata(
     git = _MetadataWritingGitOps(None)  # clone writes no metadata.json
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
         paths=["data/final/"],
     )
     assert dvc.pull_calls[0].targets == ["data/final"]
 
     with pytest.raises(UnknownProductPath):
         clone_and_pull_product(
-            client, dvc, git, None, name="provider-xw", rev="v1.0",
+            client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
             paths=["data/nope.csv"], dest=tmp_path / "other-dest",
         )
     assert not (tmp_path / "other-dest").exists()
@@ -684,12 +712,13 @@ def test_clone_and_pull_product_no_flags_unchanged_with_paths_none(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, None, name="provider-xw", paths=None,
+        client, dvc, git, _fast(), name="provider-xw", paths=None,
     )
 
-    assert dvc.pull_calls[0].targets is None
+    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
 
 
 # ---------- _resolve_paths precedence matrix (shared import/clone) -------
@@ -769,7 +798,7 @@ def test_clone_and_pull_product_forwards_reporter_to_data_pull(
     reporter = Reporter(json_mode=False, no_color=True)
 
     clone_and_pull_product(
-        client, _FakeDvcOps(), _NoopCloneGitOps(), None,
+        client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
         name="provider-xw",
         reporter=reporter,
     )
@@ -800,7 +829,7 @@ def test_clone_and_pull_product_propagates_pull_error_count(
             targets_pulled=1, total_bytes=0, elapsed_s=0.1, error_count=3,
         ),
     )
-    result = clone_and_pull_product(client, dvc, git, None, name="provider-xw")
+    result = clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw")
     assert result.pull_error_count == 3
 
 
@@ -814,5 +843,5 @@ def test_clone_and_pull_product_clean_pull_error_count_zero(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    result = clone_and_pull_product(client, dvc, git, None, name="provider-xw")
+    result = clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw")
     assert result.pull_error_count == 0

@@ -82,12 +82,17 @@ BANNED_TARGETS: dict[str, int] = {
 # the classifier above cannot be widened to launder a banned target.
 # `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
 # captures the config the factory receives, at the already-permitted site.
+# `_resolve_fast_sync_ops` 6 → 7 at issue18: ONE new site, the parametrized
+# `test_data_pull_and_clone_exit_2_when_boto3_is_missing`, which pins the
+# resolver to None to reach the exit-2 gate that replaced `data_pull`'s
+# degraded branch. A reviewed literal edit: the composition root is where a
+# `None` resolver can be injected at all, and `BANNED_TARGETS` does not move.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
     "mintd.cli._resolve_catalog_client": 6,
     "mintd.cli._resolve_dvc_ops": 5,
-    "mintd.cli._resolve_fast_sync_ops": 6,
+    "mintd.cli._resolve_fast_sync_ops": 7,
     "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._aws_credentials.os.replace": 1,
@@ -231,7 +236,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
     target by prefix, so this deletion could have been made to *look* free by
     relabelling it into the other bucket; instead the name is gone from
     production, from both literals, and from every patch site — a real shrink,
-    -4 sites / -1 target off a census of 194 / 47. ``BANNED_TARGETS`` stays at
+    -4 sites / -1 target off a census of 195 / 47. ``BANNED_TARGETS`` stays at
     132 / 28 and must not move here. The running totals live in
     ``test_the_checked_in_literal_matches_a_fresh_scan``, not here, so an
     unrelated permitted patch added in the same slice cannot masquerade as
@@ -253,7 +258,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (194 sites / 47 targets), not
+    """The literals above are the *whole* census (195 sites / 47 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -264,14 +269,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (194 → 193), or drop ``patch`` (194 → 164).
+    ``monkeypatch``-receiver calls (195 → 194), or drop ``patch`` (195 → 165).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 194
+    assert sum(scanned.values()) == 195
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

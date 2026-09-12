@@ -545,7 +545,7 @@ def clone_and_pull_product(
     client: CatalogClient,
     dvc_ops: DvcOps,
     registry_git_ops: RegistryGitOps,
-    fast_sync_ops: FastSyncOps | None,
+    fast_sync_ops: FastSyncOps,
     *,
     name: str,
     dest: Path | None = None,

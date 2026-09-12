@@ -42,6 +42,25 @@ def _stage_dvc_import(tmp_path: Path) -> None:
     (tmp_path / "data" / "imports").mkdir(parents=True, exist_ok=True)
     shutil.copy(STANDALONE_DVC, tmp_path / "data" / "imports" / "cms_based.dvc")
 
+def _stage_tracked_out(tmp_path: Path, name: str = "a") -> None:
+    """Make `tmp_path` a DVC project that tracks ONE out, so a pull-all has
+    something to discover.
+
+    `data pull` with no targets discovers `*.dvc` files and routes them
+    through fast-sync; an empty project reaches neither fast-sync nor
+    `dvc pull` and returns `pulled 0`. Before issue18 a bare `.dvc/` was
+    enough for every pull test, because `data_pull`'s degraded branch issued
+    one unconditional `dvc pull(targets=None)` -- the blanket pull this slice
+    deleted. Tests that assert on `dvc_ops.pull_calls` now need a real
+    pointer.
+    """
+    (tmp_path / ".dvc").mkdir(exist_ok=True)
+    (tmp_path / f"{name}.dvc").write_text(
+        "outs:\n  - md5: " + "a" * 32 + f"\n    size: 0\n    path: {name}\n",
+        encoding="utf-8",
+    )
+
+
 @pytest.fixture
 def patched_clients(
     monkeypatch: pytest.MonkeyPatch,
@@ -59,10 +78,20 @@ def patched_clients(
     monkeypatch.setattr(
         "mintd.cli._resolve_catalog_client", lambda cfg, **_: client
     )
+    # `fallback_all`: every target reaches `dvc pull`, which is the seam the
+    # pull/clone tests below assert on. This fixture used to pin the resolver
+    # to `None` and get that same `dvc pull` out of `data_pull`'s degraded
+    # branch; issue18 deleted the branch, so the double supplies the route.
     monkeypatch.setattr(
-        "mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None
+        "mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: _fallback_fast_sync()
     )
     return client, dvc_ops
+
+
+def _fallback_fast_sync() -> _FakeFastSyncOps:
+    fake = _FakeFastSyncOps()
+    fake.fallback_all = True
+    return fake
 
 
 @pytest.fixture
@@ -114,7 +143,7 @@ def test_cli_data_pull_dvc_error_exits_one(
 ) -> None:
     _, dvc_ops = patched_clients
     dvc_ops.pull_raises = DvcPullError("oops")
-    (tmp_path / ".dvc").mkdir()
+    _stage_tracked_out(tmp_path)
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 1
     assert "oops" in capsys.readouterr().err
@@ -132,7 +161,7 @@ def test_cli_data_pull_wall_timeout_renders_sentence(
 
     _, dvc_ops = patched_clients
     dvc_ops.pull_raises = WallTimeoutExceeded(30.0)
-    (tmp_path / ".dvc").mkdir()
+    _stage_tracked_out(tmp_path)
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 1
     err = capsys.readouterr().err
@@ -161,7 +190,7 @@ def test_cli_data_pull_storage_key_error_names_target_and_retry(
         target="data/final.dvc",
         hint="retry just this target: mintd data pull data/final.dvc",
     )
-    (tmp_path / ".dvc").mkdir()
+    _stage_tracked_out(tmp_path)
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 1
     err = capsys.readouterr().err
@@ -1178,11 +1207,95 @@ def test_cli_data_pull_in_dvc_project_proceeds(
     patched_clients,
 ) -> None:
     (tmp_path / ".dvc").mkdir()
-    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: _fallback_fast_sync()
+    )
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 0
     err = capsys.readouterr().err
     assert "not inside a DVC project" not in err
+
+
+# issue18: a boto3-less install fails loudly instead of fabricating counts ----
+
+
+@pytest.mark.parametrize("json_flag", [[], ["--json"]])
+@pytest.mark.parametrize("verb", ["pull", "clone"])
+def test_data_pull_and_clone_exit_2_when_boto3_is_missing(
+    verb: str,
+    json_flag: list[str],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """`_resolve_fast_sync_ops` returning None means boto3 is not importable,
+    which means the install is broken (boto3 is a required dependency). Both
+    verbs stop with exit 2 and a message naming the reinstall -- in `--json`
+    mode too, because `reporter.error` writes to stderr regardless of mode
+    while `reporter.warn` is suppressed.
+
+    Before issue18 every one of these four cases exited **0**: `data pull`
+    printed `warning: fast-sync unavailable` and then `pulled 0 file(s)` for a
+    pull that had fetched a file, and under `--json` the warning vanished
+    entirely -- empty stderr, no `errors` key, exit 0.
+
+    Mutation: drop either `return 2` in `cli.py` -> the pull arms report
+    `rc == 0` and the clone arms fail on the missing message. Observed while
+    writing this: with the gate removed and the degraded branch already gone,
+    `data pull` exits 0 having silently taken the crash-recovery lane, because
+    `data_pull`'s `except Exception` swallows `None.try_fast_pull`.
+    """
+    client, _ = patched_clients
+    _register_provider_xw(client)
+    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".dvc").mkdir()
+
+    argv = (
+        ["data", "pull", "--path", str(tmp_path)] if verb == "pull"
+        else ["data", "clone", "provider-xw"]
+    )
+    rc = cli.main([*json_flag, *argv])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err, "stderr must carry the failure in --json mode too"
+    assert "boto3" in err
+    assert "reinstall mintd" in err
+
+
+def test_data_pull_reports_what_landed_not_what_was_requested(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+) -> None:
+    """The completion line counts outs that landed on disk.
+
+    This is the accounting the deleted degraded branch got wrong in both
+    directions: `targets_pulled=len(targets or [])` reported `pulled 0` for a
+    pull-all that had fetched a file (a pull-all's `targets` is `None`) and
+    `pulled 1` for a targeted pull that fetched nothing.
+
+    Both arms run through one `.dvc`-carrying project and one empty one, so the
+    two numbers cannot both come from the request shape: a pull-all with one
+    tracked out reports 1, and a pull-all with none reports 0.
+
+    Mutation: put `targets_pulled=len(targets or [])` back into `data_pull` ->
+    the first arm reads `pulled 0` (request shape for a pull-all) and this
+    test fails on it. Observed: 1 then 0, as asserted.
+    """
+    _, dvc_ops = patched_clients
+    dvc_ops.workspace = tmp_path
+    _stage_tracked_out(tmp_path)
+
+    assert cli.main(["data", "pull", "--path", str(tmp_path)]) == 0
+    assert "pulled 1 file(s)" in capsys.readouterr().err
+
+    empty = tmp_path / "empty"
+    (empty / ".dvc").mkdir(parents=True)
+    assert cli.main(["data", "pull", "--path", str(empty)]) == 0
+    assert "pulled 0 file(s)" in capsys.readouterr().err
 
 
 # Slice 24: mintd data clone -----------------------------------------------
@@ -3842,7 +3955,9 @@ def unconfigured_machine(monkeypatch: pytest.MonkeyPatch) -> _FakeDvcOps:
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
     monkeypatch.setattr("mintd.cli.SubprocessDvcOps", lambda **kwargs: dvc_ops)
-    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: None)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_fast_sync_ops", lambda cfg: _fallback_fast_sync()
+    )
     return dvc_ops
 
 
@@ -3854,7 +3969,7 @@ def test_local_data_commands_do_not_require_registry_url(
     unconfigured_machine: _FakeDvcOps,
 ) -> None:
     """All five wrap dvc and never contact the catalog."""
-    (tmp_path / ".dvc").mkdir()
+    _stage_tracked_out(tmp_path)
     dvc_ops = unconfigured_machine
 
     rc = cli.main(_local_data_argv(verb, tmp_path))

@@ -36,6 +36,7 @@ from mintd.catalog import CatalogAlreadyExists, GitCatalogClient
 from mintd.model import Metadata
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
+from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 from mintd._dvc_invoke import dvc_cmd as _dvc_cmd
 from tests._harness.git import _git
@@ -199,7 +200,10 @@ def journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_emp
         "mintd.cli.GitCatalogClient",
         lambda **kw: GitCatalogClient(**kw, git_ops=git_ops),
     )
-    monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None)
+    monkeypatch.setattr(
+        "mintd.cli._resolve_fast_sync_ops",
+        lambda cfg, **_: _FakeFastSyncOps(),
+    )
 
     def configure_registry() -> None:
         _write_config(config_dir, registry_url=registry_url, cache_dir=cache_dir)
