@@ -19,13 +19,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
+from ._dvc_state import outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, check_project
-from .data_ops import data_pull
+from .data_ops import _default_dvc_remote, data_pull
 from .imports import DataDependency, NotAnImportError
 from .producer import MissingPrimaryDataProduct, ProducerError, ProducerView
 
@@ -120,7 +122,14 @@ class UnknownProductPath(ValueError):
     """A requested ``--path`` is not a tracked output of the product. The
     message lists the product's `data_products.outputs[].path` values (and
     primary) so the user can pick a real target instead of decoding a raw
-    DVC "no such target" stderr."""
+    DVC "no such target" stderr. Post-clone, the message instead lists the
+    DVC outs the cloned repo tracks (`_resolve_targets_in_clone`) — which
+    ``--path`` does NOT accept while the catalog is stale, so that raise
+    carries its own ``hint`` and the CLI prefers it over the generic one."""
+
+    def __init__(self, message: str, *, hint: str | None = None) -> None:
+        super().__init__(message)
+        self.hint = hint
 
 
 class NoTrackedOutputs(Exception):
@@ -527,6 +536,68 @@ def _validate_clone_name(name: str) -> None:
         raise ValueError(f"invalid product name: {name!r}")
 
 
+def _resolve_targets_in_clone(
+    dest: Path, *, targets: list[str], name: str, rev_primary: bool
+) -> list[str]:
+    """Expand each selected catalog path to what the CLONED repo can serve
+    for it (`_dvc_state.outs_matching`, three directions) and return the
+    project-relative pull targets, sorted and de-duplicated.
+
+    The catalog pre-filter proves a path is DECLARED; this proves DVC can
+    serve it. The ordinary lab shape is a primary declared as `data/final/`
+    while DVC tracks per-file outs beneath it and nothing at the directory
+    itself; forwarded verbatim, `dvc pull data/final` exits 1 "does not
+    exist as an output or a stage name" — so outs BENEATH the path are
+    pulled by their own stamped targets. A path AT or UNDER a tracked out
+    keeps its own spelling: dvc pulls a sub-path of a directory out
+    granularly, and substituting the enclosing out would turn a one-file
+    `--path` into a whole-directory download. The flip side is unchanged
+    from before this resolver existed: a declared sub-path the directory
+    out's manifest does not contain is forwarded as-is, and dvc pulls
+    nothing for it at exit 0 (the clone-resolver plan's open item U1 —
+    membership-testing the manifest is a separate decision).
+
+    `rev_primary` is `--rev` + `--primary`: the primary came from the HEAD
+    catalog while the clone is at an older rev that may simply predate it,
+    so the message names the rev instead of calling the catalog stale. A
+    `--rev --path` selection has already passed the rev's own metadata.json,
+    so a miss there IS a stale declaration at that rev.
+
+    Raises `UnknownProductPath` for a path that reaches no out, naming what
+    the clone really tracks; the caller removes the clone.
+    """
+    remote_name = _default_dvc_remote(dest) or "origin"
+    resolved: set[str] = set()
+    # ponytail: re-enumerates the clone once per selector (documented on
+    # outs_matching); pass the out list through if --path lists ever get long.
+    for declared in targets:
+        matched = outs_matching(dest, declared, remote_name)
+        if not matched:
+            listed = ", ".join(sorted(dvc_tracked_paths(dest, remote_name))) or "<none>"
+            cause = (
+                "the catalog describes HEAD, so this rev may predate the primary"
+                if rev_primary else
+                "the declaration is stale: the producer's metadata.json does "
+                "not match what DVC tracks"
+            )
+            raise UnknownProductPath(
+                f"catalog entry {name!r} declares {declared!r}, but the cloned "
+                f"repo tracks nothing at, above, or beneath it ({cause}); "
+                f"outs tracked in the clone: {listed}",
+                hint=(
+                    "the outs listed are what DVC tracks, not catalog outputs, "
+                    "so --path will not accept them; drop --path/--primary to "
+                    "clone everything"
+                    + ("" if rev_primary else ", or have the producer re-run "
+                       "'mintd check' and 'mintd registry update'")
+                ),
+            )
+        declared_rel = normalize_target(declared)
+        for out in matched:
+            resolved.add(declared_rel if path_covers(out.target, declared_rel) else out.target)
+    return sorted(resolved)
+
+
 def _resolve_clone_dest(
     entry: dict[str, Any], *, name: str, dest: Path | None
 ) -> Path:
@@ -583,11 +654,13 @@ def clone_and_pull_product(
         ImportDestinationExists: dest exists and is non-empty.
         ProducerError: clone failed (UNREACHABLE).
         MissingPrimaryDataProduct: `primary_only=True` and no primary set.
-        UnknownProductPath: a `paths` entry is not a tracked output —
-            checked against the catalog entry *before* the clone at the
-            default rev, or against the cloned repo's metadata.json when
-            `rev` is pinned (the clone is removed again in that case so a
-            corrected retry isn't blocked by ImportDestinationExists).
+        UnknownProductPath: a `paths` entry is not a tracked output of the
+            catalog entry (checked *before* the clone at the default rev, or
+            against the cloned repo's metadata.json when `rev` is pinned), or
+            a selected path (`--path` or the `--primary`) reaches no DVC out
+            in the cloned repo. In the post-clone cases the clone is removed
+            again so a corrected retry isn't blocked by
+            ImportDestinationExists.
         DvcOpError: dvc pull failed after clone.
     """
     _validate_clone_name(name)
@@ -634,6 +707,9 @@ def clone_and_pull_product(
         raise ImportDestinationExists(
             f"destination {resolved_dest} exists and is non-empty"
         )
+    # A pre-existing EMPTY dest is the user's (`--dest .` is their cwd): on a
+    # post-clone rejection only its contents go, never the directory itself.
+    dest_created_here = not resolved_dest.exists()
 
     try:
         if reporter is not None:
@@ -655,24 +731,40 @@ def clone_and_pull_product(
             ),
         ) from exc
 
-    if paths and rev is not None and targets is not None:
-        # Deferred half of the --path validation (see above): the registry
-        # catalog serves HEAD's outputs, which can drift from a pinned
-        # --rev. Validate against the cloned repo's metadata.json at
-        # exactly that rev, falling back to the catalog entry when it
-        # can't be read.
+    if targets is not None:
+        # Post-clone, the repo is the source of truth for what a selector
+        # can pull. Any rejection removes what this call just created so
+        # the corrected retry doesn't fail with ImportDestinationExists.
+        # Safe: the pre-clone guard guarantees resolved_dest was absent or
+        # empty before the clone. data_pull stays OUTSIDE this try: a
+        # DvcPullError must leave the (possibly partial) clone in place.
         try:
-            _validate_requested_targets(
-                _cloned_metadata_entry(resolved_dest, fallback=dumped),
-                requested=targets,
-                name=name,
+            if paths and rev is not None:
+                # Deferred half of the --path validation (see above): the
+                # registry catalog serves HEAD's outputs, which can drift
+                # from a pinned --rev. Validate against the cloned repo's
+                # metadata.json at exactly that rev, falling back to the
+                # catalog entry when it can't be read. Runs BEFORE the
+                # expansion: it checks the DECLARED spelling.
+                _validate_requested_targets(
+                    _cloned_metadata_entry(resolved_dest, fallback=dumped),
+                    requested=targets,
+                    name=name,
+                )
+            # The catalog declares paths; DVC tracks outs. A declared
+            # directory over per-file outs is not itself a dvc target, so
+            # resolve every selection against what the clone tracks
+            # before dvc sees it.
+            targets = _resolve_targets_in_clone(
+                resolved_dest, targets=targets, name=name,
+                rev_primary=rev is not None and not paths,
             )
         except UnknownProductPath:
-            # Remove the clone this call just created so the corrected
-            # retry doesn't fail with ImportDestinationExists. Safe: the
-            # pre-clone guard guarantees resolved_dest was absent or
-            # empty before the clone.
-            shutil.rmtree(resolved_dest, ignore_errors=True)
+            if dest_created_here:
+                shutil.rmtree(resolved_dest, ignore_errors=True)
+            else:
+                for child in resolved_dest.iterdir():
+                    _remove_payload(child)
             raise
 
     pull_summary = data_pull(
@@ -697,7 +789,6 @@ def clone_and_pull_product(
     remote_bucket: str | None = None
     try:
         from ._fast_sync_ops import get_remote_config, parse_s3_url
-        from .data_ops import _default_dvc_remote
         remote_name = _default_dvc_remote(resolved_dest) or "origin"
         url = get_remote_config(resolved_dest, remote_name).get("url", "")
         remote_bucket, _ = parse_s3_url(url)
