@@ -1833,7 +1833,229 @@ def test_path_removed_from_a_tracked_out_is_not_a_silent_up_to_date(tmp_path: Pa
     # a fixed "check the network" misdiagnosed this one at a working network.
     assert consumer[0].hint is not None
     assert "network" not in consumer[0].hint
-    assert "no longer publishes" in consumer[0].hint
+    assert "pin to an older rev" in consumer[0].hint
+
+
+def _scaffold_lock_outs(*outs: tuple[str, str]) -> bytes:
+    """`_scaffold_lock` with N outs under its one `wdir: code` stage, in the
+    order given."""
+    body = "".join(f"    - path: {path}\n      md5: {md5}\n" for path, md5 in outs)
+    return (
+        "schema: '2.0'\n"
+        "stages:\n"
+        "  build:\n"
+        "    cmd: python build.py\n"
+        "    wdir: code\n"
+        "    outs:\n" + body
+    ).encode()
+
+
+#: A directory primary tracked as per-file lock outs BENEATH it — the shape
+#: the scaffold's `validate` stage writes, and 18 of 22 catalog products.
+_A, _B, _OTHER = "../outputs/cms_based/a.csv", "../outputs/cms_based/b.csv", "../outputs/other.csv"
+_PIN_LOCK = _scaffold_lock_outs((_A, "a" * 32), (_B, "b" * 32), (_OTHER, "0" * 32))
+
+
+def _directory_over_lock_outs(tmp_path: Path, head_lock: bytes, *, all_outputs=False):
+    """Findings for a subscription to `outputs/cms_based/` when only a
+    scaffold-shaped `dvc.lock` exists at both revs — no `.dvc` anywhere."""
+    if all_outputs:
+        from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+        _write_metadata(tmp_path)
+        EnclaveManifest(enclave_name="e", approved_products=[
+            ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN, all=True),
+        ]).save(tmp_path / "enclave_manifest.yaml")
+        factory = _factory_by_pin({
+            _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
+            "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
+        })
+    else:
+        factory = _subscribe(tmp_path, "outputs/cms_based/")
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory,
+        fetcher=_fetcher_serving({
+            (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
+            (_VIEW_REPO, _HEAD, "dvc.yaml"): _scaffold_yaml(),
+            (_VIEW_REPO, _PIN, "dvc.lock"): _PIN_LOCK,
+            (_VIEW_REPO, _HEAD, "dvc.lock"): head_lock,
+        }),
+    )
+    return [f for f in findings if f.section == "consumer"]
+
+
+@pytest.mark.parametrize(
+    "head_lock,expected_kind",
+    [
+        (_PIN_LOCK, "up_to_date"),
+        (_scaffold_lock_outs((_A, "a" * 32), (_B, "z" * 32), (_OTHER, "0" * 32)), "drift"),
+        (_scaffold_lock_outs((_A, "a" * 32), (_B, "b" * 32), (_OTHER, "9" * 32)), "up_to_date"),
+        (_scaffold_lock_outs((_A, "a" * 32), (_B, "b" * 32), (_OTHER, "0" * 32),
+                             ("../outputs/cms_based/c.csv", "c" * 32)), "drift"),
+        (_scaffold_lock_outs((_A, "a" * 32), (_OTHER, "0" * 32)), "drift"),
+    ],
+    ids=["unchanged", "file-beneath-moved", "unrelated-out-moved", "file-added-beneath",
+         "file-removed-beneath"],
+)
+def test_directory_over_lock_outs_beneath_it_gets_a_verdict(
+    tmp_path: Path, head_lock: bytes, expected_kind: str
+):
+    """A declared DIRECTORY tracked as per-file outs beneath it has no pointer
+    of its own. The comparator knew "exact" and "enclosing" only, so every
+    such subscription read as absent — `drift_unknown`, "not published at the
+    producer's HEAD", and `--bump` blocked for 18 of 22 catalog products.
+
+    The outs beneath answer together: any of them moving, or one appearing,
+    is drift; an unrelated out moving is not.
+
+    Mutation: delete the `beneath` branch in `_match_out_md5` -> every cell
+    becomes drift_unknown.
+    """
+    consumer = _directory_over_lock_outs(tmp_path, head_lock)
+    assert [f.kind for f in consumer] == [expected_kind], consumer[0].message
+
+
+def test_directory_beneath_identity_ignores_out_order(tmp_path: Path):
+    """Mutation: drop `sorted(...)` on `beneath` -> drift."""
+    reversed_lock = _scaffold_lock_outs((_OTHER, "0" * 32), (_B, "b" * 32), (_A, "a" * 32))
+    consumer = _directory_over_lock_outs(tmp_path, reversed_lock)
+    assert [f.kind for f in consumer] == ["up_to_date"], consumer[0].message
+
+
+@pytest.mark.parametrize(
+    "winner", ["../outputs/cms_based/", "../outputs/"], ids=["exact", "enclosing"]
+)
+def test_exact_and_enclosing_still_win_over_beneath(tmp_path: Path, winner: str):
+    """A lock carrying an exact (or enclosing) out for the path AND outs
+    beneath it answers with the exact/enclosing identity: that out is
+    unchanged, so the verdict is up_to_date even though an out beneath moved.
+
+    Mutation: move the `beneath` return above `enclosing` -> the enclosing
+    cell reddens with drift.
+    """
+    def lock(beneath_md5: str) -> bytes:
+        return _scaffold_lock_outs((winner, "d" * 32 + ".dir"), (_A, beneath_md5))
+    factory = _subscribe(tmp_path, "outputs/cms_based/")
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory,
+        fetcher=_fetcher_serving({
+            (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
+            (_VIEW_REPO, _HEAD, "dvc.yaml"): _scaffold_yaml(),
+            (_VIEW_REPO, _PIN, "dvc.lock"): lock("a" * 32),
+            (_VIEW_REPO, _HEAD, "dvc.lock"): lock("z" * 32),
+        }),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+    assert [f.kind for f in consumer] == ["up_to_date"], consumer[0].message
+
+
+def test_all_outputs_directory_member_over_lock_outs_reports_drift(tmp_path: Path):
+    """The `--all` arm counts absent-at-both as equal, so a directory member
+    over lock outs read CLEAN while a file beneath it moved — a silent wrong
+    up_to_date, the bug class this lane exists to kill.
+
+    Mutation: delete the `beneath` branch -> up_to_date.
+    """
+    moved = _scaffold_lock_outs((_A, "a" * 32), (_B, "z" * 32), (_OTHER, "0" * 32))
+    consumer = _directory_over_lock_outs(tmp_path, moved, all_outputs=True)
+    assert [f.kind for f in consumer] == ["drift"], consumer[0].message
+    assert "outputs/cms_based/" in consumer[0].message
+
+
+def test_unresolvable_path_hint_does_not_assert_the_producer_withdrew_it(tmp_path: Path):
+    """No out at, above, or beneath the path at HEAD is `drift_unknown`, and
+    the hint says what was CHECKED — it used to assert "the producer no longer
+    publishes this output", which was false for every directory primary and
+    sent researchers to drop live subscriptions.
+
+    Mutation: restore the old hint text -> red.
+    """
+    gone = _scaffold_lock_outs((_OTHER, "0" * 32))
+    consumer = _directory_over_lock_outs(tmp_path, gone)
+    assert [f.kind for f in consumer] == ["drift_unknown"], consumer[0].message
+    hint = consumer[0].hint
+    assert hint is not None
+    assert "no longer publishes" not in hint
+    assert "network" not in hint
+    assert "pin to an older rev" in hint and "drop the subscription" in hint
+
+
+@pytest.mark.parametrize(
+    "head_entries,expected_kind",
+    [
+        ((("sub/a.csv", "a" * 32), ("b.csv", "b" * 32)), "up_to_date"),
+        ((("sub/a.csv", "z" * 32), ("b.csv", "b" * 32)), "drift"),
+        ((("sub/a.csv", "a" * 32), ("b.csv", "z" * 32)), "up_to_date"),
+        ((("b.csv", "b" * 32),), "drift_unknown"),
+    ],
+    ids=["unchanged", "file-beneath-moved", "sibling-outside-moved", "subdirectory-gone"],
+)
+def test_subdirectory_of_a_files_format_out_is_answered_by_the_entries_beneath_it(
+    tmp_path: Path, head_entries, expected_kind: str
+):
+    """A files-format manifest lists FILES; a subscription to a subDIRECTORY
+    inside the out has no entry of its own and read as absent. The entries
+    beneath it answer together, exactly as lock outs beneath a declared
+    directory do; a sibling outside the subdirectory stays invisible.
+
+    Mutation: drop the `startswith(subpath + "/")` collection in
+    `_out_identity` -> every cell becomes drift_unknown.
+    """
+    factory = _subscribe(tmp_path, "outputs/cms_based/sub/")
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory,
+        fetcher=_fetcher_serving({
+            (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
+                ("sub/a.csv", "a" * 32), ("b.csv", "b" * 32)),
+            (_VIEW_REPO, _HEAD, _OUT_PTR): _files_pointer(*head_entries),
+        }),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+    assert [f.kind for f in consumer] == [expected_kind], consumer[0].message
+
+
+def test_a_dropped_stage_never_feeds_the_beneath_digest(tmp_path: Path):
+    """`_pointer_md5` already refuses to call absence a verdict when a stage
+    was dropped for an unresolvable `wdir`. The beneath digest is a SET
+    identity, so a dropped member would read as "vanished" — drift, which
+    `bump` acts on, over bytes that never moved. Lock identical at both revs;
+    only HEAD's `dvc.yaml` gives the second stage an absolute `wdir`.
+
+    Mutation: drop the `dropped_a_stage and md5.endswith(".outs")` guard in
+    `_pointer_md5` -> drift.
+    """
+    def two_stage_yaml(other_wdir: str) -> bytes:
+        return (
+            "stages:\n"
+            "  build:\n    cmd: python build.py\n    wdir: code\n"
+            "    outs:\n      - ../outputs/cms_based/a.csv\n"
+            "  other:\n    cmd: python other.py\n"
+            f"    wdir: {other_wdir}\n"
+            "    outs:\n      - ../outputs/cms_based/b.csv\n"
+        ).encode()
+    lock = (
+        "schema: '2.0'\nstages:\n"
+        "  build:\n    cmd: python build.py\n    wdir: code\n    outs:\n"
+        f"    - path: ../outputs/cms_based/a.csv\n      md5: {'a' * 32}\n"
+        "  other:\n    cmd: python other.py\n    wdir: code\n    outs:\n"
+        f"    - path: ../outputs/cms_based/b.csv\n      md5: {'b' * 32}\n"
+    ).encode()
+    factory = _subscribe(tmp_path, "outputs/cms_based/")
+    findings = check_project(
+        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        producer_view_factory=factory,
+        fetcher=_fetcher_serving({
+            (_VIEW_REPO, _PIN, "dvc.yaml"): two_stage_yaml("code"),
+            (_VIEW_REPO, _HEAD, "dvc.yaml"): two_stage_yaml("/abs/code"),
+            (_VIEW_REPO, _PIN, "dvc.lock"): lock,
+            (_VIEW_REPO, _HEAD, "dvc.lock"): lock,
+        }),
+    )
+    consumer = [f for f in findings if f.section == "consumer"]
+    assert [f.kind for f in consumer] == ["drift_unknown"], consumer[0].message
 
 
 # ---------------------------------------------------------------------------
