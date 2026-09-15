@@ -685,6 +685,7 @@ def _pointer_md5(
     clean = output_path.rstrip("/")
     absent_so_far = True  # flipped by any failure that is not PATH_MISSING
     for candidate, base_dir in _pointer_candidates(clean):
+        dropped_a_stage = False
         if candidate == "dvc.lock":
             resolved = _resolved_lock(fetcher, repo, pin, memo)
             if resolved is None:
@@ -712,7 +713,11 @@ def _pointer_md5(
                 absent_so_far = False
                 continue
         md5 = _match_out_md5(data, clean, base_dir=base_dir)
-        if md5 is not None:
+        # A `.outs` digest is a SET identity over the outs beneath the path;
+        # with a stage dropped the set is incomplete, and a missing member
+        # would read as "vanished" — drift that `bump` acts on. An exact or
+        # enclosing match is one out's own identity and is unaffected.
+        if md5 is not None and not (dropped_a_stage and md5.endswith(".outs")):
             memo[key] = md5
             return md5
         # A readable document with no matching out is absence evidence.
@@ -874,10 +879,20 @@ def _out_identity(out: dict[str, Any], subpath: str = "") -> str | None:
     files = out.get("files")
     if subpath:
         if isinstance(files, list):
+            beneath: list[tuple[str, str]] = []
             for entry in files:
-                if isinstance(entry, dict) and str(entry.get("relpath", "")) == subpath:
+                if not isinstance(entry, dict):
+                    continue
+                rel = str(entry.get("relpath", ""))
+                if rel == subpath:
                     return str(entry.get("md5") or "") or None
-            # Not in the directory at this rev — genuine absence, not a miss.
+                if rel.startswith(subpath + "/"):
+                    beneath.append((rel, str(entry.get("md5", ""))))
+            # A subDIRECTORY has no entry of its own — the entries beneath it
+            # answer together, as `_match_out_md5` does for lock outs. Nothing
+            # at or beneath it at this rev is genuine absence, not a miss.
+            if beneath:
+                return f"{_digest_pairs(sorted(beneath))}.files"
             return None
         return str(md5) if md5 else None
     if md5:
@@ -891,10 +906,12 @@ def _out_identity(out: dict[str, Any], subpath: str = "") -> str | None:
     )
     if not pairs:
         return None
-    digest = hashlib.sha256(
-        json.dumps(pairs, separators=(",", ":")).encode()
-    ).hexdigest()
-    return f"{digest}.files"
+    return f"{_digest_pairs(pairs)}.files"
+
+
+def _digest_pairs(pairs: list[tuple[str, str]]) -> str:
+    """One identity for a SORTED list of `(path, md5)` pairs."""
+    return hashlib.sha256(json.dumps(pairs, separators=(",", ":")).encode()).hexdigest()
 
 
 def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | None:
@@ -911,7 +928,21 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
 
     An exact match wins. Failing that the NEAREST enclosing out answers, which
     is how a subscription to a path inside a tracked directory gets a verdict
-    at all — see `_out_identity`'s `subpath`.
+    at all — see `_out_identity`'s `subpath`. Failing THAT, the outs BENEATH
+    the path answer together: a declared directory (`data/final/`) that the
+    scaffold's `validate` stage tracks as per-file outs (`data/final/a.dta`,
+    …) has no pointer of its own, and reading that as absence blocked `bump`
+    for every such producer. Its identity is a digest over the sorted
+    `(path, identity)` pairs, so an out moving, appearing or vanishing beneath
+    the directory is drift — the whole-directory posture `.dir` pointers
+    already set. Suffix `.outs` keeps it distinct from a `.files` digest.
+    Ceiling: per-file `.dvc` POINTERS beneath a directory stay invisible —
+    `Fetcher` has no listing call, so only `dvc.lock` outs can be walked. A
+    directory tracked ONLY by such pointers still reads as absent (loud). A
+    directory tracked by BOTH lock outs and a hand-added pointer gets a
+    verdict from the lock outs alone, so that pointer's file moving is
+    missed — silent. Swept read-only across every directory primary in the
+    catalog on 2026-09-15: none is mixed; the fix must be a listing call.
     """
     if not isinstance(data, dict):
         return None
@@ -925,6 +956,7 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
                 out_lists.append(stage["outs"])
 
     enclosing: tuple[int, dict[str, Any], str] | None = None
+    beneath: list[tuple[str, str]] = []
     for outs in out_lists:
         for out in outs:
             if not isinstance(out, dict):
@@ -941,9 +973,15 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
                 depth = resolved.count("/")
                 if enclosing is None or depth > enclosing[0]:
                     enclosing = (depth, out, clean_path[len(resolved) + 1 :])
-    if enclosing is None:
-        return None
-    return _out_identity(enclosing[1], enclosing[2])
+            elif resolved.startswith(clean_path + "/"):
+                identity = _out_identity(out)
+                if identity is not None:
+                    beneath.append((resolved, identity))
+    if enclosing is not None:
+        return _out_identity(enclosing[1], enclosing[2])
+    if beneath:
+        return f"{_digest_pairs(sorted(beneath))}.outs"
+    return None
 
 
 def _drift_unknown_finding(
@@ -1118,7 +1156,9 @@ def _drift_finding_from_views(
             hint=NETWORK_HINT,
         )
     if head_md5 == _POINTER_ABSENT:
-        # Removed at HEAD (or never published there): a bump has no target.
+        # Removed at HEAD, or tracked only by per-file `.dvc` pointers beneath
+        # a directory, which the comparator cannot list. Either way a bump has
+        # no target; the hint says what was checked, not what the producer did.
         return _drift_unknown_finding(
             source=source,
             field_path=field_path,
@@ -1127,7 +1167,8 @@ def _drift_finding_from_views(
                 f"not published at the producer's HEAD ({head[:7]})"
             ),
             hint=(
-                "the producer no longer publishes this output; pin to an "
+                f"at {head[:7]} {path} is in no .dvc pointer at or above it "
+                "and no dvc.lock out at, above, or beneath it; pin to an "
                 "older rev, or drop the subscription"
             ),
         )
