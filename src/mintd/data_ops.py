@@ -67,9 +67,7 @@ class PullSummary:
       targets that never materialized are subtracted);
     - fast-sync raised: the REQUESTED/discovered targets minus those the
       recovery checkout could not materialize, best-effort (the fallback
-      ``dvc pull`` reports no per-target count);
-    - no fast-sync available: the number of REQUESTED targets (a pull-all
-      reports 0).
+      ``dvc pull`` reports no per-target count).
 
     ``error_count`` drives the CLI's non-zero exit — every target left
     absent from the workspace:
@@ -629,7 +627,7 @@ def data_pull(
     *,
     targets: list[str] | None = None,
     dvc_ops: DvcOps,
-    fast_sync_ops: FastSyncOps | None = None,
+    fast_sync_ops: FastSyncOps,
     remote: str | None = None,
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
@@ -637,30 +635,24 @@ def data_pull(
     aws_profile_name: str | None = None,
     import_rescue: "ImportRescueFn" = rescue_import_pull,
 ) -> PullSummary:
-    """Pull dvc-tracked data via fast-sync (boto3 → cache) when available;
-    fall back to ``dvc pull`` for anything fast-sync can't handle.
+    """Pull dvc-tracked data via fast-sync (boto3 → cache), falling back to
+    ``dvc pull`` for anything fast-sync can't handle.
 
-    Slice 26: when ``targets is None`` and fast_sync_ops is available,
-    discovers all ``.dvc`` files in the project and routes through
-    fast-sync. Without discovery, the call would fall through to
-    ``dvc pull`` directly and hit DVC 3.66.1's cache-write bug on
-    version_aware buckets.
+    ``fast_sync_ops`` is REQUIRED (issue18). It was optional, and a ``None``
+    meant "skip fast-sync entirely, issue one blanket ``dvc pull``, and
+    report the number of targets REQUESTED as the number landed". That lane
+    is DELETED, not disabled -- see ``cli._require_fast_sync_ops``, which is
+    what now stops a boto3-less install before it reaches this function.
+
+    Slice 26: when ``targets is None``, discovers all ``.dvc`` files in the
+    project and routes through fast-sync. Without discovery, the call would
+    fall through to ``dvc pull`` directly and hit DVC 3.66.1's cache-write
+    bug on version_aware buckets.
 
     Returns a ``PullSummary`` (target count, total bytes, elapsed) so the CLI
     can render an informative completion line (slice 38b).
     """
     start_t = time.monotonic()
-    if fast_sync_ops is None:
-        dvc_ops.pull(
-            targets=targets, cwd=project_path, remote=remote, jobs=jobs,
-            extra_args=extra_dvc_args,
-        )
-        return PullSummary(
-            targets_pulled=len(targets or []),
-            total_bytes=0,
-            elapsed_s=time.monotonic() - start_t,
-        )
-
     # Track the original request shape: "pull-all" (None) carries different
     # post-fast-sync semantics than "pull these specific .dvc files."
     pull_all_requested = targets is None

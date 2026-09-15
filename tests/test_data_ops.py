@@ -11,18 +11,41 @@ from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.reporter import RecordingReporter
 
 
-def test_data_pull_default_calls_dvc_ops_pull(tmp_path: Path) -> None:
+def test_data_pull_default_never_issues_a_blanket_dvc_pull(tmp_path: Path) -> None:
+    """A pull-all reaches ``dvc pull`` SCOPED to what discovery found, never
+    ``targets=None``.
+
+    This test used to assert the opposite -- ``DvcPullCall(targets=None)`` --
+    because it omitted ``fast_sync_ops`` and so landed in ``data_pull``'s
+    degraded branch, which issue18 deleted. That blanket pull is the one the
+    function's own docstring calls out as hitting DVC 3.66.1's cache-write bug
+    on version_aware buckets, so pinning it was pinning the defect.
+
+    Mutation: restore ``targets=targets`` (the request shape) in place of the
+    discovered list at the fallback pull -> this test fails with
+    ``targets=None != ['a.dvc']``. Observed while writing it: with
+    ``fast_sync_ops`` omitted the call now raises ``TypeError: data_pull()
+    missing 1 required keyword-only argument: 'fast_sync_ops'``.
+    """
+    (tmp_path / "a.dvc").write_text("outs:\n  - md5: " + "a" * 32 + "\n    path: a\n")
     fake = _FakeDvcOps()
-    data_pull(tmp_path, dvc_ops=fake)
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.fallback_all = True
+    data_pull(tmp_path, dvc_ops=fake, fast_sync_ops=fast_fake)
     assert len(fake.pull_calls) == 1
     assert fake.pull_calls[0] == DvcPullCall(
-        cwd=tmp_path, targets=None, remote=None, jobs=None,
+        cwd=tmp_path, targets=["a.dvc"], remote=None, jobs=None,
     )
 
 
 def test_data_pull_with_targets_passes_them(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    data_pull(tmp_path, targets=["data/a", "data/b"], dvc_ops=fake)
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.fallback_all = True
+    data_pull(
+        tmp_path, targets=["data/a", "data/b"], dvc_ops=fake,
+        fast_sync_ops=fast_fake,
+    )
     assert fake.pull_calls[0].targets == ["data/a", "data/b"]
 
 
@@ -95,15 +118,34 @@ def test_data_pull_no_targets_empty_repo_returns_early(
     assert fake.pull_calls == []
 
 
-def test_data_pull_no_targets_no_fast_sync_falls_through_to_dvc_pull(
-    tmp_path: Path,
-) -> None:
-    """When fast_sync_ops is None, route directly to dvc pull (unchanged
-    behavior for the no-fast-sync case)."""
-    fake = _FakeDvcOps()
-    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=None)
-    assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0].targets is None
+def test_data_pull_requires_fast_sync_ops() -> None:
+    """``fast_sync_ops`` is required and its type carries no ``| None``.
+
+    Replaces ``test_data_pull_no_targets_no_fast_sync_falls_through_to_dvc_pull``,
+    which existed to FREEZE the degraded branch ("unchanged behavior for the
+    no-fast-sync case"). issue18 deleted that branch, so the pin inverts:
+    there is no longer a no-fast-sync case to have behaviour.
+
+    A signature assertion and not a behavioural one on purpose. ``data_pull``
+    does not type-check at runtime, and passing ``None`` today does NOT raise:
+    ``hasattr(None, "set_progress")`` is False, ``None.try_fast_pull`` raises
+    ``AttributeError``, and ``data_pull``'s ``except Exception`` around the
+    fast-sync call swallows it into the crash-recovery lane. So a leftover
+    ``None`` would pass a behavioural test quietly. Observed: with
+    ``fast_sync_ops=None`` the call returns a ``PullSummary`` rather than
+    raising.
+
+    Mutation: restore the ``| None = None`` default -> both assertions fail.
+    """
+    import inspect
+
+    param = inspect.signature(data_pull).parameters["fast_sync_ops"]
+    assert param.default is inspect.Parameter.empty, (
+        "fast_sync_ops must be required; a default reopens the degraded lane"
+    )
+    assert "None" not in str(param.annotation), (
+        f"fast_sync_ops annotation still admits None: {param.annotation}"
+    )
 
 
 def test_data_push_calls_dvc_ops_push(tmp_path: Path) -> None:
@@ -161,8 +203,12 @@ def test_data_remove_calls_dvc_ops_remove(tmp_path: Path) -> None:
 def test_data_pull_propagates_dvc_pull_error(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
     fake.pull_raises = DvcPullError("nope")
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.fallback_all = True
     with pytest.raises(DvcPullError, match="nope"):
-        data_pull(tmp_path, dvc_ops=fake)
+        data_pull(
+            tmp_path, targets=["data/a"], dvc_ops=fake, fast_sync_ops=fast_fake,
+        )
 
 
 def test_data_pull_all_fell_back_skips_checkout(tmp_path: Path) -> None:

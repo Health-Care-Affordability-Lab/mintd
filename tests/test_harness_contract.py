@@ -215,9 +215,13 @@ def _clone(producer: LocalProducer, dest: Path) -> Path:
 
 
 def _pull(project: Path, targets: list[str] | None = None) -> None:
-    """Production's own pull, through the real dvc seam. `fast_sync_ops=None`
-    on purpose — see `test_local_remote_degrades_fast_sync_to_the_fallback_route`
-    for why a local-directory remote could not use fast-sync anyway.
+    """Production's own pull, through the real dvc seam, with the REAL
+    `SubprocessFastSyncOps` — not a double and no longer `fast_sync_ops=None`,
+    which issue18 removed from the signature. The route is unchanged:
+    `test_local_remote_degrades_fast_sync_to_the_fallback_route` asserts that a
+    local-directory remote degrades every target to `fallback_targets` before a
+    byte moves, so this lane still certifies the FALLBACK route. What changed
+    is that it now reaches it through the code production runs.
 
     This helper used to wrap the call in `os.chdir(project)` / `finally:
     os.chdir(cwd)`, mirroring the same block `data.py` carried, because
@@ -230,7 +234,7 @@ def _pull(project: Path, targets: list[str] | None = None) -> None:
         project_path=project,
         targets=targets,
         dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
-        fast_sync_ops=None,
+        fast_sync_ops=SubprocessFastSyncOps(),
     )
 
 
