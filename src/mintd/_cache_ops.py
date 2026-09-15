@@ -32,15 +32,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
 
+from ._dvc_state import _all_dvc_outs, path_covers
 from ._fast_sync_ops import (
     ClientError,
     _create_s3_client,
     check_bucket_versioning,
-    discover_all_outs,
     get_remote_config,
-    outs_for_target,
     parse_s3_url,
-    partition_pipeline_outs,
     retry_transient,
     s3_key_for_out,
     workspace_path_for,
@@ -264,19 +262,6 @@ class _Collision:
     source: str
 
 
-def _all_dvc_outs(project_path: Path, remote_name: str) -> list:
-    """Every DVC out for the project: ``.dvc`` pointers (via
-    ``discover_all_outs`` + ``outs_for_target``) plus ``dvc.lock`` stage outs.
-    The single enumeration both the collision guard and the tracked-path set
-    read from, so neither can drift from the other's view of DVC reality."""
-    outs = []
-    for target in discover_all_outs(project_path):
-        outs.extend(outs_for_target(project_path, target, remote_name))
-    _, lock_outs = partition_pipeline_outs(project_path, remote_name)
-    outs.extend(lock_outs)
-    return outs
-
-
 def dvc_tracked_paths(project_path: Path, remote_name: str) -> set[str]:
     """Repo-relative posix path of every DVC-tracked workspace out (files AND
     directory-out roots). ``cache push`` refuses any path in — or under a
@@ -303,13 +288,17 @@ def _is_tracked(rel_posix: str, tracked: set[str]) -> bool:
     reason as ``_is_protected_repo_path``: on a case-insensitive filesystem
     ``data/FINAL.parquet`` is the same file as a tracked ``data/final.parquet``,
     so a case-sensitive compare would let the cache clobber (pull) or shadow
-    (push) a versioned out."""
-    r = rel_posix.casefold()
-    for t in tracked:
-        tc = t.casefold()
-        if r == tc or r.startswith(f"{tc}/"):
-            return True
-    return False
+    (push) a versioned out.
+
+    These are directions 1 and 2 of ``_dvc_state.outs_matching``'s three, over
+    the shared ``path_covers`` rule. Direction 3 ("a tracked out lives BENEATH
+    the argument") is deliberately excluded: this guard is also asked about
+    DIRECTORY arguments (``_classify``, :func:`enumerate_push_items`), and
+    answering True for a directory that merely CONTAINS a tracked out would
+    refuse the whole directory and stop its untracked siblings from being
+    cacheable. Pinned by
+    ``tests/test_cache_ops.py::test_is_tracked_agrees_with_outs_matching``."""
+    return any(path_covers(t, rel_posix) for t in tracked)
 
 
 def _dvc_outs_under_cache(project_path: Path, remote_name: str) -> list[_Collision]:
