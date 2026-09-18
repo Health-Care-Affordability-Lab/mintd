@@ -115,6 +115,9 @@ class _FakeDvcOps:
         # behavior where a specific import cannot be materialized while other
         # targets pull fine. ``pull_raises`` (global) semantics are untouched.
         self.pull_raises_for: dict[str, Exception] = {}
+        # A successful real `dvc pull` writes the target's workspace path(s);
+        # False models the zero-exit pull that materializes nothing.
+        self.pull_materializes: bool = True
         self.add_calls: list[DvcAddCall] = []
         self.add_raises: Exception | None = None
         self.status_calls: list[DvcStatusCall] = []
@@ -265,6 +268,9 @@ class _FakeDvcOps:
                 extra_args=extra_args,
             )
         )
+        if self.pull_materializes:
+            for t in targets or []:
+                self._materialize_target(t, root=cwd, as_pull=True)
 
     def add(self, path: Path, *, cwd: Path) -> Path:
         if self.add_raises:
@@ -325,11 +331,21 @@ class _FakeDvcOps:
                 if t not in self.checkout_never_materializes:
                     self._materialize_target(t, root=cwd)
 
-    def _materialize_target(self, target: str, *, root: Path) -> None:
+    def _materialize_target(
+        self, target: str, *, root: Path, as_pull: bool = False
+    ) -> None:
         """Write what a real `dvc checkout` would: the target's workspace
         path(s). Out shapes (file vs dir vs files-format dir) come from the
         on-disk .dvc / dvc.lock, same as production's verification pass; a
         target with neither is materialized as a plain file.
+
+        `as_pull` is the `dvc pull` shape, measured against dvc 3.67.1 and
+        licensed by `test_dvc_ops_contract.py::test_pull_materializes_the_target`:
+        a target no pointer/lock resolves (a stage name, a sub-path of a dir
+        out) writes NOTHING — real `dvc pull` exits 0 and lands nothing for a
+        sub-path its manifest lacks — and an out already on disk is left as
+        is (pull is a no-op there, and overwriting it would hand real dvc a
+        modified workspace in the shared-workspace oracle tests).
 
         Path resolution and shape dispatch are imported from production
         (`workspace_path_for`, `DvcOut.materializes_as_dir`,
@@ -340,6 +356,7 @@ class _FakeDvcOps:
             EMPTY_DIR_MD5,
             cache_path_for,
             outs_for_target,
+            outs_materialized,
             parse_dvc_lock_outs,
             read_cached_dir_manifest,
             workspace_path_for,
@@ -349,9 +366,13 @@ class _FakeDvcOps:
         if not outs:
             outs = [o for o in parse_dvc_lock_outs(root, "origin") if o.target == target]
         if not outs:
+            if as_pull:
+                return
             dest = root / (target[:-4] if target.endswith(".dvc") else target)
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text("materialized")
+            return
+        if as_pull and outs_materialized(root, outs):
             return
         for out in outs:
             dest = workspace_path_for(root, out)
