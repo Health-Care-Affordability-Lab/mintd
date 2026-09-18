@@ -41,7 +41,7 @@ _BOUNDARY_SUFFIXES = (
 )
 
 # BANNED: internal mintd functions and module attributes stubbed out
-# wholesale (``_fast_sync_ops.boto3`` is the one attribute). 132 sites / 28
+# wholesale (``_fast_sync_ops.boto3`` is the one attribute). 130 sites / 28
 # targets at 70a7a9e, unmoved since. Shrink-only. The running totals for the
 # WHOLE census (banned + permitted) live in
 # ``test_the_checked_in_literal_matches_a_fresh_scan``, not here — a count
@@ -68,8 +68,8 @@ BANNED_TARGETS: dict[str, int] = {
     "mintd.data.ProducerView.at_head": 1,
     "mintd.data.check_project": 2,
     "mintd.data.data_pull": 2,
-    "mintd.data_ops.discover_all_outs": 15,
-    "mintd.data_ops.partition_pipeline_outs": 7,
+    "mintd.data_ops.discover_all_outs": 14,
+    "mintd.data_ops.partition_pipeline_outs": 6,
     "mintd.enclave.ProducerView.at_head": 1,
     "mintd.enclave.check_project": 1,
     "mintd.init._prompt_classification": 1,
@@ -179,8 +179,8 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
     grandfathered internal stub, pinned here by set equality so the set can
     only shrink.
 
-    Both string-form mechanisms count. ``monkeypatch.setattr`` supplies 115
-    of the 132 banned sites and ``unittest.mock.patch`` the other 17
+    Both string-form mechanisms count. ``monkeypatch.setattr`` supplies 113
+    of the 130 banned sites and ``unittest.mock.patch`` the other 17
     (``_fast_sync_ops._check_dvc`` 15, ``_fast_sync_ops.boto3`` 1,
     ``publish.check_project`` 1); ``patch`` is house style in
     ``test_publish.py`` / ``test_fast_sync.py`` / ``test_config.py``, so
@@ -210,7 +210,7 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
         "internal monkeypatch census moved; the literal may only shrink. "
         f"target -> (pinned, scanned): {dict(sorted(moved.items()))}"
     )
-    assert sum(banned.values()) == 132
+    assert sum(banned.values()) == 130
 
 
 def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
@@ -236,8 +236,8 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
     target by prefix, so this deletion could have been made to *look* free by
     relabelling it into the other bucket; instead the name is gone from
     production, from both literals, and from every patch site — a real shrink,
-    -4 sites / -1 target off a census of 195 / 47. ``BANNED_TARGETS`` stays at
-    132 / 28 and must not move here. The running totals live in
+    -4 sites / -1 target off a census of 193 / 47. ``BANNED_TARGETS`` stays at
+    130 / 28 and must not move here. The running totals live in
     ``test_the_checked_in_literal_matches_a_fresh_scan``, not here, so an
     unrelated permitted patch added in the same slice cannot masquerade as
     this deletion failing.
@@ -253,12 +253,12 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
     assert "mintd.cli._resolve_clients" not in PERMITTED_TARGETS
     assert "mintd.cli._resolve_clients" not in BANNED_TARGETS
-    assert sum(BANNED_TARGETS.values()) == 132
+    assert sum(BANNED_TARGETS.values()) == 130
     assert len(BANNED_TARGETS) == 28
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (195 sites / 47 targets), not
+    """The literals above are the *whole* census (193 sites / 47 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -269,14 +269,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (195 → 194), or drop ``patch`` (195 → 165).
+    ``monkeypatch``-receiver calls (193 → 192), or drop ``patch`` (193 → 163).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 195
+    assert sum(scanned.values()) == 193
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

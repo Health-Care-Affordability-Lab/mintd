@@ -840,6 +840,71 @@ def test_clone_primary_that_is_an_exact_out_is_unchanged(
     assert (dest / PRIMARY_OUT / "part.csv").read_bytes() == b"v1\n"
 
 
+def _publish_two_outs_and_drop_one_blob(producer, register) -> None:
+    """Two declared outs, one blob deleted from the producer's remote AFTER
+    the push: the failure S1's orphan guard leaves in place (real dvc:
+    `Checkout failed for following targets: data/other.csv`, exit 1, sibling
+    landed). Blobs live at `files/md5/XX/YYYY` under `producer.remote`."""
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}, "data/other.csv": b"other\n"})
+    register()
+    blobs = [p for p in (producer.remote / "files" / "md5").rglob("*") if p.is_file()]
+    gone = [p for p in blobs if p.read_bytes() == b"other\n"]
+    assert len(gone) == 1, blobs
+    gone[0].chmod(0o644)  # dvc stores blobs read-only; Windows refuses to delete those
+    gone[0].unlink()
+
+
+def test_cli_data_clone_partial_pull_reports_what_landed(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """S2, real dvc: one of two outs cannot be pulled (blob gone from the
+    remote). Before: rc 1 with the raw dvc stderr and no word on what landed.
+    After: rc 1, the clone is kept, the sibling's bytes ARE on disk, and the
+    summary names the one failed target. Mutation: re-raise DvcPullError in
+    `_pull_isolating_failures` -> raw `dvc pull failed (exit 1)` line, red."""
+    producer, _consumer, register = payload_journey
+    _publish_two_outs_and_drop_one_blob(producer, register)
+
+    dest = tmp_path / "clonedest"
+    rc = cli.main(["data", "clone", PRODUCT, "--dest", str(dest)])
+    out = _drain(capsys)
+
+    assert rc == 1, out
+    assert f"cloned {PRODUCT} → {dest.name}/ but pull incomplete: 1 target(s) failed" in out, out
+    assert "cannot pull data/other.csv.dvc:" in out, out
+    assert "mintd data pull data/other.csv.dvc" in out, out  # the retry hint
+    assert "dvc pull failed (exit 1)" not in out, out
+    assert "does not exist as an output or a stage name" not in out, out
+    assert (dest / PRIMARY_OUT / "part.csv").read_bytes() == b"v1\n"
+    assert not (dest / "data" / "other.csv").exists()
+
+
+def test_cli_data_pull_partial_failure_prints_a_summary_not_a_traceback(
+    payload_journey, tmp_path, capsys, monkeypatch
+) -> None:
+    """S2, real dvc, `mintd data pull` inside the clone above: the same
+    partial failure renders `pull incomplete: 1 target(s) failed` plus one
+    `cannot pull <t>` line with its retry hint -- never the raw dvc stderr --
+    and the sibling stays on disk. Mutation: re-raise -> red."""
+    producer, _consumer, register = payload_journey
+    _publish_two_outs_and_drop_one_blob(producer, register)
+    dest = tmp_path / "clonedest"
+    assert cli.main(["data", "clone", PRODUCT, "--dest", str(dest)]) == 1, _drain(capsys)
+    _drain(capsys)
+
+    monkeypatch.chdir(dest)
+    rc = cli.main(["data", "pull"])
+    out = _drain(capsys)
+
+    assert rc == 1, out
+    assert "pull incomplete: 1 target(s) failed" in out, out
+    assert "cannot pull data/other.csv.dvc:" in out, out
+    assert "mintd data pull data/other.csv.dvc" in out, out
+    assert "dvc pull failed (exit 1)" not in out, out
+    assert "does not exist as an output or a stage name" not in out, out
+    assert (dest / PRIMARY_OUT / "part.csv").read_bytes() == b"v1\n"
+
+
 def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
     """`mintd enclave pull` — the restricted lane, with real bytes.
 

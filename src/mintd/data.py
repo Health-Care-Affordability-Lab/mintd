@@ -797,7 +797,11 @@ def clone_and_pull_product(
     # forwarded on the catalog's word; dvc accepts a sub-path its manifest
     # lacks, fetches the manifest, lands nothing and exits 0. That is a
     # failed target, not a clean pull: count it so the CLI drops the ✓ line.
-    missing = [p for p in unverified if not (resolved_dest / p).exists()]
+    # A selection whose own pull failed was already reported and counted.
+    missing = [
+        p for p in unverified
+        if p not in pull_summary.failed_targets and not (resolved_dest / p).exists()
+    ]
     for p in missing:
         if reporter is not None:
             reporter.error(

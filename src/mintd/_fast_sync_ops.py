@@ -156,6 +156,11 @@ class DvcOut:
     # source repo's bucket — not this consumer repo's — so fast-sync
     # cannot serve it and routes the target straight to `dvc pull`.
     is_import: bool = False
+    # False for a dvc.lock out dvc.yaml declares `cache: false`: dvc never
+    # caches or pushes it, so no pull can land it. It is still DVC-tracked
+    # (clone selectors and the cache-lane screens must keep seeing it); only
+    # data_pull's discovery drops it.
+    use_cache: bool = True
 
     @property
     def materializes_as_dir(self) -> bool:
@@ -475,6 +480,37 @@ def wdir_map(dvc_yaml_doc: object) -> dict[str, str | None]:
     return out
 
 
+def uncached_outs(dvc_yaml_doc: object) -> dict[str, set[str]]:
+    """``stage name -> {out path}`` for every out ``dvc.yaml`` declares
+    ``cache: false`` (under ``outs``, ``metrics`` or ``plots``).
+
+    ``dvc.lock`` records such an out like any other -- path, md5, size, no
+    ``cache`` key -- but dvc never caches or pushes it, so ``dvc pull`` exits
+    0 and lands nothing. Paths stay as written (relative to the stage
+    ``wdir``, normalized) to compare against the lock's raw ``path``.
+    """
+    if not isinstance(dvc_yaml_doc, dict):
+        return {}
+    stages = dvc_yaml_doc.get("stages")
+    if not isinstance(stages, dict):
+        return {}
+    out: dict[str, set[str]] = {}
+    for stage, stage_data in stages.items():
+        body = stage_data.get("do", stage_data) if isinstance(stage_data, dict) else {}
+        if not isinstance(body, dict):
+            continue
+        for key in ("outs", "metrics", "plots"):
+            entries = body.get(key)
+            for entry in entries if isinstance(entries, list) else []:
+                # A `${...}` path never equals the lock's expanded one, so a
+                # templated cache: false out is still pulled and probed;
+                # expand it if a product ever declares one.
+                for path, opts in entry.items() if isinstance(entry, dict) else ():
+                    if isinstance(opts, dict) and opts.get("cache") is False:
+                        out.setdefault(str(stage), set()).add(posixpath.normpath(str(path)))
+    return out
+
+
 def stage_wdir(stage_wdirs: dict[str, str | None], stage: str) -> str | None:
     """The `wdir` for one **dvc.lock** stage name.
 
@@ -523,6 +559,9 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     names, and ``foreach`` may be a ``${vars}`` reference only dvc's
     templating can expand — guessing it would drop live instances instead.
 
+    An out ``dvc.yaml`` declares ``cache: false`` is kept, marked
+    ``use_cache=False`` (see ``DvcOut.use_cache``).
+
     Returns ``[]`` when ``dvc.lock`` is missing or malformed.
     """
     yaml_path = project_path / "dvc.yaml"
@@ -532,10 +571,13 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     # reaches the same document through `Fetcher.fetch_path_at` instead of
     # `open()`. Only the acquisition differs; the walk is identical.
     stage_wdirs: dict[str, str | None] = {}
+    stage_uncached: dict[str, set[str]] = {}
     try:
         if yaml_path.exists():
             with open(yaml_path) as f:
-                stage_wdirs = wdir_map(yaml.safe_load(f))
+                yaml_doc = yaml.safe_load(f)
+            stage_wdirs = wdir_map(yaml_doc)
+            stage_uncached = uncached_outs(yaml_doc)
     except (FileNotFoundError, yaml.YAMLError, OSError):
         pass
 
@@ -558,6 +600,7 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
             continue  # absolute wdir: unresolvable against the project root
         if "outs" not in stage_data:
             continue
+        uncached = stage_uncached.get(stage, stage_uncached.get(stage.split("@", 1)[0], set()))
         for out in stage_data["outs"]:
             has_md5 = bool(out.get("md5"))
             has_files = "files" in out
@@ -611,6 +654,7 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
                 is_path_based=is_path_based,
                 dvc_file=lock_path,
                 is_import=False,
+                use_cache=posixpath.normpath(str(raw_path)) not in uncached,
             ))
     return outs
 
