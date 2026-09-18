@@ -15,6 +15,7 @@ notes/issue-data-pull-all-fallback-skips-checkout.md.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -77,7 +78,12 @@ class PullSummary:
     - ``incomplete_targets`` (per-file download failures);
     - checkout targets ``dvc checkout`` claimed (exit 0) but never
       materialized, even after a single-target retry — any out shape, not
-      only version-aware.
+      only version-aware;
+    - DVC-lane pull failures (the non-import batch and the catch-all): a
+      target whose ``dvc pull`` raised even when retried alone, or which
+      exited 0 without materializing (``_pull_isolating_failures``). A
+      per-target ``DvcPullError`` never escapes ``data_pull``; only
+      ``error_count`` signals it.
 
     On the crash branch, error_count counts every unmaterialized recovery
     target (dvc.lock stage outs included) while targets_pulled subtracts
@@ -89,6 +95,10 @@ class PullSummary:
     total_bytes: int
     elapsed_s: float
     error_count: int = 0
+    # The targets behind ``error_count``, each already reported, so a caller
+    # with its own post-pull check (clone's sub-path check) does not report
+    # the same target a second time.
+    failed_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -161,6 +171,28 @@ def _split_cached(
     return cached, [t for t in candidates if t not in cached_set]
 
 
+def _shape_groups(targets: list[str]) -> list[list[str]]:
+    """``targets`` split into non-empty ``[.dvc paths]`` then ``[bare paths]``,
+    so no argv ever mixes the two shapes.
+
+    dvc checkout AND pull (pull's fetch half shares ``index_from_targets``)
+    exit 0 without materializing a bare target that follows a ``.dvc`` one in
+    the same argv — measured: ``dvc pull b.dvc x.dvc y.dvc s1 s2`` lands only
+    ``y``, losing both stage outs AND the other pointers. Why, and the
+    removal criterion: ``_checkout_grouped``.
+
+    The suffix is the whole test, which leaves two known-narrow leaks that
+    predate this split and stay open: a bare argv is only homogeneous to dvc
+    while no entry resolves as a dvc.yaml STAGE NAME, so a root-level out
+    whose path equals its stage name (out ``model`` of stage ``model``), or a
+    stage name the user types before a path (``mintd data pull s1
+    data/s2.txt``), still takes the leaking fast path. Both fail LOUDLY — the
+    ``outs_materialized`` probe names what did not land."""
+    groups = ([t for t in targets if t.endswith(".dvc")],
+              [t for t in targets if not t.endswith(".dvc")])
+    return [g for g in groups if g]
+
+
 def _checkout_grouped(dvc_ops: DvcOps, targets: list[str], *, cwd: Path) -> None:
     """Run ``dvc checkout`` without ever mixing ``.dvc`` file paths and bare
     out-path strings (dvc.lock stage outs, suffix-less user targets) in one
@@ -181,12 +213,8 @@ def _checkout_grouped(dvc_ops: DvcOps, targets: list[str], *, cwd: Path) -> None
     fallback. Repro recipe and removal criterion:
     notes/issue-dvc-checkout-mixed-argv.md.
     """
-    dvc_file_targets = [t for t in targets if t.endswith(".dvc")]
-    bare_targets = [t for t in targets if not t.endswith(".dvc")]
-    if dvc_file_targets:
-        dvc_ops.checkout(targets=dvc_file_targets, cwd=cwd)
-    if bare_targets:
-        dvc_ops.checkout(targets=bare_targets, cwd=cwd)
+    for group in _shape_groups(targets):
+        dvc_ops.checkout(targets=group, cwd=cwd)
 
 
 def _verify_and_retry_checkout(
@@ -249,6 +277,84 @@ def _report_pull_failure(
     )
 
 
+def _dvc_failure_why(exc: Exception) -> str:
+    """The lane-specific ``why`` for a ``DvcPullError``: one line, without the
+    ``dvc pull failed (exit N): `` framing (the CLI's summary line already says
+    the pull failed) and from dvc's own ``ERROR:`` onward when it has one, so
+    the preceding WARNING chatter does not bury the reason."""
+    msg = " ".join(str(exc).split())
+    msg = re.sub(r"^dvc pull failed \(exit \d+\): ", "", msg)
+    i = msg.find("ERROR: ")
+    return msg[i + len("ERROR: "):] if i >= 0 else msg
+
+
+def _pull_isolating_failures(
+    project_path: Path,
+    targets: list[str],
+    remote_name: str,
+    pipeline_by_target: dict[str, DvcOut],
+    *,
+    dvc_ops: DvcOps,
+    remote: str | None,
+    jobs: int | None,
+    extra_dvc_args: list[str] | None,
+    reporter: "Reporter | None",
+) -> list[str]:
+    """Batch-first, isolate-on-failure ``dvc pull``: one batched argv per
+    ``_shape_groups`` group on the happy path (one group unless this call
+    really holds both shapes); only when a group raises is each of ITS
+    members retried alone (idempotent — dvc skips what the batch already
+    landed), so survivors land and each failure is named once. One failing
+    group never stops the others. A single-target batch is not retried (the
+    retry would be the same argv). Then every target that did not raise is stat-
+    probed (``outs_materialized``, the same probe the checkout lane and the
+    import rescue use): a zero-exit pull that left the out absent is a failure
+    too; unresolvable targets (no ``.dvc``, no lock entry) stay unverifiable.
+    Returns the failed targets, each already reported via
+    ``_report_pull_failure`` when a reporter exists."""
+    if not targets:
+        return []
+
+    def _pull(argv: list[str]) -> None:
+        dvc_ops.pull(
+            targets=argv, cwd=project_path, remote=remote, jobs=jobs,
+            extra_args=extra_dvc_args,
+        )
+
+    failed: dict[str, str] = {}
+    for group in _shape_groups(targets):
+        try:
+            _pull(group)
+        except DvcPullError as exc:
+            if len(group) == 1:
+                failed[group[0]] = _dvc_failure_why(exc)
+            else:
+                # The exception text is dvc's raw stderr; each per-target retry
+                # reports its own trimmed reason, so it is not repeated here.
+                logger.warning(
+                    "batched dvc pull of %d target(s) failed; retrying each target alone",
+                    len(group),
+                )
+                for t in group:
+                    try:
+                        _pull([t])
+                    except DvcPullError as exc_t:
+                        failed[t] = _dvc_failure_why(exc_t)
+    for t in targets:
+        if t in failed:
+            continue
+        outs = resolve_target_outs(project_path, t, remote_name, pipeline_by_target)
+        if outs and not outs_materialized(project_path, outs):
+            failed[t] = (
+                "not materialized by dvc pull (exit 0, but the workspace path "
+                "is still missing)"
+            )
+    if reporter is not None:
+        for t, why in failed.items():
+            _report_pull_failure(reporter, t, why)
+    return list(failed)
+
+
 def _report_not_materialized(reporter: "Reporter", targets: list[str]) -> None:
     """One pull-failure error per target ``dvc checkout`` claimed to serve
     but left absent from the workspace (even after the single-target
@@ -282,16 +388,17 @@ def _checkout_pull_verify(
     1. grouped ``dvc checkout`` of the fully-cached ``checkout_targets`` —
        BEFORE the pull, so a hanging/crashing ``dvc pull`` can never leave
        a fresh clone with zero workspace data;
-    2. ``dvc pull`` of ``pull_targets`` — non-imports in one batched fatal
-       pull (today's behavior); each dvc-import pulled one-target-per-argv
+    2. ``dvc pull`` of ``pull_targets`` — non-imports batched per shape group
+       (``_shape_groups``), failures isolated per target and verified on disk
+       (``_pull_isolating_failures``); each dvc-import pulled one-target-per-argv
        with its ``dvc pull`` failure absorbed and the import-rescue lane
        (direct producer-bucket fetch) tried when the import did not
        materialize (see ``_import_rescue_ops``);
     3. verify-and-retry every checkout target — AFTER the pull, so the
        checkout-before-pull ordering above is unchanged;
     4. report the still-missing (when a reporter exists) and return them
-       for the caller's error accounting — checkout misses plus any import
-       whose rescue also failed.
+       for the caller's error accounting — checkout misses, non-import pull
+       failures, plus any import whose rescue also failed.
 
     ``pipeline_outs`` must be the same out list the checkout candidates
     were resolved against: ``all_pipeline`` on the crash path (candidates =
@@ -302,8 +409,8 @@ def _checkout_pull_verify(
     if checkout_targets:
         _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
 
-    rescue_failed = _pull_targets_with_import_rescue(
-        project_path, pull_targets, remote_name,
+    pull_failed = _pull_targets_with_import_rescue(
+        project_path, pull_targets, remote_name, pipeline_outs,
         dvc_ops=dvc_ops, remote=remote, jobs=jobs,
         extra_dvc_args=extra_dvc_args, reporter=reporter,
         aws_profile_name=aws_profile_name, import_rescue=import_rescue,
@@ -321,13 +428,14 @@ def _checkout_pull_verify(
         # no target is double-reported.
         if not_materialized and reporter is not None:
             _report_not_materialized(reporter, not_materialized)
-    return not_materialized + rescue_failed
+    return not_materialized + pull_failed
 
 
 def _pull_targets_with_import_rescue(
     project_path: Path,
     pull_targets: list[str],
     remote_name: str,
+    pipeline_outs: list[DvcOut],
     *,
     dvc_ops: DvcOps,
     remote: str | None,
@@ -337,11 +445,12 @@ def _pull_targets_with_import_rescue(
     aws_profile_name: str | None,
     import_rescue: "ImportRescueFn",
 ) -> list[str]:
-    """Pull ``pull_targets``: non-imports in one batched fatal ``dvc pull``,
-    each dvc-import serialized with the rescue lane behind a failed/non-
-    materializing pull. Returns the imports whose rescue also failed (already
-    reported); each was left absent from the workspace and drives the
-    caller's non-zero exit."""
+    """Pull ``pull_targets``: non-imports in a batched ``dvc pull`` per shape
+    group, with per-target failure isolation; each dvc-import serialized with
+    the rescue lane behind a failed/non-materializing pull. Returns the non-imports that
+    failed plus the imports whose rescue also failed (all already reported);
+    each was left absent from the workspace and drives the caller's non-zero
+    exit."""
     if not pull_targets:
         return []
 
@@ -354,13 +463,15 @@ def _pull_targets_with_import_rescue(
         else:
             non_import_targets.append(t)
 
-    # Non-imports keep today's single batched fatal pull (a failure raises
-    # and aborts the whole pull, unchanged).
-    if non_import_targets:
-        dvc_ops.pull(
-            targets=non_import_targets, cwd=project_path,
-            remote=remote, jobs=jobs, extra_args=extra_dvc_args,
-        )
+    # Non-imports: one batched pull per shape group (never a mixed argv),
+    # failures isolated per target and verified on disk (never raises for a
+    # per-target failure).
+    pull_failed = _pull_isolating_failures(
+        project_path, non_import_targets, remote_name,
+        {o.target: o for o in pipeline_outs},
+        dvc_ops=dvc_ops, remote=remote, jobs=jobs,
+        extra_dvc_args=extra_dvc_args, reporter=reporter,
+    )
 
     # One producer-resolution cache shared across every import in this pull
     # run so several imports from one producer fetch its config once.
@@ -407,7 +518,7 @@ def _pull_targets_with_import_rescue(
             rescue_failed.append(t)
             if reporter is not None:
                 _report_pull_failure(reporter, t, result.reason, hint=result.hint)
-    return rescue_failed
+    return pull_failed + rescue_failed
 
 
 def _finish_after_crash_recovery(
@@ -461,6 +572,7 @@ def _finish_after_crash_recovery(
         total_bytes=total_bytes,
         elapsed_s=time.monotonic() - start_t,
         error_count=len(not_materialized),
+        failed_targets=tuple(not_materialized),
     )
 
 
@@ -663,8 +775,8 @@ def data_pull(
     # therefore never fast-syncs: classify_targets finds no `<path>.dvc`,
     # routes it to `fallback`, and it lands via a scoped `dvc pull <path>`.
     # That is correct and safe (scoped, never targets=None; single
-    # homogeneous argv, so the mixed-argv checkout bug can't fire; dvc pull
-    # raises loudly on failure) but bypasses fast-sync, so a large
+    # homogeneous argv, so the mixed-argv checkout bug can't fire; a pull
+    # failure is reported per target and counted) but bypasses fast-sync, so a large
     # version-aware stage out pulled by name uses plain dvc pull rather than
     # the direct version-keyed fetch. Pinned by
     # test_data_pull_targeted_bare_stage_out_routes_to_scoped_fallback.
@@ -674,6 +786,10 @@ def data_pull(
     if pull_all_requested:
         targets = discover_all_outs(project_path)
         pipeline_outs, all_pipeline = partition_pipeline_outs(project_path, remote_name)
+        # dvc never pushes a `cache: false` out, so no pull can land it;
+        # enumerating one turned every pull into a permanent failure.
+        pipeline_outs = [o for o in pipeline_outs if o.use_cache]
+        all_pipeline = [o for o in all_pipeline if o.use_cache]
 
         n_dvc = len(targets)
         n_pipe = len(pipeline_outs)
@@ -752,14 +868,17 @@ def data_pull(
     # with no dvc.lock yields no stage outs, so the catch-all is correctly
     # skipped and the project's version-aware .dvc outs stay fast-synced.
     uncovered: list[str] = []
+    catch_all_failed: list[str] = []
     if pull_all_requested:
         covered = {out.target for out in pipeline_outs}
         uncovered = sorted({out.target for out in all_pipeline} - covered)
         if uncovered:
             logger.info("dvc pull for %d stage out(s) fast-sync can't serve", len(uncovered))
-            dvc_ops.pull(
-                targets=uncovered, cwd=project_path, remote=remote, jobs=jobs,
-                extra_args=extra_dvc_args,
+            catch_all_failed = _pull_isolating_failures(
+                project_path, uncovered, remote_name,
+                {o.target: o for o in all_pipeline},
+                dvc_ops=dvc_ops, remote=remote, jobs=jobs,
+                extra_dvc_args=extra_dvc_args, reporter=reporter,
             )
         else:
             logger.info("no uncovered stage outs; skipping catch-all dvc pull")
@@ -776,22 +895,24 @@ def data_pull(
         if result is not None
         else len(targets or []) + len(uncovered)
     )
-    synced_count = max(0, synced_count - len(mat.not_materialized))
+    synced_count = max(0, synced_count - len(mat.not_materialized) - len(catch_all_failed))
     # Non-zero exit signal: blocked targets the cache probe couldn't rescue
     # (guard/drift/unsyncable) PLUS incomplete targets PLUS checkout targets
-    # that never materialized — all leave the out absent from the workspace.
-    error_count = (
-        len(mat.hard_blocked)
-        + len(result.incomplete_targets)
-        + len(mat.not_materialized)
+    # that never materialized (mat.not_materialized also carries the
+    # non-import pull failures) PLUS catch-all pull failures — all leave the
+    # out absent from the workspace. The catch-all runs on the result-less
+    # branch too, so its failures are added outside the `result` guard.
+    failed = (
+        [*mat.hard_blocked, *result.incomplete_targets, *mat.not_materialized]
         if result is not None
-        else 0
-    )
+        else []
+    ) + catch_all_failed
     return PullSummary(
         targets_pulled=synced_count,
         total_bytes=total_bytes,
         elapsed_s=time.monotonic() - start_t,
-        error_count=error_count,
+        error_count=len(failed),
+        failed_targets=tuple(failed),
     )
 
 

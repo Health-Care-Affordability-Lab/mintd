@@ -179,6 +179,34 @@ def test_pull_rejects_a_target_no_stage_declares(ops, workspace: Path) -> None:
         ops.pull(targets=["data/nothing-declares-this.csv"], cwd=workspace)
 
 
+def test_pull_materializes_the_target(ops, workspace: Path, tmp_path: Path) -> None:
+    """A successful `pull` puts the out on disk, on both arms.
+
+    S2's `data_pull` stat-probes every pulled target (`outs_materialized`),
+    so a fake whose `pull` recorded the call and wrote nothing would make
+    every clean fake pull look like the zero-exit-nothing-landed failure.
+    `pull_materializes=False` is that failure, opt-in. The real arm pushes
+    to a local-directory remote, deletes the payload and pulls it back.
+    """
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    (workspace / ".dvc").mkdir(exist_ok=True)  # the fake's init writes nothing
+    (workspace / ".dvc" / "config").write_text(
+        f"[core]\n    remote = storage\n['remote \"storage\"']\n    url = {remote}\n",
+        encoding="utf-8",
+    )
+    payload = workspace / "data" / "x.csv"
+    payload.parent.mkdir()
+    payload.write_text("x\n", encoding="utf-8")
+    ops.add(payload, cwd=workspace)
+    ops.push(cwd=workspace)
+    payload.unlink()
+
+    ops.pull(targets=["data/x.csv.dvc"], cwd=workspace)
+
+    assert payload.is_file()
+
+
 def test_module_docstring_states_the_calls_boundary() -> None:
     """The licence is narrow; the narrowness has to be written down.
 
