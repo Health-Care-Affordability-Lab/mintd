@@ -499,6 +499,31 @@ PRODUCT = "test_project"
 #: Matches `data_products.primary` in `metadata_v2_minimal.json` (`data/final/`),
 #: so the producer's own metadata needs no doctoring to describe its payload.
 PRIMARY_OUT = "data/final"
+
+#: The field-report shape: the primary `data/final/` is declared as a
+#: directory, but DVC tracks only per-file foreach outs beneath it, written
+#: from `wdir: code`, so `dvc.lock` is dvc's own and nothing tracks the
+#: directory itself (`dvc pull data/final` is rc 1 on this repo).
+#: `data/other.csv` is the out OUTSIDE the selector (negative control).
+FOREACH_FINAL_YAML = (
+    "stages:\n"
+    "  build:\n"
+    "    foreach:\n"
+    "      - a\n"
+    "      - b\n"
+    "    do:\n"
+    "      wdir: code\n"
+    "      cmd: python -c \"import pathlib; d=pathlib.Path('../data/final'); "
+    "d.mkdir(parents=True, exist_ok=True); "
+    "(d/'${item}.csv').write_bytes(b'${item}\\n')\"\n"
+    "      outs:\n"
+    "        - ../data/final/${item}.csv\n"
+    "  other:\n"
+    "    cmd: python -c \"import pathlib; "
+    "pathlib.Path('data/other.csv').write_bytes(b'other\\n')\"\n"
+    "    outs:\n"
+    "      - data/other.csv\n"
+)
 #: `project.full_name` in the fixture — the `data/imports/` folder.
 FULL_NAME = "data_test_project"
 #: D-A's contract: the positional is the DATA PRODUCT NAME (the catalog key)
@@ -545,11 +570,15 @@ def payload_journey(
         config_dir, registry_url=registry_url, cache_dir=tmp_path / "cache"
     )
 
-    def register() -> None:
+    def register(mutate=None) -> None:
         """(Re)publish the producer's entry. Called again after the producer
-        moves, because the catalog is how a consumer discovers HEAD."""
+        moves, because the catalog is how a consumer discovers HEAD.
+        `mutate(data)` edits the entry before it is registered — for a
+        catalog that declares something the producer does not track."""
         data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
         data["repository"]["github_url"] = producer.url
+        if mutate is not None:
+            mutate(data)
         # `gh` is a network boundary and is the one thing faked here, by
         # CONSTRUCTOR ARGUMENT rather than monkeypatch — the same seam
         # `_register_provider` above uses. The catalog client itself, the git
@@ -718,6 +747,97 @@ def test_clone_puts_the_product_on_disk(payload_journey, tmp_path, capsys) -> No
 
     landed = dest / PRIMARY_OUT / "part.csv"
     assert landed.read_bytes() == b"v1\n", f"clone left nothing at {landed}"
+
+
+def test_cli_data_clone_directory_primary_exits_zero_with_bytes_on_disk(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """The clone half of the clone-resolver plan's binding question:
+    `--primary` on a directory primary tracked as per-file outs exits 0 with
+    the files on disk. Before S5: rc 1, 'data/final' does not exist as an
+    output or a stage name, and the data-less clone was left behind."""
+    producer, _consumer, register = payload_journey
+    producer.publish_pipeline(FOREACH_FINAL_YAML, seed={"code/.keep": b""})
+    register()
+
+    dest = tmp_path / "clonedest"
+    assert cli.main(["data", "clone", PRODUCT, "--primary", "--dest", str(dest)]) == 0, _drain(capsys)
+
+    assert (dest / PRIMARY_OUT / "a.csv").read_bytes() == b"a\n"
+    assert (dest / PRIMARY_OUT / "b.csv").read_bytes() == b"b\n"
+
+
+def test_clone_path_directory_selector_expands_to_the_tracked_files(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """Same via `--path data/final/`."""
+    producer, _consumer, register = payload_journey
+    producer.publish_pipeline(FOREACH_FINAL_YAML, seed={"code/.keep": b""})
+    register()
+
+    dest = tmp_path / "clonedest"
+    assert cli.main(
+        ["data", "clone", PRODUCT, "--path", f"{PRIMARY_OUT}/", "--dest", str(dest)]
+    ) == 0, _drain(capsys)
+
+    assert (dest / PRIMARY_OUT / "a.csv").read_bytes() == b"a\n"
+    assert (dest / PRIMARY_OUT / "b.csv").read_bytes() == b"b\n"
+
+
+def test_clone_selector_does_not_materialize_an_out_outside_it(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """Negative control: the expansion is the selector's outs, not everything
+    (a no-flag clone lands all three). Mutation: expand to everything -> red."""
+    producer, _consumer, register = payload_journey
+    producer.publish_pipeline(FOREACH_FINAL_YAML, seed={"code/.keep": b""})
+    register()
+
+    dest = tmp_path / "clonedest"
+    assert cli.main(["data", "clone", PRODUCT, "--primary", "--dest", str(dest)]) == 0, _drain(capsys)
+
+    assert (dest / PRIMARY_OUT / "a.csv").exists()
+    assert not (dest / "data" / "other.csv").exists(), "a selector pulled an out outside itself"
+
+
+def test_clone_stale_subpath_of_a_directory_out_exits_nonzero_with_no_tick(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """Real dvc, the clone-resolver plan's U1: `data/final` is ONE directory
+    out and the catalog declares a sub-path its manifest lacks. dvc fetches
+    the manifest, lands nothing and exits 0 — mintd must not print ✓. Pins
+    the two dvc facts the unit test only assumes."""
+    producer, _consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register(mutate=lambda d: d["data_products"]["outputs"].append(
+        {"path": f"{PRIMARY_OUT}/stale/", "description": "", "primary": False,
+         "last_published": ""}
+    ))
+
+    dest = tmp_path / "clonedest"
+    rc = cli.main(["data", "clone", PRODUCT, "--path", f"{PRIMARY_OUT}/stale/", "--dest", str(dest)])
+    out = _drain(capsys)
+
+    assert rc == 1, out
+    assert "does not contain it" in out, out
+    assert "✓" not in out, out
+    assert not (dest / PRIMARY_OUT / "stale").exists()
+    assert dest.exists(), "a pull outcome keeps the clone"
+
+
+def test_clone_primary_that_is_an_exact_out_is_unchanged(
+    payload_journey, tmp_path, capsys
+) -> None:
+    """Green twin: `data/final/` as ONE directory out (direction 1) still
+    lands as a single target. Must stay green under every mutation."""
+    producer, _consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+
+    dest = tmp_path / "clonedest"
+    assert cli.main(["data", "clone", PRODUCT, "--primary", "--dest", str(dest)]) == 0, _drain(capsys)
+
+    assert (dest / PRIMARY_OUT / "part.csv").read_bytes() == b"v1\n"
 
 
 def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:

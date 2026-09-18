@@ -1727,8 +1727,10 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     except UnknownProductPath as exc:
         reporter.error(
             str(exc),
-            hint="pass --path with one of the tracked outputs listed above, "
-                 "or drop --path to pull everything",
+            hint=exc.hint or (
+                "pass --path with one of the tracked outputs listed above, "
+                "or drop --path/--primary to pull everything"
+            ),
         )
         return 1
     except ImportDestinationExists as exc:

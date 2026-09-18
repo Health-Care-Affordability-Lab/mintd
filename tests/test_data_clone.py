@@ -172,6 +172,7 @@ def test_clone_and_pull_product_with_primary_only(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw", primary_only=True,
@@ -194,6 +195,7 @@ def test_clone_and_pull_product_normalizes_windows_primary(
     _register(client, mutate=_denormalize)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw", primary_only=True,
@@ -421,6 +423,7 @@ def test_clone_and_pull_product_with_path_pulls_only_that_file(
     _register(client, mutate=_add_file_output)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv", "data/intermediate/markets/defs_30min.parquet")
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw",
@@ -435,19 +438,22 @@ def test_clone_and_pull_product_with_path_pulls_only_that_file(
 def test_clone_and_pull_product_with_path_directory_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``paths`` works for a directory output too (fixture tracks
-    `data/final/`); the trailing slash is normalized away."""
+    """``paths`` works for a directory output too (fixture declares
+    `data/final/`); the trailing slash is normalized away, and a declared
+    directory tracked as per-file outs beneath it expands to those files —
+    dvc rejects the bare directory."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
     )
 
-    assert dvc.pull_calls[0].targets == ["data/final"]
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
 
 def test_clone_and_pull_product_with_repeated_paths_pulls_both(
@@ -458,6 +464,10 @@ def test_clone_and_pull_product_with_repeated_paths_pulls_both(
     _register(client, mutate=_add_file_output)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = (
+        "data/final/a.csv", "data/final/b.csv",
+        "data/intermediate/markets/defs_30min.parquet",
+    )
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw",
@@ -465,7 +475,8 @@ def test_clone_and_pull_product_with_repeated_paths_pulls_both(
     )
 
     assert dvc.pull_calls[0].targets == [
-        "data/final",
+        "data/final/a.csv",
+        "data/final/b.csv",
         "data/intermediate/markets/defs_30min.parquet",
     ]
 
@@ -481,6 +492,7 @@ def test_clone_and_pull_product_path_accepts_primary_itself(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw",
@@ -500,13 +512,14 @@ def test_clone_and_pull_product_normalizes_path_spellings(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw",
         paths=[".\\data\\final\\"],
     )
 
-    assert dvc.pull_calls[0].targets == ["data/final"]
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
 
 def test_clone_and_pull_product_paths_plus_primary_is_usage_error(
@@ -537,12 +550,17 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
     """An unknown --path fails with the product's tracked outputs (and
     primary) in the message — not a raw DVC 'no such target' stderr —
     BEFORE the clone touches disk: no git clone, no dest dir, no dvc pull.
-    The corrected retry must not hit ImportDestinationExists."""
+    The corrected retry must not hit ImportDestinationExists.
+
+    This is the cheap catalog pre-filter the post-clone resolver sits
+    behind (S5's `test_clone_path_typo_still_fails_before_the_clone`
+    criterion): a typo must never cost a multi-GB clone."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client, mutate=_add_file_output)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
@@ -564,7 +582,7 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
         client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
     )
     assert len(git.clone_calls) == 1
-    assert dvc.pull_calls[0].targets == ["data/final"]
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
 
 def test_clone_and_pull_product_missing_primary_fails_before_clone(
@@ -636,6 +654,7 @@ def test_clone_and_pull_product_rev_validates_against_cloned_metadata(
             ],
         }
     )
+    git.tracks = ("data/intermediate/old_defs.parquet",)
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
@@ -658,6 +677,7 @@ def test_clone_and_pull_product_rev_unknown_path_removes_clone(
     git = _MetadataWritingGitOps(
         {"primary": None, "outputs": [{"path": "data/rev-only.parquet"}]}
     )
+    git.tracks = ("data/rev-only.parquet",)
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
@@ -688,12 +708,13 @@ def test_clone_and_pull_product_rev_falls_back_to_catalog_without_metadata(
     _register(client)  # catalog outputs: data/final/ (+ primary)
     dvc = _FakeDvcOps()
     git = _MetadataWritingGitOps(None)  # clone writes no metadata.json
+    git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
         paths=["data/final/"],
     )
-    assert dvc.pull_calls[0].targets == ["data/final"]
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
     with pytest.raises(UnknownProductPath):
         clone_and_pull_product(
@@ -701,6 +722,319 @@ def test_clone_and_pull_product_rev_falls_back_to_catalog_without_metadata(
             paths=["data/nope.csv"], dest=tmp_path / "other-dest",
         )
     assert not (tmp_path / "other-dest").exists()
+
+
+# ---------- S5: selectors resolve against the cloned repo ----------
+
+
+def _primary_is_final(d: dict[str, Any]) -> None:
+    d["data_products"]["primary"] = "data/final/"  # the fixture's directory output
+
+
+def test_clone_primary_directory_prefix_expands_to_the_tracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--primary on a directory primary tracked as per-file outs: dvc receives
+    the outs, not the directory. `strict_targets` reproduces dvc's rejection
+    of 'data/final' over per-file pointers, so an unexpanded selector raises
+    DvcPullError here. Mutation: delete the expansion -> red. Real-dvc twin:
+    test_pre_units_journey.py::test_cli_data_clone_directory_primary_exits_zero_with_bytes_on_disk.
+    """
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_primary_is_final)
+    dvc = _FakeDvcOps()
+    dvc.strict_targets = True
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv", "data/final/b.csv")
+
+    clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", primary_only=True)
+
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
+
+
+@pytest.mark.parametrize(
+    "select",
+    [{"primary_only": True}, {"paths": ["data/final/"]}],
+    ids=["primary", "path-default-rev"],
+)
+def test_clone_unresolvable_selector_raises_and_removes_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, select: dict[str, Any]
+) -> None:
+    """The repo tracks nothing at, above or beneath the selected path: raise
+    UnknownProductPath naming the repo's real outs and remove the clone so the
+    corrected retry is not blocked -- for --primary and default-rev --path,
+    not just --rev --path. Mutations: drop the rmtree -> dest-absent assert
+    and the retry (ImportDestinationExists) red; drop the raise -> red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_primary_is_final)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/other.csv",)
+
+    with pytest.raises(UnknownProductPath) as exc:
+        clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", **select)
+
+    assert "data/final" in str(exc.value)
+    assert "data/other.csv" in str(exc.value)
+    assert "stale" in str(exc.value)
+    # The listed outs are DVC's, not the catalog's, so `--path` would refuse
+    # them pre-clone: the hint must not send the user there.
+    assert exc.value.hint is not None
+    assert "drop --path/--primary" in exc.value.hint
+    assert "pass --path" not in exc.value.hint
+    assert len(git.clone_calls) == 1  # past the catalog pre-filter: the clone happened
+    assert dvc.pull_calls == []
+    assert not (tmp_path / "data_provider-xw").exists()
+
+    git.tracks = ("data/final/a.csv",)  # producer fixed: the retry is not blocked
+    clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", **select)
+    assert dvc.pull_calls[0].targets == ["data/final/a.csv"]
+
+
+def test_clone_path_accepted_by_the_catalog_but_absent_in_the_repo_fails_after_the_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catalog declares data/final/hospital-all-owners/, repo tracks only
+    data/final/a.csv (nothing at/above/beneath the declared path): passes the
+    cheap pre-filter, rejected post-clone with a stale-catalog hint, clone
+    removed. NOT the live shape where data/final/ is one directory out and
+    the stale subdirectory sits under it: that resolves through direction 2
+    and is caught AFTER the pull instead — see
+    test_clone_subpath_of_a_directory_out_that_never_lands_is_a_failed_target.
+    Mutation: drop the post-clone check -> the non-strict fake accepts, red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _stale_subdir(d: dict[str, Any]) -> None:
+        d["data_products"]["outputs"].append(
+            {"path": "data/final/hospital-all-owners/", "description": "",
+             "primary": False, "last_published": ""}
+        )
+
+    _register(client, mutate=_stale_subdir)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final/a.csv",)
+
+    with pytest.raises(UnknownProductPath, match="stale") as exc:
+        clone_and_pull_product(
+            client, dvc, git, _fast(), name="provider-xw",
+            paths=["data/final/hospital-all-owners/"],
+        )
+
+    assert "data/final/a.csv" in str(exc.value)
+    assert len(git.clone_calls) == 1
+    assert dvc.pull_calls == []
+    assert not (tmp_path / "data_provider-xw").exists()
+
+
+def test_clone_path_under_a_directory_out_keeps_its_own_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direction 2: a declared FILE under one tracked directory out. dvc pulls
+    a sub-path of a directory out granularly, and that is what the selector
+    got before the resolver existed — substituting the enclosing out would
+    turn a one-file `--path` into the whole directory. Mutation: always use
+    `out.target` -> `["data/final"]`, red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _file_under_dir(d: dict[str, Any]) -> None:
+        d["data_products"]["outputs"].append(
+            {"path": "data/final/big.parquet", "description": "",
+             "primary": False, "last_published": ""}
+        )
+
+    _register(client, mutate=_file_under_dir)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final",)  # ONE directory out
+
+    clone_and_pull_product(
+        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/big.parquet"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/final/big.parquet"]
+
+
+def test_clone_subpath_of_a_directory_out_that_never_lands_is_a_failed_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The clone-resolver plan's U1, decided: a declared sub-path under ONE
+    directory out is forwarded on the catalog's word, dvc fetches only the
+    `.dir` manifest for a sub-path it lacks and exits 0 with nothing on
+    disk. That must not be a ✓ line: it counts as a failed target with its
+    own error, and the clone stays (a pull outcome, not a rejection). The
+    fake's `pull` never writes the workspace, which IS this outcome.
+    Mutation: drop the post-pull existence check -> pull_error_count 0, red.
+    """
+    from tests._fakes.reporter import RecordingReporter
+
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _stale_subdir(d: dict[str, Any]) -> None:
+        d["data_products"]["outputs"].append(
+            {"path": "data/final/stale/", "description": "",
+             "primary": False, "last_published": ""}
+        )
+
+    _register(client, mutate=_stale_subdir)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final",)  # ONE directory out; its manifest is not in git
+    reporter = RecordingReporter()
+
+    result = clone_and_pull_product(
+        client, dvc, git, _fast(), name="provider-xw",
+        paths=["data/final/stale/"], reporter=reporter,
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/final/stale"]  # forwarded, as dvc allows
+    assert result.pull_error_count == 1
+    assert (tmp_path / "data_provider-xw").exists()  # a pull outcome keeps the clone
+    errors = [e for e in reporter.events if e[0] == "error"]
+    assert any("data/final/stale" in e[1] and "stale" in (e[2] or "") for e in errors), errors
+    # The clone is kept, so the hint must not send the user to a clone that
+    # `ImportDestinationExists` refuses; it names the retry inside the clone.
+    assert all("clone everything" not in (e[2] or "") for e in errors)
+    assert any("mintd data pull" in (e[2] or "") for e in errors)
+
+
+def test_clone_repeated_spellings_of_one_stale_subpath_count_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--path x --path x/` is one selection: dvc gets one target and a miss
+    is one failed target, not one per spelling. Mutation: drop the
+    `declared_rel not in unverified` guard -> 2, red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _stale_subdir(d: dict[str, Any]) -> None:
+        d["data_products"]["outputs"].append(
+            {"path": "data/final/stale/", "description": "",
+             "primary": False, "last_published": ""}
+        )
+
+    _register(client, mutate=_stale_subdir)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final",)
+
+    result = clone_and_pull_product(
+        client, dvc, git, _fast(), name="provider-xw",
+        paths=["data/final/stale/", "data/final/stale"],
+    )
+
+    assert dvc.pull_calls[0].targets == ["data/final/stale"]
+    assert result.pull_error_count == 1
+
+
+def test_clone_rev_primary_subpath_that_never_lands_blames_the_rev_not_the_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--rev --primary` where the HEAD primary is a sub-path of the rev's one
+    directory out and does not land: the post-pull error must say the rev
+    may predate the primary, like the pre-pull rejection does — not blame
+    the producer's metadata. Mutation: drop the rev branch of the post-pull
+    hint -> red."""
+    from tests._fakes.reporter import RecordingReporter
+
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _primary_is_sub(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = "data/final/sub/"
+
+    _register(client, mutate=_primary_is_sub)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps({"primary": "data/final/", "outputs": [{"path": "data/final/"}]})
+    git.tracks = ("data/final",)
+    reporter = RecordingReporter()
+
+    result = clone_and_pull_product(
+        client, dvc, git, _fast(), name="provider-xw", rev="v1.0", primary_only=True,
+        reporter=reporter,
+    )
+
+    assert result.pull_error_count == 1
+    hints = [e[2] or "" for e in reporter.events if e[0] == "error"]
+    assert any("predate the primary" in h for h in hints), hints
+    assert all("registry update" not in h for h in hints)
+
+
+def test_clone_rev_primary_unresolvable_names_the_rev_not_a_stale_catalog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--rev` + `--primary`: the primary comes from the HEAD catalog and the
+    clone is at an older rev that may predate it. The message must say that,
+    not diagnose a stale catalog and send the producer to republish.
+    Mutation: drop the `rev` branch of the message -> red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_primary_is_final)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps({"primary": "data/old.parquet", "outputs": []})
+    git.tracks = ("data/old.parquet",)
+
+    with pytest.raises(UnknownProductPath) as exc:
+        clone_and_pull_product(
+            client, dvc, git, _fast(), name="provider-xw", rev="v1.0", primary_only=True,
+        )
+
+    assert "predate the primary" in str(exc.value)
+    assert "stale" not in str(exc.value)
+    assert "data/old.parquet" in str(exc.value)
+    assert not (tmp_path / "data_provider-xw").exists()
+
+
+def test_clone_rev_path_declared_at_that_rev_but_untracked_is_a_stale_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--rev --path` has already passed the rev's OWN metadata.json, so a
+    resolver miss is a stale declaration at that rev — not a rev that
+    predates the output. Mutation: key the wording on `rev` alone -> red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    git = _MetadataWritingGitOps({"primary": None, "outputs": [{"path": "data/final/"}]})
+    git.tracks = ("data/other.csv",)
+
+    with pytest.raises(UnknownProductPath) as exc:
+        clone_and_pull_product(
+            client, dvc, git, _fast(), name="provider-xw", rev="v1.0", paths=["data/final/"],
+        )
+
+    assert "stale" in str(exc.value)
+    assert "predate" not in str(exc.value)
+    assert not (tmp_path / "data_provider-xw").exists()
+
+
+def test_clone_rejection_keeps_a_pre_existing_empty_dest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--dest .` in an empty directory is the user's cwd. A post-clone
+    rejection must clear what the clone put there, never remove the
+    directory itself. Mutation: rmtree unconditionally -> red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_primary_is_final)
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/other.csv",)
+    mine = tmp_path / "mine"
+    mine.mkdir()
+
+    with pytest.raises(UnknownProductPath):
+        clone_and_pull_product(
+            client, dvc, git, _fast(), name="provider-xw", primary_only=True, dest=mine,
+        )
+
+    assert mine.is_dir()
+    assert list(mine.iterdir()) == []
 
 
 def test_clone_and_pull_product_no_flags_unchanged_with_paths_none(
