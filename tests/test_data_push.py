@@ -91,6 +91,112 @@ def test_data_push_returns_summary_with_counts(tmp_path: Path) -> None:
     assert summary.elapsed_s >= 0.0
 
 
+def test_data_push_never_mixes_dvc_files_and_bare_paths_in_one_argv(
+    tmp_path: Path,
+) -> None:
+    """dvc collects push targets through the same ``index_from_targets`` fast
+    path as pull, so a mixed argv uploads only the last ``.dvc`` target's outs
+    and exits 0 (measured: 1 of 2 objects, under a ✓). One argv per shape, and
+    the best-effort counts add up across them.
+
+    Mutation: push ``targets`` in one call again -> one mixed argv, red.
+    """
+    dvc_ops = _FakeDvcOps()
+    dvc_ops.push_result = DvcPushResult(pushed=2, up_to_date=False)
+
+    summary = data_push(
+        project_path=tmp_path,
+        dvc_ops=dvc_ops,
+        targets=["data/x.csv.dvc", "data/a.csv"],
+    )
+
+    assert [c.targets for c in dvc_ops.push_calls] == [
+        ["data/x.csv.dvc"], ["data/a.csv"],
+    ]
+    assert summary.pushed == 4  # 2 per group, summed
+    assert summary.up_to_date is False
+
+
+def test_data_push_targets_none_still_pushes_everything_in_one_argv(
+    tmp_path: Path,
+) -> None:
+    """The no-targets case must stay one ``dvc push`` with no target list —
+    dvc's own "push everything tracked". Mutation: group ``None`` -> an empty
+    argv list or two calls, red."""
+    dvc_ops = _FakeDvcOps()
+    data_push(project_path=tmp_path, dvc_ops=dvc_ops)
+    assert [c.targets for c in dvc_ops.push_calls] == [None]
+
+
+def test_data_push_is_up_to_date_only_when_every_group_is(tmp_path: Path) -> None:
+    """A ✓ "already up to date" line must not be printed when one group really
+    uploaded. Mutation: ``any(...)`` instead of ``all(...)`` -> red."""
+
+    class _MixedPush(_FakeDvcOps):
+        def push(
+            self,
+            *,
+            cwd: Path,
+            targets: list[str] | None = None,
+            remote: str | None = None,
+            jobs: int | None = None,
+        ) -> DvcPushResult:
+            super().push(cwd=cwd, targets=targets, remote=remote, jobs=jobs)
+            first = len(self.push_calls) == 1
+            return (
+                DvcPushResult(pushed=0, up_to_date=True)
+                if first
+                else DvcPushResult(pushed=3, up_to_date=False)
+            )
+
+    dvc_ops = _MixedPush()
+    summary = data_push(
+        project_path=tmp_path, dvc_ops=dvc_ops, targets=["a.dvc", "data/b.csv"],
+    )
+    assert summary.up_to_date is False
+    assert summary.pushed == 3
+
+
+def test_data_push_real_dvc_lands_every_object_of_a_mixed_selection(
+    tmp_path: Path, real_dvc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real dvc, because only real dvc has the bug: pushing a ``.dvc``-tracked
+    file and a dvc.lock stage out in one selection must put BOTH objects on the
+    remote. Unpatched this uploads 1 of 2 and still prints ✓ pushed, so the
+    collaborator who pulls the other out is the one who finds out.
+
+    Mutation: push ``targets`` in one call again -> 1 object on the remote, red.
+    """
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from tests._harness.git import _git
+
+    for key, value in real_dvc.env.items():
+        monkeypatch.setenv(key, value)  # SubprocessDvcOps inherits the redirect
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    remote = tmp_path / "remote"
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init", "-q"], cwd=ws, check=True)
+    real_dvc(["remote", "add", "-d", "storage", str(remote)], cwd=ws, check=True)
+    (ws / "data").mkdir()
+    for name in ("x.csv", "a.csv"):
+        (ws / "data" / name).write_text(f"{name}\n")
+    real_dvc(["add", "data/x.csv"], cwd=ws, check=True)
+    (ws / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n      - data/a.csv\n")
+    real_dvc(["commit", "-f"], cwd=ws, check=True)  # writes dvc.lock, never runs cmd
+
+    summary = data_push(
+        project_path=ws,
+        dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+        targets=["data/x.csv.dvc", "data/a.csv"],
+    )
+
+    blobs = sorted(p.read_text() for p in remote.rglob("*") if p.is_file())
+    assert blobs == ["a.csv\n", "x.csv\n"], blobs
+    assert summary.up_to_date is False
+
+
 # --- CLI human-mode line ----------------------------------------------------
 
 

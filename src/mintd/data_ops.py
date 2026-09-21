@@ -186,8 +186,10 @@ def _shape_groups(targets: list[str]) -> list[list[str]]:
     while no entry resolves as a dvc.yaml STAGE NAME, so a root-level out
     whose path equals its stage name (out ``model`` of stage ``model``), or a
     stage name the user types before a path (``mintd data pull s1
-    data/s2.txt``), still takes the leaking fast path. Both fail LOUDLY — the
-    ``outs_materialized`` probe names what did not land."""
+    data/s2.txt``), still takes the leaking fast path. On the pull and checkout
+    lanes both leaks fail LOUDLY — the ``outs_materialized`` probe names what
+    did not land. On the push lane they do NOT: ``data_push`` has no such
+    probe, so a stage-name collision there still exits 0 under a ✓."""
     groups = ([t for t in targets if t.endswith(".dvc")],
               [t for t in targets if not t.endswith(".dvc")])
     return [g for g in groups if g]
@@ -954,22 +956,40 @@ def data_push(
 ) -> PushSummary:
     # Resolve the effective remote for display only (explicit > .dvc/config >
     # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
-    # applies its own default when None. ``targets`` pass straight through to
-    # ``dvc push <targets>`` (None = push everything tracked, dvc's default).
-    # Push deliberately has no fast-sync/grouping analog: those exist only to
-    # work around dvc's pull/checkout-side materialization bugs, whereas push
-    # uploads from an intact local cache.
+    # applies its own default when None. ``targets=None`` pushes everything
+    # tracked (dvc's default) in one argv.
+    #
+    # Push needs no fast-sync analog — it uploads from an intact local cache —
+    # but it DOES need the same argv grouping as pull and checkout: dvc collects
+    # push targets through the same ``index_from_targets`` fast path, so an argv
+    # mixing ``.dvc`` paths and bare out paths uploads only the last ``.dvc``
+    # target's outs and still exits 0 (measured: ``mintd data push x.csv.dvc
+    # data/s1.txt`` put 1 of 2 objects on the remote under a ✓). The collaborator
+    # who later pulls the missing out is the one who finds out. See
+    # ``_shape_groups`` — including the residual stage-name leak it documents,
+    # which is silent here because push has no post-op probe.
     effective_remote = remote or _default_dvc_remote(project_path) or "origin"
     start_t = time.monotonic()
-    result: DvcPushResult = dvc_ops.push(
-        targets=targets, cwd=project_path, remote=remote, jobs=jobs,
-    )
+    # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
+    # raising group aborts the rest and surfaces as a non-zero exit. Deliberate
+    # — push is idempotent (the re-run skips what already landed) and its
+    # failure modes (credentials, remote unreachable) hit every group alike, so
+    # there is nothing for a survivor list to add.
+    results: list[DvcPushResult] = [
+        dvc_ops.push(targets=group, cwd=project_path, remote=remote, jobs=jobs)
+        for group in (_shape_groups(targets) if targets else [targets])
+    ]
+    # Best-effort counts stay best-effort: a group dvc reported no number for
+    # drops out rather than counting as zero, and the push is "up to date" only
+    # when every group was.
+    pushed = [r.pushed for r in results if r.pushed is not None]
+    byte_counts = [r.bytes for r in results if r.bytes is not None]
     return PushSummary(
         remote=effective_remote,
-        pushed=result.pushed,
-        bytes=result.bytes,
+        pushed=sum(pushed) if pushed else None,
+        bytes=sum(byte_counts) if byte_counts else None,
         elapsed_s=time.monotonic() - start_t,
-        up_to_date=result.up_to_date,
+        up_to_date=all(r.up_to_date for r in results),
     )
 
 
