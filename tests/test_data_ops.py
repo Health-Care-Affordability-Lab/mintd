@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import pytest
 from pathlib import Path
-from mintd._dvc_ops import DvcPullError
+from mintd._dvc_ops import DvcPullError, pull_retry_hint
 from mintd._fast_sync_ops import EMPTY_DIR_MD5, DvcFileEntry, DvcOut, cache_path_for
 from mintd.model import FastPullResult
-from mintd.data_ops import _out_aggregate_bytes, data_add, data_pull, data_push, data_remove, data_verify
+from mintd.data_ops import (
+    _out_aggregate_bytes,
+    _pull_targets_with_import_rescue,
+    data_add,
+    data_pull,
+    data_push,
+    data_remove,
+    data_verify,
+)
 from tests._fakes.dvc_ops import DvcPullCall, _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.reporter import RecordingReporter
@@ -200,15 +208,21 @@ def test_data_remove_calls_dvc_ops_remove(tmp_path: Path) -> None:
     assert fake.remove_calls[0].name == "raw.csv.dvc"
 
 
-def test_data_pull_propagates_dvc_pull_error(tmp_path: Path) -> None:
+def test_data_pull_records_a_dvc_pull_error_instead_of_raising(tmp_path: Path) -> None:
+    """S2: a failing `dvc pull` is a per-target failure in the summary, not
+    an exception out of data_pull (the CLI's error_count branch renders it).
+    Was `test_data_pull_propagates_dvc_pull_error`, which pinned the raise."""
     fake = _FakeDvcOps()
     fake.pull_raises = DvcPullError("nope")
     fast_fake = _FakeFastSyncOps()
     fast_fake.fallback_all = True
-    with pytest.raises(DvcPullError, match="nope"):
-        data_pull(
-            tmp_path, targets=["data/a"], dvc_ops=fake, fast_sync_ops=fast_fake,
-        )
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=["data/a"], dvc_ops=fake, fast_sync_ops=fast_fake, reporter=rep,
+    )
+    assert summary.error_count == 1
+    assert [e[1] for e in rep.events_of("error")] == ["cannot pull data/a: nope"]
+    assert rep.events_of("error")[0][2] == pull_retry_hint("data/a")
 
 
 def test_data_pull_all_fell_back_skips_checkout(tmp_path: Path) -> None:
@@ -233,11 +247,11 @@ def test_data_pull_partial_pull_failure_still_keeps_synced_checkout(tmp_path: Pa
         success=False, synced_count=1, fallback_targets=["B"]
     )
     fake.pull_raises = DvcPullError("network")
-    with pytest.raises(DvcPullError, match="network"):
-        data_pull(tmp_path, targets=["A", "B"], dvc_ops=fake, fast_sync_ops=fast_fake)
+    summary = data_pull(tmp_path, targets=["A", "B"], dvc_ops=fake, fast_sync_ops=fast_fake)
     # checkout MUST have been called for the synced target before the pull blew up.
     assert len(fake.checkout_calls) == 1
     assert fake.checkout_calls[0].targets == ["A"]
+    assert summary.error_count == 1  # B, recorded rather than raised (S2)
 
 
 def test_data_pull_pull_all_skips_catch_all_when_dvc_yaml_has_no_lock_outs(
@@ -333,8 +347,7 @@ def test_data_pull_fast_sync_raises_pull_all_includes_stage_outs_in_fallback(
     fast_fake = _FakeFastSyncOps()
     fast_fake.raises = RuntimeError("boom")
     data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
-    assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0].targets == ["a.dvc", "data/final/b.parquet"]
+    assert [c.targets for c in fake.pull_calls] == [["a.dvc"], ["data/final/b.parquet"]]
 
 
 def test_data_pull_fast_sync_handles_pipeline_only_project(
@@ -717,15 +730,16 @@ def test_data_pull_degraded_checks_out_cached_before_fallback_pull(
     with zero workspace data."""
     cached, missing = _two_target_project(tmp_path)
     fake = _FakeDvcOps()
+    fake.workspace = tmp_path
     fake.pull_raises = DvcPullError("network")
     fast_fake = _FakeFastSyncOps()
     _degrade(fast_fake, degrade, [cached, missing])
-    with pytest.raises(DvcPullError, match="network"):
-        data_pull(
-            tmp_path, targets=[cached, missing], dvc_ops=fake, fast_sync_ops=fast_fake,
-        )
+    summary = data_pull(
+        tmp_path, targets=[cached, missing], dvc_ops=fake, fast_sync_ops=fast_fake,
+    )
     assert len(fake.checkout_calls) == 1
     assert fake.checkout_calls[0].targets == [cached]
+    assert summary.error_count == 1  # the fallback target, recorded (S2)
 
 
 @pytest.mark.parametrize("degrade", ["raises", "raises_pull_all", "all_fallback"])
@@ -879,23 +893,77 @@ def test_data_pull_fast_sync_raises_pull_all_checks_out_cached_pipeline_outs(
     assert fake.pull_calls == []
 
 
+def _write_stage_project(project: Path, outs: list[str]) -> None:
+    """A dvc.yaml declaring one stage per out plus dvc's lock shape for it:
+    md5-keyed, no version_id, so every out is UNCOVERED by fast-sync and
+    routes to the catch-all `dvc pull` (the S2 lane). Both files are real so
+    `partition_pipeline_outs` runs unpatched (`test_substrate_rules`)."""
+    yaml_lines = ["stages:"]
+    lock_lines = ["schema: '2.0'", "stages:"]
+    for i, out in enumerate(outs):
+        yaml_lines += [f"  s{i}:", f"    cmd: echo {i}", "    outs:", f"      - {out}"]
+        lock_lines += [
+            f"  s{i}:", f"    cmd: echo {i}", "    outs:",
+            # letters: an all-digit md5 is a YAML int (`0` * 32 parses falsy)
+            f"      - path: {out}", f"        md5: {chr(ord('a') + i) * 32}", "        size: 4",
+        ]
+    (project / "dvc.yaml").write_text("\n".join(yaml_lines) + "\n")
+    (project / "dvc.lock").write_text("\n".join(lock_lines) + "\n")
+
+
+def test_data_pull_a_cache_false_out_is_not_a_failed_pull(
+    tmp_path: Path, real_dvc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real dvc, because the fake cannot express the shape: a `cache: false`
+    metrics out is recorded in dvc.lock but never pushed, and `dvc pull`
+    exits 0 without landing it. A fresh clone never has it either (`/data/**`
+    is gitignored). The pull must land the cached sibling and exit clean.
+
+    Mutation: delete the `use_cache` filter in `data_pull` ->
+    `cannot pull data/m.json: not materialized`, error_count 1, red.
+    """
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from tests._harness.git import _git
+
+    for key, value in real_dvc.env.items():
+        monkeypatch.setenv(key, value)  # SubprocessDvcOps inherits the redirect
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init", "-q"], cwd=ws, check=True)
+    real_dvc(["remote", "add", "-d", "storage", str(tmp_path / "remote")], cwd=ws, check=True)
+    (ws / "data").mkdir()
+    (ws / "data" / "a.csv").write_text("a\n")
+    (ws / "data" / "m.json").write_text("1\n")
+    (ws / "dvc.yaml").write_text(
+        "stages:\n  build:\n    cmd: run\n    outs:\n      - data/a.csv\n"
+        "    metrics:\n      - data/m.json:\n          cache: false\n"
+    )
+    real_dvc(["commit", "-f"], cwd=ws, check=True)  # writes dvc.lock, never runs cmd
+    real_dvc(["push"], cwd=ws, check=True)
+    (ws / "data" / "a.csv").unlink()
+    (ws / "data" / "m.json").unlink()
+
+    reporter = RecordingReporter()
+    summary = data_pull(
+        ws, targets=None, dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+        fast_sync_ops=_FakeFastSyncOps(), reporter=reporter,
+    )
+
+    assert (ws / "data" / "a.csv").read_text() == "a\n"
+    assert summary.error_count == 0, reporter.events_of("error")
+    assert summary.targets_pulled == 1
+
+
 def test_data_pull_catch_all_only_uncovered_no_fast_sync_counts_correctly(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """No .dvc files and no fast-syncable stage outs → fast-sync never runs
     (result is None). The catch-all pulls the uncovered out, and targets_pulled
-    must equal exactly that count — not double-count. (`targets` from
-    discover_all_outs are .dvc files, disjoint from pipeline out paths, and
-    here empty.)"""
-    uncovered = DvcOut(
-        target="data/final/b.parquet", path="data/final/b.parquet",
-        md5="b", is_dir=False, version_id=None,
-    )
-    monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
-    monkeypatch.setattr(
-        "mintd.data_ops.partition_pipeline_outs",
-        lambda _p, _r: ([], [uncovered]),
-    )
+    must equal exactly that count — not double-count. On-disk dvc.yaml/dvc.lock
+    (S2 rewrote it off the banned `partition_pipeline_outs` patch)."""
+    _write_stage_project(tmp_path, ["data/final/b.parquet"])
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     summary = data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
@@ -905,6 +973,237 @@ def test_data_pull_catch_all_only_uncovered_no_fast_sync_counts_correctly(
     assert len(fake.pull_calls) == 1
     assert fake.pull_calls[0].targets == ["data/final/b.parquet"]
     assert summary.targets_pulled == 1
+    assert summary.error_count == 0
+
+
+# ---------- S2: the DVC lane's failure model (PLAN-clone-resolver § S2) ----------
+
+_STAGE_NOT_FOUND = (
+    "dvc pull failed (exit 1): ERROR: failed to pull data from the cloud - "
+    "'data/final/b.parquet' does not exist as an output or a stage name in 'dvc.yaml'"
+)
+
+
+class _AttemptRecordingDvcOps(_FakeDvcOps):
+    """`pull_raises_for` raises BEFORE the fake records, so `pull_calls` holds
+    only the argvs that succeeded; this records every argv attempted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: list[list[str]] = []
+
+    def pull(self, *, cwd: Path, targets: list[str] | None = None, **kw) -> None:  # type: ignore[override]
+        self.attempts.append(list(targets or []))
+        super().pull(cwd=cwd, targets=targets, **kw)
+
+
+def test_data_pull_catch_all_records_a_failing_target_instead_of_raising(
+    tmp_path: Path,
+) -> None:
+    """One uncovered stage out whose `dvc pull` raises: the summary counts
+    it and the reporter got exactly one `cannot pull <t>: <why>` with the
+    retry hint, `why` trimmed of the `dvc pull failed (exit 1): ERROR:`
+    framing. Mutation: re-raise in `_pull_isolating_failures` -> red."""
+    _write_stage_project(tmp_path, ["data/final/b.parquet"])
+    fake = _FakeDvcOps()
+    fake.pull_raises_for = {"data/final/b.parquet": DvcPullError(_STAGE_NOT_FOUND)}
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=_FakeFastSyncOps(), reporter=rep,
+    )
+    assert summary.error_count == 1
+    assert summary.targets_pulled == 0
+    errors = rep.events_of("error")
+    assert len(errors) == 1
+    assert errors[0][1] == (
+        "cannot pull data/final/b.parquet: failed to pull data from the cloud - "
+        "'data/final/b.parquet' does not exist as an output or a stage name in 'dvc.yaml'"
+    )
+    assert errors[0][2] == pull_retry_hint("data/final/b.parquet")
+
+
+def test_data_pull_catch_all_isolates_a_failing_member_so_survivors_land(
+    tmp_path: Path,
+) -> None:
+    """Batch-first, isolate-on-failure: the batched argv raises, then each
+    member is retried alone; the two survivors land, the failure is reported
+    ONCE (not once for the batch and once for the retry). Mutation: drop the
+    per-member retry -> survivors absent, three lost / red."""
+    outs = ["data/a.csv", "data/b.csv", "data/c.csv"]
+    _write_stage_project(tmp_path, outs)
+    fake = _AttemptRecordingDvcOps()
+    fake.pull_raises_for = {"data/b.csv": DvcPullError(_STAGE_NOT_FOUND)}
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=_FakeFastSyncOps(), reporter=rep,
+    )
+    assert fake.attempts == [outs, ["data/a.csv"], ["data/b.csv"], ["data/c.csv"]]
+    assert (tmp_path / "data/a.csv").is_file()
+    assert (tmp_path / "data/c.csv").is_file()
+    assert not (tmp_path / "data/b.csv").exists()
+    assert summary.error_count == 1
+    assert summary.targets_pulled == 2
+    assert [e[1].split(":")[0] for e in rep.events_of("error")] == ["cannot pull data/b.csv"]
+
+
+def test_data_pull_crash_recovery_never_mixes_dvc_files_and_stage_outs_in_one_pull(
+    tmp_path: Path,
+) -> None:
+    """Fast-sync raises on a pull-all over a `.dvc` target AND a dvc.lock stage
+    out: the recovery pull issues one argv per shape, never a mixed one (dvc
+    3.67.1 lands only part of a mixed argv; the real-dvc twin below proves
+    that). Mutation: `for group in [targets]` -> one mixed argv, red."""
+    dvc_target = _write_single_file_dvc(tmp_path, "data/x.csv", _MD5_MISSING)
+    _write_stage_project(tmp_path, ["data/final/b.parquet"])
+    fake, fast_fake = _crashing_fakes(tmp_path)
+    summary = data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake)
+    assert [c.targets for c in fake.pull_calls] == [[dvc_target], ["data/final/b.parquet"]]
+    assert summary.error_count == 0
+
+
+def test_data_pull_one_failing_shape_group_does_not_sink_the_other(
+    tmp_path: Path,
+) -> None:
+    """Splitting the argv must not re-introduce "one failure sinks the pull":
+    the `.dvc` group's pull raises, and the stage-out group must still be
+    pulled and land, with only the raiser reported. Mutation: `break` after a
+    group's except-handling -> the stage out is never attempted, absent,
+    error_count 2, red.
+
+    `attempts`, not `pull_calls`: `pull_raises_for` raises BEFORE the fake
+    records, so only `_AttemptRecordingDvcOps` can tell "the `.dvc` group was
+    attempted and raised" from "it was skipped"."""
+    dvc_target = _write_single_file_dvc(tmp_path, "data/x.csv", _MD5_MISSING)
+    _write_stage_project(tmp_path, ["data/final/b.parquet"])
+    fake = _AttemptRecordingDvcOps()
+    fake.workspace = tmp_path  # recovery checkouts materialize (as _crashing_fakes)
+    fake.pull_raises_for = {dvc_target: DvcPullError(_STAGE_NOT_FOUND)}
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.raises = RuntimeError("boom mid-sync")
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=fast_fake, reporter=rep,
+    )
+    assert fake.attempts == [[dvc_target], ["data/final/b.parquet"]]
+    assert (tmp_path / "data/final/b.parquet").is_file()
+    assert summary.error_count == 1
+    assert [e[1].split(":")[0] for e in rep.events_of("error")] == [f"cannot pull {dvc_target}"]
+
+
+def test_data_pull_crash_recovery_lands_both_dvc_files_and_stage_outs(
+    tmp_path: Path, real_dvc, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real dvc, because only real dvc has the bug: fast-sync raises on a
+    pull-all over TWO `.dvc`-tracked files and a dvc.lock stage out, cache
+    empty, all three on the remote. All three must land, exit clean.
+
+    Two `.dvc` targets, not one, because a mixed argv drops `.dvc` targets
+    too: measured, `dvc pull x.csv.dvc y.csv.dvc data/a.csv` lands only
+    y.csv. Mutation: `for group in [targets]` -> `cannot pull` for x.csv and
+    data/a.csv, error_count 2, red."""
+    import shutil
+
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from tests._harness.git import _git
+
+    for key, value in real_dvc.env.items():
+        monkeypatch.setenv(key, value)  # SubprocessDvcOps inherits the redirect
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-b", "main", str(ws)])
+    real_dvc(["init", "-q"], cwd=ws, check=True)
+    real_dvc(["remote", "add", "-d", "storage", str(tmp_path / "remote")], cwd=ws, check=True)
+    (ws / "data").mkdir()
+    for name in ("x.csv", "y.csv", "a.csv"):
+        (ws / "data" / name).write_text(f"{name}\n")
+    real_dvc(["add", "data/x.csv", "data/y.csv"], cwd=ws, check=True)
+    (ws / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n      - data/a.csv\n")
+    real_dvc(["commit", "-f"], cwd=ws, check=True)  # writes dvc.lock, never runs cmd
+    real_dvc(["push"], cwd=ws, check=True)
+    for name in ("x.csv", "y.csv", "a.csv"):
+        (ws / "data" / name).unlink()
+    cache = ws / ".dvc" / "cache"
+    for blob in cache.rglob("*"):
+        if blob.is_file():
+            blob.chmod(0o644)  # dvc writes blobs read-only; Windows won't delete them
+    shutil.rmtree(cache)
+
+    fast_fake = _FakeFastSyncOps()
+    fast_fake.raises = RuntimeError("boom mid-sync")
+    reporter = RecordingReporter()
+    summary = data_pull(
+        ws, targets=None, dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+        fast_sync_ops=fast_fake, reporter=reporter,
+    )
+
+    assert summary.error_count == 0, reporter.events_of("error")
+    for name in ("x.csv", "y.csv", "a.csv"):
+        assert (ws / "data" / name).read_text() == f"{name}\n"
+
+
+def test_data_pull_counts_a_zero_exit_pull_that_materialized_nothing(
+    tmp_path: Path,
+) -> None:
+    """`dvc pull` exits 0 and the out stays absent (the field shape): the
+    `outs_materialized` probe counts it as failed, `targets_pulled` excludes
+    it, and the why says so. Mutation: drop the probe -> red."""
+    _write_stage_project(tmp_path, ["data/final/b.parquet"])
+    fake = _FakeDvcOps()
+    fake.pull_materializes = False
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=_FakeFastSyncOps(), reporter=rep,
+    )
+    assert fake.pull_calls[0].targets == ["data/final/b.parquet"]  # exit 0
+    assert summary.error_count == 1
+    assert summary.targets_pulled == 0
+    errors = rep.events_of("error")
+    assert len(errors) == 1
+    assert errors[0][1].startswith("cannot pull data/final/b.parquet: not materialized by dvc pull")
+    assert errors[0][2] == pull_retry_hint("data/final/b.parquet")
+
+
+def test_pull_targets_with_import_rescue_records_a_non_import_batch_failure(
+    tmp_path: Path,
+) -> None:
+    """The second unguarded pull: the non-import batch inside
+    `_pull_targets_with_import_rescue` no longer raises; the failed target is
+    reported and returned for the caller's accounting. Mutation: restore the
+    bare `dvc_ops.pull(targets=non_import_targets, ...)` -> raises / red."""
+    target = _write_single_file_dvc(tmp_path, "data/a.csv", _MD5_MISSING)
+    fake = _FakeDvcOps()
+    fake.pull_raises_for = {target: DvcPullError("nope")}
+    rep = RecordingReporter()
+
+    def _never_rescue(*_a, **_k):
+        raise AssertionError("a non-import must never reach the import-rescue lane")
+
+    failed = _pull_targets_with_import_rescue(
+        tmp_path, [target], "origin", [],
+        dvc_ops=fake, remote=None, jobs=None, extra_dvc_args=None, reporter=rep,
+        aws_profile_name=None, import_rescue=_never_rescue,
+    )
+    assert failed == [target]
+    assert [e[1] for e in rep.events_of("error")] == [f"cannot pull {target}: nope"]
+
+
+def test_data_pull_clean_catch_all_keeps_error_count_zero(tmp_path: Path) -> None:
+    """Green twin: a clean catch-all pull materializes its outs -> error_count
+    0, and ONE batched argv (no per-target multiplication on the happy path).
+    Must stay green under every mutation above."""
+    outs = ["data/a.csv", "data/b.csv"]
+    _write_stage_project(tmp_path, outs)
+    fake = _AttemptRecordingDvcOps()
+    rep = RecordingReporter()
+    summary = data_pull(
+        tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=_FakeFastSyncOps(), reporter=rep,
+    )
+    assert fake.attempts == [outs]
+    assert all((tmp_path / o).is_file() for o in outs)
+    assert summary.error_count == 0
+    assert summary.targets_pulled == 2
+    assert rep.events_of("error") == []
 
 
 # ---------- fail-loudly contract for version-aware outs ----------

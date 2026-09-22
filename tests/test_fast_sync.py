@@ -1881,6 +1881,94 @@ def test_parse_dvc_lock_outs_keeps_foreach_instances_under_the_orphan_guard(
     ]
 
 
+def test_parse_dvc_lock_outs_marks_cache_false_outs(tmp_path: Path) -> None:
+    """An out dvc.yaml declares `cache: false` is kept but marked
+    `use_cache=False`: dvc.lock records it like any other (path, md5, size,
+    no `cache` key), dvc never pushes it, and a pull that enumerates it
+    fails forever. It stays DVC-tracked, so clone selectors still find it.
+
+    Shapes are lab products': a `wdir: code` validate stage whose `metrics:`
+    entry is `../data/final/validation_report.txt: {cache: false}`; a
+    directory out spelled with its trailing slash, which real dvc keeps in
+    the lock; a `plots:` entry; one list item holding two outs; a literal
+    path inside a `foreach` body. `cache: true` stays pullable.
+
+    Mutations, each red: drop `use_cache=` (or the `@`-base fallback, a key
+    of the tuple, `.get("do")`, either `normpath`) -> a flag flips; filter
+    cache: false outs out of the parse or `partition_pipeline_outs` ->
+    `outs_matching` stops finding `data/reports`.
+    """
+    from mintd._dvc_state import outs_matching
+
+    _write_lock(
+        tmp_path,
+        yaml_body=(
+            "stages:\n"
+            "  validate:\n"
+            "    cmd: run\n"
+            "    wdir: code\n"
+            "    outs:\n"
+            "      - ../schemas/v1/schema.json:\n"
+            "          cache: true\n"
+            "      - ../data/reports/:\n"
+            "          cache: false\n"
+            "    metrics:\n"
+            "      - ../data/final/validation_report.txt:\n"
+            "          cache: false\n"
+            "      - ../data/m1.json:\n"
+            "          cache: false\n"
+            "        ../data/m2.json:\n"
+            "          cache: false\n"
+            "    plots:\n"
+            "      - ../data/plots/p.csv:\n"
+            "          cache: false\n"
+            "  fan:\n"
+            "    foreach: [a]\n"
+            "    do:\n"
+            "      cmd: run\n"
+            "      outs:\n"
+            "        - data/${item}.csv\n"
+            "        - data/log.txt:\n"
+            "            cache: false\n"
+        ),
+        body=(
+            "stages:\n"
+            "  validate:\n"
+            "    outs:\n"
+            "      - path: ../schemas/v1/schema.json\n"
+            "        md5: 11111111111111111111111111111111\n"
+            "      - path: ../data/reports/\n"
+            "        md5: 44444444444444444444444444444444.dir\n"
+            "      - path: ../data/final/validation_report.txt\n"
+            "        md5: 22222222222222222222222222222222\n"
+            "      - path: ../data/m1.json\n"
+            "        md5: 55555555555555555555555555555555\n"
+            "      - path: ../data/m2.json\n"
+            "        md5: 66666666666666666666666666666666\n"
+            "      - path: ../data/plots/p.csv\n"
+            "        md5: 33333333333333333333333333333333\n"
+            "  fan@a:\n"
+            "    outs:\n"
+            "      - path: data/a.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            "      - path: data/log.txt\n"
+            "        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        ),
+    )
+    outs = parse_dvc_lock_outs(tmp_path, "x")
+    assert {o.path: o.use_cache for o in outs} == {
+        "schemas/v1/schema.json": True,
+        "data/reports": False,
+        "data/final/validation_report.txt": False,
+        "data/m1.json": False,
+        "data/m2.json": False,
+        "data/plots/p.csv": False,
+        "data/a.csv": True,
+        "data/log.txt": False,
+    }
+    assert [o.target for o in outs_matching(tmp_path, "data/reports/", "x")] == ["data/reports"]
+
+
 def test_parse_dvc_lock_outs_keeps_a_stale_foreach_instance_known_residual(
     tmp_path: Path,
 ) -> None:

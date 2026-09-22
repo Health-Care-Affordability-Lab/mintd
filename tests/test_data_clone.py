@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import pytest
 
-from mintd._dvc_ops import DvcOpError
+from mintd._dvc_ops import DvcOpError, DvcPullError
 from mintd._registry_git_ops import GitOpError
 from mintd.catalog import InMemoryCatalogClient
 from mintd.data import (
@@ -901,6 +901,55 @@ def test_clone_subpath_of_a_directory_out_that_never_lands_is_a_failed_target(
     # `ImportDestinationExists` refuses; it names the retry inside the clone.
     assert all("clone everything" not in (e[2] or "") for e in errors)
     assert any("mintd data pull" in (e[2] or "") for e in errors)
+
+
+@pytest.mark.parametrize("fast_sync_crashes", [False, True])
+def test_clone_subpath_whose_own_pull_fails_is_reported_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fast_sync_crashes: bool
+) -> None:
+    """The same sub-path selection as above, but its `dvc pull` RAISES
+    (credentials, network, a blob missing on the remote). data_pull reports
+    and counts that failure itself; the post-pull sub-path check must not
+    report it again -- a second error blaming the producer's catalog for a
+    transport failure, and `2 target(s) failed` for one selection. Both
+    data_pull return sites: fast-sync's result, and its crash recovery.
+
+    Mutations, each red: drop the `not in pull_summary.failed_targets`
+    filter in `clone_and_pull_product`, or `failed_targets=` on either
+    data_pull return site -> pull_error_count 2.
+    """
+    from tests._fakes.reporter import RecordingReporter
+
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+
+    def _stale_subdir(d: dict[str, Any]) -> None:
+        d["data_products"]["outputs"].append(
+            {"path": "data/final/stale/", "description": "",
+             "primary": False, "last_published": ""}
+        )
+
+    _register(client, mutate=_stale_subdir)
+    dvc = _FakeDvcOps()
+    dvc.pull_raises_for = {"data/final/stale": DvcPullError(
+        "dvc pull failed (exit 1): ERROR: Unable to locate credentials"
+    )}
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/final",)
+    reporter = RecordingReporter()
+    fast = _fast()
+    if fast_sync_crashes:
+        fast.raises = RuntimeError("fast-sync blew up")
+
+    result = clone_and_pull_product(
+        client, dvc, git, fast, name="provider-xw",
+        paths=["data/final/stale/"], reporter=reporter,
+    )
+
+    assert result.pull_error_count == 1
+    errors = [e for e in reporter.events if e[0] == "error"]
+    assert len(errors) == 1, errors
+    assert "Unable to locate credentials" in errors[0][1]
 
 
 def test_clone_repeated_spellings_of_one_stale_subpath_count_once(
