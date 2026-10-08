@@ -8,6 +8,8 @@ import pytest
 
 import yaml
 
+from pydantic import ValidationError
+
 from mintd.imports import DataDependency, NotAnImportError, scan_imports
 
 FIXTURES = Path(__file__).parent / "fixtures" / "dvc_files"
@@ -135,7 +137,7 @@ def test_scan_imports_skips_dvc_add_files(tmp_path: Path) -> None:
 
 def test_data_dependency_is_frozen() -> None:
     dep = DataDependency.from_dvc_file(FIXTURES / "standalone_import.dvc")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         dep.producer_repo = "mutated"  # type: ignore[misc]
 
 

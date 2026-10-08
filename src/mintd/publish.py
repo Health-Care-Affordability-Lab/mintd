@@ -419,7 +419,9 @@ def _overlay(raw: Any, dumped: Any) -> Any:
     if isinstance(raw, list) and isinstance(dumped, list):
         paired = [
             _overlay(r, d) if isinstance(r, dict) and isinstance(d, dict) else d
-            for r, d in zip(raw, dumped)
+            # strict=False is load-bearing: the shorter list is paired and
+            # the remainder of `dumped` is appended on the next line.
+            for r, d in zip(raw, dumped, strict=False)
         ]
         return paired + dumped[len(paired):]
     return dumped

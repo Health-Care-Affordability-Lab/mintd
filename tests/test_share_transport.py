@@ -55,7 +55,7 @@ class _UploadWrapsClientError:
         except ClientError:
             # Bare raise inside except => __context__ is the ClientError, as
             # boto3/s3/transfer.py:456-459 does.
-            raise S3UploadFailedError(
+            raise S3UploadFailedError(  # noqa: B904 — bare raise is the point, see comment above
                 f"Failed to upload {filename} to {bucket}/{key}"
             )
 

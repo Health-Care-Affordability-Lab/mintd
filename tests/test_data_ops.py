@@ -1579,7 +1579,7 @@ def test_data_pull_checkout_silent_noop_retries_each_target_then_errors(
     assert fake.pull_calls == []
     errors = rep.events_of("error")
     assert len(errors) == 2
-    for (_, msg, hint), target in zip(errors, [a, b]):
+    for (_, msg, hint), target in zip(errors, [a, b], strict=True):
         assert target in msg
         assert "not materialized by dvc checkout" in msg
         assert hint == f"retry just this target: mintd data pull {target}"

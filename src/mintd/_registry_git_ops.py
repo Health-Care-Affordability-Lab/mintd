@@ -350,7 +350,7 @@ class SubprocessRegistryGitOps:
         except subprocess.TimeoutExpired as e:
             raise GitOpError(cmd, f"timed out after {self._fast_timeout}s") from e
         except subprocess.CalledProcessError as e:
-            raise GitOpError(cmd, e.stderr or e.stdout or "")
+            raise GitOpError(cmd, e.stderr or e.stdout or "") from e
         return result.stdout
 
     def _gh(self, args: list[str], *, cwd: Path) -> str:
@@ -375,5 +375,5 @@ class SubprocessRegistryGitOps:
                 raise GhAuthError(stderr) from e
             if "already exists" in stderr.lower():
                 raise PRConflictError(branch="(unknown)") from e
-            raise GitOpError(cmd, stderr)
+            raise GitOpError(cmd, stderr) from e
         return result.stdout
