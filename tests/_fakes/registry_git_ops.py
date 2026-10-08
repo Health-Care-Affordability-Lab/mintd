@@ -72,6 +72,8 @@ class _FakeRegistryGitOps:
     pr_exists_calls: list[str] = field(default_factory=list)
     tag_raises: Exception | None = None
     commit_all_raises: Exception | None = None
+    push_with_tags_raises: Exception | None = None
+    push_with_tags_calls: list[Path] = field(default_factory=list)
     force_dirty: bool = False
     current_commit_value: str = "abcdef0"
 
@@ -135,11 +137,31 @@ class _FakeRegistryGitOps:
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["push", "-u", "origin", branch], cwd=repo_dir)
 
+    def push_with_tags(self, work_dir: Path) -> None:
+        if self.push_with_tags_raises:
+            raise self.push_with_tags_raises
+        self.push_with_tags_calls.append(Path(work_dir))
+        self._git(["push", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
+
     def tag(self, work_dir: Path, name: str, message: str) -> None:
         if self.tag_raises:
             raise self.tag_raises
         self.tag_calls.append(FakeTag(work_dir, name, message))
-        self._git(["tag", "-a", name, "-m", message], cwd=work_dir)
+        try:
+            self._git(["tag", "-a", name, "-m", message], cwd=work_dir)
+        except subprocess.CalledProcessError as e:
+            # The Protocol forbids a bare CalledProcessError reaching a
+            # caller, so make the same translation production does. publish
+            # routes on this type to tell an idempotent rerun from a real
+            # tag collision, and a fake that leaks the raw error hides the
+            # whole branch.
+            if "already exists" in (e.stderr or ""):
+                from mintd._registry_git_ops import GitTagAlreadyExists
+                raise GitTagAlreadyExists(name, str(work_dir)) from e
+            raise
+
+    def tag_points_at_head(self, work_dir: Path, name: str) -> bool:
+        return name in self._git(["tag", "--points-at", "HEAD"], cwd=work_dir).split()
 
     def is_working_tree_clean(self, work_dir: Path) -> bool:
         if self.force_dirty:

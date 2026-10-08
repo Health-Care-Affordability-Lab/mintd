@@ -152,6 +152,13 @@ def _seed_project(tmp_path: Path) -> Path:
     _git(["init", "-b", "main"], cwd=proj)
     _git(["add", "-A"], cwd=proj)
     _git(["commit", "-m", "migrated"], cwd=proj)
+    # A real lab repo has somewhere to push. `publish` sends the bump commit
+    # and the release tag to origin before it writes the catalog entry, so a
+    # project without one cannot publish a product anybody else can import.
+    origin = tmp_path / "project-origin.git"
+    _git(["init", "--bare", "-b", "main", str(origin)], cwd=tmp_path)
+    _git(["remote", "add", "origin", str(origin)], cwd=proj)
+    _git(["push", "-u", "origin", "main"], cwd=proj)
     return proj
 
 

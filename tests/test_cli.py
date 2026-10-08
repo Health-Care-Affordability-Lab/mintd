@@ -2082,13 +2082,22 @@ def patched_git_ops(monkeypatch: pytest.MonkeyPatch):
 
 
 def _init_git_in(path: Path) -> None:
-    """Initialize a git repo in `path` so the slice-15 working-tree check passes."""
+    """Initialize a git repo in `path` so the slice-15 working-tree check passes.
+
+    With a bare origin alongside it: `publish` pushes the bump commit and the
+    release tag there before writing the catalog entry, so a project with
+    nowhere to push cannot publish.
+    """
     subprocess.run(["git", "init", "-q"], cwd=path, check=True)
     subprocess.run(
         ["git", "-c", "user.email=test@mintd", "-c", "user.name=test",
          "commit", "--allow-empty", "-q", "-m", "init"],
         cwd=path, check=True,
     )
+    origin = path.parent / f"{path.name}-origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=path, check=True)
+    subprocess.run(["git", "push", "-q", "-u", "origin", "HEAD"], cwd=path, check=True)
 
 
 def test_cli_publish_dry_run_renders_diff(
@@ -3623,8 +3632,11 @@ def test_cli_publish_registry_branch_exists_exits_one_with_hint(
     assert hint is not None
     assert "update/provider-xw" in hint
     assert "tag v" in hint
-    # The retry advice must be runnable: the failing run already made the tag.
-    assert "git tag -d v" in hint
+    # The retry advice must be runnable. The failing run already made the tag
+    # and pushed it, so the rerun adopts it; telling the user to delete it
+    # would be advice to undo a ref consumers can already see.
+    assert "git tag -d" not in hint
+    assert "idempotent" in hint
     assert "Traceback" not in capsys.readouterr().err
 
 

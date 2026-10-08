@@ -1,8 +1,13 @@
 """`mintd publish` — the producer-side write transaction.
 
-Four steps in order: bump metadata.json → dvc push → git tag → catalog update.
-DVC failure rolls back metadata.json. Tag/catalog failures leave the
-manifest bumped + DVC pushed; the CLI prints partial-state warnings.
+Six steps in order: bump metadata.json → dvc push → commit → git tag →
+git push → catalog update. DVC failure rolls back metadata.json. Later
+failures leave the manifest bumped + DVC pushed; the CLI prints
+partial-state warnings.
+
+The catalog update is last because it is the advertisement: once the entry
+is out, consumers resolve `--rev v<version>` against this repo's remote.
+Everything a consumer needs must be on the remote before then.
 """
 
 import json
@@ -71,6 +76,10 @@ class DvcPushFailed(PublishError):
 
 
 class TagFailed(PublishError):
+    pass
+
+
+class ProjectPushFailed(PublishError):
     pass
 
 
@@ -264,17 +273,60 @@ def _apply_publish(
     try:
         git_ops.tag(project_path, tag_name, message or f"mintd publish {tag_name}")
     except (GitOpError, GitTagAlreadyExists) as exc:
-        raise TagFailed(
-            f"git tag {tag_name} failed: {exc}",
+        # A rerun of a publish that got this far and failed later (the catalog
+        # step is the usual place) finds its own tag waiting. That tag is the
+        # tag this run would create, so adopt it and carry on — that is what
+        # makes the "rerun, it's idempotent" hints below true. A tag of the
+        # same name on any *other* commit is a real collision and still stops.
+        try:
+            adopted = isinstance(exc, GitTagAlreadyExists) and git_ops.tag_points_at_head(
+                project_path, tag_name
+            )
+        except GitOpError:
+            # The probe itself failed, so we cannot claim the tag is ours.
+            adopted = False
+        if not adopted:
+            raise TagFailed(
+                f"git tag {tag_name} failed: {exc}",
+                pushed=True,
+                recovery_hint=(
+                    f"metadata.json is committed and DVC artifacts are pushed, but this run "
+                    f"did not tag and nothing was published.\n"
+                    f"The usual cause is a tag named {tag_name} already sitting on a different "
+                    f"commit — inspect it with `git show {tag_name}`. If metadata.json has "
+                    f"changed since that tag, publish a new version rather than reusing "
+                    f"{preview.new_version}.\n"
+                    f"Otherwise: rerun `mintd publish {preview.new_version}` (idempotent)."
+                ),
+            ) from exc
+
+    # Step 5: push the commit and the tag to the project's origin.
+    #
+    # Before the catalog update, on purpose. Without this step publish left
+    # both on the publisher's machine while the catalog advertised the
+    # product, so every consumer's `dvc import --rev v<version>` — which
+    # resolves the rev against the *remote* — found nothing. That is the one
+    # failure mode that looks exactly like success from the producer's side.
+    if reporter is not None:
+        reporter.update_status("Pushing to origin...")
+    try:
+        git_ops.push_with_tags(project_path)
+    except GitOpError as exc:
+        raise ProjectPushFailed(
+            f"git push to origin failed: {exc}",
             pushed=True,
+            tagged=True,
             recovery_hint=(
-                f"metadata.json is committed and DVC artifacts are pushed; tag {tag_name} was not created.\n"
-                f"To retry: rerun `mintd publish {preview.new_version}` (idempotent).\n"
-                f"If the tag already exists, delete it first with `git tag -d {tag_name}` then retry."
+                f"DVC artifacts are pushed and tag {tag_name} exists locally, but "
+                "neither it nor the bump commit reached origin, so the catalog was "
+                "left alone — nothing advertises the new version yet.\n"
+                "Check that `git remote -v` shows an origin you can write to, and that "
+                "your branch is not behind it (`git pull --rebase`), then rerun "
+                f"`mintd publish {preview.new_version}` (idempotent)."
             ),
         ) from exc
 
-    # Step 5: catalog update
+    # Step 6: catalog update
     if reporter is not None:
         reporter.update_status("Updating catalog entry...")
     try:
@@ -313,10 +365,11 @@ def _apply_publish(
             pushed=True, tagged=True,
             recovery_hint=(
                 branch_line
-                + f"DVC push, the metadata.json commit, and tag v{preview.new_version} "
-                "all completed — only the catalog PR is missing.\n"
-                f"To retry: `git tag -d v{preview.new_version}` (it was created by the "
-                f"run that failed), then rerun `mintd publish {preview.new_version}`.\n"
+                + f"DVC push, the metadata.json commit, tag v{preview.new_version} "
+                "and the push to origin all completed — only the catalog PR is "
+                "missing.\n"
+                f"To retry: rerun `mintd publish {preview.new_version}` (idempotent — "
+                "it adopts the tag it already created).\n"
                 "Or, to skip the data steps entirely: `mintd registry update`."
             ),
         ) from exc
@@ -436,5 +489,21 @@ def _atomic_write_json(path: Path, content: str) -> None:
 atomic_write_json = _atomic_write_json
 
 
+# The two stamps publish refreshes on every run. Excluded from the diff so
+# that `local_diff == []` means what steps 1 and 3 already assume it means —
+# "nothing to write, nothing to commit" — on a rerun at the same version.
+# Without this a retry always produced a fresh commit, which moved HEAD past
+# the tag the failed attempt had already created, so the tag could never be
+# adopted and every "rerun, it's idempotent" hint in this module was false.
+# They are also pure noise in the preview: they always differ.
+_VOLATILE_STAMPS: Any = {
+    "status": {"last_updated"},
+    "data_products": {"outputs": {"__all__": {"last_published"}}},
+}
+
+
 def _compute_diff(old: Metadata, new: Metadata) -> list[FieldChange]:
-    return _dict_diff(old.model_dump(), new.model_dump())
+    return _dict_diff(
+        old.model_dump(exclude=_VOLATILE_STAMPS),
+        new.model_dump(exclude=_VOLATILE_STAMPS),
+    )
