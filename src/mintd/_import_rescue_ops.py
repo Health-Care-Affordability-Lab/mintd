@@ -7,8 +7,7 @@ committed lock. On that shape plain ``dvc pull`` cannot materialize the
 import at all (dvc 3.66.x builds storage for an import only from recorded
 version info — there is no ETag-vs-md5 fallback on the erepo path), so the
 import is unpullable by any dvc invocation even though the bytes on S3 are
-fine and md5-verifiable. See
-``notes/issues/issue-import-pull-version-aware-no-version-ids.md``.
+fine and md5-verifiable.
 
 This is NOT an extension of fast-sync (SLICE-29 correctly rejected teaching
 fast-sync about second buckets). It fires only *after* a per-import

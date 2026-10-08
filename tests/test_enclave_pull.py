@@ -721,7 +721,7 @@ def test_pull_force_still_imports_a_shared_output_only_once(tmp_path):
     assert len(outputs) == len(set(outputs)), f"duplicate provenance rows: {outputs}"
 
 
-# D7 (notes/mintd-check/DECISIONS-20260828.md) — fresh-clone wedge. A fresh
+# Fresh-clone wedge. A fresh
 # clone tracks the manifest but not downloads/, so every row fast-skips off
 # downloaded[] without a stat and the pull ends in a bare "nothing to pull"
 # while `enclave package` then dies on the first missing dir. The fix: stat

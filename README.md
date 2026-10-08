@@ -64,10 +64,6 @@ git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git`
 tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
 to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 
-> While the repo is private, the `curl … | bash` fetch step itself only
-> works if you already cloned the repo locally and ran `bash install.sh`,
-> or if you have a `gh` token wired into `git`. Anonymous fetch of
-> `raw.githubusercontent.com/.../install.sh` will 404 on a private repo.
 
 ### Manual install
 
@@ -80,6 +76,14 @@ uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.g
 ```
 
 Or `pipx install git+…` / `pip install --user git+…` if you prefer.
+(`pip install --user` needs the user-scripts dir on PATH — on Windows
+that's `%APPDATA%\Python\Python3XX\Scripts`.)
+
+Optionally add reflink support, which the one-liner does for you:
+
+```bash
+uv pip install --python ~/.local/share/uv/tools/mintd/bin/python cffi reflink
+```
 
 You'll also need **DVC** with the S3 backend, since `mintd` shells out to
 it for every data operation:
@@ -98,7 +102,6 @@ mintd --help
 
 > Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them
 > under WSL2, Git Bash, or MSYS2 — there are no `.ps1` siblings yet.
-> See [`notes/INSTALL.md`](notes/INSTALL.md).
 
 ## First-time setup
 
@@ -112,8 +115,18 @@ mintd config validate         # schema + AWS profile + S3 head_bucket check
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
 `registry_url`, `storage_bucket_prefix`, `storage_endpoint`,
-`aws_profile_name`, and a `timeouts:` block — see
-[`notes/CONFIG.md`](notes/CONFIG.md).
+`aws_profile_name`, and a `timeouts:` block:
+
+```yaml
+timeouts:
+  fast: 30        # metadata queries (dvc status, git ls-remote)
+  transfer: null  # unbounded; set to e.g. 7200 for a 2h cap on dvc pull / git clone
+```
+
+`fast` caps local metadata and registry queries; `transfer` caps the
+network-heavy ones (DVC push/pull, git clone) and is `null` — disabled — by
+default. Per-command, `--timeout 600` opts into a 10-minute wall clock and
+`--timeout 0` disables it. `NO_COLOR` in the environment turns off all color.
 
 If you have a v1 mintd config kicking around:
 
@@ -255,7 +268,7 @@ rather recompute-once-and-share than commit.
 ```bash
 # Push any untracked path (a file or a whole directory):
 mintd cache push data/scratch/isochrones
-mintd cache push results/model.pkl notes/scratch.csv
+mintd cache push results/model.pkl scratch/notes.csv
 
 # See what's cached, then pull it back on another clone:
 mintd cache ls
@@ -308,16 +321,27 @@ Global flags worth knowing:
 
 Every subcommand has `--help`.
 
+### `--json` output contract
+
+Unversioned — payloads carry no `schema_version`, and a breaking change needs
+a documented deprecation. Numbers are JSON numbers (`elapsed_s: 14.3`, not
+`"14.3"`), missing values are explicit `null` rather than `""` or an omitted
+key, and arrays are always present, possibly empty, never null.
+
+- `data list` — array of entries sorted by `name`; each has `name`,
+  `project_type`, `description` (str or null).
+- `data list --imported` — array of entries; each has `local_path`,
+  `producer_repo`, `contract_pin`, `output_path`.
+- `data clone` — object: `dest` (absolute), `primary` (str or null),
+  `elapsed_s` (two decimals), `files`, `bytes`.
+
 ## Where to look next
 
 - [`vocab.md`](vocab.md) — domain language (producer/consumer, audience,
   pins, resolver).
-- [`notes/INSTALL.md`](notes/INSTALL.md) — install paths per OS.
-- [`notes/CONFIG.md`](notes/CONFIG.md) — config file reference.
-- [`notes/JSON-SCHEMA.md`](notes/JSON-SCHEMA.md) — the `metadata.json` v2
-  schema.
-- [`notes/plans/metadata-standard.md`](notes/plans/metadata-standard.md)
-  — design rationale for the metadata model.
+- [`DECISIONS.md`](DECISIONS.md) — why the design is the way it is, newest
+  first.
+- `mintd <command> --help` — every flag, always current.
 
 ## Development
 
@@ -328,4 +352,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
-Slice-based development; specs live in `notes/SLICE-*.md`.
+Conventions:
+
+- Design decisions are appended to [`DECISIONS.md`](DECISIONS.md), newest
+  first. Entries are never edited or marked superseded — a reversal is a new
+  entry.
+- A known, unfixed defect is a `pytest.mark.xfail(strict=True)` test whose
+  docstring is the spec. `grep -rn 'strict=True' tests/` lists them, and one
+  that starts passing turns CI red, so the list cannot go stale.
+- Plans live in pull request descriptions.
+- `notes/` is gitignored scratch. Nothing tracked may reference it —
+  `tests/test_docs.py` enforces that.

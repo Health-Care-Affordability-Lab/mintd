@@ -946,7 +946,7 @@ def _payload_backup(dest: Path, *, engage: bool, name: str) -> Iterator[None]:
         raise
     # Gated on `moved` — see the refusal above, which this is paired with. An
     # ungated clear deletes a `.mintd-bump-backup` this helper never created.
-    # KNOWN EDGE, filed not fixed (T-E in notes/BACKLOG.md): if the body
+    # KNOWN EDGE, not fixed: if the body
     # reports success WITHOUT materialising `dest` — `--no-exec` and
     # `--no-download` are forwarded to dvc verbatim and never post-checked —
     # this clears a payload the command only meant to re-point. Not fixed here

@@ -70,7 +70,7 @@ class Config(BaseModel):
             return cls.model_validate(data)
         except ValidationError as e:
             raise ConfigError(
-                f"invalid config in {path} (see notes/CONFIG.md for the new timeouts: block): {e}"
+                f"invalid config in {path} (note the timeouts: block added in v2): {e}"
             ) from e
 
     def resolved_cache_dir(self) -> Path:

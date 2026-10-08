@@ -996,7 +996,7 @@ def test_outs_matching_agrees_with_real_dvc_on_one_graph(
         under both the correct stamp and the broken one, which is exactly how
         the `X.dvc` stamp defect survived review: a mixed argv of `.dvc` paths
         and bare out paths trips dvc 3.67.1's `index_from_targets` defect
-        (`notes/issues/issue-dvc-checkout-mixed-argv.md`) and under-delivers at
+        and under-delivers at
         exit 0. The targets go in `_all_dvc_outs` enumeration order —
         pointers first, the failing order.
 

@@ -8,7 +8,7 @@ Each field carries an `Owner` annotation describing who is allowed to write
 it. The audience taxonomy (LOCAL / CATALOG / PRODUCER_CONTRACT / CONSUMER)
 that earlier drafts encoded has been dropped — the catalog is "metadata
 minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below). See
-`notes/decisions.md` 2026-05-14 for the rationale.
+`DECISIONS.md` (2026-05-14) for the rationale.
 """
 
 import types
