@@ -732,6 +732,37 @@ def test_import_bump_at_head_is_a_no_op(payload_journey, capsys) -> None:
     assert "up to date" in _drain(capsys)
 
 
+def test_import_of_a_path_only_on_a_branch_points_at_rev(
+    payload_journey, capsys
+) -> None:
+    """The field report: `--path` names an out that exists only on a producer
+    branch. Real dvc words that as a bare `unexpected error - ['<path>']`,
+    which must surface as "not found at rev" with a hint naming `--rev` —
+    and `--rev <branch>` must then actually land the bytes."""
+    from tests._harness.payload import publish_payload
+
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+    _git(["checkout", "-b", "wip"], cwd=producer.work)
+    publish_payload(producer.work, producer.remote, {"data/wip_only": {"part.csv": b"w1\n"}})
+    _git(["add", "-A"], cwd=producer.work)
+    _git(["commit", "-m", "wip payload"], cwd=producer.work)
+    _git(["push", "origin", "wip"], cwd=producer.work)
+
+    rc = cli.main(["data", "import", PRODUCT, "--path", "data/wip_only"])
+    err = " ".join(_drain(capsys).split())
+    assert rc == 1, err
+    assert "not found at rev 'HEAD'" in err
+    assert "--rev" in err
+    assert "--dvc-arg=-v" not in err
+
+    assert cli.main(
+        ["data", "import", PRODUCT, "--path", "data/wip_only", "--rev", "wip"]
+    ) == 0, _drain(capsys)
+    assert _imported_bytes(consumer, "data/wip_only") == b"w1\n"
+
+
 def test_clone_puts_the_product_on_disk(payload_journey, tmp_path, capsys) -> None:
     """`mintd data clone` — the consumer's first contact with a product.
 

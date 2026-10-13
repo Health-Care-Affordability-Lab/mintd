@@ -22,7 +22,7 @@ class DvcOpError(Exception):
 
     ``hint`` is an optional actionable recovery command for the CLI's error
     renderer; ``None`` on every subclass except the ones that populate it
-    (currently ``DvcStorageKeyError``).
+    (currently ``DvcStorageKeyError`` and ``DvcImportPathNotFound``).
     """
 
     hint: str | None = None
@@ -115,6 +115,11 @@ class DvcNotInRepoError(DvcOpError):
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
+    hint: str | None = (
+        "if that path exists only on a branch or tag, name it: "
+        "retry with --rev <branch-or-tag>"
+    )
+
 
 class DvcDestinationGitIgnored(DvcOpError):
     """dvc refused to write the pointer because its path is git-ignored.
@@ -173,6 +178,13 @@ def _parse_push_output(stdout: str) -> DvcPushResult:
 # dvc renders an uncaught dvc_data StorageKeyError as
 # "ERROR: unexpected error - ('data', 'final', ..., 'file.dta')".
 _STORAGE_KEY_TUPLE_RE = re.compile(r"unexpected error\s*-\s*(\([^()]*\))")
+
+# dvc 3.x renders "path not in the producer's tree at this rev" as a bare
+# list repr: "ERROR: unexpected error - ['data/final']". Matched on shape,
+# not on the path mintd passed, because dvc echoes it normalized (no leading
+# './', no trailing '/'). The '[' + quote is what keeps a missing-objects
+# crash ("unexpected error - failed to load directory ...") out of this arm.
+_IMPORT_MISSING_PATH_RE = re.compile(r"unexpected error\s*-\s*\['")
 
 
 def _translate_storage_key_error(
@@ -430,7 +442,11 @@ class SubprocessDvcOps:
                 raise DvcNotInRepoError(
                     f"not inside a DVC repository while importing into '{dest}'"
                 )
-            if "Does not exist" in stderr or "Unable to find" in stderr:
+            if (
+                "Does not exist" in stderr
+                or "Unable to find" in stderr
+                or _IMPORT_MISSING_PATH_RE.search(stderr)
+            ):
                 raise DvcImportPathNotFound(
                     f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"
                 )
