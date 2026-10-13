@@ -1,4 +1,8 @@
+import contextlib
 import logging
+
+import pytest
+
 from mintd._console import Reporter
 
 def test_reporter_json_suppression(capsys):
@@ -218,3 +222,40 @@ def test_messages_keep_bracketed_text(capsys):
     assert "[s3]" in err
     assert "[/bucket/key]" in err
     assert err.count("[data/final/x]") == 2
+
+
+LINE = "Importing 'data/final' -> 'data/imports/x/data/final'"
+
+
+@pytest.mark.parametrize(
+    "spinner,stdout_tty,stderr_tty,to_stderr",
+    [
+        # One screen with a spinner drawing on it: a second writer on fd 1
+        # splices into the spinner row and the next repaint erases it.
+        (True, True, True, True),
+        (False, True, True, False),
+        # `> log`: nothing to splice into, and the file keeps the line.
+        (True, False, True, False),
+        # `2> log`: the spinner draws nowhere the line could land.
+        (True, True, False, False),
+    ],
+    ids=["spinner-on-shared-tty", "no-spinner", "stdout-redirected", "stderr-redirected"],
+)
+def test_child_stdout_leaves_fd1_only_when_it_would_splice(
+    capsys, monkeypatch, spinner, stdout_tty, stderr_tty, to_stderr
+):
+    reporter = Reporter(no_color=True)
+    monkeypatch.setattr(reporter._stdout, "_force_terminal", stdout_tty)
+    monkeypatch.setattr(reporter._stderr, "_force_terminal", stderr_tty)
+    with reporter.status("Working...") if spinner else contextlib.nullcontext():
+        # Chunks, not lines: split mid-path, and a last line with no newline.
+        reporter.passthrough_stdout(LINE[:15])
+        reporter.passthrough_stdout(LINE[15:] + "\nno newline")
+    out, err = capsys.readouterr()
+    if to_stderr:
+        assert out == ""
+        assert LINE in err
+        assert "no newline" in err
+    else:
+        assert out == LINE + "\nno newline"
+        assert "data/imports" not in err
