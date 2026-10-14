@@ -39,7 +39,7 @@ def run_streaming(
     stderr_lines: List[str] = []
     
     def _default_stdout(line: str) -> None:
-        # Reader hands us complete \n-terminated lines (post-\r-tick cleanup).
+        # Reader hands us RAW chunks, not lines; the reporter does any line handling.
         # json_mode suppresses the forward to terminal so JSON consumers
         # don't see child output on stdout; line capture still happens.
         if json_mode:

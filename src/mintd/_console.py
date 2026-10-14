@@ -66,6 +66,9 @@ class Reporter:
         # instead of "Updating files: 23% (700/3090)"). We coalesce chunks
         # until we see a \r or \n boundary.
         self._stderr_buf: str = ""
+        # Child stdout held to line boundaries, only while a spinner shares
+        # the screen (see `passthrough_stdout`).
+        self._stdout_buf: str = ""
 
     def status(self, msg: str) -> Any:  # context manager
         if self.json_mode or self.level < 1:
@@ -101,6 +104,11 @@ class Reporter:
                 finally:
                     outer_self._active_status = None
                     outer_self._status_base = ""
+                    # A child's last stdout line with no newline: print it
+                    # now, rather than drop it or glue it to the next one.
+                    if outer_self._stdout_buf:
+                        outer_self._print_child_line(outer_self._stdout_buf)
+                        outer_self._stdout_buf = ""
 
         return _StatusCM()
 
@@ -182,11 +190,35 @@ class Reporter:
             self._stderr.print(f"trace: {msg}")
 
     def passthrough_stdout(self, chunk: str) -> None:
-        # Stdout from streamed subprocesses is rare and usually structured
-        # (e.g. dvc status --json). Route plain through the stdout console.
+        """Route a raw stdout chunk from a child subprocess.
+
+        Straight to fd 1, so ``mintd ... > log`` keeps it — except while a
+        spinner is drawing on the same terminal. rich's Live owns that row,
+        so a second writer on fd 1 splices into it and the next repaint
+        erases what the child wrote. Then complete lines go through the
+        spinner's own console instead, and a partial line waits for its
+        newline or for the spinner to stop.
+        """
         if not chunk or self.json_mode:
             return
-        self._stdout.print(chunk, end="", soft_wrap=True, highlight=False, markup=False)
+        if (
+            self._active_status is None
+            or not self._stdout.is_terminal
+            or not self._stderr.is_terminal
+        ):
+            self._stdout.print(chunk, end="", soft_wrap=True, highlight=False, markup=False)
+            return
+        self._stdout_buf += chunk
+        *lines, self._stdout_buf = self._stdout_buf.split("\n")
+        for line in lines:
+            self._print_child_line(line)
+
+    def _print_child_line(self, line: str) -> None:
+        # Final state of any \r-overwritten ticks. soft_wrap/highlight off
+        # keep a long path on one copy-pasteable row with no color inside it.
+        visible = line[line.rfind("\r") + 1:].rstrip()
+        if visible:
+            self._stderr.print(visible, soft_wrap=True, highlight=False)
 
     def passthrough_stderr(self, chunk: str) -> None:
         """Route a raw stderr chunk from a child subprocess.
