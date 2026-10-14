@@ -2045,7 +2045,7 @@ def _handle_data_import(args: argparse.Namespace) -> int:
     except DvcOpError as exc:
         reporter.error(
             str(exc),
-            hint="retry with --dvc-arg=-v for verbose DVC output",
+            hint=exc.hint or "retry with --dvc-arg=-v for verbose DVC output",
         )
         return 1
     summary = _import_summary(produced)

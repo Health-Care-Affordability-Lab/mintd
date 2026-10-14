@@ -899,3 +899,45 @@ def test_git_ignored_with_nothing_in_the_way_is_not_destination_exists(
     assert "final/final.dvc" in str(ei.value)
     assert "--dest-root" in str(ei.value)
     assert "force=True" not in str(ei.value)
+
+
+# dvc 3.x reports a path absent from the producer's tree at the resolved rev
+# as an uncaught list repr. Measured at 3.67.1; dvc echoes the path
+# normalized, whatever spelling mintd sent.
+MISSING_PATH_STDERR = "ERROR: unexpected error - ['data/wip_only']\n"
+# The same crash prefix when the path IS in the tree but its objects never
+# reached the remote. A download problem, not a rev problem.
+OBJECTS_MISSING_STDERR = (
+    "ERROR: unexpected error - failed to load directory ('data', 'final'): "
+    "[Errno 2] No such file or directory: '/r/files/md5/1b/4e63.dir'\n"
+)
+
+
+@pytest.mark.parametrize(
+    "path", ["data/wip_only", "data/wip_only/", "./data/wip_only"]
+)
+def test_import_missing_path_is_typed_not_a_raw_dvc_crash(
+    tmp_path: Path, path: str
+) -> None:
+    from mintd._dvc_ops import DvcImportPathNotFound
+
+    with pytest.raises(DvcImportPathNotFound) as ei:
+        _CannedStderrDvcOps(MISSING_PATH_STDERR).import_(
+            repo_url="https://example.org/repo", path=path,
+            dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert "not found at rev 'HEAD'" in str(ei.value)
+    assert "--rev" in (ei.value.hint or "")
+
+
+def test_objects_missing_from_the_remote_is_not_a_missing_path(
+    tmp_path: Path,
+) -> None:
+    from mintd._dvc_ops import DvcImportPathNotFound
+
+    with pytest.raises(DvcOpError) as ei:
+        _CannedStderrDvcOps(OBJECTS_MISSING_STDERR).import_(
+            repo_url="https://example.org/repo", path="data/final",
+            dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert not isinstance(ei.value, DvcImportPathNotFound)
