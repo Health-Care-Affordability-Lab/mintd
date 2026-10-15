@@ -340,7 +340,7 @@ def _check_bucket(
 def migrate_v1_to_v2(v1_data: dict) -> dict:
     """Translate a legacy ``mintd`` v1 config dict to the v2 shape.
 
-    Maps the v1 keys that have a v2 equivalent (per ``notes/V1-PORT-AUDIT.md``);
+    Maps the v1 keys that have a v2 equivalent;
     silently drops the rest (``platform``, ``storage.region``,
     ``storage.cache_type``, ``storage.versioning``, ``tools.github_cli``,
     ``registry.default_branch``). Unknown top-level keys outside the v1 set

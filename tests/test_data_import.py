@@ -576,8 +576,7 @@ def test_a_failed_forced_import_restores_the_payload(
         # Inside the import root on purpose: `dest.resolve()` in the
         # containment check FOLLOWS an existing symlink, so a link pointing
         # anywhere outside is refused as an escaping path before the backup is
-        # ever reached. That is pre-existing and out of scope here; see the
-        # `_payload_backup` follow-up in notes/BACKLOG.md.
+        # ever reached. That is pre-existing and out of scope here.
         target = dest.parent / "dvc-cache-payload"
         target.mkdir()
         (target / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")

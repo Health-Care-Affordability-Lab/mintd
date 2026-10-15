@@ -8,8 +8,7 @@ in a slice-19 cleanup; for now, the rename would touch slice 7-12 tests.
 
 ``data_pull``'s degraded-path behavior (checkout-before-pull ordering, the
 fallback/blocked/incomplete routing, the scoped catch-all) implements the
-pull-all audit; the full catalogue of those fixes lives in
-notes/issue-data-pull-all-fallback-skips-checkout.md.
+pull-all audit.
 """
 
 from __future__ import annotations
@@ -212,8 +211,7 @@ def _checkout_grouped(dvc_ops: DvcOps, targets: list[str], *, cwd: Path) -> None
     clone bug). Homogeneous argvs are safe: an all-``.dvc`` argv completes
     the fast path, and an all-bare argv aborts it on the FIRST target while
     ``index`` is still None, taking the correct repo.index + granular-collect
-    fallback. Repro recipe and removal criterion:
-    notes/issue-dvc-checkout-mixed-argv.md.
+    fallback.
     """
     for group in _shape_groups(targets):
         dvc_ops.checkout(targets=group, cwd=cwd)

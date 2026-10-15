@@ -2,8 +2,8 @@
 
 The catalog stores `metadata.json` verbatim except for
 `Metadata.CATALOG_EXCLUDED_PATHS` (mint-internal provenance fields). No
-audience-based filtering, no advisory tier — see `notes/decisions.md`
-2026-05-14 for the rationale.
+audience-based filtering, no advisory tier — see `DECISIONS.md` (2026-05-14)
+for the rationale.
 
 Two thin wrappers around `yaml.safe_dump` / `yaml.safe_load`:
   - `serialize(metadata)` calls `metadata.to_catalog_entry()` and dumps.

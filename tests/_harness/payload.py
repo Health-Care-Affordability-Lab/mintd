@@ -4,8 +4,7 @@ The suite has never had a producer that serves *data*. Every "the consumer
 pulled it" assertion until now has been a double's return value, because
 building real payload meant spawning `dvc` per output — measured at **1.95s**
 marginal per producer at `b7b1102`, against **0.06s** for the same work through
-`dvc.repo.Repo` in-process. That 26x is the whole reason this module exists;
-see Approach C in `notes/mintd-check/PLAN-hermetic-harness.md`.
+`dvc.repo.Repo` in-process. That 26x is the whole reason this module exists.
 
 Choosing the in-process API over the CLI buys speed and owes fidelity: mintd
 pins `dvc >= 3.66, < 4.0` (`pyproject.toml:12`), a **range**, so `Repo`'s

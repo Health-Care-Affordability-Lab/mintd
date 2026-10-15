@@ -109,8 +109,7 @@ def test_aws_profile_name_no_credentials_file(
 # The AWS SDK (and therefore the boto3 inside DVC) resolves the credentials
 # file from $AWS_SHARED_CREDENTIALS_FILE before falling back to
 # ~/.aws/credentials. Detection must read the same file, or mintd and DVC
-# disagree under an OS sandbox that fences $HOME (see
-# notes/issues/issue-aws-profile-detection-ignores-shared-credentials-file.md).
+# disagree under an OS sandbox that fences $HOME.
 
 
 def test_aws_profile_name_honours_aws_shared_credentials_file(

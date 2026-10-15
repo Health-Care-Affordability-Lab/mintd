@@ -236,7 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args._reporter.error(
             str(e),
             hint="raise (or null out) the matching timeouts: entry in "
-                 "~/.config/mintd/config.yaml — see notes/CONFIG.md",
+                 "~/.config/mintd/config.yaml",
         )
         return 1
     except ConfigError as e:
@@ -806,7 +806,7 @@ def _require_fast_sync_ops(config: Config, reporter: Reporter) -> FastSyncOps | 
     if fast_sync_ops is None:
         reporter.error(
             "mintd's boto3 dependency is missing — reinstall mintd",
-            hint="see notes/INSTALL.md, or: pip install 'dvc[s3]'",
+            hint="pip install 'dvc[s3]'",
         )
     return fast_sync_ops
 
@@ -1039,7 +1039,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 jobs=args.jobs,
             )
     except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
         return 2
     except DvcPushError as e:
         reporter.error(str(e), hint="check AWS credentials: mintd config validate")
@@ -1086,7 +1086,7 @@ def _share_boto3_available(reporter: Reporter) -> bool:
         logger.warning("share unavailable (boto3 not importable): %s", exc)
         reporter.error(
             "share requires boto3, which is not installed",
-            hint="install it: pip install 'dvc[s3]' (see notes/INSTALL.md)",
+            hint="install it: pip install 'dvc[s3]'",
         )
         return False
     return True
@@ -1191,7 +1191,7 @@ def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, 
     if factory is None:
         reporter.error(
             "the repo file cache (S3) requires boto3, which is not installed",
-            hint="install it: pip install 'dvc[s3]' (see notes/INSTALL.md)",
+            hint="install it: pip install 'dvc[s3]'",
         )
         return 2
     return reporter, project_path, config, factory
@@ -1391,7 +1391,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
     try:
         produced = data_add(args.path, project_path=Path("."), dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
         return 2
     except DvcOpError as e:
         reporter.error(str(e), hint=e.hint or "check the path exists inside a DVC project; 'mintd init' scaffolds one")
@@ -1455,7 +1455,7 @@ def _handle_data_verify(args: argparse.Namespace) -> int:
                 dvc_ops=dvc_ops,
             )
     except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
         return 2
     except DvcOpError as e:
         reporter.error(str(e), hint=e.hint or "retry with --dvc-arg=-v for verbose DVC output")
@@ -1478,7 +1478,7 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     try:
         data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
     except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]' (see notes/INSTALL.md)")
+        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
         return 2
     except DvcOpError as e:
         reporter.error(str(e), hint=e.hint or "check the name; 'mintd data verify' lists tracked outputs")
@@ -1493,7 +1493,7 @@ def _handle_data_ls(args: argparse.Namespace) -> int:
     client = _resolve_catalog_client(config)
     listing_fn = _resolve_s3_listing_ops(config)
     if listing_fn is None:
-        reporter.error("boto3 not installed", hint="pip install 'boto3' (see notes/INSTALL.md)")
+        reporter.error("boto3 not installed", hint="pip install 'boto3'")
         return 2
 
     try:
@@ -1737,7 +1737,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         reporter.error(str(exc), hint="pass --dest <path> or remove the existing directory")
         return 1
     except DvcNotInstalled as exc:
-        reporter.error(str(exc), hint="pip install 'dvc[s3]' (see notes/INSTALL.md)")
+        reporter.error(str(exc), hint="pip install 'dvc[s3]'")
         return 2
     except ProducerError as exc:
         reporter.error(str(exc), hint="check git auth (gh auth status / ssh -T git@github.com)")

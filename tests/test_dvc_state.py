@@ -199,7 +199,7 @@ def test_outs_matching_normalizes_a_lock_out_through_wdir(tmp_path: Path) -> Non
         # that matters here -- over-matching would turn a selector into a
         # whole-repo download. `normalize_target` has three production callers
         # outside this slice, so it is not changed here; the rooted-path escape
-        # is filed at notes/mintd-check/FOLLOWUP-normalize-target-root-escape.md.
+        # remains a known, unfixed gap.
         (".//data/final", False),   # -> '/data/final', a ROOTED path
         ("data//final/", False),    # -> 'data//final', doubled separator
     ],
@@ -238,8 +238,8 @@ def test_outs_matching_stamps_the_pull_target_on_every_out(tmp_path: Path) -> No
     full-product download reported as success.
 
     The spelling is project-relative for BOTH kinds, never `X.dvc` for
-    pointers: a mixed argv trips dvc 3.67.1's `index_from_targets` defect
-    (`notes/issues/issue-dvc-checkout-mixed-argv.md`), which is why
+    pointers: a mixed argv trips dvc 3.67.1's `index_from_targets` defect,
+    which is why
     `data_ops._checkout_grouped` already keeps every argv homogeneous.
 
     Mutation: return `out` instead of `dataclasses.replace(out, target=rel)`

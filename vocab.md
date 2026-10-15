@@ -200,8 +200,8 @@ Listed here so they're not "missing" — they'll get definitions in the slice wh
 - `Pin`, `DataDependency`, `Imports` — slice 5 (`imports.yaml`).
 - `ProducerView`, `Fetcher`, `ProducerError` — slice 6 (`--upgrades` mode).
 - `RegistrationStatus`, pending registrations — slice 3.
-- `share/` lane, Stratum T transport, `share_user` — share S1 (`notes/PLAN-share-s1.md`);
+- `share/` lane, Stratum T transport, `share_user` — share S1;
   an *ephemeral, uncatalogued, unpinned* handoff lane — the deliberate exception to the
   pin discipline, named so nobody retrofits pins onto it.
-- repo file cache (S3), `mintd-lane=cache` tag, push/pull skip-compare — cache slice
-  (`notes/PLAN-cache.md`); *durable but unpinned*, governed by the repo's own tier.
+- repo file cache (S3), `mintd-lane=cache` tag, push/pull skip-compare — cache slice;
+  *durable but unpinned*, governed by the repo's own tier.

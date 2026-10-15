@@ -3,8 +3,7 @@
 These are ratchets, not correctness tests. Each pins a property of *how this
 suite is written* against a checked-in literal, so the only way to move is to
 edit the literal — which shows up in review — and the only cheap direction is
-down. Rules 1 and 4 of the four substrate rules in
-``notes/mintd-check/PLAN-hermetic-harness.md``.
+down. Rules 1 and 4 of the four substrate rules.
 """
 
 from __future__ import annotations

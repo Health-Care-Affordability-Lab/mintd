@@ -80,8 +80,8 @@ def outs_matching(project_path: Path, declared: str, remote_name: str) -> list[D
     into a silent full-product download reported as success. The spelling is the
     project-relative workspace path for pointer outs AND lock outs alike, never
     ``X.dvc`` for pointers: a mixed argv trips dvc 3.67.1's
-    ``index_from_targets`` defect (`notes/issues/issue-dvc-checkout-mixed-argv.md`,
-    whose field incident cached ~37 GB and materialized ONE out at exit 0), which
+    ``index_from_targets`` defect (whose field incident cached ~37 GB and
+    materialized ONE out at exit 0), which
     is why ``data_ops._checkout_grouped`` already keeps every argv homogeneous.
     The project-relative form still resolves for a pointer out because
     ``classify_targets`` appends ``.dvc`` itself.

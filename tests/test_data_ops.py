@@ -1518,8 +1518,7 @@ def test_data_pull_checkout_never_mixes_dvc_and_stage_out_targets(
     variable when a ``dvc checkout`` argv mixes ``.dvc`` file paths with
     bare dvc.lock stage-out path strings — the checkout exits 0 having
     materialized only the last ``.dvc`` target's out. Minimized offline
-    against dvc 3.67.1 (repro recipe:
-    notes/issue-dvc-checkout-mixed-argv.md): homogeneous argvs are safe,
+    against dvc 3.67.1: homogeneous argvs are safe,
     mixed argvs are not. Contract: every ``dvc checkout`` invocation
     data_pull issues is all-``.dvc`` or all-bare, never mixed, and no
     target is dropped."""

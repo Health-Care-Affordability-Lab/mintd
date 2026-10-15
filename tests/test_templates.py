@@ -291,8 +291,7 @@ def test_run_all_r_fails_loud_on_missing_config(tmp_path: Path) -> None:
 # `${stata_cmd} -b do ingest.do` stage lets DVC cache broken output and mark
 # the stage clean. The scaffold routes stata stages through run_stata.sh,
 # which reads the return code _mintd_run.do records in a sentinel file
-# (logs/.rc_<stage>) and turns it into the process exit status. See
-# notes/issues/issue-stata-batch-errors-not-propagated.md.
+# (logs/.rc_<stage>) and turns it into the process exit status.
 
 _posix_sh_only = pytest.mark.skipif(
     os.name == "nt",
@@ -661,7 +660,6 @@ def test_scaffold_stamps_a_publishable_mint_version(
     setuptools-scm suffixes any untagged or dirty build, and `publish` validates
     this field *before* it looks at the requested version — so a suffixed string
     made every scaffolded repo unpublishable, with or without a flag.
-    See notes/issues/issue-publish-rejects-dev-mint-version.md.
     """
     monkeypatch.setattr(
         "mintd._templates._render.importlib.metadata.version", lambda _dist: installed

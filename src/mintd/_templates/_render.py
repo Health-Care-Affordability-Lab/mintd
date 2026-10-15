@@ -109,13 +109,11 @@ def _build_context(
     # setuptools-scm suffixes any untagged or dirty build ("0.0.2.dev110+g03b29b5"),
     # and publish semver-checks this field before it looks at the requested version —
     # a suffixed string blocks publish outright. Stamp the release segment only.
-    # See notes/issues/issue-publish-rejects-dev-mint-version.md.
     release = re.match(r"\d+\.\d+\.\d+", version)
     version = release.group(0) if release else "0.0.0"
     # Load the user's config lazily; slice 21 lets users seed these fields
     # via `mintd config setup`. Absent fields fall back to safe defaults
     # — empty strings for cosmetic vars, sensible literals for the rest.
-    # See `notes/V1-PORT-AUDIT.md` for the legacy→v2 mapping.
     try:
         from .._config import Config
         cfg = Config.load()
@@ -150,7 +148,7 @@ def _build_context(
         "mint_hash": _get_mint_hash(),
 
         # Platform — auto-detected (slice 21). Windows shell scripts not yet
-        # vendored — see notes/V1-PORT-AUDIT.md and the windows-followup memory.
+        # vendored.
         "platform_os": platform_os,
         "command_sep": command_sep,
         "stata_executable": _cfg("stata_executable", "stata"),
