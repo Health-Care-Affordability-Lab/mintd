@@ -102,6 +102,9 @@ class PublishPreview:
     # Slice 32 (reviewer P1): `_apply_publish` reads new_metadata from
     # here verbatim — no recomputation drift between prepare and apply.
     new_metadata: Metadata = None  # type: ignore[assignment]
+    # The exempted `data_products_output_unpinned` messages: this publish's
+    # push must pin them, or the post-push re-check stops the release.
+    unpinned: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,7 +131,15 @@ def prepare_publish(
 ) -> PublishPreview:
     metadata_path = project_path / "metadata.json"
     findings = check_project(project_path, upgrades=False, client=client)
-    error_findings = [f for f in findings if f.severity == "error"]
+    # A tracked output with no S3 version ID is what this verb's own
+    # `dvc push` records (dvc rewrites the pointer / dvc.lock on a
+    # version-aware push) and `commit_all` then commits, so it is not a reason
+    # to refuse here. `_apply_publish` re-checks it right after the push,
+    # before anything is committed, tagged or advertised.
+    error_findings = [
+        f for f in findings
+        if f.severity == "error" and f.kind != "data_products_output_unpinned"
+    ]
     if error_findings:
         raise PublishBlocked(error_findings)
 
@@ -199,6 +210,7 @@ def prepare_publish(
         catalog_diff=catalog_diff,
         first_publish=first_publish,
         new_metadata=new_metadata,
+        unpinned=tuple(f.message for f in findings if f.kind == "data_products_output_unpinned"),
     )
 
 
@@ -253,6 +265,30 @@ def _apply_publish(
             f"dvc push failed: {exc}",
             recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
         ) from exc
+
+    # The push is what pins outputs on a version-aware remote, and it can
+    # change what the gate sees (dvc writes a legacy `.dir` pointer back as a
+    # files-format manifest). Re-run the WHOLE gate: anything still wrong --
+    # the unpinned state exempted above, or a verdict the push revealed --
+    # stops the release before it is committed, tagged or advertised. A push
+    # that reports success and pins nothing is exactly how undeliverable
+    # releases reached the catalog.
+    still_wrong = [
+        f for f in check_project(project_path, upgrades=False, client=client)
+        if f.severity == "error"
+    ]
+    if still_wrong:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(
+            "dvc push reported success but this project is still not deliverable: "
+            + "; ".join(f.message for f in still_wrong),
+            recovery_hint=(
+                "metadata.json was rolled back; nothing was committed, tagged or advertised. "
+                "dvc push may have rewritten .dvc / dvc.lock files with the S3 version IDs it "
+                "recorded ('git status' lists them): keep them and commit them with your fix. "
+                + (still_wrong[0].hint or "")
+            ),
+        )
 
     # Step 3: commit the bump (only when there's a real content change —
     # retries at the same version stay idempotent w.r.t. git history).

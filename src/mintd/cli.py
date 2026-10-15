@@ -2856,6 +2856,10 @@ def _render_publish_preview(reporter: Reporter, preview: PublishPreview) -> None
     reporter.info(f"Catalog diff:    {catalog_diff_msg}")
     for change in preview.catalog_diff:
         reporter.info(f"  - {change.field_path}: {change.before!r} → {change.after!r}")
+    if preview.unpinned:
+        reporter.info("Not yet pinned (this publish's dvc push must record the S3 version IDs, or the release stops after it):")
+        for message in preview.unpinned:
+            reporter.info(f"  - {message}")
     reporter.info("")
 
 

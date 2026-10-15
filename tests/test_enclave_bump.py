@@ -1,3 +1,4 @@
+import shutil
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from mintd.data import BumpBlocked, ImportNotFound, PrimaryRemovedAtHead
 from mintd.enclave import ApprovedProduct, EnclaveManifest, TransferredItem, enclave_bump
 from mintd.model import Metadata
 from mintd.producer import ProducerView
+from tests._enclave_fixtures import MINIMAL_METADATA, client_with_provider_xw, stage_enclave_manifest
 
 REPO_URL = "https://github.com/example-org/provider-xw"
 PIN_SHA = "a" * 40
@@ -486,3 +488,26 @@ def test_bump_blocked_row_blocks_the_whole_repo(tmp_path):
                      producer_view_factory=_head_factory(), check_findings=findings)
 
     assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [PIN_SHA, PIN_SHA]
+
+
+def test_enclave_bump_names_an_unreadable_dvc_lock_instead_of_a_missing_repo(tmp_path: Path) -> None:
+    """Twin of `bump_import`'s: a merge-conflicted dvc.lock stops the consumer
+    walk before it reaches the manifest rows, so the bump must name the file
+    -- not "no consumer finding", which sends the user looking for a
+    subscription that exists.
+
+    Mutation: drop `consumer_walk_failure(findings) or` in `enclave_bump` ->
+    reddens.
+    """
+    shutil.copy(MINIMAL_METADATA, tmp_path / "metadata.json")
+    manifest = stage_enclave_manifest(tmp_path)
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / "dvc.lock").write_text(
+        "<<<<<<< HEAD\nschema: '2.0'\n=======\nstages: {}\n>>>>>>> theirs\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ImportNotFound) as excinfo:
+        enclave_bump(client_with_provider_xw(), manifest_path=manifest, name="provider-xw")
+
+    assert "dvc.lock" in str(excinfo.value)
+    assert "no consumer finding" not in str(excinfo.value)

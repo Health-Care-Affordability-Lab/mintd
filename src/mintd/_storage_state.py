@@ -49,6 +49,10 @@ class StorageInspection:
     dvc_url: str | None
     metadata_path: Path
     dvc_config_path: Path
+    # ``version_aware = true`` on the default remote in ``.dvc/config``: the S3
+    # key is then the file's real path and a consumer's pull needs the version
+    # ID recorded in the pointer, which is what the delivery gate checks for.
+    dvc_version_aware: bool = False
 
 
 def inspect_storage(project_path: Path) -> StorageInspection:
@@ -74,7 +78,7 @@ def inspect_storage(project_path: Path) -> StorageInspection:
     dvc_config_path = project_path / ".dvc" / "config"
 
     meta_bucket, meta_prefix, meta_name, meta_block_present = _read_metadata_storage(metadata_path)
-    dvc_name, dvc_url = _read_dvc_config(dvc_config_path)
+    dvc_name, dvc_url, dvc_version_aware = _read_dvc_config(dvc_config_path)
 
     meta_url: str | None = None
     if meta_bucket and meta_prefix:
@@ -109,6 +113,7 @@ def inspect_storage(project_path: Path) -> StorageInspection:
         dvc_url=dvc_url,
         metadata_path=metadata_path,
         dvc_config_path=dvc_config_path,
+        dvc_version_aware=dvc_version_aware,
     )
 
 
@@ -236,20 +241,27 @@ def _read_metadata_storage(
     )
 
 
-def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None]:
-    """Return (default_remote_name, url) from .dvc/config.
+def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
+    """Return (default_remote_name, url, version_aware) from .dvc/config.
 
     Handles both DVC section-header formats: ``[remote "name"]`` and
     ``['remote "name"']``. Falls back to the single remote section when
     ``[core] remote = ...`` isn't set (clone-time config shape).
+
+    ``version_aware`` is that remote's ``version_aware = true`` flag. Only the
+    committed ``.dvc/config`` is read, never ``config.local``: a consumer's
+    clone carries the former and not the latter, and the flag decides whether
+    their pull needs an S3 version ID per file.
     """
     if not config_path.is_file():
-        return None, None
-    parser = configparser.ConfigParser(strict=False)
+        return None, None, False
+    # dvc writes raw values; a `%` in one (URL-encoded, a hand edit) must be
+    # read literally, not interpolated into a traceback.
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
     try:
         parser.read(config_path, encoding="utf-8")
     except configparser.Error:
-        return None, None
+        return None, None, False
 
     name = parser.get("core", "remote", fallback="") or None
     if not name:
@@ -259,18 +271,38 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None]:
                 name = sec_name
                 break
         if not name:
-            return None, None
+            return None, None, False
 
     for section in (f'remote "{name}"', f'\'remote "{name}"\''):
         if parser.has_section(section):
             url = parser.get(section, "url", fallback="") or None
-            return name, url
+            return name, url, _version_aware(parser, section)
 
     for section in parser.sections():
         if _extract_remote_section_name(section) == name:
             url = parser.get(section, "url", fallback="") or None
-            return name, url
-    return name, None
+            return name, url, _version_aware(parser, section)
+    return name, None, False
+
+
+def _version_aware(parser: configparser.ConfigParser, section: str) -> bool:
+    # dvc's own reader (configobj) strips an inline comment and surrounding
+    # quotes; configparser keeps both, so mirror the strip before deciding.
+    # Anything else -- a hand edit configparser would choke on -- reads as
+    # the md5 layout: this is a read-only classifier, it never raises.
+    def flag(key: str) -> bool | None:
+        raw = parser.get(section, key, fallback=None)
+        if raw is None:
+            return None
+        value = raw.split("#", 1)[0].split(";", 1)[0].strip().strip("'\"").lower()
+        return value in ("true", "1", "yes", "on")
+
+    explicit = flag("version_aware")
+    if explicit is not None:
+        return explicit
+    # dvc (data_cloud.get_remote) turns version_aware on for a worktree
+    # remote that does not set it.
+    return bool(flag("worktree"))
 
 
 def _extract_remote_section_name(section: str) -> str | None:

@@ -1293,3 +1293,33 @@ def test_bump_never_touches_another_products_import(tmp_path: Path) -> None:
     assert (payload / "irreplaceable.csv").is_file(), "the victim's payload was deleted"
     assert FIXTURE_URL in victim.read_text(encoding="utf-8")
     assert fake.calls == [], "re-imported another product's pointer"
+
+
+def test_bump_names_an_unreadable_dvc_lock_instead_of_a_missing_import(tmp_path: Path) -> None:
+    """A merge-conflicted dvc.lock stops the consumer walk, so `check` has no
+    finding for an import that is right there on disk. The bump must say
+    which file stopped it -- not "no consumer finding", which sends the
+    researcher looking for an import that exists.
+
+    Mutation: drop `consumer_walk_failure(findings) or` in `bump_import` ->
+    the message is "no consumer finding ..." and this reddens.
+    """
+    client = InMemoryCatalogClient()
+    _register_fixture_product(client)
+    _stage_namespaced(tmp_path, name="final", producer_path="data/final/")
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / "dvc.lock").write_text(
+        "<<<<<<< HEAD\nschema: '2.0'\n=======\nstages: {}\n>>>>>>> theirs\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ImportNotFound) as excinfo:
+        bump_import(
+            client,
+            _FakeDvcOps(),
+            project_path=tmp_path,
+            name="test_project",
+            check_findings=check_project(tmp_path, upgrades=False),
+        )
+
+    assert "dvc.lock" in str(excinfo.value)
+    assert "no consumer finding" not in str(excinfo.value)

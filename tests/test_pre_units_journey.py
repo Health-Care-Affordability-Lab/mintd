@@ -34,6 +34,7 @@ from mintd import cli
 from mintd._config import ConfigError
 from mintd.catalog import CatalogAlreadyExists, GitCatalogClient
 from mintd.model import Metadata
+from tests._dvc_fixtures import write_lock
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
@@ -421,6 +422,23 @@ def scaffolded_journey(
     }
     (proj / "metadata.json").write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+    )
+    # ...and produced + pushed: the dvc.lock entry a researcher who ran
+    # `dvc repro` and `mintd data push` would have committed, standing in for
+    # the run and the push this test cannot make. The scaffold's own `validate`
+    # stage declares `../data/final/` under its wdir, so `dvc add` would refuse
+    # the path ("overlaps with an output of stage") -- producing it is the only
+    # way to track it. Files-format with a per-entry version ID under the
+    # scaffold's OWN remote name is what dvc writes for a directory on a
+    # version-aware remote (which `mintd init` always configures). Without it
+    # `check` reports `data/final/` as undeliverable -- the delivery gate
+    # working, not a scaffold defect.
+    write_lock(
+        proj,
+        "validate",
+        "../data/final/",
+        files={"survey.parquet": "v-1"},
+        remote=meta["storage"]["dvc"]["remote_name"],
     )
     return proj, dvc_spawn_envs
 

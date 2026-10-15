@@ -26,7 +26,7 @@ from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
-from .check import CheckFinding, check_project
+from .check import CheckFinding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
 from .imports import DataDependency, NotAnImportError
 from .producer import MissingPrimaryDataProduct, ProducerError, ProducerView
@@ -1009,7 +1009,8 @@ def bump_import(
     finding = _find_consumer_finding_for_target(findings, source=dvc_source)
     if finding is None:
         raise ImportNotFound(
-            f"no consumer finding for {name!r} (source={dvc_source})"
+            consumer_walk_failure(findings)
+            or f"no consumer finding for {name!r} (source={dvc_source})"
         )
 
     if finding.kind is None:

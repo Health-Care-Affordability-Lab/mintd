@@ -1740,6 +1740,33 @@ def test_parse_dvc_lock_outs_foreach_out_above_the_wdir_is_not_dropped(
 
 
 @pytest.mark.parametrize(
+    "raw", ["/srv/shared/lookup.csv", "C:/shared/lookup.csv", "../outside.csv"], ids=["posix-abs", "drive", "dotdot"]
+)
+def test_parse_dvc_lock_outs_skips_an_out_outside_the_project(tmp_path: Path, raw: str) -> None:
+    """A dvc 2.x lock can carry an external out (an absolute path), and `..`
+    can climb out of the root. Neither is this project's to pull: handed to
+    `dvc pull`, it lands nothing and the pull reports a false failure.
+
+    Mutation: drop the `posixpath.isabs` arm -> `posix-abs` reddens; drop the
+    `PureWindowsPath(...).drive` arm -> `drive` reddens.
+    """
+    _write_lock(
+        tmp_path,
+        yaml_body=f"stages:\n  build:\n    cmd: run\n    outs:\n      - data/final.csv\n      - {raw}\n",
+        body=(
+            "stages:\n"
+            "  build:\n"
+            "    outs:\n"
+            "      - path: data/final.csv\n"
+            "        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            f"      - path: {raw}\n"
+            "        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        ),
+    )
+    assert [o.path for o in parse_dvc_lock_outs(tmp_path, "x")] == ["data/final.csv"]
+
+
+@pytest.mark.parametrize(
     "yaml_body",
     ["vars:\n  - x: 1\n", "stages: {}\n"],
     ids=["vars-only", "empty-stages"],
