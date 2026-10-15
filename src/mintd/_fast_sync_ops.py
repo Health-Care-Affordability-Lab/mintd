@@ -16,7 +16,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, TypeVar
 
 import yaml
@@ -606,11 +606,15 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
             has_files = "files" in out
             if not has_md5 and not has_files:
                 continue
-            try:
-                raw_path = out["path"]
-                abs_path = (project_path / wdir / raw_path).resolve()
-                rel = abs_path.relative_to(project_path.resolve()).as_posix()
-            except (ValueError, KeyError):
+            # Lexical, like `resolve_out`'s other callers: dvc checks a file
+            # out as a symlink into `.dvc/cache/` when reflinks and hardlinks
+            # are unavailable, and resolving that link made the out vanish
+            # (or point at the cache) instead of keeping its workspace path.
+            raw_path = out.get("path")
+            rel = resolve_out(wdir, str(raw_path)) if raw_path is not None else ".."
+            # Outside the project: escaped through `..`, or absolute (a dvc
+            # 2.x external out) in either platform's spelling.
+            if rel == ".." or rel.startswith("../") or posixpath.isabs(rel) or PureWindowsPath(str(raw_path)).drive:
                 logger.warning(
                     "path resolution failed for stage %s, out %s; skipping",
                     stage, out.get("path"),
@@ -701,7 +705,7 @@ def discover_all_outs(project_path: Path) -> list[str]:
     relative to project_path, sorted lexicographically.
 
     Excludes the ``.dvc/`` internals directory (DVC metadata, not data
-    pointers) and ``dvc.lock`` (pipeline lockfile). Mirrors v1's
+    pointers), ``.git/`` and ``dvc.lock`` (pipeline lockfile). Mirrors v1's
     ``discover_dvc_targets`` (mintd/utils/dvc_guards.py) for the .dvc-file
     half; pipeline-stage names from ``dvc.yaml`` are NOT included because
     fast-sync's ``classify_targets`` cannot consume them — such targets
@@ -713,9 +717,9 @@ def discover_all_outs(project_path: Path) -> list[str]:
     """
     results: list[str] = []
     for dirpath, dirnames, filenames in os.walk(project_path, followlinks=False):
-        # Prune .dvc/ internals in-place so os.walk doesn't descend.
-        if ".dvc" in dirnames:
-            dirnames.remove(".dvc")
+        # Prune .dvc/ internals in-place so os.walk doesn't descend; dvc never
+        # reads .git/ either, where a branch or tag named `*.dvc` is a ref file.
+        dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")]
         for name in filenames:
             if not name.endswith(".dvc") or name == "dvc.lock":
                 continue

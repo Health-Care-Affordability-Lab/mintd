@@ -7,8 +7,10 @@ query check_project() instead of re-implementing checks.
 Findings are split into three sections, by which artifact they read:
 
   - producer: derivable from metadata.json alone — shape, required fields,
-    Owner × Audience consistency, storage config sanity. This is what a
-    project owner is responsible for getting right before publishing.
+    Owner × Audience consistency, storage config sanity — plus, when `.dvc/`
+    exists, the project's own DVC pointers and dvc.lock: every declared
+    output must be one `mintd data import` can actually land. This is what
+    a project owner is responsible for getting right before publishing.
   - consumer: derivable from imports.yaml and the resolved producer metadata
     of upstream projects — pin resolvability, version compatibility. This is
     what a project owner is responsible for keeping current as upstreams move.
@@ -42,7 +44,10 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
-from ._fast_sync_ops import resolve_out, stage_wdir, wdir_map
+# `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
+# so this module must never import `_cache_ops` at module level.
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._fast_sync_ops import discover_all_outs, normalize_target, resolve_out, stage_wdir, wdir_map
 from ._registry_git_ops import GitOpError
 from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
@@ -62,6 +67,35 @@ ProducerViewFactory = Callable[[str, str], "ProducerView | ProducerError"]
 # code/project repo publishes no consumable data product, and an enclave
 # resolves *upstream* producers' primaries rather than publishing its own.
 PRIMARY_REQUIRED_TYPES: frozenset[str] = frozenset({"data"})
+
+# The delivery gate's finding kinds, keyed by what `_dvc_state.delivery` found.
+# "pinned" and "via_parent" map to nothing on purpose: a subpath under a pinned
+# `.dir` out is undecidable offline (its manifest is an S3 object), a warning
+# there would print on every subpath of every healthy directory out and block
+# nothing, and the clone lane's postcondition reports a missing subpath the
+# moment it is decidable. UNPINNED and PARTIAL share one kind — same repair;
+# the message names the count and the files.
+_DeliveryKind = Literal[
+    "data_products_output_untracked",
+    "data_products_output_not_pullable",
+    "data_products_output_unpinned",
+    "data_products_output_missing_from_manifest",
+]
+_UNDELIVERABLE_KINDS: dict[DeliveryState, _DeliveryKind] = {
+    "untracked": "data_products_output_untracked",
+    "not_pullable": "data_products_output_not_pullable",
+    "unpinned": "data_products_output_unpinned",
+    "partial": "data_products_output_unpinned",
+    "missing_from_manifest": "data_products_output_missing_from_manifest",
+}
+
+# dvc deletes a stage's outputs before it runs the stage's command
+# (`Stage.run` -> `remove_outs`). A file placed there by hand is in neither git
+# (the scaffold ignores /data/**) nor the DVC cache, so every hint that leads a
+# producer to run a stage carries this warning.
+_STAGE_RUN_DELETES = (
+    "dvc deletes a stage's outputs before it runs, so first move anything you placed there by hand somewhere safe"
+)
 
 # ---------------------------------------------------------------------------
 # Finding type
@@ -95,6 +129,11 @@ class CheckFinding:
         "storage_bucket_empty",
         "data_products_primary_missing",
         "data_products_primary_mismatch",
+        "data_products_output_untracked",
+        "data_products_output_not_pullable",
+        "data_products_output_unpinned",
+        "data_products_output_missing_from_manifest",
+        "dvc_state_unreadable",
         "repository_github_url_missing",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
@@ -127,16 +166,45 @@ def check_project(
     Slice 6 added: env hygiene (dvc/git/gh), --upgrades network checks.
     """
     findings = _producer_findings(path)
-    findings.extend(
-        _consumer_findings(
-            path,
-            upgrades=upgrades,
-            producer_view_factory=producer_view_factory,
-            client=client,
-            fetcher=fetcher,
+    try:
+        findings.extend(
+            _consumer_findings(
+                path,
+                upgrades=upgrades,
+                producer_view_factory=producer_view_factory,
+                client=client,
+                fetcher=fetcher,
+            )
         )
-    )
+    except Exception as exc:
+        # The consumer walk parses dvc.lock and the pointers under
+        # data/imports/. When it fails and the producer section has already
+        # named an unreadable DVC file, report that the imports went unchecked
+        # instead of a traceback; any other failure is a real bug and
+        # propagates. Reading the fact (did the walk fail?) rather than
+        # predicting it from file paths keeps every consumer finding the walk
+        # CAN compute -- `--bump` reads them.
+        if not any(f.kind == "dvc_state_unreadable" for f in findings):
+            raise
+        findings.append(
+            CheckFinding(
+                severity="error",
+                section="consumer",
+                message=f"imports were not checked: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}",
+                kind="dvc_state_unreadable",
+                hint="fix the unreadable DVC file reported above, then re-run 'mintd check'.",
+            )
+        )
     return findings
+
+
+def consumer_walk_failure(findings: list[CheckFinding]) -> str | None:
+    """Why the consumer findings are missing, when an unreadable DVC file
+    stopped the consumer walk: the bump verbs report this instead of "no
+    consumer finding" for an import that exists."""
+    if not any(f.section == "consumer" and f.kind == "dvc_state_unreadable" for f in findings):
+        return None
+    return "; ".join(f.message for f in findings if f.kind == "dvc_state_unreadable")
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +213,9 @@ def check_project(
 
 
 def _producer_findings(project_path: Path) -> list[CheckFinding]:
-    """Producer-section checks: everything derivable from metadata.json alone."""
+    """Producer-section checks: everything derivable from metadata.json alone,
+    plus — when `.dvc/` exists — whether its declared outputs are ones DVC can
+    deliver, read from the project's own pointers and dvc.lock."""
     from ._storage_state import StorageState, inspect_storage, repair_hint
 
     metadata_path = project_path / "metadata.json"
@@ -217,6 +287,61 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
     if meta:
         findings.extend(_check_data_products_primary(meta, metadata_path))
         findings.extend(_check_repository_identity(meta, metadata_path))
+        # No `.dvc/` means no DVC truth to compare the declaration against
+        # (`mintd init` always creates one); a bare metadata.json is not a
+        # product that promised anything DVC-delivered.
+        if (project_path / ".dvc").is_dir():
+            # `check`, `publish` and `register` all route through here. A
+            # dvc.yaml, dvc.lock or pointer file dvc itself would reject (a
+            # bad merge's conflict markers, a hand edit) is this project's
+            # defect to report by name -- not a traceback out of the gate, and
+            # not a false "untracked" for the out it should have declared.
+            # Known cost: the screen and `_all_dvc_outs` each parse every
+            # pointer with pure-Python YAML (about 1 s on the largest live
+            # product, 3-4 s at 5,000 pointers); sharing one parse is the fix
+            # if that starts to matter.
+            pointers = discover_all_outs(project_path)
+            unreadable = _unreadable_dvc_files(project_path, pointers)
+            findings.extend(
+                CheckFinding(
+                    severity="error",
+                    section="producer",
+                    message=f"could not read {rel}: {why}; declared outputs cannot be verified until it is fixed",
+                    source=project_path / rel,
+                    kind="dvc_state_unreadable",
+                    hint=(
+                        "fix the file by hand (a merge may have left conflict markers; 'git diff' shows "
+                        "them), then re-run 'mintd check'."
+                    ),
+                )
+                for rel, why in unreadable
+            )
+            if not unreadable:
+                try:
+                    findings.extend(
+                        _check_data_products_delivery(
+                            meta,
+                            project_path,
+                            metadata_path,
+                            remote_name=inspection.dvc_remote_name or "",
+                            version_aware=inspection.dvc_version_aware,
+                            pointers=pointers,
+                        )
+                    )
+                except Exception as exc:
+                    # The screen above checks shape, not every value; whatever
+                    # the parsers still reject is dvc.lock's (pointer errors
+                    # are swallowed into "no outs" upstream).
+                    findings.append(
+                        CheckFinding(
+                            severity="error",
+                            section="producer",
+                            message=f"could not read dvc.lock: {exc}; declared outputs cannot be verified until it is fixed",
+                            source=project_path / "dvc.lock",
+                            kind="dvc_state_unreadable",
+                            hint="fix the entry by hand, then re-run 'mintd check'.",
+                        )
+                    )
 
     return findings
 
@@ -278,6 +403,224 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
         )
     return findings
 
+
+def _check_data_products_delivery(
+    meta: Metadata,
+    project_path: Path,
+    metadata_path: Path,
+    *,
+    remote_name: str,
+    version_aware: bool,
+    pointers: list[str] | None = None,
+) -> list[CheckFinding]:
+    """One error per declared output path that `mintd data import` could not
+    land, judged by `_dvc_state.delivery` from the working tree's pointers
+    alone (committed or not).
+
+    Before this gate the producer's own `check` compared `primary` against
+    `outputs[]` as text and never asked DVC: a product could declare a path
+    DVC tracks nowhere, or one pushed before its remote became version-aware
+    (no S3 version IDs), pass `check`, publish, and hand every consumer an
+    empty directory at exit 0.
+
+    The declared set is the primary first, then `outputs[].path`, deduplicated
+    on the normalized spelling — `data/final/` and `data/final` are one path,
+    and the primary is usually also an outputs[] row — so each undeliverable
+    path is reported once, under the field that declares it first.
+    """
+    declared: dict[str, tuple[str, str]] = {}
+    primary = meta.data_products.primary
+    if primary and normalize_target(primary):
+        declared[normalize_target(primary)] = (primary, "data_products.primary")
+    for i, out in enumerate(meta.data_products.outputs):
+        key = normalize_target(out.path)
+        if key:
+            declared.setdefault(key, (out.path, f"data_products.outputs[{i}].path"))
+    if not declared:
+        return []
+
+    outs = _all_dvc_outs(project_path, remote_name, pointers=pointers)  # one workspace walk per check
+    findings: list[CheckFinding] = []
+    for path, field_path in declared.values():
+        verdict = delivery(project_path, path, remote_name, version_aware=version_aware, outs=outs)
+        if verdict.deliverable:
+            continue
+        what = (
+            "is not a DVC-tracked output"
+            if verdict.state == "untracked"
+            else "cannot be delivered by 'mintd data import'"
+        )
+        findings.append(
+            CheckFinding(
+                severity="error",
+                section="producer",
+                message=f"{path!r} {what}: {verdict.detail}",
+                field_path=field_path,
+                source=metadata_path,
+                kind=_UNDELIVERABLE_KINDS[verdict.state],
+                hint=_delivery_hint(verdict, path, remote_name, project_path),
+            )
+        )
+    return findings
+
+
+def _delivery_hint(verdict: Delivery, path: str, remote_name: str, project_path: Path) -> str:
+    """One hint per state: the facts a producer needs, and the repairs.
+    Shape-specific commands are deliberately not prescribed -- `dvc add`
+    refuses a path a stage declares -- so the producer, who knows which shape
+    they have, chooses; a repair that runs a stage carries
+    `_STAGE_RUN_DELETES`."""
+    if verdict.state == "untracked":
+        rel = normalize_target(path)
+        twins = [t for t in verdict.tracked if path_covers(t, rel) or path_covers(rel, t)]
+        if twins:
+            return (
+                f"DVC tracks {abbreviate(twins)}; the declaration differs from it only by case, "
+                "which a case-sensitive consumer's filesystem treats as a different path. "
+                "Declare the spelling DVC tracks."
+            )
+        facts = [f"DVC tracks nothing at {path!r}"]
+        stage = _pipeline_stage_declaring(project_path, path)
+        if stage:
+            facts.append(f"dvc.yaml stage {stage!r} declares it but dvc.lock has no entry for it")
+        if verdict.tracked:
+            facts.append(f"tracked: {abbreviate(verdict.tracked)}")
+        return (
+            "; ".join(facts) + ". Declare a path DVC tracks, or track this one: for a dvc.yaml "
+            f"output, run the stage that produces it ({_STAGE_RUN_DELETES}); for a loose file, "
+            "'mintd data add'. Then 'mintd data push' and commit the pointer or dvc.lock."
+        )
+    if verdict.state == "not_pullable":
+        return (
+            f"dvc never pushes {abbreviate(verdict.unpullable)}: 'cache: false' in dvc.yaml, or a "
+            "'dvc import' whose bytes live in the source repo's bucket. Drop 'cache: false' (then "
+            "'dvc commit' and 'mintd data push'), declare the source product instead of the import, "
+            "or remove this outputs[] entry."
+        )
+    if verdict.state == "missing_from_manifest":
+        stage = _pipeline_stage_declaring(project_path, path)
+        owner = (
+            f"the stage {stage!r} that owns it; {_STAGE_RUN_DELETES}"
+            if stage
+            else "the 'mintd data add' that tracks it"
+        )
+        return (
+            f"the directory out above {path!r} is tracked but holds nothing at that name. Remove this "
+            f"outputs[] entry, or make the file part of the directory out (through {owner}) and "
+            "'mintd data push'."
+        )
+    return (
+        f"remote {remote_name!r} is version_aware, so a consumer's pull needs an S3 version ID "
+        f"recorded under that remote; none is for {abbreviate(verdict.unpinned)}. Run 'mintd data "
+        "push' from this project, then commit the rewritten .dvc / dvc.lock files."
+    )
+
+
+def _unreadable_dvc_files(project_path: Path, pointers: list[str]) -> list[tuple[str, str]]:
+    """``(file, why)`` for every DVC file dvc itself could not read: dvc.yaml,
+    dvc.lock and each ``*.dvc`` pointer that is not YAML (a merge's conflict
+    markers are the common case) or not the shape dvc writes. The parsers
+    downstream swallow these into "no outs", which is right for a pull lane
+    choosing a fallback route and wrong for a gate that would then call the
+    file's out untracked -- or, for the consumer walk, traceback.
+
+    Shape is checked only as far as the parsers assume it: dvc.yaml lists
+    outs as strings or ``{path: options}`` mappings (under ``do:`` for a
+    foreach stage); dvc.lock and pointers list outs as mappings.
+    """
+    bad: list[tuple[str, str]] = []
+
+    def load(rel: str) -> tuple[bool, object]:
+        try:
+            return True, yaml.safe_load((project_path / rel).read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            bad.append((rel, "not UTF-8 text (dvc writes UTF-8)"))
+            return False, None
+        except Exception as exc:  # any reason the parse fails: yaml's own errors, an impossible date's ValueError
+            why = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            bad.append((rel, f"not readable as YAML ({why})"))
+            return False, None
+
+    def outs_ok(block: object, *, strings_allowed: bool) -> bool:
+        if not isinstance(block, dict):
+            return False
+        keys = ("outs", "metrics", "plots") if strings_allowed else ("outs",)
+        for key in keys:
+            outs = block.get(key)
+            if outs is None:
+                continue
+            if not isinstance(outs, list):
+                return False
+            for out in outs:
+                if not (isinstance(out, dict) or (strings_allowed and isinstance(out, str))):
+                    return False
+        return True
+
+    def stages_ok(doc: object, *, strings_allowed: bool) -> bool:
+        if doc is None:
+            return True  # an empty file declares nothing
+        if not isinstance(doc, dict):
+            return False
+        stages = doc.get("stages")
+        if stages is None:
+            return True
+        if not isinstance(stages, dict):
+            return False
+        for stage in stages.values():
+            body = stage.get("do", stage) if (strings_allowed and isinstance(stage, dict)) else stage
+            if not outs_ok(body, strings_allowed=strings_allowed):
+                return False
+        return True
+
+    for rel, strings_allowed in (("dvc.yaml", True), ("dvc.lock", False)):
+        if not (project_path / rel).is_file():
+            continue
+        ok, doc = load(rel)
+        if ok and not stages_ok(doc, strings_allowed=strings_allowed):
+            bad.append((rel, "not in the shape dvc writes"))
+    for rel in pointers:
+        ok, doc = load(rel)
+        if not ok:
+            continue
+        if doc is None:
+            bad.append((rel, "empty"))
+        elif not isinstance(doc, dict) or doc.get("outs") is None or not outs_ok(doc, strings_allowed=False):
+            bad.append((rel, "not in the shape dvc writes"))
+    return bad
+
+
+def _pipeline_stage_declaring(project_path: Path, declared: str) -> str | None:
+    """The dvc.yaml stage that declares an out at, under or above ``declared``,
+    if any. Such a path is one the pipeline promises but has never produced —
+    no dvc.lock entry, so `_all_dvc_outs` cannot see it — which is every fresh
+    scaffold the moment its primary is filled in. ``dvc add`` refuses it
+    ("overlaps with an output of stage"), so the repair is running the stage.
+    Templated outs (``${item}``) expand per foreach instance and are not
+    matched here."""
+    try:
+        doc = yaml.safe_load((project_path / "dvc.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return None
+    stages = doc.get("stages") if isinstance(doc, dict) else None
+    if not isinstance(stages, dict):
+        return None
+    rel = normalize_target(declared)
+    wdirs = wdir_map(doc)
+    for stage, stage_data in stages.items():
+        body = stage_data.get("do", stage_data) if isinstance(stage_data, dict) else None
+        wdir = wdirs.get(str(stage))
+        if not isinstance(body, dict) or wdir is None:
+            continue
+        for key in ("outs", "metrics", "plots"):
+            entries = body.get(key)
+            for entry in entries if isinstance(entries, list) else []:
+                for raw in entry.keys() if isinstance(entry, dict) else [entry]:
+                    if not isinstance(raw, str) or "${" in raw:
+                        continue
+                    out = resolve_out(wdir, raw)
+                    if path_covers(out, rel) or path_covers(rel, out):
+                        return str(stage)
+    return None
 
 
 def _consumer_findings(

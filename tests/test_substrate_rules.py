@@ -125,7 +125,7 @@ def _scan_double_targets() -> dict[str, int]:
 
     Neither half is optional. Restricting the receiver to ``monkeypatch``
     silently drops ``tests/test_pre_units_journey.py:286``; dropping ``patch``
-    silently drops 30 sites, 17 of them banned-class, and leaves the ratchet
+    silently drops 29 sites, 16 of them banned-class, and leaves the ratchet
     evadable by a one-word change of mechanism.
     """
     counts: collections.Counter[str] = collections.Counter()
@@ -179,11 +179,10 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
     grandfathered internal stub, pinned here by set equality so the set can
     only shrink.
 
-    Both string-form mechanisms count. ``monkeypatch.setattr`` supplies 113
-    of the 130 banned sites and ``unittest.mock.patch`` the other 17
-    (``_fast_sync_ops._check_dvc`` 15, ``_fast_sync_ops.boto3`` 1,
-    ``publish.check_project`` 1); ``patch`` is house style in
-    ``test_publish.py`` / ``test_fast_sync.py`` / ``test_config.py``, so
+    Both string-form mechanisms count. ``monkeypatch.setattr`` supplies 114
+    of the 130 banned sites and ``unittest.mock.patch`` the other 16
+    (``_fast_sync_ops._check_dvc`` 15, ``_fast_sync_ops.boto3`` 1); ``patch``
+    is house style in ``test_fast_sync.py`` / ``test_config.py``, so
     scanning only ``setattr`` would leave the ratchet evadable by a one-word
     change of mechanism.
 

@@ -2,16 +2,16 @@ import json
 import subprocess
 import pytest
 from pathlib import Path
-from unittest.mock import patch
 from mintd.publish import (
-    publish_project, CatalogUpdateFailed, DvcPushFailed, ProjectPushFailed,
-    TagFailed, PublishError, VersionNotIncreasing
+    publish_project, prepare_publish, CatalogUpdateFailed, DvcPushFailed, ProjectPushFailed,
+    TagFailed, PublishBlocked, PublishError, VersionNotIncreasing
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
 from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
+from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, write_pointer
 from tests._enclave_fixtures import client_with_provider_xw, stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
@@ -67,9 +67,14 @@ def _origin_tags(proj: Path) -> list[str]:
     return out.stdout.split()
 
 @pytest.fixture(autouse=True)
-def mock_check_project():
-    with patch("mintd.publish.check_project", return_value=[]):
-        yield
+def mock_check_project(monkeypatch):
+    # `monkeypatch`, not a `unittest.mock.patch` context: the tests below that
+    # put the REAL check_project back do so through `monkeypatch`, and with
+    # two mechanisms the undo ran in the wrong order -- the patch context
+    # exited first (restoring the real function), then monkeypatch's undo
+    # re-installed the mock it had seen, leaving `mintd.publish.check_project`
+    # mocked for the rest of the session. One mechanism, one undo stack.
+    monkeypatch.setattr("mintd.publish.check_project", lambda *a, **kw: [])
 
 def test_publish_dry_run_returns_diff(tmp_path):
     proj = _seed_project(tmp_path)
@@ -1046,3 +1051,172 @@ def test_republish_still_fails_when_the_tag_is_on_another_commit(tmp_path):
 
     with pytest.raises(TagFailed):
         _publish(proj)
+
+
+def _commit_count(proj: Path) -> int:
+    out = subprocess.run(["git", "log", "--oneline"], cwd=proj, check=True, capture_output=True, text=True).stdout
+    return len(out.strip().splitlines())
+
+
+class TestDeliveryGate:
+    """The module's autouse `mock_check_project` stubs the gate out of every
+    test above. Overriding that fixture BY NAME at class scope puts the real
+    `check_project` back for this class without a second patch site -- the
+    substrate census pins `mintd.publish.check_project` at exactly its
+    current count."""
+
+    @pytest.fixture(autouse=True)
+    def mock_check_project(self):
+        yield
+
+    def test_prepare_publish_is_blocked_by_an_untracked_output(self, tmp_path):
+        """The free consequence of an error finding: `prepare_publish` raises
+        before it touches git or the catalog, so a product that declares a
+        path DVC tracks nowhere cannot be advertised.
+
+        Mutation: severity "warning" in `_check_data_products_delivery` -> no
+        raise, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_dvc_project(proj)  # declares data/final/, tracks nothing
+
+        with pytest.raises(PublishBlocked) as excinfo:
+            prepare_publish(
+                project_path=proj,
+                version=None,
+                dry_run=True,
+                client=_FakeCatalogClient(),
+                git_ops=_FakeRegistryGitOps(),
+            )
+
+        assert [f.kind for f in excinfo.value.findings] == ["data_products_output_untracked"]
+
+    def test_prepare_publish_lets_an_unpinned_output_through_to_its_own_push(self, tmp_path):
+        """A tracked output with no S3 version ID is what publish's own
+        `dvc push` records and `commit_all` commits -- the ordinary state
+        after `dvc repro` + commit. Refusing it here would break every release
+        that ships new data; the post-push re-check below is where it is held.
+
+        Mutation: drop the `kind != "data_products_output_unpinned"` exemption
+        in `prepare_publish` -> PublishBlocked, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+
+        preview = prepare_publish(
+            project_path=proj,
+            version=None,
+            dry_run=True,
+            client=_FakeCatalogClient(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+        assert preview.new_version == "0.1.1"
+
+    def test_publish_releases_an_output_its_own_push_pins(self, tmp_path):
+        """The path the exemption and the re-check exist for: tracked but
+        unpinned before the push, pinned by it, then committed and tagged with
+        the rewritten pointer.
+
+        Mutation: run the re-check BEFORE `dvc_ops.push` -> it sees the
+        pre-push state and refuses a push that worked, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+
+        class _PushPinsTheOutput(_FakeDvcOps):
+            def push(self, *, cwd, **kw):
+                result = super().push(cwd=cwd, **kw)
+                write_pointer(cwd, "data/final", files={"a.parquet": "v-1"})
+                return result
+
+        git = _FakeRegistryGitOps()
+
+        result = publish_project(
+            project_path=proj,
+            version="0.1.1",
+            client=_FakeCatalogClient(),
+            dvc_ops=_PushPinsTheOutput(),
+            git_ops=git,
+        )
+
+        assert result.tagged
+        assert [t.name for t in git.tag_calls] == ["v0.1.1"]
+        committed = subprocess.run(
+            ["git", "show", "HEAD:data/final.dvc"], cwd=proj, check=True, capture_output=True, text=True
+        ).stdout
+        assert "version_id: v-1" in committed
+
+    def test_publish_refuses_a_push_that_pinned_nothing(self, tmp_path):
+        """The push is what pins outputs on a version-aware remote. When it
+        reports success and the lock still carries no version ID (the fake
+        push writes nothing, like a push that silently moved nothing), publish
+        must stop before commit, tag or catalog: metadata rolled back, no tag.
+
+        Mutation: drop the post-push re-check in `_apply_publish` -> the
+        release is tagged unpinned, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+        dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
+
+        with pytest.raises(DvcPushFailed) as excinfo:
+            publish_project(
+                project_path=proj,
+                version="0.1.1",
+                client=_FakeCatalogClient(),
+                dvc_ops=dvc,
+                git_ops=git,
+            )
+
+        assert "dvc push reported success but" in str(excinfo.value)
+        assert "nothing was committed, tagged or advertised" in excinfo.value.recovery_hint
+        assert len(dvc.push_calls) == 1
+        assert git.tag_calls == []
+        assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
+        assert _commit_count(proj) == 2  # initial + "declare and track": nothing committed by publish
+
+    def test_publish_refuses_when_the_push_reveals_a_subpath_the_manifest_lacks(self, tmp_path):
+        """A verdict can CHANGE across the push: a declared subpath under a
+        legacy unpinned `.dir` out reads as unpinned before the push (and is
+        exempted), and a version-aware push writes the pointer back as a
+        files-format manifest -- which may not hold that subpath. The
+        post-push gate must block on whatever is wrong then, not only on the
+        kind it exempted.
+
+        Mutation: filter the post-push re-check to the unpinned kind -> the
+        release is tagged with an undeliverable row, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_dvc_project(proj, declared=("data/final/", "data/final/summary.csv"))
+        write_pointer(proj, "data/final", is_dir=True, version_id=None)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+
+        class _PushWritesTheManifestBack(_FakeDvcOps):
+            def push(self, *, cwd, **kw):
+                result = super().push(cwd=cwd, **kw)
+                write_pointer(cwd, "data/final", files={"a.parquet": "v-1"})  # summary.csv is not in it
+                return result
+
+        dvc, git = _PushWritesTheManifestBack(), _FakeRegistryGitOps()
+
+        with pytest.raises(DvcPushFailed) as excinfo:
+            publish_project(
+                project_path=proj,
+                version="0.1.1",
+                client=_FakeCatalogClient(),
+                dvc_ops=dvc,
+                git_ops=git,
+            )
+
+        assert "data/final/summary.csv" in str(excinfo.value)
+        # The push rewrote data/final.dvc with fresh S3 version IDs; the hint
+        # must say to keep it, not leave a stash or checkout to discard them.
+        assert "keep them and commit them with your fix" in excinfo.value.recovery_hint
+        assert git.tag_calls == []
+        assert _commit_count(proj) == 2

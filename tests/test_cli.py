@@ -29,6 +29,7 @@ from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
 from mintd._registry_git_ops import GitOpError
+from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
@@ -2119,6 +2120,31 @@ def test_cli_publish_dry_run_renders_diff(
     assert rc == 0
     assert "About to publish" in err
     assert "Primary output:" in err
+
+def test_cli_publish_dry_run_names_the_outputs_its_push_must_pin(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    patched_clients,
+    patched_git_ops,
+) -> None:
+    """`check` errors on an unpinned output; publish lets it through because
+    its own push is what pins it. The preview says so instead of a silent
+    exit 0 that disagrees with `check`.
+
+    Mutation: drop the `preview.unpinned` block in `_render_publish_preview`
+    -> reddens.
+    """
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_undeliverable_primary(tmp_path)
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert "Not yet pinned" in err
+    assert "'data/final/' cannot be delivered by 'mintd data import'" in err
+
 
 def test_cli_publish_blocked_by_check_errors_exits_one(
     tmp_path: Path,
@@ -4658,3 +4684,72 @@ def test_a_corrupt_registry_entry_is_an_error_not_a_traceback(
     msg = recording_reporter.events_of("error")[-1][1]
     assert "unreadable" in msg
     assert "provider-xw.yaml" in msg
+
+
+def test_check_reports_an_undeliverable_output_with_its_repair(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """End to end through `cli.main`: the delivery gate's finding renders as
+    an error line, its repair on the 💡 line, the severity footer counts it,
+    and the exit code is 1 — so a CI step running `mintd check` fails on a
+    product no consumer could import. Real `check_project`; `patched_clients`
+    only keeps the config and the clients off the developer's machine.
+
+    Mutation: severity "warning" in `_check_data_products_delivery` -> rc 0, reddens.
+    """
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_undeliverable_primary(tmp_path)
+
+    rc = cli.main(["check", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "no issues found" not in out
+    assert "cannot be delivered by 'mintd data import'" in out
+    assert "💡" in out and "mintd data push" in out
+    assert "1 error(s), 0 warning(s)" in out
+
+
+def test_check_reports_an_unreadable_dvc_lock_without_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """The delivery gate reads dvc.lock on every `check`; a lock dvc itself
+    would reject must come out as an error line and exit 1, never as a
+    traceback (the standing rule for every documented failure path)."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_dvc_project(tmp_path)
+    (tmp_path / "dvc.yaml").write_text(
+        "stages:\n  build:\n    cmd: run\n    outs:\n    - data/final\n", encoding="utf-8"
+    )
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - data/final\n", encoding="utf-8"
+    )
+
+    rc = cli.main(["check", str(tmp_path)])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert "could not read dvc.lock" in captured.out
+    assert "Traceback" not in captured.out + captured.err
+
+
+def test_registry_register_refuses_an_output_without_version_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """`register` advertises the product and pushes nothing, so unlike
+    `publish` it has no later step that could pin the outputs: the unpinned
+    state blocks it outright. Real `check_project` through the real handler."""
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_undeliverable_primary(tmp_path)
+    client, _ = patched_clients
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "cannot be delivered by 'mintd data import'" in out
+    # Following a "publish does it" hint from here burns a version: publish
+    # pushes, commits and tags, then fails on the missing catalog entry.
+    assert "mintd publish" not in out
+    with pytest.raises(CatalogNotFound):
+        client.fetch("test_project")

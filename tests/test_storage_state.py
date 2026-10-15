@@ -26,14 +26,21 @@ def _write_metadata(tmp_path: Path, storage: dict | None) -> None:
     (tmp_path / "metadata.json").write_text(json.dumps(body))
 
 
-def _write_dvc_config(tmp_path: Path, *, remote: str, url: str, quoted: bool = False) -> None:
+def _write_dvc_config(
+    tmp_path: Path,
+    *,
+    remote: str,
+    url: str,
+    quoted: bool = False,
+    version_aware: str | None = None,
+) -> None:
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True, exist_ok=True)
     section = f"'remote \"{remote}\"'" if quoted else f'remote "{remote}"'
-    cfg.write_text(
-        f"[core]\n    remote = {remote}\n"
-        f"[{section}]\n    url = {url}\n"
-    )
+    body = f"[core]\n    remote = {remote}\n[{section}]\n    url = {url}\n"
+    if version_aware is not None:
+        body += f"    version_aware = {version_aware}\n"
+    cfg.write_text(body)
 
 
 # ---------- classifier ----------------------------------------------
@@ -188,3 +195,61 @@ def test_compute_storage_prefix_rejects_unknown_tier() -> None:
             classification="contract",  # type: ignore[arg-type]
             project_name="data_foo",
         )
+
+
+# ---------- version_aware reader -------------------------------------
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, False), ("true", True), ("True", True), ("false", False), ("maybe", False),
+        ("%true", False), ("true  # since the bucket got versioning", True), ('"true"', True),
+    ],
+    ids=["absent", "true", "True", "false", "garbage", "percent", "inline-comment", "quoted"],
+)
+def test_inspect_storage_reads_version_aware(
+    tmp_path: Path, value: str | None, expected: bool
+) -> None:
+    """`dvc remote modify <r> version_aware true` writes the lowercase word; a
+    hand-edited value configparser cannot read is the md5 layout, never a
+    traceback out of a read-only classifier -- including a `%`, which the
+    parser's default interpolation would otherwise raise on. dvc's own reader
+    strips an inline comment and quotes, so those read as dvc reads them.
+
+    Mutations: `_version_aware` returning True unconditionally reddens `absent`
+    and `garbage`; returning False reddens `true`.
+    """
+    _write_metadata(tmp_path, None)
+    _write_dvc_config(tmp_path, remote="p", url="s3://b/p/", version_aware=value)
+
+    assert inspect_storage(tmp_path).dvc_version_aware is expected
+
+
+def test_inspect_storage_reads_version_aware_in_the_quoted_header_form(tmp_path: Path) -> None:
+    """The flag lives under whichever header spelling dvc used for the remote."""
+    _write_metadata(tmp_path, None)
+    _write_dvc_config(tmp_path, remote="p", url="s3://b/p/", quoted=True, version_aware="true")
+
+    assert inspect_storage(tmp_path).dvc_version_aware is True
+
+
+@pytest.mark.parametrize(
+    "extra,expected",
+    [("    worktree = true\n", True), ("    worktree = true\n    version_aware = false\n", False)],
+    ids=["worktree-implies-version-aware", "explicit-false-wins"],
+)
+def test_inspect_storage_treats_a_worktree_remote_as_version_aware(
+    tmp_path: Path, extra: str, expected: bool
+) -> None:
+    """dvc turns `version_aware` on for a `worktree = true` remote that does
+    not set it (`data_cloud.get_remote`), so its pulls need per-file version
+    IDs exactly like an explicit `version_aware = true` remote.
+
+    Mutation: read only the `version_aware` key -> the first row reddens.
+    """
+    _write_metadata(tmp_path, None)
+    _write_dvc_config(tmp_path, remote="p", url="s3://b/p/")
+    cfg = tmp_path / ".dvc" / "config"
+    cfg.write_text(cfg.read_text() + extra)
+
+    assert inspect_storage(tmp_path).dvc_version_aware is expected

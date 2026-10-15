@@ -130,12 +130,16 @@ mintd init data my-cleaned-survey
 cd data_my-cleaned-survey
 
 # Edit metadata.json (description, contact, data_products.outputs, …)
-# Then validate before you commit:
-mintd check
 
-# Track outputs with DVC, push the bytes:
-mintd data add data/final/survey.parquet
+# Produce the outputs and push the bytes. The scaffold's pipeline owns
+# data/final/: `dvc repro` rebuilds it from data/raw/ and deletes anything
+# placed there by hand, so keep source files in data/raw/:
+dvc repro
 mintd data push
+
+# Validate before you commit. check also errors on any declared output DVC
+# cannot deliver to importers (untracked, or pushed without S3 version IDs):
+mintd check
 
 # Announce the project to the lab registry (opens a PR):
 mintd registry register
@@ -288,7 +292,7 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
-mintd check    [path] [--upgrades]                Validate metadata + (optionally) pins
+mintd check    [path] [--upgrades]                Validate metadata, output delivery + (optionally) pins
 mintd data     import|clone|pull|push|add|verify|remove|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff

@@ -6,13 +6,16 @@ itself lives in `tests/test_harness_contract.py`
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from mintd._dvc_state import outs_matching
+from mintd._dvc_state import delivery, outs_matching
+from mintd._fast_sync_ops import EMPTY_DIR_MD5
+from tests._dvc_fixtures import REMOTE, write_pipeline, write_pointer
 
 # ---------------------------------------------------------------------------
 # builders
@@ -286,3 +289,182 @@ def test_dvc_state_has_no_import_cycle() -> None:
             capture_output=True, text=True,
         )
         assert r.returncode == 0, f"{order!r} failed:\n{r.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# `delivery` — would `mintd data import <declared>` land bytes?
+#
+# Still the pure tier: real pointer files, no `.dvc/config` (the CALLER reads
+# the version_aware flag and passes it), no doubles. The shared writers come
+# from `tests/_dvc_fixtures.py` because the gate, CLI and publish tests author
+# the same shapes.
+# ---------------------------------------------------------------------------
+
+
+def _dir_pointer(project: Path, *, version_id: str | None) -> None:
+    write_pointer(project, "data/final", is_dir=True, version_id=version_id)
+
+
+def _two_pointers(project: Path, *, b_version_id: str | None) -> None:
+    write_pointer(project, "data/final/a.csv")
+    write_pointer(project, "data/final/b.csv", version_id=b_version_id)
+
+
+# (id, setup, declared, version_aware, expected state)
+_DELIVERY_ROWS = [
+    ("untracked-va", lambda p: write_pointer(p, "data/raw.csv"), "data/final/", True, "untracked"),
+    ("untracked-md5", lambda p: write_pointer(p, "data/raw.csv"), "data/final/", False, "untracked"),
+    ("not-pullable-cache-false-va", lambda p: write_pipeline(p, "data/final/x.csv", cache=False),
+     "data/final/x.csv", True, "not_pullable"),
+    ("not-pullable-cache-false-md5", lambda p: write_pipeline(p, "data/final/x.csv", cache=False),
+     "data/final/x.csv", False, "not_pullable"),
+    ("not-pullable-import", lambda p: write_pointer(p, "data/final", is_dir=True, imported=True),
+     "data/final/", True, "not_pullable"),
+    ("unpinned-dir-no-files-va", lambda p: _dir_pointer(p, version_id=None), "data/final/", True, "unpinned"),
+    ("dir-no-files-on-md5-remote", lambda p: _dir_pointer(p, version_id=None), "data/final/", False, "pinned"),
+    ("dir-pinned", lambda p: _dir_pointer(p, version_id="v-1"), "data/final/", True, "pinned"),
+    ("partial-per-file-pointers", lambda p: _two_pointers(p, b_version_id=None), "data/final/", True, "partial"),
+    ("per-file-pointers-on-md5-remote", lambda p: _two_pointers(p, b_version_id=None), "data/final/", False, "pinned"),
+    ("pinned-per-file-pointers", lambda p: _two_pointers(p, b_version_id="v-2"), "data/final/", True, "pinned"),
+    ("missing-from-manifest-va", lambda p: write_pointer(p, "data/final", files={"a.csv": "v-1"}),
+     "data/final/b.csv", True, "missing_from_manifest"),
+    ("missing-from-manifest-md5", lambda p: write_pointer(p, "data/final", files={"a.csv": "v-1"}),
+     "data/final/b.csv", False, "missing_from_manifest"),
+    ("files-subpath-pinned", lambda p: write_pointer(p, "data/final", files={"a.csv": "v-1"}),
+     "data/final/a.csv", True, "pinned"),
+    ("files-subpath-unpinned-va", lambda p: write_pointer(p, "data/final", files={"a.csv": None}),
+     "data/final/a.csv", True, "unpinned"),
+    ("files-subpath-unpinned-md5", lambda p: write_pointer(p, "data/final", files={"a.csv": None}),
+     "data/final/a.csv", False, "pinned"),
+    ("via-parent-pinned-dir", lambda p: _dir_pointer(p, version_id="v-1"), "data/final/x.csv", True, "via_parent"),
+    ("via-parent-unpinned-dir-va", lambda p: _dir_pointer(p, version_id=None), "data/final/x.csv", True, "unpinned"),
+    ("via-parent-unpinned-dir-md5", lambda p: _dir_pointer(p, version_id=None), "data/final/x.csv", False, "via_parent"),
+    ("via-parent-cache-false-lock-dir", lambda p: write_pipeline(p, "data/final", cache=False),
+     "data/final/x.csv", True, "not_pullable"),
+    ("empty-dir-files-format", lambda p: write_pointer(p, "data/final", files={}), "data/final/", True, "pinned"),
+    ("empty-dir-md5", lambda p: write_pointer(p, "data/final", is_dir=True, version_id=None, md5=EMPTY_DIR_MD5[:-4]),
+     "data/final/", True, "pinned"),
+    # a files-format parent dvc never pushes: its manifest says nothing about delivery
+    ("via-parent-import-files-parent", lambda p: write_pointer(p, "data/final", files={"x.csv": "v-1"}, imported=True),
+     "data/final/x.csv", True, "not_pullable"),
+    ("via-parent-cache-false-files-lock", lambda p: write_pipeline(p, "data/final", cache=False, files={"x.csv": "v-1"}),
+     "data/final/x.csv", True, "not_pullable"),
+    # a never-pushed out BESIDE pullable siblings is not part of the promise:
+    # a pipeline's uncached metric commonly lives under data/final/
+    ("mixed-cache-false-sibling-va", lambda p: (write_pointer(p, "data/final/a.csv"),
+                                                write_pipeline(p, "data/final/b.csv", cache=False)),
+     "data/final/", True, "pinned"),
+    ("mixed-cache-false-sibling-md5", lambda p: (write_pointer(p, "data/final/a.csv"),
+                                                 write_pipeline(p, "data/final/b.csv", cache=False)),
+     "data/final/", False, "pinned"),
+    ("mixed-import-sibling", lambda p: (write_pointer(p, "data/final/a.csv"),
+                                        write_pointer(p, "data/final/b.csv", imported=True)),
+     "data/final/", True, "pinned"),
+    # the matcher folds case; delivery must not, because the consumer's filesystem may not
+    ("case-mismatch", lambda p: _dir_pointer(p, version_id="v-1"), "Data/Final/", True, "untracked"),
+    ("case-mismatch-subpath", lambda p: _dir_pointer(p, version_id="v-1"), "Data/Final/x.csv", True, "untracked"),
+    ("case-mismatch-files-subpath", lambda p: write_pointer(p, "data/final", files={"b.csv": "v-1"}),
+     "data/final/B.csv", True, "missing_from_manifest"),
+    # a parent known to hold nothing cannot be hiding the subpath
+    ("via-parent-empty-dir-md5", lambda p: write_pointer(p, "data/final", is_dir=True, md5=EMPTY_DIR_MD5[:-4]),
+     "data/final/x.csv", True, "missing_from_manifest"),
+    ("via-parent-file-out", lambda p: write_pointer(p, "data/final"),
+     "data/final/x.csv", True, "missing_from_manifest"),
+]
+
+
+@pytest.mark.parametrize("row", _DELIVERY_ROWS, ids=[r[0] for r in _DELIVERY_ROWS])
+def test_delivery_case_table(tmp_path: Path, row) -> None:
+    """One row per shape the fleet showed, times both remote layouts where
+    the layout changes the answer.
+
+    `version_aware` is load-bearing only for the pin arms: on an md5-layout
+    remote plain `dvc pull` serves any pushed out, so a missing version ID is
+    not a defect there (`*-md5` rows) — which is also why a local-directory
+    remote never trips the gate. UNTRACKED, NOT-PULLABLE and
+    MISSING-FROM-MANIFEST fire on either layout. A subpath under a `.dir` out
+    inherits that out's coverage (`via-parent-*`): an unpinned parent cannot
+    land anything beneath it, a pinned one is the offline ceiling. An out that
+    pins ZERO files is a deliverable empty directory, not a defect.
+
+    Mutations, one per arm: drop `version_aware and` -> every `*-md5` pin row
+    reddens; drop the `use_cache` / `is_import` arms of `_never_pushed` -> the
+    `not-pullable-*` rows; drop the `out_pins_no_files` arm -> `empty-dir-*`;
+    drop the `if not inside` scan -> `missing-from-manifest-*`; return
+    `via_parent` for every strict-ancestor match before the tally ->
+    `via-parent-unpinned-dir-va` and `via-parent-cache-false-lock-dir`; drop
+    the `_never_pushed` screen before the manifest scan ->
+    `via-parent-*-files-*`; make `_never_pushed` return None -> the
+    `not-pullable-*` rows; count never-pushed siblings as files -> the
+    `mixed-*` rows; set `exact = matched` -> `case-*`.
+    """
+    _, setup, declared, version_aware, expected = row
+    setup(tmp_path)
+
+    verdict = delivery(tmp_path, declared, REMOTE, version_aware=version_aware)
+
+    assert verdict.state == expected, verdict
+    assert verdict.deliverable is (expected in ("pinned", "via_parent"))
+
+
+def test_delivery_names_what_a_repair_needs(tmp_path: Path) -> None:
+    """`tracked` (untracked) and `unpinned` (partial) are what a hint prints;
+    a verdict that only carried the state would leave the producer guessing
+    which file.
+
+    Mutation: return `()` for `tracked` or stop collecting `unpinned` -> reddens.
+    """
+    write_pointer(tmp_path, "data/raw.csv")
+    untracked = delivery(tmp_path, "data/final/", REMOTE, version_aware=True)
+    assert untracked.state == "untracked"
+    assert untracked.tracked == ("data/raw.csv",)
+
+    _two_pointers(tmp_path, b_version_id=None)
+    partial = delivery(tmp_path, "data/final/", REMOTE, version_aware=True)
+    assert partial.state == "partial"
+    assert partial.unpinned == ("data/final/b.csv",)
+    assert "data/final/b.csv" in partial.detail
+
+    write_pipeline(tmp_path, "data/final/c.csv", cache=False)
+    alone = delivery(tmp_path, "data/final/c.csv", REMOTE, version_aware=True)
+    assert alone.state == "not_pullable"
+    assert alone.unpullable == ("data/final/c.csv",)
+
+
+def test_outs_matching_uses_a_passed_out_list(tmp_path: Path) -> None:
+    """A caller resolving many declared paths enumerates the workspace once
+    and passes the list in; `outs=` must be what is searched, not a hint.
+
+    Mutation: ignore the kwarg and call `_all_dvc_outs` anyway -> reddens.
+    """
+    write_pointer(tmp_path, "data/final/a.csv")
+
+    assert outs_matching(tmp_path, "data/final/", REMOTE, outs=[]) == []
+    assert [o.target for o in outs_matching(tmp_path, "data/final/", REMOTE)] == ["data/final/a.csv"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need a privilege on Windows")
+@pytest.mark.parametrize("tracked_by", ["pointer", "lock"])
+def test_delivery_keeps_a_symlinked_checkout_on_its_workspace_path(tmp_path: Path, tracked_by: str) -> None:
+    """When reflinks and hardlinks are unavailable (a cache on another
+    filesystem), dvc checks a file out as a symlink into `.dvc/cache/`.
+    Resolving that link made the out look untracked -- or vanish, with an
+    external cache -- so a delivered product failed `check`, `publish` and
+    `register`. Workspace paths are lexical now.
+
+    Mutation: resolve the path in `_workspace_rel` (pointer) or in
+    `parse_dvc_lock_outs` (lock) -> the matching row reddens.
+    """
+    if tracked_by == "pointer":
+        write_pointer(tmp_path, "data/final/x.parquet")
+    else:
+        write_pipeline(tmp_path, "data/final/x.parquet", version_id="v-1")
+    blob = tmp_path / ".dvc" / "cache" / "files" / "md5" / "aa" / ("a" * 30)
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(b"x")
+    (tmp_path / "data" / "final").mkdir(parents=True, exist_ok=True)
+    os.symlink(blob, tmp_path / "data" / "final" / "x.parquet")
+
+    verdict = delivery(tmp_path, "data/final/x.parquet", REMOTE, version_aware=True)
+
+    assert verdict.state == "pinned", verdict

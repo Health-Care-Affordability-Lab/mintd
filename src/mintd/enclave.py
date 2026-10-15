@@ -25,7 +25,7 @@ from .data import (
     PrimaryRemovedAtHead,
     _find_consumer_findings_for_target,
 )
-from .check import CheckFinding, _resolve_approved_product_url
+from .check import CheckFinding, _resolve_approved_product_url, consumer_walk_failure
 from .producer import MissingPrimaryDataProduct, ProducerView
 from ._dvc_ops import DvcOpError, DvcOps
 
@@ -429,7 +429,10 @@ def enclave_bump(
         findings, source=manifest_path, field_path=f"approved_products[{name}]"
     )
     if not repo_findings:
-        raise ImportNotFound(f"no consumer finding for {name!r} (manifest={manifest_path})")
+        raise ImportNotFound(
+            consumer_walk_failure(findings)
+            or f"no consumer finding for {name!r} (manifest={manifest_path})"
+        )
     # `check` emits one finding per ROW under a single repo-keyed field_path,
     # and rows can disagree — one path drifted while another cannot be read.
     # Reading only the first match made this WRITE verb depend on YAML row
