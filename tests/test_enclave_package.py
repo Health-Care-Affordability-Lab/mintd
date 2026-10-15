@@ -193,7 +193,7 @@ def _seed(
     tmp_path: Path,
     manifest_path: Path,
     downloaded: list[tuple[str, str]],
-    transferred: list[tuple[str, str]] = [],
+    transferred: list[tuple[str, str]] | None = None,
     *,
     day: str = "2026-05-15",
     contract_pins: dict[tuple[str, str], str] | None = None,
@@ -203,6 +203,7 @@ def _seed(
     `transferred` seeds `(repo, artifact_pin_seed)` rows so a test can express
     "these bytes already crossed the gap" without restating the whole model.
     """
+    transferred = [] if transferred is None else transferred
     items: list[DownloadedItem] = []
     for repo, seed in downloaded:
         pin = seed * 5

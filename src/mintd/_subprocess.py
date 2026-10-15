@@ -158,10 +158,10 @@ def run_streaming(
 
     try:
         proc.wait(timeout=wall_timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         _kill_ladder()
         # wall_timeout cannot be None here — TimeoutExpired only fires when set.
-        raise WallTimeoutExceeded(wall_timeout if wall_timeout is not None else 0.0)
+        raise WallTimeoutExceeded(wall_timeout if wall_timeout is not None else 0.0) from exc
     except KeyboardInterrupt:
         _kill_ladder()
         raise

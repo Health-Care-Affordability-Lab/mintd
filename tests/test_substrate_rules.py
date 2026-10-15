@@ -416,12 +416,21 @@ PER_FILE_IGNORES = {
     "src/mintd/cli.py": ["T201"],
     "src/mintd/config_ops.py": ["T201"],
     "src/mintd/files/**": ["T201", "E501", "F401", "F811"],
-    "tests/**": ["T201", "E501"],
+    "tests/**": ["T201", "E501", "TID251"],
+    # TID251 seams. The first two own process spawning by design; the last
+    # three spawn directly, which is why `_dvc_ops.py:3` and
+    # `_registry_git_ops.py:1` both falsely claim to be the only such module.
+    # Deleting an entry here is the repair; adding one needs a reason.
+    "src/mintd/_subprocess.py": ["TID251"],
+    "src/mintd/_registry_git_ops.py": ["TID251"],
+    "src/mintd/_init_ops.py": ["TID251"],
+    "src/mintd/_fast_sync_ops.py": ["TID251"],
+    "src/mintd/_producer_git_ops.py": ["TID251"],
 }
 
 #: The rest of ``[tool.ruff.lint]``. Pinned because `per-file-ignores` is only
 #: the most VISIBLE way to exempt code — see the docstring below.
-LINT_SELECT = ["E", "F", "T201"]
+LINT_SELECT = ["E", "F", "T201", "B", "TID251"]
 LINT_IGNORE = ["E501"]
 #: per-line ``noqa`` comments under `src/`. A count, not a location list: the point is
 #: that adding one is a visible edit, and pinning line numbers would redden on
@@ -460,7 +469,7 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
     assert lint["ignore"] == LINT_IGNORE
     # Nothing else may appear in the table — a key this test does not know
     # about is an exemption mechanism it is not pinning.
-    assert sorted(lint) == ["ignore", "per-file-ignores", "select"]
+    assert sorted(lint) == ["flake8-tidy-imports", "ignore", "per-file-ignores", "select"]
 
     # Ruff accepts `#noqa`, `#  noqa`, `# NOQA` and `#NOQA` as directives — all
     # four verified rc=0 against `--select T201`. A literal `"# noqa"` count saw

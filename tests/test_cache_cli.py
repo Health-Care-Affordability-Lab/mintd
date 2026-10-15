@@ -167,7 +167,9 @@ def test_cache_push_partial_failure_exit_1(
                         "PutObject",
                     )
                 except ClientError:
-                    raise S3UploadFailedError("fail")
+                    # bare raise: boto3/s3/transfer.py does this, and the
+                    # __context__ it leaves is what the test asserts on.
+                    raise S3UploadFailedError("fail")  # noqa: B904
             return self._real.upload_file(filename, bucket, key, ExtraArgs=ExtraArgs, Callback=Callback)
 
     with mock_aws():

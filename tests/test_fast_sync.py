@@ -554,12 +554,12 @@ def test_try_fast_pull_updates_per_out_description(
     s3, bucket = s3_versioned
     bodies = [b"a" * 1024, b"b" * 2048, b"c" * 4096]
     md5s = [_md5_of(b) for b in bodies]
-    for body, md5 in zip(bodies, md5s):
+    for body, md5 in zip(bodies, md5s, strict=True):
         key = f"files/md5/{md5[:2]}/{md5[2:]}"
         s3.put_object(Bucket=bucket, Key=key, Body=body)
 
     _write_dvc_config(tmp_path, bucket)
-    for name, body, md5 in zip(["a", "b", "c"], bodies, md5s):
+    for name, body, md5 in zip(["a", "b", "c"], bodies, md5s, strict=True):
         _write_dvc_file_md5(tmp_path, name, md5, size=len(body))
 
     class _RecordingReporter:

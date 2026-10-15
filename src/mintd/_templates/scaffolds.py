@@ -154,4 +154,4 @@ def dispatch(project_type: str):
         return _DISPATCH[project_type]
     except KeyError:
         valid = ", ".join(sorted(_DISPATCH))
-        raise ValueError(f"unknown project_type {project_type!r}; expected one of: {valid}")
+        raise ValueError(f"unknown project_type {project_type!r}; expected one of: {valid}") from None

@@ -910,7 +910,8 @@ class _FailingUploadClient(_CountingClient):
                     "PutObject",
                 )
             except ClientError:
-                raise S3UploadFailedError(f"Failed to upload {filename}")
+                # bare raise: mirrors boto3/s3/transfer.py, see test_share_transport
+                raise S3UploadFailedError(f"Failed to upload {filename}")  # noqa: B904
         return super().upload_file(filename, bucket, key, ExtraArgs=ExtraArgs, Callback=Callback)
 
 

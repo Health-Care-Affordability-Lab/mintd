@@ -75,11 +75,26 @@ line-length = 120
 mintd = "mintd.cli:main"
 
 [tool.ruff.lint]
-select = ["E", "F", "T201"]
-ignore = ["E501"]  # line-length is informational; ruff format enforces real limits
+select = ["E", "F", "T201", "B", "TID251"]
+ignore = ["E501"]  # line length is not enforced: `ruff format` is not run in CI
+
+# TID251 makes the process-spawning boundary a lint gate instead of a docstring
+# claim. `_dvc_ops.py:3` and `_registry_git_ops.py:1` both assert they are the
+# only module that shells out; the per-file-ignores below are the modules that
+# actually do, so the list is the repair backlog and the rule stops a sixth.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"subprocess" = { msg = "spawn through mintd._subprocess.run_streaming; see per-file-ignores for the sanctioned seams" }
 
 [tool.ruff.lint.per-file-ignores]
 "src/mintd/cli.py" = ["T201"]
 "src/mintd/config_ops.py" = ["T201"]
 "src/mintd/files/**" = ["T201", "E501", "F401", "F811"]
-"tests/**" = ["T201", "E501"]
+"tests/**" = ["T201", "E501", "TID251"]  # tests drive the real CLI; the boundary is a src/ concern
+# sanctioned process seams
+"src/mintd/_subprocess.py" = ["TID251"]
+"src/mintd/_registry_git_ops.py" = ["TID251"]
+# pending repair: these spawn directly, which is why the "sole seam" docstrings
+# are false. Route through _subprocess.run_streaming and delete the entry.
+"src/mintd/_init_ops.py" = ["TID251"]          # 11 spawn sites
+"src/mintd/_fast_sync_ops.py" = ["TID251"]     # 1 (dvc --version probe)
+"src/mintd/_producer_git_ops.py" = ["TID251"]  # 1 spawn + 4 type references
