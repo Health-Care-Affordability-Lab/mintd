@@ -110,7 +110,9 @@ class RegistryGitOps(Protocol):
     def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def push_with_tags(self, work_dir: Path) -> None: ...
     def tag(self, work_dir: Path, name: str, message: str) -> None: ...
+    def tag_points_at_head(self, work_dir: Path, name: str) -> bool: ...
     def is_working_tree_clean(self, work_dir: Path) -> bool: ...
     def current_commit(self, work_dir: Path) -> str: ...
     def open_pr(
@@ -269,6 +271,31 @@ class SubprocessRegistryGitOps:
             if "non-fast-forward" in e.stderr or "fetch first" in e.stderr:
                 raise RegistryBranchExists(e.command, e.stderr, branch) from e
             raise
+
+    def push_with_tags(self, work_dir: Path) -> None:
+        """Push the current branch and the annotated tags reachable from it.
+
+        ``--follow-tags`` is the whole point: ``tag`` above creates annotated
+        tags, and this sends the commit and its tag in one round trip. A
+        product cannot be advertised in the catalog at a rev the remote does
+        not have, because `publish` does this before it writes the entry.
+
+        Not ``push_branch``: the caller is a producer project, not the
+        registry cache, and it does not know its own branch name. ``HEAD``
+        resolves to the checked-out branch and creates it on the remote if
+        it is not there yet.
+        """
+        self._git(["push", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
+
+    def tag_points_at_head(self, work_dir: Path, name: str) -> bool:
+        """Is ``name`` an existing tag on the current commit?
+
+        Asked only after ``tag`` reports a collision, to tell an idempotent
+        rerun (the tag a previous attempt left at this very commit) from a
+        real one (a tag of the same name somewhere else). Tag names cannot
+        contain whitespace, so ``split()`` is an exact match.
+        """
+        return name in self._git(["tag", "--points-at", "HEAD"], cwd=work_dir).split()
 
     def tag(self, work_dir: Path, name: str, message: str) -> None:
         try:

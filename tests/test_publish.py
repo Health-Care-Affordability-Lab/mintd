@@ -4,8 +4,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 from mintd.publish import (
-    publish_project, CatalogUpdateFailed, DvcPushFailed, TagFailed, PublishError,
-    VersionNotIncreasing
+    publish_project, CatalogUpdateFailed, DvcPushFailed, ProjectPushFailed,
+    TagFailed, PublishError, VersionNotIncreasing
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
 from mintd._registry_git_ops import (
@@ -23,8 +23,10 @@ class _FakeCatalogClient:
 
     def __init__(self, entries: dict | None = None) -> None:
         self._entries = entries or {}
+        self.updated: list = []
 
-    def update(self, metadata, *, dry_run=False, reporter=None): pass
+    def update(self, metadata, *, dry_run=False, reporter=None):
+        self.updated.append(metadata)
 
     def fetch(self, name):
         from mintd.catalog import CatalogNotFound
@@ -43,7 +45,26 @@ def _seed_project(tmp_path: Path) -> Path:
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=proj, check=True)
     subprocess.run(["git", "add", "metadata.json"], cwd=proj, check=True)
     subprocess.run(["git", "commit", "-m", "initial"], cwd=proj, check=True)
+    # A bare origin, because publish now pushes to it. Without a reachable
+    # origin a published tag never leaves the machine and every consumer
+    # `dvc import --rev vX.Y.Z` fails — the defect these tests guard.
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(origin)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=proj, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=proj, check=True)
     return proj
+
+
+def _origin_of(proj: Path) -> Path:
+    return proj.parent / "origin.git"
+
+
+def _origin_tags(proj: Path) -> list[str]:
+    out = subprocess.run(
+        ["git", "tag", "--list"], cwd=_origin_of(proj),
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout.split()
 
 @pytest.fixture(autouse=True)
 def mock_check_project():
@@ -498,7 +519,7 @@ class _RecordingReporter:
 
 
 def test_apply_publish_updates_status_between_phases(tmp_path):
-    """All five phase labels appear in order when local_diff is non-empty."""
+    """All six phase labels appear in order when local_diff is non-empty."""
     from mintd.publish import _apply_publish, prepare_publish
     proj = _seed_project(tmp_path)
     dvc = _FakeDvcOps()
@@ -520,12 +541,13 @@ def test_apply_publish_updates_status_between_phases(tmp_path):
         "Pushing data to DVC...",
         "Committing version bump...",
         "Tagging release...",
+        "Pushing to origin...",
         "Updating catalog entry...",
     ]
 
-# --- Step 5 (catalog update) must never leak a traceback -------------------
-# The failure lands after dvc push, the metadata commit, and the tag have all
-# succeeded, so the recovery hint has to say so.
+# --- Step 6 (catalog update) must never leak a traceback -------------------
+# The failure lands after dvc push, the metadata commit, the tag and the push
+# to origin have all succeeded, so the recovery hint has to say so.
 
 class _FailingCatalogClient(_FakeCatalogClient):
     def __init__(self, exc: Exception) -> None:
@@ -559,8 +581,11 @@ def test_publish_catalog_branch_collision_reports_partial_state(tmp_path, exc):
     assert "DVC push" in hint
     assert "tag v0.1.1" in hint
     assert "mintd publish 0.1.1" in hint
-    # The failing run already created the tag; a bare rerun would die at step 4.
-    assert "git tag -d v0.1.1" in hint
+    # The failing run already created the tag and pushed it. A rerun adopts
+    # that tag instead of colliding with it, so telling the user to delete it
+    # would be advice to undo a ref consumers can already see.
+    assert "git tag -d" not in hint
+    assert "idempotent" in hint
 
 
 def test_publish_catalog_gh_missing_reports_partial_state(tmp_path):
@@ -805,8 +830,13 @@ def test_publish_rollback_restores_the_users_nested_keys(tmp_path):
     assert json.loads(before)["ownership"]["slack"] == "#my-channel"
 
 
-def test_publish_preview_still_lists_the_bumped_fields(tmp_path):
-    """The preview the user reads is unchanged by the write change."""
+def test_publish_preview_lists_the_bumped_fields_but_not_the_stamps(tmp_path):
+    """The preview shows what the user decided; it hides what publish stamps.
+
+    `status.last_updated` differs on every single run, so listing it tells
+    the reader nothing — and an empty `local_diff` is how the apply phase
+    recognises an idempotent rerun, which the stamp alone used to defeat.
+    """
     proj = _seed_project_with_strays(tmp_path)
 
     result = publish_project(
@@ -817,7 +847,8 @@ def test_publish_preview_still_lists_the_bumped_fields(tmp_path):
 
     paths = {c.field_path for c in result.diff}
     assert "mint.version" in paths
-    assert "status.last_updated" in paths
+    assert "status.last_published_version" in paths
+    assert "status.last_updated" not in paths
 
 
 def test_publish_write_does_not_reshuffle_a_file_with_no_strays(tmp_path):
@@ -933,3 +964,85 @@ def test_publish_refuses_when_the_catalog_is_unreachable(tmp_path):
     assert not excinfo.value.catalog_updated
     assert dvc.push_calls == []
     assert git.tag_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Publishing to origin
+#
+# `publish` used to stop at a local `git tag`: the bump commit and the tag
+# stayed on the publisher's machine while the catalog PR advertised the
+# product to everyone. A consumer then ran `mintd data import <repo>
+# --rev v0.1.1`, which resolves the rev against the *remote*, and got
+# nothing. These tests pin the push.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_pushes_the_tag_to_origin(tmp_path):
+    proj = _seed_project(tmp_path)
+
+    _publish(proj)
+
+    assert "v0.1.1" in _origin_tags(proj)
+
+
+def test_publish_pushes_the_bump_commit_to_origin(tmp_path):
+    proj = _seed_project(tmp_path)
+
+    _publish(proj)
+
+    local = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=proj,
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    remote = subprocess.run(
+        ["git", "rev-parse", "main"], cwd=_origin_of(proj),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    assert local == remote, "the bump commit never reached origin"
+
+
+def test_publish_does_not_update_the_catalog_when_the_push_fails(tmp_path):
+    """Ordering matters: the catalog is the advertisement. If the repo push
+    fails the product is unreachable, so the entry must not go out."""
+    proj = _seed_project(tmp_path)
+    git = _FakeRegistryGitOps()
+    git.push_with_tags_raises = GitOpError(["git", "push"], "remote rejected")
+    client = _FakeCatalogClient()
+
+    with pytest.raises(ProjectPushFailed) as excinfo:
+        publish_project(
+            project_path=proj, version="0.1.1",
+            client=client, dvc_ops=_FakeDvcOps(), git_ops=git,
+        )
+
+    assert client.updated == []
+    assert excinfo.value.pushed is True
+    assert excinfo.value.tagged is True
+    assert excinfo.value.catalog_updated is False
+
+
+def test_republish_at_the_same_version_is_idempotent(tmp_path):
+    """A rerun after a catalog failure must not die on its own tag. The
+    first run's tag is already at HEAD; that is success, not a collision."""
+    proj = _seed_project(tmp_path)
+    _publish(proj)
+
+    result = _publish(proj)
+
+    assert result.version == "0.1.1"
+    assert result.tagged is True
+    assert "v0.1.1" in _origin_tags(proj)
+
+
+def test_republish_still_fails_when_the_tag_is_on_another_commit(tmp_path):
+    """The idempotency window is narrow: same tag, same commit. A tag left
+    on an unrelated commit is a real collision and must still stop."""
+    proj = _seed_project(tmp_path)
+    subprocess.run(["git", "tag", "-a", "v0.1.1", "-m", "by hand"], cwd=proj, check=True)
+    subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "moves HEAD past the tag"],
+        cwd=proj, check=True,
+    )
+
+    with pytest.raises(TagFailed):
+        _publish(proj)
