@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 
 
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+# Repos scaffolded before #27 carry the raw setuptools-scm build string
+# ("0.0.2.dev102+g30b92fb3f") in mint.version; read those as their release segment.
+_SCM_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+)(?:\.dev\d+)?(?:\+[\w.]+)?$")
 
 
 class PublishError(Exception):
@@ -453,6 +456,9 @@ def publish_project(
 
 
 def _resolve_version(current: str, requested: str | None) -> str:
+    scm = _SCM_VERSION_RE.match(current)
+    if scm:
+        current = scm.group(1)
     m = _SEMVER_RE.match(current)
     if not m:
         raise InvalidCurrentVersion(f"current mint.version {current!r} is not valid semver (MAJOR.MINOR.PATCH expected)")

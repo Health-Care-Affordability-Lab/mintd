@@ -4,7 +4,8 @@ import pytest
 from pathlib import Path
 from mintd.publish import (
     publish_project, prepare_publish, CatalogUpdateFailed, DvcPushFailed, ProjectPushFailed,
-    TagFailed, PublishBlocked, PublishError, VersionNotIncreasing
+    TagFailed, PublishBlocked, PublishError, VersionNotIncreasing,
+    InvalidCurrentVersion, _resolve_version
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
 from mintd._registry_git_ops import (
@@ -174,6 +175,28 @@ def test_publish_allows_equal_version_for_retry(tmp_path):
         cwd=proj, capture_output=True, text=True,
     ).stdout.strip()
     assert parents == "1"
+
+def test_publish_accepts_dev_suffixed_current_version(tmp_path):
+    """Repos scaffolded before #27 carry the raw setuptools-scm build string."""
+    proj = _seed_project(tmp_path)
+    m = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    m["mint"]["version"] = "0.0.2.dev102+g30b92fb3f"
+    (proj / "metadata.json").write_text(json.dumps(m))
+    subprocess.run(["git", "commit", "-qam", "pre-#27 scaffold"], cwd=proj, check=True)
+
+    result = publish_project(
+        project_path=proj,
+        client=_FakeCatalogClient(),
+        dvc_ops=_FakeDvcOps(),
+        git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert result.version == "0.0.3"
+    assert json.loads((proj / "metadata.json").read_text(encoding="utf-8"))["mint"]["version"] == "0.0.3"
+
+def test_publish_still_rejects_garbage_current_version():
+    with pytest.raises(InvalidCurrentVersion):
+        _resolve_version("0.0.2-banana", None)
 
 def test_publish_refuses_invalid_semver(tmp_path):
     proj = _seed_project(tmp_path)
