@@ -420,3 +420,72 @@ def test_every_parsed_git_spawn_actually_passes_git_env(
     assert seen, f"{spawn} never reached a spawn primitive"
     assert seen[0].get("LC_ALL") == "C", f"{spawn} inherited the user's locale: {seen[0]}"
     assert seen[0].get("LANGUAGE") == "", f"{spawn} inherited LANGUAGE: {seen[0]}"
+
+
+def test_restore_index_puts_back_what_the_index_held_before(tmp_path: Path) -> None:
+    """What `dvc import` under `core.autostage` leaves (a committed pointer
+    re-staged, a new pointer and `.gitignore` staged) is undone in git's index
+    and only there. Run from a subdirectory whose name has a space: the
+    restore's `--cacheinfo` path is repo-root-relative, its pathspecs are not.
+    Mutation: drop the `--show-prefix` -> the entry lands at the repo root.
+    """
+    repo = tmp_path / "repo"
+    sub = repo / "data" / "imports x"
+    sub.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    (sub / "old.dvc").write_text("v1\n")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    ops = SubprocessRegistryGitOps()
+    names = ["old.dvc", "new.dvc", ".gitignore"]
+    before = ops.index_entries(sub, names)
+    assert set(before) == {"old.dvc"}
+
+    (sub / "old.dvc").write_text("v2\n")
+    (sub / "new.dvc").write_text("new\n")
+    (sub / ".gitignore").write_text("/new\n")
+    _git(["add", "-A"], cwd=repo)
+
+    ops.restore_index(sub, names, before)
+
+    assert _git(["diff", "--cached", "--name-only"], cwd=repo).strip() == ""
+    assert (sub / "old.dvc").read_text() == "v2\n"  # the working tree is untouched
+    assert (sub / "new.dvc").is_file()
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitOpError):
+        ops.index_entries(plain, names)  # the import lane skips the restore on this
+
+
+def test_restore_index_drops_a_staged_file_the_index_never_held_and_spares_siblings(
+    tmp_path: Path,
+) -> None:
+    """The pointer was on disk but not staged before the import (an earlier
+    import ran with autostage off), dvc's autostage staged its new version,
+    and the cleanup wrote the old bytes back. The index entry now matches
+    neither the file nor HEAD, which `git rm --cached` refuses; the restore
+    must still drop it. Its name holds glob characters that would also match
+    the committed sibling `final.dvc`, which must not be touched.
+
+    Mutations: `rm --cached` for `--force-remove` -> GitOpError; drop
+    `:(literal)` -> the sibling's entry is snapshotted and rewritten.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    (repo / "final.dvc").write_text("keep\n")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    name = "fin[a]l.dvc"
+    (repo / name).write_text("v1\n")
+    ops = SubprocessRegistryGitOps()
+    before = ops.index_entries(repo, [name])
+    assert before == {}
+
+    (repo / name).write_text("v2\n")
+    _git(["add", "--", f":(literal){name}"], cwd=repo)
+    (repo / name).write_text("v1\n")
+    ops.restore_index(repo, [name], before)
+
+    assert _git(["diff", "--cached", "--name-only"], cwd=repo).strip() == ""
+    assert _git(["status", "--porcelain"], cwd=repo).strip() == "?? fin[a]l.dvc"

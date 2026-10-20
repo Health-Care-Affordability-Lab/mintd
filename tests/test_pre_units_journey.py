@@ -788,6 +788,217 @@ def test_import_of_a_path_only_on_a_branch_points_at_rev(
     assert _imported_bytes(consumer, "data/wip_only") == b"w1\n"
 
 
+#: One stage that writes the primary as a directory, so `dvc.lock` is dvc's own
+#: `.dir` out with no `files:` list: what a lab pipeline commits.
+FINAL_DIR_YAML = (
+    "stages:\n"
+    "  build:\n"
+    "    cmd: python -c \"import pathlib; d=pathlib.Path('data/final'); "
+    "d.mkdir(parents=True, exist_ok=True); (d/'part.csv').write_bytes(b'v1\\n')\"\n"
+    "    outs:\n"
+    "      - data/final\n"
+)
+
+
+def _set_version_aware(producer, on: bool) -> str:
+    """Flip the producer's remote to (or back from) `version_aware` and push
+    the commit; returns it.
+
+    On a version-aware remote a pointer with no S3 version ID pulls nothing
+    at exit 0, which is the fleet's broken state; this reproduces it with a
+    local remote. S3 lists an absent prefix as empty, while a local remote
+    without the directory makes dvc exit 255 "failed to load directory"
+    (measured), hence the mkdir. `_configure_remote` rewrites the remote on
+    every `publish`, so call this AFTER the last publish. A warm consumer
+    cache still serves an already-imported `.dir` hash from a version-aware
+    remote, so a test that imported first must publish NEW bytes before
+    calling this.
+    """
+    flag = ["version_aware", "true"] if on else ["--unset", "version_aware"]
+    subprocess.run(
+        [*_dvc_cmd(), "remote", "modify", "storage", *flag],
+        cwd=str(producer.work), capture_output=True, check=True,
+    )
+    (producer.remote / PRIMARY_OUT).mkdir(parents=True, exist_ok=True)
+    return producer._commit_and_push("remote is version-aware" if on else "remote is md5 again")
+
+
+def _import_dir(consumer: Path) -> Path:
+    return consumer / "data" / "imports" / FULL_NAME / "data"
+
+
+def _autostage(consumer: Path) -> None:
+    """dvc `git add`s every pointer and `.gitignore` it writes, as on a
+    machine whose global dvc config sets `core.autostage`. Local config, so
+    the consumer's tracked tree stays clean."""
+    subprocess.run(
+        [*_dvc_cmd(), "config", "--local", "core.autostage", "true"],
+        cwd=str(consumer), capture_output=True, check=True,
+    )
+
+
+def test_import_of_an_unpinned_directory_out_exits_nonzero_and_leaves_nothing(
+    payload_journey, capsys
+) -> None:
+    """The field report: the committed `dvc.lock` pins `data/final` as a
+    `.dir` out with no S3 version ID on a version-aware remote. Before, the
+    import exited 0 with an empty directory. Now it exits 1, says the
+    producer must fix it, and leaves the consumer's tree as it was, git's
+    index included although dvc's autostage staged the pointer and
+    `.gitignore`.
+
+    `check` errors on the same producer first: the two verbs judge with one
+    predicate. Mutations: delete the `_require_deliverable(...)` call -> rc 0;
+    drop the index restore -> `git status` shows the pointer still staged.
+    """
+    from mintd.check import check_project
+
+    producer, consumer, register = payload_journey
+    _autostage(consumer)
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    _set_version_aware(producer, True)
+    register()
+    assert "data_products_output_unpinned" in {f.kind for f in check_project(producer.work)}
+
+    rc = cli.main(["data", "import", PRODUCT])
+    out = " ".join(_drain(capsys).split())
+
+    assert rc == 1, out
+    assert "cannot be delivered by 'mintd data import'" in out
+    assert "S3 version ID" in out
+    assert "ask them to run 'mintd check'" in out
+    assert "✓" not in out
+    assert not (_import_dir(consumer) / "final.dvc").exists()
+    assert not (_import_dir(consumer) / "final").exists()
+    assert _git(["status", "--porcelain"], cwd=consumer).strip() == ""
+
+
+def test_import_succeeds_on_a_plain_rerun_once_the_producer_fixes_it(
+    payload_journey, capsys
+) -> None:
+    """What the hint promises. The import fails and leaves nothing, so after
+    the producer makes the output deliverable a plain re-run (no `--force`)
+    lands the bytes. Before that, `--rev` at the broken commit, which is no
+    longer the producer's tip, still exits 1: the diagnosis fetches the pin
+    dvc recorded, not HEAD.
+
+    Mutation: drop the fresh-import cleanup -> the re-run exits 1 on
+    "already exists".
+    """
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    broken = _set_version_aware(producer, True)
+    register()
+    # `--force` with nothing to replace: the hint must not ask for it again.
+    assert cli.main(["data", "import", PRODUCT, "--force"]) == 1
+    out = " ".join(_drain(capsys).split())
+    assert "then re-run this import" in out and "with --force" not in out
+
+    _set_version_aware(producer, False)  # the producer's fix
+    register()
+    rc = cli.main(["data", "import", PRODUCT, "--rev", broken])
+    out = " ".join(_drain(capsys).split())
+    assert rc == 1, out
+    assert f"@ {broken[:7]} cannot be delivered" in out
+    assert "import a later --rev" in out  # the producer's own check is clean now
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    assert _imported_bytes(consumer, PRIMARY_OUT) == b"v1\n"
+
+
+def test_forced_reimport_that_lands_nothing_keeps_the_previous_import(
+    payload_journey, capsys
+) -> None:
+    """`--force` onto a broken version: the import exits 1 and the previous
+    pointer and bytes are both back where they were, in git's index as well
+    as on disk, though dvc's autostage staged the broken pointer.
+
+    Mutations: drop the pointer restore -> the pin moves; run the
+    postcondition after `_payload_backup` -> the v1 bytes are gone; forget
+    what the index held -> the committed pointer is staged for deletion.
+    """
+    producer, consumer, register = payload_journey
+    _autostage(consumer)
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    register()
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    _git(["commit", "-q", "-m", "import v1"], cwd=consumer)  # autostage staged it
+    pin_before = _pins_of(consumer)["final"]
+
+    producer.publish({PRIMARY_OUT: {"part.csv": b"v2\n"}}, message="v2 payload")
+    _set_version_aware(producer, True)
+    register()
+    rc = cli.main(["data", "import", PRODUCT, "--force"])
+    out = " ".join(_drain(capsys).split())
+
+    assert rc == 1, out
+    assert "re-run this import with --force" in out
+    assert _imported_bytes(consumer, PRIMARY_OUT) == b"v1\n"
+    assert _pins_of(consumer) == {"final": pin_before}
+    assert not list(_import_dir(consumer).glob("*.mintd-bump-backup"))
+    assert _git(["status", "--porcelain"], cwd=consumer).strip() == ""
+
+
+def test_failed_import_keeps_a_gitignore_an_earlier_import_wrote(
+    payload_journey, capsys
+) -> None:
+    """The `.gitignore` beside the pointer already lists an output imported
+    earlier, and is committed. A failed import of a second output puts it
+    back byte for byte, on disk and in git's index (autostage staged dvc's
+    version). Mutation: unlink the `.gitignore` instead of restoring it ->
+    `/extract` is gone."""
+    producer, consumer, register = payload_journey
+    _autostage(consumer)
+    producer.publish({
+        PRIMARY_OUT: {"part.csv": b"v1\n"},
+        "data/extract": {"part.csv": b"e1\n"},
+    })
+    register()
+    assert cli.main(["data", "import", PRODUCT, "--path", "data/extract"]) == 0, _drain(capsys)
+    _git(["commit", "-q", "-m", "import extract"], cwd=consumer)
+    gitignore = _import_dir(consumer) / ".gitignore"
+    before = gitignore.read_bytes()
+    assert b"/extract" in before
+
+    _set_version_aware(producer, True)  # data/final was never imported: no warm cache
+    register()
+    assert cli.main(["data", "import", PRODUCT]) == 1, _drain(capsys)
+
+    assert gitignore.read_bytes() == before
+    assert _git(["status", "--porcelain"], cwd=consumer).strip() == ""
+
+
+def test_no_exec_import_at_a_good_rev_keeps_its_pointer(payload_journey, capsys) -> None:
+    """`--dvc-arg=--no-exec` lands nothing by design and records no
+    `rev_lock`. The import at a deliverable `--rev` keeps its pointer and
+    exits 0, though the producer's HEAD can no longer deliver. Mutation:
+    drop the empty-pin return -> HEAD is judged and the pointer deleted."""
+    producer, consumer, register = payload_journey
+    good = producer.publish({PRIMARY_OUT: {"part.csv": b"v1\n"}})
+    _set_version_aware(producer, True)
+    register()
+
+    rc = cli.main(["data", "import", PRODUCT, "--rev", good, "--dvc-arg=--no-exec"])
+    assert rc == 0, _drain(capsys)
+    assert (_import_dir(consumer) / "final.dvc").is_file()
+
+
+def test_import_of_a_genuinely_empty_directory_out_still_succeeds(
+    payload_journey, capsys
+) -> None:
+    """The deliverable control: an empty directory out lands no file on a
+    version-aware remote too, and that is a correct import. Drives the real
+    producer checkout. Mutation: delete `if verdict.deliverable: return` ->
+    rc 1."""
+    producer, consumer, register = payload_journey
+    producer.publish({PRIMARY_OUT: {}})
+    _set_version_aware(producer, True)
+    register()
+
+    assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
+    assert (_import_dir(consumer) / "final").is_dir()
+
+
 def test_clone_puts_the_product_on_disk(payload_journey, tmp_path, capsys) -> None:
     """`mintd data clone` — the consumer's first contact with a product.
 

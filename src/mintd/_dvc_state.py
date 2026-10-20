@@ -16,9 +16,10 @@ pointers, `dvc.lock` stage outs, or both in the same prefix.
 
 `outs_matching` answers "which outs does this declared path reach"; `delivery`
 answers the consumer's question on top of it — "would `mintd data import` of
-this path land bytes?". `check` is its caller today; the import postcondition
-and the push probe are meant to call it too rather than re-derive it, so the
-three verbs cannot disagree about what "delivered" means.
+this path land bytes?". `check` and the import postcondition
+(`data._require_deliverable`) call it; the push probe is meant to as well
+rather than re-derive it, so the three verbs cannot disagree about what
+"delivered" means.
 """
 from __future__ import annotations
 

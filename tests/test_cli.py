@@ -29,7 +29,7 @@ from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
 from mintd._registry_git_ops import GitOpError
-from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary
+from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, write_pointer
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
@@ -106,12 +106,15 @@ def recording_reporter(monkeypatch: pytest.MonkeyPatch):
 
 
 def _register_provider_xw(
-    client: InMemoryCatalogClient, primary: str = "outputs/main.parquet"
+    client: InMemoryCatalogClient,
+    primary: str = "outputs/main.parquet",
+    *,
+    github_url: str = "https://github.com/example-org/provider-xw",
 ) -> Metadata:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["repository"]["github_url"] = github_url
     data["data_products"]["primary"] = primary
     metadata = Metadata.model_validate(data)
     client.register(metadata)
@@ -4544,6 +4547,115 @@ def test_data_import_duplicate_pointer_reports_instead_of_tracebacking(
     assert "remove one" in err
 
 
+@pytest.mark.parametrize("lands", [True, False], ids=["landed", "landed-nothing"])
+def test_data_import_reads_the_producer_only_when_nothing_landed(
+    lands: bool, tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """The producer URL does not exist, so ANY read of it fails.
+
+    landed: a healthy import never touches the producer (no extra git or
+    network work). landed-nothing: the unreadable producer is a named error,
+    not a traceback and not a silent exit 0, and the fresh import leaves no
+    pointer behind.
+
+    Mutations: always read the producer, or drop the gate's `dest.is_file()`
+    arm (this output is a single file) -> `landed` is rc 1; never read it,
+    or delete the `except FetchError` arm -> `landed-nothing` reddens.
+    """
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client, github_url=str(tmp_path / "gone.git"))
+    if not lands:
+        dvc_ops.import_lands_nothing = {"outputs/main.parquet"}
+    root = tmp_path / "imports"
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(root)])
+    err = " ".join(capsys.readouterr().err.split())
+    pointer = root / "data_provider-xw" / "outputs" / "main.parquet.dvc"
+    if lands:
+        assert rc == 0, err
+        assert pointer.is_file()
+    else:
+        assert rc == 1, err
+        assert "could not be read" in err and "check git access" in err
+        assert "Traceback" not in err
+        assert not pointer.exists()
+
+
+def _undeliverable_producer(tmp_path: Path, client: InMemoryCatalogClient) -> str:
+    """A producer git repo declaring `data/good/` (pinned) and `data/final/`
+    (a `.dir` out with no S3 version ID on a version-aware remote), registered
+    as `test_project`. Returns its commit, for `--rev`: the fake records a
+    40-character rev as the pin, so the diagnosis reads this repo there."""
+    from tests._harness.git import _git
+
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer, declared=("data/good/", "data/final/"))
+    write_pointer(producer, "data/good", files={"a.csv": "v-1"})
+    write_pointer(producer, "data/final", is_dir=True, version_id=None)
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+    return _git(["rev-parse", "HEAD"], cwd=producer).strip()
+
+
+def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """A forced `--rev` re-import that lands nothing puts the previous import
+    back, so the retry the hint names needs `--force` again; without it the
+    retry stops on "already imports". Mutation: drop the `--force` wording
+    from the `--rev` hint -> this reddens."""
+    client, dvc_ops = patched_clients
+    sha = _undeliverable_producer(tmp_path, client)
+    root = tmp_path / "imports"
+    args = ["data", "import", "test_project", "--path", "data/final/", "--rev", sha, "--dest-root", str(root)]
+    assert cli.main(args) == 0, capsys.readouterr().err
+    pointer = root / "data_test_project" / "data" / "final.dvc"
+    before = pointer.read_bytes()
+
+    dvc_ops.import_lands_nothing = {"data/final"}
+    rc = cli.main([*args, "--force"])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "import a later --rev with --force" in err
+    assert pointer.read_bytes() == before
+
+
+def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """`--all` over a product with one deliverable output and one that is not.
+
+    The deliverable output lands and stays and is named; the import exits 1
+    naming the other. The transfer is faked (`import_lands_nothing`); the
+    diagnosis is real: the producer is a git repo whose `data/final.dvc` is a
+    `.dir` out with no S3 version ID on a version-aware remote.
+
+    Mutation: delete the `_require_deliverable(...)` call -> rc 0.
+    """
+    client, dvc_ops = patched_clients
+    sha = _undeliverable_producer(tmp_path, client)
+    dvc_ops.import_lands_nothing = {"data/final"}
+
+    root = tmp_path / "imports"
+    rc = cli.main([
+        "data", "import", "test_project", "--all", "--rev", sha, "--dest-root", str(root),
+    ])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "'data/final/' of 'test_project'" in err and "cannot be delivered" in err
+    assert "run 'mintd check' in" in err  # `--rev` here only gives the fake a real pin
+    assert "1 of 2 outputs were imported before this failure" in err and "good" in err
+    ns = root / "data_test_project" / "data"
+    assert (ns / "good.dvc").is_file() and (ns / "good" / "payload").is_file()
+    assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
+
+
 def _reachable_raises(root: str) -> set[str]:
     """Exception NAMES raised by `src/mintd/data.py` functions reachable from
     `root`, following calls to other module-level functions in that file.
@@ -4598,6 +4710,9 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # the last complete copy of the payload — the one action D14 exists to
     # prevent.
     "StaleBackupExists": "nothing was deleted or overwritten",
+    # The postcondition: dvc exited 0 and landed nothing the producer can
+    # deliver. Its hint is computed per case, so the raise carries it.
+    "UndeliverableImport": "ask the producer",
     "MissingPrimaryDataProduct": None,
     "NoTrackedOutputs": None,
     "UnknownProductPath": "relative to the producer",
@@ -4605,7 +4720,10 @@ _EXPECTED_HINTS: dict[str, str | None] = {
 }
 
 #: Exception types whose constructor is not a bare message.
-_EXC_ARGS: dict[str, tuple[Any, ...]] = {"GitOpError": (["git", "fetch"], "boom")}
+_EXC_ARGS: dict[str, tuple[Any, ...]] = {
+    "GitOpError": (["git", "fetch"], "boom"),
+    "UndeliverableImport": ("boom", "ask the producer"),
+}
 
 
 def test_import_raise_sites_all_have_a_handler_case() -> None:

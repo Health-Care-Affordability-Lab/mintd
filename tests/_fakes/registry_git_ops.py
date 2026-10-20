@@ -134,6 +134,16 @@ class _FakeRegistryGitOps:
         self._git(["-c", "user.email=test@mintd", "-c", "user.name=test", "commit", "-m", message],
                   cwd=repo_dir)
 
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]:
+        # Delegates: this fake's `_git` leaks `CalledProcessError`, and the
+        # import lane routes on the typed `GitOpError` (a non-repo skips).
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().index_entries(work_dir, names)
+
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        SubprocessRegistryGitOps().restore_index(work_dir, names, entries)
+
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["push", "-u", "origin", branch], cwd=repo_dir)
 
