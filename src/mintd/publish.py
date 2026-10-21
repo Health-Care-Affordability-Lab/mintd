@@ -455,7 +455,13 @@ def publish_project(
 def _resolve_version(current: str, requested: str | None) -> str:
     m = _SEMVER_RE.match(current)
     if not m:
-        raise InvalidCurrentVersion(f"current mint.version {current!r} is not valid semver (MAJOR.MINOR.PATCH expected)")
+        # Older scaffolds stamped mintd's raw build string ("0.0.2.dev102+g…") into
+        # mint.version; its release segment is the value to write back.
+        release = re.match(r"\d+\.\d+\.\d+", current)
+        raise InvalidCurrentVersion(
+            f"current mint.version {current!r} is not valid semver (MAJOR.MINOR.PATCH expected)",
+            recovery_hint=f'set mint.version in metadata.json to "{release.group(0) if release else "MAJOR.MINOR.PATCH"}", commit, then rerun `mintd publish`',
+        )
     
     if requested is None:
         return f"{m.group(1)}.{m.group(2)}.{int(m.group(3)) + 1}"
