@@ -512,7 +512,7 @@ def _delivery_hint(verdict: Delivery, path: str, remote_name: str, project_path:
     return (
         f"remote {remote_name!r} is version_aware, so a consumer's pull needs an S3 version ID "
         f"recorded under that remote; none is for {abbreviate(verdict.unpinned)}. Run 'mintd data "
-        "push' from this project, then commit the rewritten .dvc / dvc.lock files."
+        "push' from this project, then commit and push the rewritten .dvc / dvc.lock files."
     )
 
 

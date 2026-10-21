@@ -1048,6 +1048,18 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     except DvcOpError as e:
         reporter.error(str(e))
         return 1
+    # The upload worked either way, so this only decides the ✓. Importers read
+    # the producer's pushed commit, never this working tree, and a
+    # version-aware push writes S3 version IDs into exactly these files, so a
+    # pointer that differs from HEAD is one no importer can see yet.
+    # None, not []: a JSON reader must not mistake "git could not answer"
+    # (outside a repo, say) for a clean tree, and `warn` is silent under --json.
+    pointers: list[str] | None
+    try:
+        pointers = _resolve_git_ops(config).uncommitted_pointers(Path("."))
+    except GitOpError as exc:
+        reporter.warn(f"could not check .dvc / dvc.lock files against HEAD: {exc.stderr.strip() or exc}")
+        pointers = None
     if reporter.json_mode:
         reporter.result(
             {
@@ -1056,6 +1068,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 "bytes": summary.bytes,
                 "elapsed_s": round(summary.elapsed_s, 2),
                 "up_to_date": summary.up_to_date,
+                "uncommitted_pointers": pointers,
             },
             pretty=_pretty_data_push,
         )
@@ -1063,7 +1076,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
         remote_clause = f" → s3://{summary.remote}"
         duration = _format_duration(summary.elapsed_s)
         if summary.up_to_date:
-            reporter.success(f"✓ already up to date{remote_clause} in {duration}")
+            line = f"already up to date{remote_clause} in {duration}"
         else:
             count_clause = (
                 f" {summary.pushed} object(s)" if summary.pushed is not None else ""
@@ -1071,9 +1084,14 @@ def _handle_data_push(args: argparse.Namespace) -> int:
             size_clause = (
                 f" ({_human_bytes(summary.bytes)})" if summary.bytes else ""
             )
-            reporter.success(
-                f"✓ pushed{count_clause}{size_clause}{remote_clause} in {duration}"
+            line = f"pushed{count_clause}{size_clause}{remote_clause} in {duration}"
+        if pointers:
+            reporter.warn(
+                f"{line}, but these pointer files differ from the last commit: "
+                f"{', '.join(pointers)} — commit and push them, or importers get an empty directory"
             )
+        else:
+            reporter.success(f"✓ {line}")
     return 0
 
 
@@ -2632,6 +2650,37 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         return _render_findings(error_findings, json_out=False)
+    # After check, so a finding whose fix is another push is fixed before the
+    # one commit. Here and not in `check_project`: `publish` re-checks between
+    # its own push and its commit, while the pointers are dirty by design.
+    # No exception for a directory outside git: importers read a git history,
+    # so a project without one cannot be imported by anyone.
+    # The whole tree, as `publish` requires: importers read the commit, and a
+    # list of the files they need (pointers, dvc.yaml, the vars files it
+    # loads, metadata.json, ...) is never complete. `mintd init` makes no
+    # commit, so a first registration would otherwise pass uncommitted.
+    try:
+        unseen = _resolve_git_ops(config).uncommitted_files(args.path)
+    except GitOpError as exc:
+        reporter.error(
+            f"could not check the project against HEAD: {exc.stderr.strip() or exc}",
+            hint=(
+                "importers read this project's git history, so register needs a working git "
+                "repository: fix git (or 'git init' and commit), then rerun 'mintd registry register'"
+            ),
+        )
+        return 1
+    if unseen:
+        shown = ", ".join(unseen[:8]) + (f" … ({len(unseen)} in all)" if len(unseen) > 8 else "")
+        reporter.error(
+            f"the project has uncommitted changes: {shown}",
+            hint=(
+                "importers read the commit on your git remote, not your disk: commit and push what "
+                "belongs to the project, put data in DVC ('mintd data add') or .gitignore, then "
+                "rerun 'mintd registry register'"
+            ),
+        )
+        return 1
     with reporter.status("Registering project with the catalog…"):
         try:
             result = client.register(metadata, reporter=reporter)

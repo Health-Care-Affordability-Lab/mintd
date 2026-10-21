@@ -15,13 +15,19 @@ import pytest
 from mintd import cli
 from mintd._dvc_ops import DvcPushResult, _parse_push_output
 from mintd.data_ops import PushSummary, data_push
+from tests._dvc_fixtures import stage_undeliverable_primary, write_pointer
 from tests._fakes.dvc_ops import _FakeDvcOps
+from tests._harness.git import _git
 
 
 @pytest.fixture
-def push_clients(monkeypatch: pytest.MonkeyPatch) -> _FakeDvcOps:
+def push_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDvcOps:
     """Inject a fake DvcOps and a defaulted Config so ``data push`` never
-    touches the real environment."""
+    touches the real environment. The cwd is an empty git repo in
+    ``tmp_path``: the push's pointer check would otherwise read this checkout,
+    which tracks ``.dvc`` / ``dvc.lock`` fixtures, and outside a repo it warns."""
+    _git(["init", "-q"], cwd=tmp_path)
+    monkeypatch.chdir(tmp_path)
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr(
         "mintd.cli.Config.load", classmethod(lambda cls, path=None: cls())
@@ -261,7 +267,10 @@ def test_cli_push_json_payload(
     # Exactly one JSON object on stdout, no stray token.
     out = captured.out.strip()
     payload = json.loads(out)
-    assert set(payload) == {"remote", "pushed", "bytes", "elapsed_s", "up_to_date"}
+    assert set(payload) == {
+        "remote", "pushed", "bytes", "elapsed_s", "up_to_date", "uncommitted_pointers",
+    }
+    assert payload["uncommitted_pointers"] == []
     assert payload["remote"] == "r"
     assert payload["pushed"] == 5
     assert payload["bytes"] is None
@@ -288,3 +297,119 @@ def test_cli_push_json_unparseable_counts(
     payload = json.loads(capsys.readouterr().out.strip())
     assert rc == 0
     assert payload["pushed"] is None
+
+
+# --- pointers the push left uncommitted --------------------------------------
+
+
+def test_cli_push_names_uncommitted_pointers_instead_of_a_check(
+    push_clients: _FakeDvcOps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A version-aware push writes S3 version IDs into the pointer and leaves
+    it uncommitted. Importers read the commit, so `data push` names the file
+    and drops the ✓; it still exits 0, because the upload worked.
+
+    A double stands in for dvc's rewrite: `version_aware` applies only to
+    cloud remotes, moto's `mock_aws` is in-process and cannot reach a dvc
+    subprocess, and moto's server mode needs flask, which is not installed.
+    mintd only reads the pointer bytes on disk after the push, which is
+    exactly what the double changes; git is real.
+
+    Mutations: `if pointers:` -> `if False:` reddens run 1; warning only when
+    `not summary.up_to_date` reddens run 2; dropping the JSON key reddens
+    run 3.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    stage_undeliverable_primary(proj)
+    _git(["init", "-q", "-b", "main"], cwd=proj)
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "track"], cwd=proj)
+    monkeypatch.chdir(proj)
+    real_push = push_clients.push
+
+    def push_and_pin(**kw):
+        result = real_push(**kw)
+        write_pointer(kw["cwd"], "data/final", files={"a.parquet": "v-1"})
+        return result
+
+    monkeypatch.setattr(push_clients, "push", push_and_pin)
+
+    push_clients.push_result = DvcPushResult(pushed=1, up_to_date=False)
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "✓" not in err
+    assert "pushed 1 object(s)" in err
+    assert "data/final.dvc" in err and "commit and push" in err
+    assert _git(["status", "--porcelain"], cwd=proj).strip()  # data push writes no git
+
+    # A rerun with nothing new to upload: the pointer is still not committed.
+    push_clients.push_result = DvcPushResult(pushed=0, up_to_date=True)
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "✓" not in err
+    assert "already up to date" in err and "data/final.dvc" in err
+
+    assert cli.main(["--json", "data", "push", "--remote", "r"]) == 0
+    assert json.loads(capsys.readouterr().out)["uncommitted_pointers"] == ["data/final.dvc"]
+
+    _git(["commit", "-q", "-am", "pin"], cwd=proj)
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "✓ already up to date" in err
+    assert "data/final.dvc" not in err
+
+
+def test_cli_push_still_succeeds_when_git_cannot_answer(
+    push_clients: _FakeDvcOps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No git on PATH after an upload that worked: a warning saying the
+    pointers could not be checked, the upload's line, exit 0, no traceback.
+    Under --json the warning is silent, so the key is null, not the `[]` of
+    a clean tree. Mutations: delete the `except GitOpError` arm ->
+    traceback; set `[]` there -> the JSON arm reddens."""
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "could not check .dvc / dvc.lock files against HEAD" in err
+    assert "pushed 1 object(s)" in err
+    assert "Traceback" not in err
+
+    assert cli.main(["--json", "data", "push", "--remote", "r"]) == 0
+    assert json.loads(capsys.readouterr().out)["uncommitted_pointers"] is None
+
+
+def test_cli_push_from_a_subdirectory_names_root_pointers_and_only_pointers(
+    push_clients: _FakeDvcOps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`dvc push` uploads the whole repo from any subdirectory (the scaffold's
+    stages run from `code/`), so the check covers the root's `dvc.lock` too;
+    and it names pointer files only, not an uncommitted note.
+
+    Mutations: drop `top` from the pointer pathspecs -> a ✓ from `code/`;
+    report every uncommitted file -> `notes.txt` is named.
+    """
+    proj = tmp_path / "proj"
+    (proj / "code").mkdir(parents=True)
+    (proj / "dvc.lock").write_text("v1\n")
+    _git(["init", "-q", "-b", "main"], cwd=proj)
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "seed"], cwd=proj)
+    (proj / "dvc.lock").write_text("v2\n")
+    (proj / "notes.txt").write_text("not a pointer\n")
+    monkeypatch.chdir(proj / "code")
+
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "✓" not in err
+    assert "differ from the last commit: dvc.lock" in err
+    assert "notes.txt" not in err

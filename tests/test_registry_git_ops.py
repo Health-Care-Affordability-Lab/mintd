@@ -489,3 +489,93 @@ def test_restore_index_drops_a_staged_file_the_index_never_held_and_spares_sibli
 
     assert _git(["diff", "--cached", "--name-only"], cwd=repo).strip() == ""
     assert _git(["status", "--porcelain"], cwd=repo).strip() == "?? fin[a]l.dvc"
+
+
+def test_uncommitted_pointers_names_only_pointer_files_that_differ_from_head(
+    tmp_path: Path,
+) -> None:
+    """Every way a pointer can differ from HEAD, under user config that
+    would hide some of them, and nothing that is not a pointer."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    for rel in (".dvc/config", "data/a.dvc", "data/old.dvc", "dvc.lock", "data/sub/dvc.lock", "foodvc.lock"):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text("v1\n")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    _git(["config", "status.showUntrackedFiles", "no"], cwd=repo)
+    for rel in (".dvc/config", "data/a.dvc", "foodvc.lock", "data/sub/dvc.lock"):
+        (repo / rel).write_text("v2\n")
+    _git(["add", "data/sub/dvc.lock"], cwd=repo)
+    _git(["rm", "-q", "dvc.lock"], cwd=repo)
+    _git(["mv", "data/old.dvc", "data/new.dvc"], cwd=repo)
+    (repo / "data" / "sp ace.dvc").write_text("new\n")
+    (repo / "new" / "deep").mkdir(parents=True)
+    (repo / "new" / "deep" / "x.dvc").write_text("new\n")
+
+    assert sorted(SubprocessRegistryGitOps().uncommitted_pointers(repo)) == [
+        "data/a.dvc", "data/new.dvc", "data/old.dvc", "data/sp ace.dvc",
+        "data/sub/dvc.lock", "dvc.lock", "new/deep/x.dvc",
+    ]
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitOpError) as exc:
+        SubprocessRegistryGitOps().uncommitted_pointers(plain)
+    assert "not a git repository" in exc.value.stderr  # register refuses on it
+
+
+
+
+def test_uncommitted_files_is_everything_git_status_shows(tmp_path: Path) -> None:
+    """`register`'s question: is the working tree exactly the commit? A
+    tracked change, an untracked file and an untracked directory (one entry)
+    count, under `status.showUntrackedFiles=no` too; an ignored file does
+    not. The pointer query sees a root-level pointer from a subdirectory,
+    since `dvc push` uploads the whole repo from there.
+
+    Mutations: `--untracked-files=no` -> the untracked entries vanish; drop
+    `top` from the pointer pathspecs -> the subdirectory query misses
+    `dvc.lock`.
+    """
+    repo = tmp_path / "repo"
+    (repo / "code").mkdir(parents=True)
+    (repo / "dvc.yaml").write_text("v1\n")
+    (repo / ".gitignore").write_text("ignored.log\n")
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    _git(["config", "status.showUntrackedFiles", "no"], cwd=repo)
+    (repo / "dvc.yaml").write_text("v2\n")
+    (repo / "dvc_vars.yaml").write_text("new\n")
+    (repo / "scratch" / "deep").mkdir(parents=True)
+    (repo / "scratch" / "deep" / "a.txt").write_text("new\n")
+    (repo / "ignored.log").write_text("noise\n")
+    (repo / "dvc.lock").write_text("new\n")
+    ops = SubprocessRegistryGitOps()
+
+    assert sorted(ops.uncommitted_files(repo)) == ["dvc.lock", "dvc.yaml", "dvc_vars.yaml", "scratch/"]
+    assert ops.uncommitted_pointers(repo / "code") == ["dvc.lock"]
+
+
+def test_uncommitted_files_survives_a_path_that_is_not_utf8(tmp_path: Path) -> None:
+    """`-z` hands paths over as raw bytes. A name that is not UTF-8 (Latin-1
+    from a Windows zip, say) is shown with a replacement character, not
+    raised as a UnicodeDecodeError past `except GitOpError`. The entry goes
+    into the index directly, since not every filesystem accepts such a name.
+
+    Mutation: decode strictly -> UnicodeDecodeError.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    blob = subprocess.run(
+        ["git", "hash-object", "-w", "--stdin"], cwd=repo, input=b"x\n",
+        capture_output=True, check=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "update-index", "--index-info"], cwd=repo,
+        input=b"100644 " + blob + b"\tcaf\xe9.csv\n", capture_output=True, check=True,
+    )
+
+    assert SubprocessRegistryGitOps().uncommitted_files(repo) == ["caf\ufffd.csv"]

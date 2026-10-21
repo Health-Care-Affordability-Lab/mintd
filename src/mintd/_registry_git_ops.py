@@ -27,6 +27,12 @@ from typing import Any, Protocol
 # ---------------------------------------------------------------------------
 
 
+#: The files a version-aware push rewrites: the pointers. ``top`` anchors them
+#: at the repo root, because `dvc push` uploads the whole repo from any
+#: subdirectory.
+_POINTER_PATHSPEC = (":(top,glob)**/*.dvc", ":(top,glob)**/dvc.lock")
+
+
 class GitOpError(Exception):
     """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
 
@@ -116,6 +122,8 @@ class RegistryGitOps(Protocol):
     def tag(self, work_dir: Path, name: str, message: str) -> None: ...
     def tag_points_at_head(self, work_dir: Path, name: str) -> bool: ...
     def is_working_tree_clean(self, work_dir: Path) -> bool: ...
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]: ...
+    def uncommitted_files(self, work_dir: Path) -> list[str]: ...
     def current_commit(self, work_dir: Path) -> str: ...
     def open_pr(
         self,
@@ -347,6 +355,38 @@ class SubprocessRegistryGitOps:
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
 
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]:
+        """The `.dvc` / `dvc.lock` files anywhere in the repo that differ
+        from HEAD: what `data push` reports. The ``:(top,glob)`` pathspecs
+        match root-level files from any subdirectory and leave out
+        ``.dvc/config`` and ``foodvc.lock``. ``--untracked-files=all`` keeps
+        each untracked pointer a path, never a collapsed directory (git 2.48
+        already descends for a file pathspec; this does not rely on it)."""
+        return self._uncommitted(work_dir, _POINTER_PATHSPEC, untracked="all")
+
+    def uncommitted_files(self, work_dir: Path) -> list[str]:
+        """Everything `git status` shows: tracked changes and untracked files
+        not ignored, an untracked directory as one ``dir/`` entry. `registry
+        register` refuses on any, as `publish` does, because importers read
+        the commit and no list of the files they need stays complete."""
+        return self._uncommitted(work_dir, (), untracked="normal")
+
+    def _uncommitted(self, work_dir: Path, pathspec: tuple[str, ...], *, untracked: str) -> list[str]:
+        """Files matching ``pathspec`` (all, if empty) that differ from HEAD:
+        modified, staged, deleted or untracked. Paths are relative to the
+        repo root (porcelain v1 ignores ``status.relativePaths``).
+
+        ``-z`` returns paths raw rather than C-quoted, so ``data/sp ace.dvc``
+        survives; ``--no-renames`` makes a ``git mv`` one path per record and
+        overrides ``status.renames``; an explicit ``--untracked-files``
+        overrides ``status.showUntrackedFiles=no``.
+        """
+        out = self._git(
+            ["status", "--porcelain", "-z", "--no-renames", f"--untracked-files={untracked}", "--", *pathspec],
+            cwd=work_dir,
+        )
+        return [rec[3:] for rec in out.split("\0") if rec]
+
     def current_commit(self, work_dir: Path) -> str:
         return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
 
@@ -401,11 +441,17 @@ class SubprocessRegistryGitOps:
     def _git(self, args: list[str], *, cwd: Path | None) -> str:
         cmd = ["git", *args]
         try:
+            # git writes paths as raw bytes under `-z` (UTF-8 for any name it
+            # did not get from elsewhere): decode them as UTF-8 whatever the
+            # locale (cp1252 on Windows), and replace a byte that is not,
+            # rather than raise past `except GitOpError` as a traceback.
             result = subprocess.run(
                 cmd,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._fast_timeout,
                 env=git_env(),
                 check=True,

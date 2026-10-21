@@ -2390,6 +2390,7 @@ def test_check_errors_on_a_dir_pointer_without_version_ids(tmp_path: Path) -> No
     assert f.source == tmp_path / "metadata.json"
     assert "'data/final/'" in f.message and "0/1 files" in f.message
     assert f.hint and "mintd data push" in f.hint
+    assert "commit and push the rewritten" in f.hint  # importers read the pushed commit
 
 
 def test_check_is_clean_when_the_dir_pointer_is_pinned(tmp_path: Path) -> None:
