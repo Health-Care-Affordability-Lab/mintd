@@ -14,12 +14,13 @@ A running log of design decisions for mintdv2. Newest at the top. Each entry: wh
    carries them as `uncommitted_pointers`. It checks the whole repo from any subdirectory, as the
    push uploads it.
 2. `mintd registry register`, after `check` passes, exits 1 while `git status` shows anything
-   uncommitted: tracked changes or untracked files that are not ignored, the rule `publish`
-   already applies. It names them; data goes to DVC or `.gitignore`. There is no list of "the
+   uncommitted: tracked changes or untracked files that are not ignored, whatever
+   `status.showUntrackedFiles` says (`publish`'s clean-tree check honours that setting, so it
+   can pass a tree register refuses). It names them; data goes to DVC or `.gitignore`. There is no list of "the
    files importers read": each one tried missed something (`metadata.json` and `dvc.yaml` on a
    never-committed project, then the `dvc_vars.yaml` every scaffolded `dvc.yaml` loads), and a
    miss passes register while every import fails. The cost: an unrelated untracked file blocks
-   register until it is committed, ignored or stashed, as it already blocks `publish`.
+   register until it is committed, ignored or stashed.
 3. Pointers are judged against HEAD, not against what one push rewrote: importers see HEAD
    whichever command dirtied the file.
 4. When git cannot answer, outside a git repository included, register fails closed and data push

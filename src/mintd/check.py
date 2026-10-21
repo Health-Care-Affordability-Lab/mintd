@@ -488,7 +488,7 @@ def _delivery_hint(verdict: Delivery, path: str, remote_name: str, project_path:
         return (
             "; ".join(facts) + ". Declare a path DVC tracks, or track this one: for a dvc.yaml "
             f"output, run the stage that produces it ({_STAGE_RUN_DELETES}); for a loose file, "
-            "'mintd data add'. Then 'mintd data push' and commit the pointer or dvc.lock."
+            "'mintd data add'. Then 'mintd data push' and commit and push the pointer or dvc.lock."
         )
     if verdict.state == "not_pullable":
         return (

@@ -9,6 +9,17 @@ from __future__ import annotations
 import os
 
 
+#: Variables that change what every pathspec means. git sets
+#: ``GIT_LITERAL_PATHSPECS`` for hooks and aliases run under
+#: ``--literal-pathspecs`` (Magit passes it on every call), and literal mode
+#: switches off the ``:(top,glob)`` / ``:(literal)`` magic the seams rely on:
+#: the pointer check matched nothing and an import rollback dropped tracked
+#: index entries. Unset, git's defaults apply.
+_PATHSPEC_ENV = frozenset(
+    {"GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"}
+)
+
+
 def git_env() -> dict[str, str]:
     """Return the parent env with git's message language pinned to English.
 
@@ -40,4 +51,5 @@ def git_env() -> dict[str, str]:
     feature mintd offers, it is a parse failure; the user's own git is
     untouched.
     """
-    return {**os.environ, "LC_ALL": "C", "LANGUAGE": ""}
+    env = {k: v for k, v in os.environ.items() if k not in _PATHSPEC_ENV}
+    return {**env, "LC_ALL": "C", "LANGUAGE": ""}

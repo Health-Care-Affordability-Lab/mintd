@@ -973,8 +973,11 @@ def test_cli_registry_register_blocks_on_check_project_errors(
     patched_clients,
 ) -> None:
     """Pattern A's check gate: if check_project returns an error finding,
-    register exits 1 and client.register is NEVER called."""
+    register exits 1 and client.register is NEVER called. The project is a
+    clean git repo, so the uncommitted-changes guard after check cannot be
+    what stops it."""
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)
     client, _ = patched_clients
     err_finding = CheckFinding(
         severity="error",
@@ -991,8 +994,9 @@ def test_cli_registry_register_blocks_on_check_project_errors(
     monkeypatch.setattr(client, "register", must_not_call)
 
     rc = cli.main(["registry", "register", str(tmp_path)])
-    capsys.readouterr()
+    captured = capsys.readouterr()
     assert rc == 1
+    assert "storage.bucket is empty" in captured.out + captured.err
 
 
 def test_cli_registry_register_passes_through_when_check_clean(
@@ -4944,6 +4948,27 @@ def test_registry_register_refuses_while_a_pointer_differs_from_head(
     assert cli.main(["registry", "register", str(tmp_path)]) == 0, capsys.readouterr().err
     assert len(calls) == 1
     client.fetch("test_project")
+
+
+def test_registry_register_names_at_most_eight_files_and_the_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """A commit touching hundreds of files must not print them all: the error
+    names the first 8 and says how many there are. Nine files is the edge.
+
+    Mutations: slice 9, or no cap -> `f8.txt` is named; drop the count, or
+    count only above 9 -> "(9 in all)" is missing.
+    """
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)
+    for i in range(9):
+        (tmp_path / f"f{i}.txt").write_text("x\n")
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "f7.txt … (9 in all)" in err
+    assert "f8.txt" not in err
 
 
 def test_registry_register_needs_a_git_repository(

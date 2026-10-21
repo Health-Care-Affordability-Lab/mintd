@@ -17,7 +17,9 @@ Two rules for every clone here:
 
 from __future__ import annotations
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -560,11 +562,13 @@ def test_uncommitted_files_is_everything_git_status_shows(tmp_path: Path) -> Non
 
 def test_uncommitted_files_survives_a_path_that_is_not_utf8(tmp_path: Path) -> None:
     """`-z` hands paths over as raw bytes. A name that is not UTF-8 (Latin-1
-    from a Windows zip, say) is shown with a replacement character, not
-    raised as a UnicodeDecodeError past `except GitOpError`. The entry goes
-    into the index directly, since not every filesystem accepts such a name.
+    from a Windows zip, say) comes back as the string Python itself makes of
+    those bytes, not a UnicodeDecodeError past `except GitOpError`. The entry
+    goes into the index directly, since not every filesystem accepts such a
+    name.
 
-    Mutation: decode strictly -> UnicodeDecodeError.
+    Mutations: decode strictly -> UnicodeDecodeError; `errors="replace"` ->
+    U+FFFD, a name no other git call can find again.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -578,4 +582,89 @@ def test_uncommitted_files_survives_a_path_that_is_not_utf8(tmp_path: Path) -> N
         input=b"100644 " + blob + b"\tcaf\xe9.csv\n", capture_output=True, check=True,
     )
 
-    assert SubprocessRegistryGitOps().uncommitted_files(repo) == ["caf\ufffd.csv"]
+    assert SubprocessRegistryGitOps().uncommitted_files(repo) == [os.fsdecode(b"caf\xe9.csv")]
+
+
+def _index(repo: Path) -> bytes:
+    return subprocess.run(
+        ["git", "ls-files", "--stage", "-z"], cwd=repo, capture_output=True, check=True
+    ).stdout
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="argv is UTF-16 on Windows; git emits UTF-8 there")
+def test_restore_index_round_trips_a_name_that_is_not_utf8(tmp_path: Path) -> None:
+    """A failed import puts back the index entry dvc's autostage replaced. A
+    name that is not UTF-8 must reach `update-index` as the bytes git gave:
+    decoded with U+FFFD it named a path that does not exist, so a phantom
+    entry was added and the broken pointer stayed staged. Index-only, since
+    not every filesystem accepts such a name.
+
+    Mutation: `errors="replace"` -> an extra entry; the original is not back.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+
+    def stage(content: bytes) -> None:
+        blob = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=repo, input=content,
+            capture_output=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "update-index", "--add", "--index-info"], cwd=repo,
+            input=b"100644 " + blob + b"\tcaf\xe9.dvc\n", capture_output=True, check=True,
+        )
+
+    ops = SubprocessRegistryGitOps()
+    name = os.fsdecode(b"caf\xe9.dvc")
+    stage(b"good pointer\n")
+    before = _index(repo)
+    entries = ops.index_entries(repo, [name])
+    assert list(entries) == [name]
+
+    stage(b"broken pointer\n")  # what dvc's core.autostage leaves
+    ops.restore_index(repo, [name], entries)
+
+    assert _index(repo) == before
+
+
+def test_pointer_queries_ignore_an_inherited_literal_pathspecs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """git exports GIT_LITERAL_PATHSPECS=1 to hooks and aliases run under
+    `--literal-pathspecs` (Magit passes it on every call). Literal mode turns
+    off the `:(top,glob)` and `:(literal)` magic: the pointer check matched
+    nothing, and `index_entries` came back empty, so a rollback dropped the
+    tracked pointer from the index.
+
+    Mutation: pass the parent's pathspec variables through `git_env()` -> both
+    queries come back empty.
+    """
+    repo = tmp_path / "repo"
+    (repo / "data").mkdir(parents=True)
+    (repo / "data" / "final.dvc").write_text("v1\n")
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    (repo / "data" / "final.dvc").write_text("v2\n")
+    monkeypatch.setenv("GIT_LITERAL_PATHSPECS", "1")
+
+    ops = SubprocessRegistryGitOps()
+    assert ops.uncommitted_pointers(repo) == ["data/final.dvc"]
+    assert list(ops.index_entries(repo / "data", ["final.dvc"])) == ["final.dvc"]
+
+
+def test_uncommitted_pointers_lists_an_unstaged_pointer_once(tmp_path: Path) -> None:
+    """`git rm --cached` shows a path twice: a staged delete, then untracked.
+
+    Mutation: drop the de-duplication -> `["a.dvc", "a.dvc"]`.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.dvc").write_text("x\n")
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    _git(["rm", "-q", "--cached", "a.dvc"], cwd=repo)
+
+    assert SubprocessRegistryGitOps().uncommitted_pointers(repo) == ["a.dvc"]

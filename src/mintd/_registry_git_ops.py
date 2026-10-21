@@ -385,7 +385,9 @@ class SubprocessRegistryGitOps:
             ["status", "--porcelain", "-z", "--no-renames", f"--untracked-files={untracked}", "--", *pathspec],
             cwd=work_dir,
         )
-        return [rec[3:] for rec in out.split("\0") if rec]
+        # dict.fromkeys: `git rm --cached` lists a path twice (staged delete,
+        # then untracked).
+        return list(dict.fromkeys(rec[3:] for rec in out.split("\0") if rec))
 
     def current_commit(self, work_dir: Path) -> str:
         return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
@@ -443,15 +445,17 @@ class SubprocessRegistryGitOps:
         try:
             # git writes paths as raw bytes under `-z` (UTF-8 for any name it
             # did not get from elsewhere): decode them as UTF-8 whatever the
-            # locale (cp1252 on Windows), and replace a byte that is not,
-            # rather than raise past `except GitOpError` as a traceback.
+            # locale (cp1252 on Windows). A byte that is not UTF-8 becomes a
+            # surrogate rather than a traceback or a U+FFFD: on POSIX it encodes
+            # back to the same byte in argv, so a path read here and handed to
+            # `update-index` names the same file.
             result = subprocess.run(
                 cmd,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
-                errors="replace",
+                errors="surrogateescape",
                 timeout=self._fast_timeout,
                 env=git_env(),
                 check=True,

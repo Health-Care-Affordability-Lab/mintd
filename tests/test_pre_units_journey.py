@@ -1054,6 +1054,12 @@ def test_readme_produce_flow_names_pointers_until_committed_and_pushed(
     for line in ("git status", "git add -A", 'git commit -m "Record pushed data versions"', "git push"):
         assert f"\n{line}\n" in readme, f"README no longer says {line!r}"
         _git(shlex.split(line)[1:], cwd=producer.work)
+    # ...and between the push and the register, where a reader meets it.
+    assert (
+        readme.index("\nmintd data push\n")
+        < readme.index('\ngit commit -m "Record pushed data versions"\n')
+        < readme.index("\nmintd registry register\n")
+    ), "README's commit step is no longer between data push and registry register"
     assert cli.main(["data", "push", "--remote", "local"]) == 0
     assert "✓ already up to date" in _drain(capsys)
     rc, out = register()

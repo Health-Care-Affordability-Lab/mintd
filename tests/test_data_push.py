@@ -373,12 +373,14 @@ def test_cli_push_still_succeeds_when_git_cannot_answer(
     pointers could not be checked, the upload's line, exit 0, no traceback.
     Under --json the warning is silent, so the key is null, not the `[]` of
     a clean tree. Mutations: delete the `except GitOpError` arm ->
-    traceback; set `[]` there -> the JSON arm reddens."""
+    traceback; set `[]` there -> the JSON arm reddens; print the ✓ when git
+    could not answer -> the ✓ assertion reddens."""
     monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
     assert cli.main(["data", "push", "--remote", "r"]) == 0
     err = " ".join(capsys.readouterr().err.split())
     assert "could not check .dvc / dvc.lock files against HEAD" in err
     assert "pushed 1 object(s)" in err
+    assert "✓" not in err  # nobody checked the pointers
     assert "Traceback" not in err
 
     assert cli.main(["--json", "data", "push", "--remote", "r"]) == 0
@@ -413,3 +415,32 @@ def test_cli_push_from_a_subdirectory_names_root_pointers_and_only_pointers(
     assert "✓" not in err
     assert "differ from the last commit: dvc.lock" in err
     assert "notes.txt" not in err
+
+
+def test_cli_push_from_a_nested_repo_checks_the_dvc_project(
+    push_clients: _FakeDvcOps,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """dvc finds its project by walking up to `.dvc/`; git stops at the
+    nearest `.git`. From inside a submodule or a nested clone the push uploads
+    the outer project, so its pointers are the ones to check.
+
+    Mutation: query git at the cwd -> a ✓ over the outer `dvc.lock`.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".dvc").mkdir(parents=True)
+    (proj / "dvc.lock").write_text("v1\n")
+    _git(["init", "-q", "-b", "main"], cwd=proj)
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "seed"], cwd=proj)
+    (proj / "dvc.lock").write_text("v2\n")
+    (proj / "code").mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=proj / "code")
+    monkeypatch.chdir(proj / "code")
+
+    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "✓" not in err
+    assert "differ from the last commit: dvc.lock" in err

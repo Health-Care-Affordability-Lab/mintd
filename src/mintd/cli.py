@@ -1026,6 +1026,14 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dvc_root(start: Path) -> Path:
+    """The nearest directory at or above ``start`` holding ``.dvc/``: the
+    project `dvc push` pushes from anywhere beneath it. Git's own walk stops at
+    the nearest ``.git`` instead, which inside a submodule or nested clone is
+    a different repository. ``start`` when there is none."""
+    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
+
+
 def _handle_data_push(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
@@ -1056,7 +1064,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     # (outside a repo, say) for a clean tree, and `warn` is silent under --json.
     pointers: list[str] | None
     try:
-        pointers = _resolve_git_ops(config).uncommitted_pointers(Path("."))
+        pointers = _resolve_git_ops(config).uncommitted_pointers(_dvc_root(Path.cwd()))
     except GitOpError as exc:
         reporter.warn(f"could not check .dvc / dvc.lock files against HEAD: {exc.stderr.strip() or exc}")
         pointers = None
@@ -1088,8 +1096,11 @@ def _handle_data_push(args: argparse.Namespace) -> int:
         if pointers:
             reporter.warn(
                 f"{line}, but these pointer files differ from the last commit: "
-                f"{', '.join(pointers)} — commit and push them, or importers get an empty directory"
+                f"{', '.join(pointers)} — commit and push them; importers read your pushed commit, not these files"
             )
+        elif pointers is None:
+            # The warning above says why: no ✓ over pointers nobody checked.
+            reporter.success(line)
         else:
             reporter.success(f"✓ {line}")
     return 0
