@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -21,15 +22,22 @@ from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
-from ._dvc_state import outs_matching, path_covers
+from ._dvc_state import delivery, outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
 from .imports import DataDependency, NotAnImportError
-from .producer import MissingPrimaryDataProduct, ProducerError, ProducerView
+from .producer import (
+    FetchError,
+    GitArchiveFetcher,
+    MissingPrimaryDataProduct,
+    ProducerError,
+    ProducerView,
+)
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -45,6 +53,7 @@ __all__ = [
     "NoTrackedOutputs",
     "PrimaryRemovedAtHead",
     "ProducerError",
+    "UndeliverableImport",
     "UnknownProductPath",
     "bump_import",
     "clone_and_pull_product",
@@ -138,6 +147,18 @@ class NoTrackedOutputs(Exception):
     usable. Importing nothing is a refusal, not a success."""
 
 
+class UndeliverableImport(Exception):
+    """`dvc import` exited 0 and landed no file for an output that the
+    producer's DVC state at the recorded pin cannot deliver, judged by
+    `_dvc_state.delivery`, the predicate the producer's own `mintd check`
+    errors on. ``hint`` says whose fix it is. Positional, so the CLI's
+    raise-site tripwire can build it."""
+
+    def __init__(self, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.hint = hint
+
+
 class BumpBlocked(Exception):
     """The consumer-section finding for this dep is an error or non-actionable
     warning. Bumping is unsafe until the user resolves the underlying producer
@@ -176,8 +197,14 @@ def import_product(
     extra_dvc_args: list[str] | None = None,
     producer_view_factory: Callable[[str, str], ProducerView] | None = None,
     reporter: "Reporter | None" = None,
+    registry_git_ops: RegistryGitOps | None = None,
 ) -> list[Path]:
-    """Catalog-driven `dvc import`. Returns the list of `.dvc` files written."""
+    """Catalog-driven `dvc import`. Returns the list of `.dvc` files written.
+
+    Raises `UndeliverableImport` when an output lands no file and the
+    producer's DVC state at the pin cannot deliver it; a fresh import that
+    fails that way leaves the project as it was, git's index included when
+    ``registry_git_ops`` is given."""
 
     entry = client.fetch(name)
     dumped = entry.model_dump()
@@ -272,6 +299,20 @@ def import_product(
                 # doesn't fail with the cryptic "stage working dir ... does not
                 # exist".
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # What a failed postcondition below puts back: a forced
+                # re-import gets its previous pointer (`_payload_backup`
+                # restores the payload), a fresh one loses what dvc wrote.
+                previous = target_dvc.read_bytes() if target_dvc.is_file() else None
+                gitignore = dest.parent / ".gitignore"
+                gitignore_before = gitignore.read_bytes() if gitignore.is_file() else None
+                # Before dvc runs: its `core.autostage` `git add`s both files.
+                index_names = [target_dvc.name, gitignore.name]
+                staged: dict[str, str] | None = None
+                if registry_git_ops is not None:
+                    try:
+                        staged = registry_git_ops.index_entries(dest.parent, index_names)
+                    except GitOpError:
+                        staged = None  # not a git work tree: no index to restore
                 # D16: `--force` used to `rmtree` the destination outright — no
                 # rename-aside, no restore — so an import that died mid-transfer
                 # left no working copy and said nothing: the bytes were still in
@@ -287,17 +328,49 @@ def import_product(
                     engage=force and target_dvc.exists(),
                     name=name,
                 ):
-                    produced.append(
-                        dvc_ops.import_(
-                            repo_url=repo_url,
-                            path=p,
-                            dest=dest,
-                            cwd=cwd,
-                            rev=rev,
-                            force=force,
-                            extra_args=extra_dvc_args,
-                        )
+                    written = dvc_ops.import_(
+                        repo_url=repo_url,
+                        path=p,
+                        dest=dest,
+                        cwd=cwd,
+                        rev=rev,
+                        force=force,
+                        extra_args=extra_dvc_args,
                     )
+                    # The import twin of `clone_and_pull_product`'s `missing`
+                    # check. A file, not `outs_materialized`: on an unpinned
+                    # `.dir` out dvc writes the empty-directory hash beside an
+                    # empty directory, which that probe counts as landed.
+                    # Inside `_payload_backup`, so a forced re-import that
+                    # lands nothing gets its previous payload back.
+                    if not (dest.is_file() or (dest.is_dir() and any(f.is_file() for f in dest.rglob("*")))):
+                        try:
+                            _require_deliverable(
+                                repo_url, p, written, name=name,
+                                # `--force` again only if a previous import is put back.
+                                force=previous is not None, rev_requested=rev is not None,
+                            )
+                        except BaseException:
+                            if previous is not None:
+                                target_dvc.write_bytes(previous)
+                            else:
+                                _remove_payload(dest)
+                                target_dvc.unlink(missing_ok=True)
+                                if gitignore_before is None:
+                                    gitignore.unlink(missing_ok=True)
+                                else:
+                                    gitignore.write_bytes(gitignore_before)
+                            if registry_git_ops is not None and staged is not None:
+                                try:
+                                    registry_git_ops.restore_index(dest.parent, index_names, staged)
+                                except GitOpError as git_exc:
+                                    if reporter is not None:
+                                        reporter.warn(
+                                            f"could not restore git's index for {target_dvc.name} and "
+                                            f".gitignore in {dest.parent}: {git_exc.stderr.strip()}"
+                                        )
+                            raise
+                    produced.append(written)
     except BaseException:
         if produced and reporter is not None:
             # EARLIER outputs are not rolled back — the failing one is, by
@@ -318,6 +391,56 @@ def import_product(
             )
         raise
     return produced
+
+
+def _require_deliverable(
+    repo_url: str, path: str, pointer: Path, *, name: str, force: bool, rev_requested: bool
+) -> None:
+    """dvc exited 0 and landed no file for ``path``. Raise unless the
+    producer's tree at the pin dvc recorded can deliver it empty (an empty
+    directory out, say), judged by `_dvc_state.delivery` with the inputs
+    `mintd check` uses, so the two cannot disagree. Offline: reads the
+    producer's git, never its bucket."""
+    pin = DataDependency.from_dvc_file(pointer).contract_pin
+    if not pin:
+        # `--dvc-arg=--no-exec` records no `rev_lock`: nothing was meant to
+        # land, and an empty pin would fetch the producer's HEAD, not the rev
+        # the user asked for.
+        return
+    retry = "re-run this import with --force" if force else "re-run this import"
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp)
+        try:
+            GitArchiveFetcher().checkout_at(repo_url, pin, tree)
+        except FetchError as exc:
+            raise UndeliverableImport(
+                f"nothing was imported for {path!r} of {name!r} @ {pin[:7]}, and the "
+                f"producer's DVC state there could not be read to say why: {exc.detail or exc.reason}",
+                f"check git access to {repo_url}, then {retry}",
+            ) from exc
+        storage = inspect_storage(tree)
+        verdict = delivery(
+            tree, path, storage.dvc_remote_name or "", version_aware=storage.dvc_version_aware
+        )
+    if verdict.deliverable:
+        return
+    if rev_requested:
+        # The producer may have fixed it since: their `check` judges HEAD.
+        hint = (
+            f"commit {pin[:7]} cannot deliver it: import a later --rev"
+            f"{' with --force' if force else ''}, or ask the producer to "
+            f"run 'mintd check' in {repo_url}, which names the repair"
+        )
+    else:
+        hint = (
+            f"this is the producer's to fix: ask them to run 'mintd check' in {repo_url}, "
+            f"which names the repair, then {retry}"
+        )
+    raise UndeliverableImport(
+        f"{path!r} of {name!r} @ {pin[:7]} cannot be delivered by 'mintd data import': "
+        f"{verdict.detail}; nothing was imported for it",
+        hint,
+    )
 
 
 def _drop_nested_paths(paths: list[str], *, reporter: "Reporter | None") -> list[str]:

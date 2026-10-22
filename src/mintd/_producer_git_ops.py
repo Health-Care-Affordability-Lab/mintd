@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 from enum import StrEnum
 from io import BytesIO
+from pathlib import Path
 from typing import Literal, Protocol, overload
 
 
@@ -187,6 +188,20 @@ class GitArchiveFetcher:
         head_sha = _git_ls_remote_head(repo, timeout=self.timeout)
         raw = self.fetch_metadata_at(repo, head_sha)
         return raw, head_sha
+
+    def checkout_at(self, repo: str, pin: str, dest: Path) -> None:
+        """Check ``repo``'s tree at ``pin`` out into the empty directory
+        ``dest``, one commit deep: the fetch ``_fallback_clone`` makes, checked
+        out instead of shown. Raises FetchError."""
+        # The whole tree at the pin, not a sparse checkout of the DVC files:
+        # the import postcondition calls this only for an import that landed
+        # nothing, and `dvc import` has just cloned the full repo anyway.
+        for argv in (
+            ["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, str(dest)],
+            ["git", "-C", str(dest), "fetch", "--depth=1", "origin", pin],
+            ["git", "-C", str(dest), "checkout", "--quiet", "FETCH_HEAD"],
+        ):
+            self._run_clone(argv, repo=repo, pin=pin, path="")
 
     def _fallback_clone(self, repo: str, pin: str, path: str) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
