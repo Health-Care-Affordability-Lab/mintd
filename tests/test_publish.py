@@ -4,7 +4,8 @@ import pytest
 from pathlib import Path
 from mintd.publish import (
     publish_project, prepare_publish, CatalogUpdateFailed, DvcPushFailed, ProjectPushFailed,
-    TagFailed, PublishBlocked, PublishError, VersionNotIncreasing
+    TagFailed, PublishBlocked, PublishError, VersionNotIncreasing,
+    InvalidCurrentVersion, _resolve_version
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
 from mintd._registry_git_ops import (
@@ -174,6 +175,15 @@ def test_publish_allows_equal_version_for_retry(tmp_path):
         cwd=proj, capture_output=True, text=True,
     ).stdout.strip()
     assert parents == "1"
+
+@pytest.mark.parametrize("current, suggested", [
+    ("0.0.2.dev102+g30b92fb3f", '"0.0.2"'),  # pre-#27 scaffold
+    ("banana", '"MAJOR.MINOR.PATCH"'),
+])
+def test_invalid_current_version_hint_names_the_fix(current, suggested):
+    with pytest.raises(InvalidCurrentVersion) as exc:
+        _resolve_version(current, None)
+    assert f"set mint.version in metadata.json to {suggested}" in exc.value.recovery_hint
 
 def test_publish_refuses_invalid_semver(tmp_path):
     proj = _seed_project(tmp_path)
