@@ -582,7 +582,7 @@ def test_uncommitted_files_survives_a_path_that_is_not_utf8(tmp_path: Path) -> N
         input=b"100644 " + blob + b"\tcaf\xe9.csv\n", capture_output=True, check=True,
     )
 
-    assert SubprocessRegistryGitOps().uncommitted_files(repo) == [os.fsdecode(b"caf\xe9.csv")]
+    assert SubprocessRegistryGitOps().uncommitted_files(repo) == [b"caf\xe9.csv".decode("utf-8", "surrogateescape")]
 
 
 def _index(repo: Path) -> bytes:
