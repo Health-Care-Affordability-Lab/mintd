@@ -24,7 +24,9 @@ dvc-TRACKED directory dest — its pointer beside it — is refused with
 `DvcImportDestinationExists`, and `force` does not help; an UNTRACKED
 directory dest is a *container* — the source basename is nested inside it
 and the call succeeds, while the returned pointer path is still computed
-from the original `dest` and so names a file that was never written.
+from the original `dest` and so names a file that was never written. It lands
+a stand-in payload at the out -- a file for a path with a suffix, else a
+directory -- unless the producer path is in `import_lands_nothing`.
 
 Strict target resolution reads EVERY `dvc.yaml` in the workspace -- root or
 subdirectory -- plus each one's sibling `dvc.lock`, and every `*.dvc`
@@ -118,6 +120,10 @@ class _FakeDvcOps:
         # A successful real `dvc pull` writes the target's workspace path(s);
         # False models the zero-exit pull that materializes nothing.
         self.pull_materializes: bool = True
+        # A successful real `dvc import` lands the payload at the out. Producer
+        # paths listed here model the zero-exit import that lands nothing (an
+        # unpinned `.dir` out on a version-aware remote).
+        self.import_lands_nothing: set[str] = set()
         self.add_calls: list[DvcAddCall] = []
         self.add_raises: Exception | None = None
         self.status_calls: list[DvcStatusCall] = []
@@ -226,6 +232,12 @@ class _FakeDvcOps:
             f"      rev: {rev or 'main'}\n"
             f"      rev_lock: {rev_lock}\n"
         )
+        if path.rstrip("/") not in self.import_lands_nothing and not out.exists():
+            if Path(path.rstrip("/")).suffix:  # a file out lands as a file, as with dvc
+                out.write_text("fake payload\n")
+            else:
+                out.mkdir()
+                (out / "payload").write_text("fake payload\n")
         # Like SubprocessDvcOps, the return is computed from the ORIGINAL
         # dest — after nesting it names a `<dest>.dvc` that was never
         # written, on the real arm and this one alike (contract-pinned).

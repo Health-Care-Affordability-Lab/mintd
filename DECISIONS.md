@@ -4,6 +4,51 @@ A running log of design decisions for mintdv2. Newest at the top. Each entry: wh
 
 ---
 
+## 2026-10-19 — `data push` reports uncommitted pointers instead of committing them; `registry register` refuses them
+
+**Decision:** on a version-aware remote `dvc push` writes each object's S3 version ID into the
+`.dvc` / `dvc.lock` files, and an importer reads the producer's pushed commit, not its disk. So:
+
+1. `mintd data push` still uploads and exits 0, but when any `.dvc` / `dvc.lock` file in the repo
+   differs from HEAD it prints no ✓; it names the files and says to commit and push them. `--json`
+   carries them as `uncommitted_pointers`. It checks the whole repo from any subdirectory, as the
+   push uploads it.
+2. `mintd registry register`, after `check` passes, exits 1 while `git status` shows anything
+   uncommitted: tracked changes or untracked files that are not ignored, whatever
+   `status.showUntrackedFiles` says (`publish`'s clean-tree check honours that setting, so it
+   can pass a tree register refuses). It names them; data goes to DVC or `.gitignore`. There is no list of "the
+   files importers read": each one tried missed something (`metadata.json` and `dvc.yaml` on a
+   never-committed project, then the `dvc_vars.yaml` every scaffolded `dvc.yaml` loads), and a
+   miss passes register while every import fails. The cost: an unrelated untracked file blocks
+   register until it is committed, ignored or stashed.
+3. Pointers are judged against HEAD, not against what one push rewrote: importers see HEAD
+   whichever command dirtied the file.
+4. When git cannot answer, outside a git repository included, register fails closed and data push
+   warns (`--json` reports `uncommitted_pointers: null`). There is no exception for a directory
+   outside git: importers read a git history, so a project without one cannot be imported.
+5. `check` keeps judging the working tree, because it is the step before the commit.
+
+Rejected: `data push` commits and pushes the pointers itself.
+
+**Why:** `publish` stays the only verb that writes the producer's git history, and it refuses a
+dirty tree so its commit holds only what it wrote. `data push` runs mid-work in arbitrary dirty
+trees; committing there would sweep unrelated edits into pushed history, and mintd would have to
+decide which pointers a targeted push owns. Exit 0, because the upload succeeded. `register` is the
+hard stop because it is the moment the product becomes discoverable, and a warning can be scrolled
+past. The guard lives in the register handler, not in `check_project` or the catalog client,
+because `publish` re-runs `check` between its own push and its commit, while the pointers are dirty
+by design.
+
+**Not covered:** a pointer committed but not pushed, or pushed only to a branch other than the
+default branch importers read. Inferring "pushed" from local upstream and branch history broke on
+every git workflow variant (repos with no commits yet, branches deleted after a merge, squash
+merges, signed commits); the follow-up compares pointer contents with that default branch instead.
+`registry update`, which runs no delivery gate at all.
+
+**Reversal cost:** Low. Two git queries, two call sites.
+
+---
+
 ## 2026-08-22 — Every fake gets a verdict: licensed by a contract test, or recorded as unlicensed
 
 **Decision:** `tests/test_substrate_rules.py` now carries a census of `tests/_fakes/`. A fake is

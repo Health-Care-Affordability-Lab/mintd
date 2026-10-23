@@ -134,6 +134,16 @@ class _FakeRegistryGitOps:
         self._git(["-c", "user.email=test@mintd", "-c", "user.name=test", "commit", "-m", message],
                   cwd=repo_dir)
 
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]:
+        # Delegates: this fake's `_git` leaks `CalledProcessError`, and the
+        # import lane routes on the typed `GitOpError` (a non-repo skips).
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().index_entries(work_dir, names)
+
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        SubprocessRegistryGitOps().restore_index(work_dir, names, entries)
+
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         self._git(["push", "-u", "origin", branch], cwd=repo_dir)
 
@@ -168,6 +178,16 @@ class _FakeRegistryGitOps:
             return False
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
+
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]:
+        # Delegates: this fake's `_git` leaks `CalledProcessError`, and the CLI
+        # routes on the typed `GitOpError`.
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().uncommitted_pointers(work_dir)
+
+    def uncommitted_files(self, work_dir: Path) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().uncommitted_files(work_dir)
 
     def current_commit(self, work_dir: Path) -> str:
         return self.current_commit_value

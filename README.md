@@ -154,6 +154,22 @@ mintd data push
 # cannot deliver to importers (untracked, or pushed without S3 version IDs):
 mintd check
 
+# Commit and push the project. On a version-aware remote `mintd data push`
+# writes each object's S3 version ID into the .dvc / dvc.lock files, and
+# importers read your pushed commit, not your disk. data push names the
+# pointers it left uncommitted; registry register refuses while git has
+# any uncommitted change or untracked file that is not ignored (whatever
+# status.showUntrackedFiles says). Data belongs in DVC, not
+# git: the scaffold's .gitignore covers data/, and any data file git status
+# lists elsewhere goes to `mintd data add` or .gitignore before you commit.
+# First push only: create the GitHub repository named in metadata.json
+# (repository.github_url), `git remote add origin <that url>`, and push
+# with `git push -u origin main`.
+git status
+git add -A
+git commit -m "Record pushed data versions"
+git push
+
 # Announce the project to the lab registry (opens a PR):
 mintd registry register
 

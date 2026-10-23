@@ -1175,7 +1175,8 @@ def test_bump_clears_the_existing_directory_before_reimport(
 
     assert produced.changed is True
     assert len(fake.calls) == 1
-    assert not payload.exists()
+    # The old bytes are gone; the fake's stand-in payload may replace them.
+    assert not (payload / "v1.csv").exists()
 
 
 def test_bump_rewrites_a_renamed_dvc_file_in_place(tmp_path: Path) -> None:

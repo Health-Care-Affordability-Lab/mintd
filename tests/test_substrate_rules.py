@@ -77,7 +77,7 @@ BANNED_TARGETS: dict[str, int] = {
 }
 
 # PERMITTED: the other half of the same census — composition root (33 sites /
-# 8 targets) plus process/network boundary (30 sites / 11 targets). Pinned so
+# 8 targets) plus process/network boundary (31 sites / 11 targets). Pinned so
 # the classifier above cannot be widened to launder a banned target.
 # `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
 # captures the config the factory receives, at the already-permitted site.
@@ -86,6 +86,9 @@ BANNED_TARGETS: dict[str, int] = {
 # resolver to None to reach the exit-2 gate that replaced `data_pull`'s
 # degraded branch. A reviewed literal edit: the composition root is where a
 # `None` resolver can be injected at all, and `BANNED_TARGETS` does not move.
+# `GitCatalogClient` 2 → 3: the README produce-flow journey runs `registry
+# register` through the real CLI with real dvc and git, and `gh` can only be
+# faked at the catalog client's constructor, as the `journey` fixture does.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -102,7 +105,7 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd._producer_git_ops.subprocess.run": 6,
     "mintd._share_ops._create_s3_client": 2,
     "mintd._templates._render.importlib.metadata.version": 1,
-    "mintd.cli.GitCatalogClient": 2,
+    "mintd.cli.GitCatalogClient": 3,
     "mintd.cli.SubprocessDvcOps": 2,
     "mintd.init.SubprocessInitOps": 1,
     "mintd.producer.os.replace": 1,
@@ -224,8 +227,9 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
     patched ``_resolve_dvc_ops`` but never ``_resolve_catalog_client``, and
     ``test_cli.py:3338`` patched ``_resolve_catalog_client`` but never
     ``_resolve_dvc_ops``. They are safe because ``_handle_data_push``
-    (``cli.py:926``) and ``_handle_data_verify`` (``:1344``) resolve only dvc
-    ops, and ``_handle_check`` (``:753``) resolves only the catalog client — so
+    (``cli.py:926``) and ``_handle_data_verify`` (``:1344``) resolve dvc ops
+    (push also git ops, for its pointer check) but never the catalog client,
+    and ``_handle_check`` (``:753``) resolves only the catalog client — so
     neither module ever reaches the factory it left unpatched. Stated wrongly,
     that precondition reads as a general licence to drop a wrapper patch on a
     handler that really does resolve both.
@@ -256,7 +260,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (193 sites / 47 targets), not
+    """The literals above are the *whole* census (194 sites / 47 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -267,14 +271,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (193 → 192), or drop ``patch`` (193 → 163).
+    ``monkeypatch``-receiver calls (194 → 193), or drop ``patch`` (194 → 164).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 193
+    assert sum(scanned.values()) == 194
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

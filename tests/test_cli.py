@@ -29,7 +29,7 @@ from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
 from mintd._registry_git_ops import GitOpError
-from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary
+from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, write_pointer
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
@@ -105,13 +105,26 @@ def recording_reporter(monkeypatch: pytest.MonkeyPatch):
     return rep
 
 
+def _git_repo(path: Path) -> None:
+    """Commit everything in ``path``: `registry register` refuses a project
+    outside git, or one with anything uncommitted."""
+    from tests._harness.git import _git
+
+    _git(["init", "-q", "-b", "main"], cwd=path)
+    _git(["add", "-A"], cwd=path)
+    _git(["commit", "-q", "-m", "project"], cwd=path)
+
+
 def _register_provider_xw(
-    client: InMemoryCatalogClient, primary: str = "outputs/main.parquet"
+    client: InMemoryCatalogClient,
+    primary: str = "outputs/main.parquet",
+    *,
+    github_url: str = "https://github.com/example-org/provider-xw",
 ) -> Metadata:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["project"]["name"] = "provider-xw"
     data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["repository"]["github_url"] = github_url
     data["data_products"]["primary"] = primary
     metadata = Metadata.model_validate(data)
     client.register(metadata)
@@ -793,6 +806,7 @@ def test_registry_register_prints_result(
     patched_clients,
 ) -> None:
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)  # register needs the project committed
     rc = cli.main(["registry", "register", str(tmp_path)])
     captured = capsys.readouterr()
     out_combined = captured.out + captured.err  # Reporter writes to stderr
@@ -937,6 +951,7 @@ def test_cli_registry_register_catalog_already_exists_includes_update_hint(
 ) -> None:
     """`registry register` on already-registered project → exit 1 + update hint."""
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)  # register needs the project committed
     client, _ = patched_clients
 
     def _raise(*a: Any, **kw: Any) -> None:
@@ -958,8 +973,11 @@ def test_cli_registry_register_blocks_on_check_project_errors(
     patched_clients,
 ) -> None:
     """Pattern A's check gate: if check_project returns an error finding,
-    register exits 1 and client.register is NEVER called."""
+    register exits 1 and client.register is NEVER called. The project is a
+    clean git repo, so the uncommitted-changes guard after check cannot be
+    what stops it."""
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)
     client, _ = patched_clients
     err_finding = CheckFinding(
         severity="error",
@@ -976,8 +994,9 @@ def test_cli_registry_register_blocks_on_check_project_errors(
     monkeypatch.setattr(client, "register", must_not_call)
 
     rc = cli.main(["registry", "register", str(tmp_path)])
-    capsys.readouterr()
+    captured = capsys.readouterr()
     assert rc == 1
+    assert "storage.bucket is empty" in captured.out + captured.err
 
 
 def test_cli_registry_register_passes_through_when_check_clean(
@@ -986,6 +1005,7 @@ def test_cli_registry_register_passes_through_when_check_clean(
     patched_clients,
 ) -> None:
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)  # register needs the project committed
     monkeypatch.setattr("mintd.cli.check_project", lambda *a, **kw: [])
     rc = cli.main(["registry", "register", str(tmp_path)])
     assert rc == 0
@@ -3103,8 +3123,9 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     into the factory that builds its DvcOps, so dvc subprocess stderr flows
     through the spinner (passthrough_stderr), not raw to the terminal.
 
-    Two factories since the issue30 split: `data push`/`data verify` resolve
-    dvc alone, `data import`/`enclave pull` need the catalog too. Both spies
+    Two factories since the issue30 split: `data push`/`data verify` never
+    resolve the catalog (push also resolves git ops, for its pointer check),
+    `data import`/`enclave pull` need the catalog too. Both spies
     append to one list — all four handlers must still thread the reporter."""
     captured: list = []
     client = InMemoryCatalogClient()
@@ -3849,6 +3870,7 @@ def test_registry_register_with_enclave_manifest_reaches_client_register(
 ) -> None:
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
     stage_enclave_manifest(tmp_path)
+    _git_repo(tmp_path)  # register needs the project committed
     client, _ = patched_clients
     _register_provider_xw(client)
     registered: list[str] = []
@@ -4544,6 +4566,115 @@ def test_data_import_duplicate_pointer_reports_instead_of_tracebacking(
     assert "remove one" in err
 
 
+@pytest.mark.parametrize("lands", [True, False], ids=["landed", "landed-nothing"])
+def test_data_import_reads_the_producer_only_when_nothing_landed(
+    lands: bool, tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """The producer URL does not exist, so ANY read of it fails.
+
+    landed: a healthy import never touches the producer (no extra git or
+    network work). landed-nothing: the unreadable producer is a named error,
+    not a traceback and not a silent exit 0, and the fresh import leaves no
+    pointer behind.
+
+    Mutations: always read the producer, or drop the gate's `dest.is_file()`
+    arm (this output is a single file) -> `landed` is rc 1; never read it,
+    or delete the `except FetchError` arm -> `landed-nothing` reddens.
+    """
+    client, dvc_ops = patched_clients
+    _register_provider_xw(client, github_url=str(tmp_path / "gone.git"))
+    if not lands:
+        dvc_ops.import_lands_nothing = {"outputs/main.parquet"}
+    root = tmp_path / "imports"
+    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(root)])
+    err = " ".join(capsys.readouterr().err.split())
+    pointer = root / "data_provider-xw" / "outputs" / "main.parquet.dvc"
+    if lands:
+        assert rc == 0, err
+        assert pointer.is_file()
+    else:
+        assert rc == 1, err
+        assert "could not be read" in err and "check git access" in err
+        assert "Traceback" not in err
+        assert not pointer.exists()
+
+
+def _undeliverable_producer(tmp_path: Path, client: InMemoryCatalogClient) -> str:
+    """A producer git repo declaring `data/good/` (pinned) and `data/final/`
+    (a `.dir` out with no S3 version ID on a version-aware remote), registered
+    as `test_project`. Returns its commit, for `--rev`: the fake records a
+    40-character rev as the pin, so the diagnosis reads this repo there."""
+    from tests._harness.git import _git
+
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer, declared=("data/good/", "data/final/"))
+    write_pointer(producer, "data/good", files={"a.csv": "v-1"})
+    write_pointer(producer, "data/final", is_dir=True, version_id=None)
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+    return _git(["rev-parse", "HEAD"], cwd=producer).strip()
+
+
+def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """A forced `--rev` re-import that lands nothing puts the previous import
+    back, so the retry the hint names needs `--force` again; without it the
+    retry stops on "already imports". Mutation: drop the `--force` wording
+    from the `--rev` hint -> this reddens."""
+    client, dvc_ops = patched_clients
+    sha = _undeliverable_producer(tmp_path, client)
+    root = tmp_path / "imports"
+    args = ["data", "import", "test_project", "--path", "data/final/", "--rev", sha, "--dest-root", str(root)]
+    assert cli.main(args) == 0, capsys.readouterr().err
+    pointer = root / "data_test_project" / "data" / "final.dvc"
+    before = pointer.read_bytes()
+
+    dvc_ops.import_lands_nothing = {"data/final"}
+    rc = cli.main([*args, "--force"])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "import a later --rev with --force" in err
+    assert pointer.read_bytes() == before
+
+
+def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """`--all` over a product with one deliverable output and one that is not.
+
+    The deliverable output lands and stays and is named; the import exits 1
+    naming the other. The transfer is faked (`import_lands_nothing`); the
+    diagnosis is real: the producer is a git repo whose `data/final.dvc` is a
+    `.dir` out with no S3 version ID on a version-aware remote.
+
+    Mutation: delete the `_require_deliverable(...)` call -> rc 0.
+    """
+    client, dvc_ops = patched_clients
+    sha = _undeliverable_producer(tmp_path, client)
+    dvc_ops.import_lands_nothing = {"data/final"}
+
+    root = tmp_path / "imports"
+    rc = cli.main([
+        "data", "import", "test_project", "--all", "--rev", sha, "--dest-root", str(root),
+    ])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "'data/final/' of 'test_project'" in err and "cannot be delivered" in err
+    assert "run 'mintd check' in" in err  # `--rev` here only gives the fake a real pin
+    assert "1 of 2 outputs were imported before this failure" in err and "good" in err
+    ns = root / "data_test_project" / "data"
+    assert (ns / "good.dvc").is_file() and (ns / "good" / "payload").is_file()
+    assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
+
+
 def _reachable_raises(root: str) -> set[str]:
     """Exception NAMES raised by `src/mintd/data.py` functions reachable from
     `root`, following calls to other module-level functions in that file.
@@ -4598,6 +4729,9 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # the last complete copy of the payload — the one action D14 exists to
     # prevent.
     "StaleBackupExists": "nothing was deleted or overwritten",
+    # The postcondition: dvc exited 0 and landed nothing the producer can
+    # deliver. Its hint is computed per case, so the raise carries it.
+    "UndeliverableImport": "ask the producer",
     "MissingPrimaryDataProduct": None,
     "NoTrackedOutputs": None,
     "UnknownProductPath": "relative to the producer",
@@ -4605,7 +4739,10 @@ _EXPECTED_HINTS: dict[str, str | None] = {
 }
 
 #: Exception types whose constructor is not a bare message.
-_EXC_ARGS: dict[str, tuple[Any, ...]] = {"GitOpError": (["git", "fetch"], "boom")}
+_EXC_ARGS: dict[str, tuple[Any, ...]] = {
+    "GitOpError": (["git", "fetch"], "boom"),
+    "UndeliverableImport": ("boom", "ask the producer"),
+}
 
 
 def test_import_raise_sites_all_have_a_handler_case() -> None:
@@ -4751,5 +4888,142 @@ def test_registry_register_refuses_an_output_without_version_ids(
     # Following a "publish does it" hint from here burns a version: publish
     # pushes, commits and tags, then fails on the missing catalog entry.
     assert "mintd publish" not in out
+    with pytest.raises(CatalogNotFound):
+        client.fetch("test_project")
+
+
+def _spy_on_register(client: InMemoryCatalogClient, monkeypatch: pytest.MonkeyPatch) -> list:
+    calls: list = []
+    real = client.register
+
+    def spy(*a: Any, **kw: Any) -> Any:
+        calls.append(a)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(client, "register", spy)
+    return calls
+
+
+def test_registry_register_refuses_while_a_pointer_differs_from_head(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """The pointer `mintd data push` rewrote is pinned on disk, so `check`
+    passes, but importers read the commit. Register refuses until it is
+    committed, and then until an untracked note is committed or ignored: the
+    whole tree counts, as for `publish`; an ignored file does not.
+
+    Mutations: delete the `if unseen:` refusal -> arm 1 registers; query
+    without untracked files -> `scratch.txt` registers.
+    """
+    from tests._harness.git import _git
+
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    stage_undeliverable_primary(tmp_path)
+    _git(["init", "-q", "-b", "main"], cwd=tmp_path)
+    _git(["add", "-A"], cwd=tmp_path)
+    _git(["commit", "-q", "-m", "track"], cwd=tmp_path)
+    write_pointer(tmp_path, "data/final", files={"a.parquet": "v-1"})  # what data push leaves
+    client, _ = patched_clients
+    calls = _spy_on_register(client, monkeypatch)
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "data/final.dvc" in err and "commit and push" in err
+    assert calls == []
+    with pytest.raises(CatalogNotFound):
+        client.fetch("test_project")
+
+    _git(["commit", "-q", "-am", "pin"], cwd=tmp_path)
+    (tmp_path / "scratch.txt").write_text("not a pointer\n")
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "uncommitted changes: scratch.txt" in err  # the whole tree, as publish
+
+    (tmp_path / ".gitignore").write_text("scratch.txt\n")
+    _git(["add", ".gitignore"], cwd=tmp_path)
+    _git(["commit", "-q", "-m", "ignore scratch"], cwd=tmp_path)
+    assert cli.main(["registry", "register", str(tmp_path)]) == 0, capsys.readouterr().err
+    assert len(calls) == 1
+    client.fetch("test_project")
+
+
+def test_registry_register_names_at_most_eight_files_and_the_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """A commit touching hundreds of files must not print them all: the error
+    names the first 8 and says how many there are. Nine files is the edge.
+
+    Mutations: slice 9, or no cap -> `f8.txt` is named; drop the count, or
+    count only above 9 -> "(9 in all)" is missing.
+    """
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    _git_repo(tmp_path)
+    for i in range(9):
+        (tmp_path / f"f{i}.txt").write_text("x\n")
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "f7.txt … (9 in all)" in err
+    assert "f8.txt" not in err
+
+
+def test_registry_register_needs_a_git_repository(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """Importers read a git history, so a project outside git cannot be
+    imported and register refuses it, whatever words git uses (a tmp on its
+    own filesystem says "...up to mount point"). A repo with no commits yet
+    (what `mintd init` leaves) is refused too: importers could not read its
+    metadata.json. Committed, it registers.
+
+    Mutations: report nothing when git fails -> the plain directory
+    registers; ask only about pointer files -> the uncommitted project
+    registers.
+    """
+    from tests._harness.git import _git
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    shutil.copy(MINIMAL, plain / "metadata.json")
+    rc = cli.main(["registry", "register", str(plain)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "not a git repository" in err and "register needs a working git repository" in err
+
+    unborn = tmp_path / "unborn"
+    unborn.mkdir()
+    shutil.copy(MINIMAL, unborn / "metadata.json")
+    _git(["init", "-q", "-b", "main"], cwd=unborn)
+    rc = cli.main(["registry", "register", str(unborn)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "uncommitted changes: metadata.json" in err
+
+    _git(["add", "-A"], cwd=unborn)
+    _git(["commit", "-q", "-m", "project"], cwd=unborn)
+    assert cli.main(["registry", "register", str(unborn)]) == 0, capsys.readouterr().err
+
+
+def test_registry_register_refuses_when_git_cannot_answer(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+    patched_clients,
+) -> None:
+    """No git on PATH: register cannot tell whether the pointers are
+    committed, so it fails closed with a message, not a traceback and not a
+    silent pass. Mutation: treat that `GitOpError` as "no pointers" -> rc 0.
+    """
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    client, _ = patched_clients
+    monkeypatch.setenv("PATH", str(tmp_path / "no-bin"))
+
+    rc = cli.main(["registry", "register", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "git not installed" in err
+    assert "Traceback" not in err
     with pytest.raises(CatalogNotFound):
         client.fetch("test_project")

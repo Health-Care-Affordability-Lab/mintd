@@ -27,6 +27,12 @@ from typing import Any, Protocol
 # ---------------------------------------------------------------------------
 
 
+#: The files a version-aware push rewrites: the pointers. ``top`` anchors them
+#: at the repo root, because `dvc push` uploads the whole repo from any
+#: subdirectory.
+_POINTER_PATHSPEC = (":(top,glob)**/*.dvc", ":(top,glob)**/dvc.lock")
+
+
 class GitOpError(Exception):
     """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
 
@@ -108,12 +114,16 @@ class RegistryGitOps(Protocol):
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
     def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool: ...
     def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]: ...
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
     def push_with_tags(self, work_dir: Path) -> None: ...
     def tag(self, work_dir: Path, name: str, message: str) -> None: ...
     def tag_points_at_head(self, work_dir: Path, name: str) -> bool: ...
     def is_working_tree_clean(self, work_dir: Path) -> bool: ...
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]: ...
+    def uncommitted_files(self, work_dir: Path) -> list[str]: ...
     def current_commit(self, work_dir: Path) -> str: ...
     def open_pr(
         self,
@@ -260,6 +270,42 @@ class SubprocessRegistryGitOps:
         self._git(["add", "-A"], cwd=repo_dir)
         self._git(["commit", "-m", message], cwd=repo_dir)
 
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]:
+        """What git's index holds for each of ``names`` (files in
+        ``work_dir``), as the ``mode,object`` pair `restore_index` puts back.
+        A name the index does not hold is absent. ``:(literal)``, so a name
+        with ``[`` or ``*`` in it cannot match a sibling."""
+        out = self._git(
+            ["ls-files", "--stage", "-z", "--", *(f":(literal){n}" for n in names)], cwd=work_dir
+        )
+        entries: dict[str, str] = {}
+        for rec in out.split("\0"):
+            if rec:
+                meta, name = rec.split("\t", 1)
+                mode, obj, _stage = meta.split()
+                entries[name] = f"{mode},{obj}"
+        return entries
+
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
+        """Put git's index for ``names`` back to ``entries`` (from
+        `index_entries`): a name it held gets that entry back, a name it did
+        not is dropped from the index. The working tree is not touched.
+
+        This undoes dvc's ``core.autostage``, which `git add`s the pointer and
+        `.gitignore` it writes. ``--cacheinfo`` takes a path from the repo
+        root, unlike update-index's plain paths, hence the prefix.
+        ``--force-remove`` rather than ``rm --cached``, which refuses an entry
+        that matches neither the file (already put back) nor HEAD."""
+        prefix = self._git(["rev-parse", "--show-prefix"], cwd=work_dir).strip()
+        for name in names:
+            if name in entries:
+                self._git(
+                    ["update-index", "--add", "--cacheinfo", f"{entries[name]},{prefix}{name}"],
+                    cwd=work_dir,
+                )
+            else:
+                self._git(["update-index", "--force-remove", "--", name], cwd=work_dir)
+
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         try:
             self._git(["push", "-u", "origin", branch], cwd=repo_dir)
@@ -308,6 +354,40 @@ class SubprocessRegistryGitOps:
     def is_working_tree_clean(self, work_dir: Path) -> bool:
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
+
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]:
+        """The `.dvc` / `dvc.lock` files anywhere in the repo that differ
+        from HEAD: what `data push` reports. The ``:(top,glob)`` pathspecs
+        match root-level files from any subdirectory and leave out
+        ``.dvc/config`` and ``foodvc.lock``. ``--untracked-files=all`` keeps
+        each untracked pointer a path, never a collapsed directory (git 2.48
+        already descends for a file pathspec; this does not rely on it)."""
+        return self._uncommitted(work_dir, _POINTER_PATHSPEC, untracked="all")
+
+    def uncommitted_files(self, work_dir: Path) -> list[str]:
+        """Everything `git status` shows: tracked changes and untracked files
+        not ignored, an untracked directory as one ``dir/`` entry. `registry
+        register` refuses on any, as `publish` does, because importers read
+        the commit and no list of the files they need stays complete."""
+        return self._uncommitted(work_dir, (), untracked="normal")
+
+    def _uncommitted(self, work_dir: Path, pathspec: tuple[str, ...], *, untracked: str) -> list[str]:
+        """Files matching ``pathspec`` (all, if empty) that differ from HEAD:
+        modified, staged, deleted or untracked. Paths are relative to the
+        repo root (porcelain v1 ignores ``status.relativePaths``).
+
+        ``-z`` returns paths raw rather than C-quoted, so ``data/sp ace.dvc``
+        survives; ``--no-renames`` makes a ``git mv`` one path per record and
+        overrides ``status.renames``; an explicit ``--untracked-files``
+        overrides ``status.showUntrackedFiles=no``.
+        """
+        out = self._git(
+            ["status", "--porcelain", "-z", "--no-renames", f"--untracked-files={untracked}", "--", *pathspec],
+            cwd=work_dir,
+        )
+        # dict.fromkeys: `git rm --cached` lists a path twice (staged delete,
+        # then untracked).
+        return list(dict.fromkeys(rec[3:] for rec in out.split("\0") if rec))
 
     def current_commit(self, work_dir: Path) -> str:
         return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
@@ -363,11 +443,19 @@ class SubprocessRegistryGitOps:
     def _git(self, args: list[str], *, cwd: Path | None) -> str:
         cmd = ["git", *args]
         try:
+            # git writes paths as raw bytes under `-z` (UTF-8 for any name it
+            # did not get from elsewhere): decode them as UTF-8 whatever the
+            # locale (cp1252 on Windows). A byte that is not UTF-8 becomes a
+            # surrogate rather than a traceback or a U+FFFD: on POSIX it encodes
+            # back to the same byte in argv, so a path read here and handed to
+            # `update-index` names the same file.
             result = subprocess.run(
                 cmd,
                 cwd=str(cwd) if cwd else None,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="surrogateescape",
                 timeout=self._fast_timeout,
                 env=git_env(),
                 check=True,
