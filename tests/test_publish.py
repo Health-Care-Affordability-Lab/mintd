@@ -1058,6 +1058,177 @@ def _commit_count(proj: Path) -> int:
     return len(out.strip().splitlines())
 
 
+# Publish takes the next version from this repo's own mint.version, so a clone
+# behind the catalog would write its older state over the entry.
+
+def _catalog_at(proj: Path, listed, *, extra_output: str | None = None):
+    """A catalog whose entry for this repo lists `listed` as its last published
+    version. "<missing>" drops the field (the shape of entries written before it
+    existed), "<no-status>" the whole status block; None stores a null.
+    `extra_output` adds an output this repo's metadata.json does not have."""
+    from mintd.catalog import CatalogEntry
+    from mintd.model import Metadata
+    meta = Metadata.from_json_file(proj / "metadata.json")
+    entry = meta.to_catalog_entry().model_dump()
+    if listed == "<no-status>":
+        del entry["status"]
+    elif listed == "<missing>":
+        del entry["status"]["last_published_version"]
+    else:
+        entry["status"]["last_published_version"] = listed
+    if extra_output:
+        entry["data_products"]["outputs"].append(
+            {**entry["data_products"]["outputs"][0], "path": extra_output, "primary": False}
+        )
+    return _FakeCatalogClient(entries={meta.project.name: CatalogEntry.model_validate(entry)})
+
+
+def _refused_without_writes(proj: Path, client, *, git=None, **kwargs) -> VersionNotIncreasing:
+    """Publish must raise VersionNotIncreasing having written nothing anywhere."""
+    before = (proj / "metadata.json").read_bytes()
+    commits, tags = _commit_count(proj), _origin_tags(proj)
+    dvc, git = _FakeDvcOps(), git or _FakeRegistryGitOps()
+    with pytest.raises(VersionNotIncreasing) as excinfo:
+        publish_project(project_path=proj, client=client, dvc_ops=dvc, git_ops=git, **kwargs)
+    assert (proj / "metadata.json").read_bytes() == before
+    assert (_commit_count(proj), _origin_tags(proj)) == (commits, tags)
+    assert dvc.push_calls == []
+    assert git.tag_calls == [] and git.push_with_tags_calls == []
+    assert client.updated == []
+    exc = excinfo.value
+    assert not (exc.pushed or exc.tagged or exc.catalog_updated)
+    return exc
+
+
+@pytest.mark.parametrize(
+    "version, dry_run, would_be",
+    [
+        (None, False, "0.1.1"), ("0.1.2", False, "0.1.2"), ("0.2.0", False, "0.2.0"),
+        (None, True, "0.1.1"),
+    ],
+    ids=["implicit-bump", "explicit-version", "explicit-version-above-the-catalogs", "dry-run"],
+)
+def test_publish_refuses_when_the_catalog_is_ahead_of_the_repo(tmp_path, version, dry_run, would_be):
+    """A clone at 0.1.0 whose catalog entry lists 0.1.3 (a release made from
+    another clone) must not publish over it, whatever version it asks for:
+    v0.2.0 would still replace the entry with this clone's older outputs.
+    Deleting the guard lets the non-dry params publish and the dry-run param
+    return a preview; comparing only the requested version lets 0.2.0 through."""
+    proj = _seed_project(tmp_path)
+    # Ahead in outputs too, as a release from another clone usually is.
+    client = _catalog_at(proj, "0.1.3", extra_output="data/final/added-elsewhere.parquet")
+
+    exc = _refused_without_writes(proj, client, version=version, dry_run=dry_run)
+
+    assert "v0.1.0" in str(exc) and "v0.1.3" in str(exc) and f"v{would_be}" in str(exc)
+    assert "git pull --tags" in exc.recovery_hint
+    assert 'mint.version to "0.1.3"' in exc.recovery_hint
+    assert "v0.1.4" in exc.recovery_hint
+
+
+def test_publish_refuses_to_reuse_the_version_the_catalog_lists(tmp_path):
+    """Same number, different content: the repo at 0.1.0 bumps to 0.1.1, which
+    the catalog already lists. Refused as behind, not as a same-version rerun."""
+    proj = _seed_project(tmp_path)
+    client = _catalog_at(proj, "0.1.1")
+
+    exc = _refused_without_writes(proj, client)
+
+    assert "this repo is at v0.1.0" in str(exc) and "v0.1.1" in str(exc)
+    assert "git pull --tags" in exc.recovery_hint
+
+
+def test_publish_refuses_the_catalogs_version_without_its_release_tag(tmp_path):
+    """metadata.json already saying 0.1.1 (nothing to commit) is not proof of
+    the rerun: without tag v0.1.1 on HEAD this is a hand edit, not a release."""
+    proj = _seed_project(tmp_path)
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["mint"]["version"] = "0.1.1"
+    meta["status"]["last_published_version"] = "0.1.1"
+    (proj / "metadata.json").write_text(json.dumps(meta))
+    subprocess.run(["git", "commit", "-am", "set 0.1.1 by hand"], cwd=proj, check=True)
+    client = _catalog_at(proj, "0.1.1")
+
+    exc = _refused_without_writes(proj, client, version="0.1.1")
+
+    assert "with no version" in exc.recovery_hint and "v0.1.2" in exc.recovery_hint
+
+
+def test_publish_refuses_the_catalogs_version_while_there_is_something_to_commit(tmp_path):
+    """mint.version at the listed 0.1.1 with tag v0.1.1 on HEAD, but
+    metadata.json never recorded that release (last_published_version ''):
+    publishing would commit, move HEAD off the tag and stop at step 4's
+    TagFailed after dvc push. Dropping `not local_diff` lets it run."""
+    proj = _seed_project(tmp_path)
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["mint"]["version"] = "0.1.1"
+    (proj / "metadata.json").write_text(json.dumps(meta))
+    subprocess.run(["git", "commit", "-am", "set 0.1.1 by hand"], cwd=proj, check=True)
+    subprocess.run(["git", "tag", "-a", "v0.1.1", "-m", "by hand"], cwd=proj, check=True)
+    client = _catalog_at(proj, "0.1.1")
+
+    _refused_without_writes(proj, client, version="0.1.1")
+
+
+def test_publish_refuses_when_the_release_tag_probe_fails(tmp_path, monkeypatch):
+    """A rerun that cannot prove its tag is on HEAD fails closed, as a
+    VersionNotIncreasing naming git's error rather than a raw GitOpError
+    traceback or a claim that the repo is behind."""
+    proj = _seed_project(tmp_path)
+    _publish(proj)
+    client = _catalog_at(proj, "0.1.1")
+    git = _FakeRegistryGitOps()
+
+    def boom(work_dir, name):
+        raise GitOpError(["git", "tag", "--points-at", "HEAD"], "fatal: broken")
+
+    monkeypatch.setattr(git, "tag_points_at_head", boom)
+
+    exc = _refused_without_writes(proj, client, git=git, version="0.1.1")
+
+    assert "could not be checked" in str(exc) and "fatal: broken" in str(exc)
+    assert "mintd publish 0.1.1" in exc.recovery_hint
+
+
+def test_republish_after_its_catalog_pr_merged_is_still_idempotent(tmp_path):
+    """The documented `mintd publish <same version>` rerun, after the first
+    run's catalog PR merged: nothing to commit, tag on HEAD, so it proceeds."""
+    proj = _seed_project(tmp_path)
+    _publish(proj)
+    commits = _commit_count(proj)
+    client = _catalog_at(proj, "0.1.1")
+
+    result = publish_project(
+        project_path=proj, version="0.1.1", client=client,
+        dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert result.version == "0.1.1" and result.tagged
+    assert len(client.updated) == 1
+    assert _commit_count(proj) == commits
+
+
+@pytest.mark.parametrize(
+    "listed",
+    ["0.1.0", "", None, "latest", "<missing>", "<no-status>", "<no-entry>"],
+    ids=[
+        "catalog-at-the-repos-version", "registered-never-published", "null-field",
+        "not-semver", "entry-without-the-field", "entry-without-status", "no-entry",
+    ],
+)
+def test_publish_proceeds_when_the_catalog_is_behind_or_never_published(tmp_path, listed):
+    proj = _seed_project(tmp_path)
+    client = _FakeCatalogClient() if listed == "<no-entry>" else _catalog_at(proj, listed)
+
+    result = publish_project(
+        project_path=proj, client=client, dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(),
+    )
+
+    assert result.version == "0.1.1"
+    assert len(client.updated) == 1
+    assert "v0.1.1" in _origin_tags(proj)
+
+
 class TestDeliveryGate:
     """The module's autouse `mock_check_project` stubs the gate out of every
     test above. Overriding that fixture BY NAME at class scope puts the real
