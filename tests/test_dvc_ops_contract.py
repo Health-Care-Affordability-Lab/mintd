@@ -274,9 +274,9 @@ def test_import_into_an_existing_directory_dest_is_refused(
     ops.import_(
         repo_url=producer.url, path="data/final", dest=dest, cwd=workspace
     )
-    # Real dvc materialized the payload; the fake records pointers only, so
-    # stage the directory it would have left behind.
-    dest.mkdir(exist_ok=True)
+    # Both arms land the payload, so the second import meets a tracked
+    # directory dest. This also licenses the fake's stand-in payload.
+    assert any(f.is_file() for f in dest.rglob("*"))
 
     with pytest.raises(DvcImportDestinationExists):
         ops.import_(

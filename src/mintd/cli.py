@@ -68,6 +68,7 @@ from .data import (
     ImportNotFound,
     NoTrackedOutputs,
     PrimaryRemovedAtHead,
+    UndeliverableImport,
     UnknownProductPath,
     bump_import,
     clone_and_pull_product,
@@ -1992,6 +1993,7 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             force=args.force,
             extra_dvc_args=dvc_args or None,
             reporter=reporter,
+            registry_git_ops=_resolve_git_ops(config),
         )
     except CatalogNotFound as exc:
         reporter.error(str(exc), hint="run 'mintd data list' to see available products")
@@ -2005,6 +2007,11 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             str(exc),
             hint="pass --path relative to the producer's repo root",
         )
+        return 1
+    except UndeliverableImport as exc:
+        # dvc exited 0 but landed nothing the producer can deliver: no ✓, and
+        # the hint says whose fix it is.
+        reporter.error(str(exc), hint=exc.hint)
         return 1
     except StaleBackupExists as exc:
         # Ahead of the bare-message tuple below, which would render this

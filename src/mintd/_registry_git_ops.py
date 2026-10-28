@@ -108,6 +108,8 @@ class RegistryGitOps(Protocol):
     def checkout_new_branch(self, repo_dir: Path, branch: str) -> None: ...
     def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool: ...
     def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]: ...
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
     def push_with_tags(self, work_dir: Path) -> None: ...
@@ -259,6 +261,42 @@ class SubprocessRegistryGitOps:
     def commit_all(self, repo_dir: Path, message: str) -> None:
         self._git(["add", "-A"], cwd=repo_dir)
         self._git(["commit", "-m", message], cwd=repo_dir)
+
+    def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]:
+        """What git's index holds for each of ``names`` (files in
+        ``work_dir``), as the ``mode,object`` pair `restore_index` puts back.
+        A name the index does not hold is absent. ``:(literal)``, so a name
+        with ``[`` or ``*`` in it cannot match a sibling."""
+        out = self._git(
+            ["ls-files", "--stage", "-z", "--", *(f":(literal){n}" for n in names)], cwd=work_dir
+        )
+        entries: dict[str, str] = {}
+        for rec in out.split("\0"):
+            if rec:
+                meta, name = rec.split("\t", 1)
+                mode, obj, _stage = meta.split()
+                entries[name] = f"{mode},{obj}"
+        return entries
+
+    def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
+        """Put git's index for ``names`` back to ``entries`` (from
+        `index_entries`): a name it held gets that entry back, a name it did
+        not is dropped from the index. The working tree is not touched.
+
+        This undoes dvc's ``core.autostage``, which `git add`s the pointer and
+        `.gitignore` it writes. ``--cacheinfo`` takes a path from the repo
+        root, unlike update-index's plain paths, hence the prefix.
+        ``--force-remove`` rather than ``rm --cached``, which refuses an entry
+        that matches neither the file (already put back) nor HEAD."""
+        prefix = self._git(["rev-parse", "--show-prefix"], cwd=work_dir).strip()
+        for name in names:
+            if name in entries:
+                self._git(
+                    ["update-index", "--add", "--cacheinfo", f"{entries[name]},{prefix}{name}"],
+                    cwd=work_dir,
+                )
+            else:
+                self._git(["update-index", "--force-remove", "--", name], cwd=work_dir)
 
     def push_branch(self, repo_dir: Path, branch: str) -> None:
         try:
