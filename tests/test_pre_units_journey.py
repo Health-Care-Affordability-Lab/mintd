@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -997,6 +998,72 @@ def test_import_of_a_genuinely_empty_directory_out_still_succeeds(
 
     assert cli.main(["data", "import", PRODUCT]) == 0, _drain(capsys)
     assert (_import_dir(consumer) / "final").is_dir()
+
+
+def test_readme_produce_flow_names_pointers_until_committed_and_pushed(
+    payload_journey, monkeypatch, capsys
+) -> None:
+    """The README's produce steps with real dvc and real git. `dvc repro`
+    writes `dvc.lock`, so `mintd data push` names it rather than printing a
+    check mark; `registry register` refuses it uncommitted and goes through
+    once it is committed and pushed. Only `gh` is faked, at the catalog
+    client's constructor, as `journey` does.
+
+    `check` reads the lab's S3 remote (md5 layout, so the lock needs no
+    version IDs) and a matching `metadata.storage`; the pushes go to the
+    harness's local directory through `--remote local`.
+    """
+    from tests._dvc_fixtures import storage_block, write_dvc_config
+    from tests._harness.payload import publish_pipeline_payload
+
+    producer, _consumer, _register = payload_journey
+    git_ops = _FakeRegistryGitOps()
+    monkeypatch.setattr(
+        "mintd.cli.GitCatalogClient",
+        lambda **kw: GitCatalogClient(**kw, git_ops=git_ops),
+    )
+    publish_pipeline_payload(  # `dvc repro` + push; commits nothing
+        producer.work, producer.remote, FOREACH_FINAL_YAML, seed={"code/.keep": b""}
+    )
+    write_dvc_config(producer.work, version_aware=False)
+    subprocess.run(
+        [*_dvc_cmd(), "remote", "add", "local", str(producer.remote)],
+        cwd=str(producer.work), capture_output=True, check=True,
+    )
+    meta = producer.metadata()
+    meta["storage"] = {**storage_block(), "versioning": False}
+    producer._write_metadata(meta)
+    monkeypatch.chdir(producer.work)
+
+    assert cli.main(["data", "push", "--remote", "local"]) == 0, _drain(capsys)
+    out = " ".join(_drain(capsys).split())
+    assert "✓" not in out
+    assert "dvc.lock" in out and "commit and push" in out
+
+    def register() -> tuple[int, str]:
+        rc = cli.main(["registry", "register", str(producer.work)])
+        return rc, " ".join(_drain(capsys).split())
+
+    rc, out = register()
+    assert rc == 1, out
+    assert "the project has uncommitted changes:" in out
+    assert all(f in out for f in ("dvc.lock", "dvc.yaml", "metadata.json")), out
+
+    # The README's commit step, run exactly as written there.
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    for line in ("git status", "git add -A", 'git commit -m "Record pushed data versions"', "git push"):
+        assert f"\n{line}\n" in readme, f"README no longer says {line!r}"
+        _git(shlex.split(line)[1:], cwd=producer.work)
+    # ...and between the push and the register, where a reader meets it.
+    assert (
+        readme.index("\nmintd data push\n")
+        < readme.index('\ngit commit -m "Record pushed data versions"\n')
+        < readme.index("\nmintd registry register\n")
+    ), "README's commit step is no longer between data push and registry register"
+    assert cli.main(["data", "push", "--remote", "local"]) == 0
+    assert "✓ already up to date" in _drain(capsys)
+    rc, out = register()
+    assert rc == 0, out
 
 
 def test_clone_puts_the_product_on_disk(payload_journey, tmp_path, capsys) -> None:

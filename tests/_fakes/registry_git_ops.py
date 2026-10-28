@@ -179,6 +179,16 @@ class _FakeRegistryGitOps:
         stdout = self._git(["status", "--porcelain"], cwd=work_dir)
         return stdout.strip() == ""
 
+    def uncommitted_pointers(self, work_dir: Path) -> list[str]:
+        # Delegates: this fake's `_git` leaks `CalledProcessError`, and the CLI
+        # routes on the typed `GitOpError`.
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().uncommitted_pointers(work_dir)
+
+    def uncommitted_files(self, work_dir: Path) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().uncommitted_files(work_dir)
+
     def current_commit(self, work_dir: Path) -> str:
         return self.current_commit_value
 

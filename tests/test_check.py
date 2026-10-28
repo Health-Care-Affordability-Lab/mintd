@@ -2390,6 +2390,7 @@ def test_check_errors_on_a_dir_pointer_without_version_ids(tmp_path: Path) -> No
     assert f.source == tmp_path / "metadata.json"
     assert "'data/final/'" in f.message and "0/1 files" in f.message
     assert f.hint and "mintd data push" in f.hint
+    assert "commit and push the rewritten" in f.hint  # importers read the pushed commit
 
 
 def test_check_is_clean_when_the_dir_pointer_is_pinned(tmp_path: Path) -> None:
@@ -2626,6 +2627,7 @@ def test_check_untracked_hint_names_the_pipeline_stage_when_dvc_yaml_declares_th
     assert [f.kind for f in gate] == ["data_products_output_untracked"]
     assert gate[0].hint and "stage 'validate'" in gate[0].hint and "no entry" in gate[0].hint
     assert "dvc deletes a stage's outputs before it runs" in gate[0].hint
+    assert "commit and push the pointer" in gate[0].hint  # importers read the pushed commit
 
 
 def test_check_reports_an_unreadable_dvc_lock_instead_of_a_traceback(tmp_path: Path) -> None:
