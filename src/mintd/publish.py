@@ -197,6 +197,11 @@ def prepare_publish(
                 "and retry"
             ),
         ) from exc
+    else:
+        _refuse_to_take_the_catalog_backwards(
+            project_path, git_ops, current.project.name, current.mint.version, new_version,
+            existing._nested("status", "last_published_version"), local_diff,
+        )
 
     return PublishPreview(
         project_name=current.project.name,
@@ -480,6 +485,66 @@ def _semver_tuple(v: str) -> tuple[int, int, int]:
     m = _SEMVER_RE.match(v)
     assert m
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _refuse_to_take_the_catalog_backwards(
+    project_path: Path,
+    git_ops: RegistryGitOps,
+    name: str,
+    current_version: str,
+    new_version: str,
+    listed: str,
+    local_diff: list[FieldChange],
+) -> None:
+    """Raise VersionNotIncreasing when publishing would replace a catalog entry
+    with older state. `client.update` replaces the entry wholesale, and this
+    repo's mint.version knows nothing of a release made from another clone, so
+    a clone behind the entry would renumber it and drop what this checkout
+    lacks, whatever version it asks for. '' (registered, never published) or no
+    field at all: nothing to protect."""
+    if not _SEMVER_RE.match(listed):
+        return
+    following = _resolve_version(listed, None)
+    if _semver_tuple(current_version) < _semver_tuple(listed):
+        raise VersionNotIncreasing(
+            f"this repo is at v{current_version} but the catalog already lists {name} "
+            f"v{listed}; publishing v{new_version} from it would replace that entry with "
+            "this clone's older state",
+            recovery_hint=(
+                f"v{listed} was published from another clone: run `git pull --tags`, then "
+                "rerun `mintd publish`. If that release never reached origin, bring "
+                "metadata.json up to the catalog entry by hand (the registry cache holds a "
+                f'copy, ~/.cache/mintd/registry by default), set mint.version to "{listed}", '
+                f"commit, then rerun `mintd publish`; it will publish v{following}."
+            ),
+        )
+    if _semver_tuple(new_version) > _semver_tuple(listed):
+        return
+    # Not behind and not above: new_version == current_version == listed, since
+    # _resolve_version never goes below current. The one such publish that is
+    # not an overwrite is the documented `mintd publish <same version>` rerun
+    # whose catalog PR merged in the meantime: nothing to commit and the
+    # release tag already on HEAD, the state step 4 adopts.
+    try:
+        if not local_diff and git_ops.tag_points_at_head(project_path, f"v{listed}"):
+            return
+    except GitOpError as exc:
+        raise VersionNotIncreasing(
+            f"the catalog already lists {name} v{listed}, and whether tag v{listed} is on "
+            f"HEAD (the sign of a rerun) could not be checked: {_git_error_summary(exc)}",
+            recovery_hint=f"fix the git error above, then rerun `mintd publish {listed}`",
+        ) from exc
+    raise VersionNotIncreasing(
+        f"the catalog already lists {name} v{listed}; publishing v{listed} again from "
+        "this repo would overwrite it",
+        recovery_hint=(
+            f"v{listed} is already in the catalog. Bring this clone up to it (`git pull "
+            "--tags`) and check metadata.json lists everything the entry does (the registry "
+            "cache holds a copy, ~/.cache/mintd/registry by default), then run `mintd "
+            f"publish` with no version to publish v{following}. A rerun of v{listed} needs "
+            "nothing to commit and its tag on HEAD."
+        ),
+    )
 
 
 def _overlay(raw: Any, dumped: Any) -> Any:
