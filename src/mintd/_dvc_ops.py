@@ -1,6 +1,9 @@
 """DVC subprocess seam.
 
-Only this module shells out to `dvc`. Mirrors `_registry_git_ops.py` for git/gh.
+`SubprocessDvcOps` runs the `DvcOps` verbs through `_subprocess.run_streaming`.
+`_init_ops.py` (`mintd init`'s `dvc init` / `config` / `remote`) and
+`_fast_sync_ops._check_dvc` (`dvc --version`) spawn `dvc` directly. Mirrors
+`_registry_git_ops.py` for git/gh.
 """
 
 from __future__ import annotations
@@ -22,7 +25,8 @@ class DvcOpError(Exception):
 
     ``hint`` is an optional actionable recovery command for the CLI's error
     renderer; ``None`` on every subclass except the ones that populate it
-    (currently ``DvcStorageKeyError`` and ``DvcImportPathNotFound``).
+    (currently ``DvcRepoPathError``, ``DvcStorageKeyError`` and
+    ``DvcImportPathNotFound``).
     """
 
     hint: str | None = None
@@ -58,7 +62,7 @@ class DvcRepoPathError(DvcOpError):
 
 
 class DvcNotInstalled(DvcOpError):
-    """The `dvc` binary is not on PATH."""
+    """mintd's bundled dvc is missing: `sys.executable -m dvc` cannot run it."""
 
 
 class DvcPushError(DvcOpError):

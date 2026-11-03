@@ -1,4 +1,4 @@
-"""Subprocess seam for tar.gz archive operations.
+"""Seam for tar.gz archive operations, in-process via stdlib `tarfile`.
 
 Slice 16: produces and inspects .tar.gz transfer archives. Path-traversal
 validation is the load-bearing guarantee — see `_validate_member_safe`.

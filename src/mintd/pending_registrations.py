@@ -1,7 +1,7 @@
 """Tracks open pull requests for catalog registrations.
 
-`GitCatalogClient.status(name)` consults this file before falling back to a
-`gh pr list` query. Writes are atomic (temp file + rename) so a crashed mintd
+`GitCatalogClient.status(name)` consults this file when the registry cache has
+no entry for `name`. Writes are atomic (temp file + rename) so a crashed mintd
 process never leaves a half-written file.
 
 State file path: `<work_dir>/.mintd_pending.json`, where `<work_dir>` is the

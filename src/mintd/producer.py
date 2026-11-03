@@ -3,8 +3,11 @@
 The two-source-of-truth contract: the catalog is canonical for identity
 (slice 2/3), but the producer-at-pin is canonical for pipeline correctness.
 `ProducerView` is the runtime object that *is* "producer at pin" — fetched
-on demand via `Fetcher`, cached content-addressed by commit SHA, validated
+on demand via `Fetcher`, cached on disk by `(repo, pin)`, validated
 with a typed failure taxonomy (`ProducerError`) at the construction boundary.
+The cache is content-addressed only when the pin is a commit SHA, which
+`at_head` guarantees; a tag or branch passed to `at` is cached under its
+name and served from the cache from then on.
 
 Replaces legacy mintd's `fetch_producer_metadata` (which returned
 `dict[str, Any]` and swallowed every failure into `{}`).
@@ -51,7 +54,8 @@ class MissingPrimaryDataProduct(Exception):
 class ProducerError(Exception):
     """Validation-level failure constructing a ProducerView.
 
-    Wraps the three `FetchError` transport reasons plus two validation
+    Wraps the `FetchError` transport reasons a metadata fetch raises
+    (unreachable, pin_missing, metadata_missing) plus two validation
     reasons (metadata_invalid, schema_too_old). Translation from
     `FetchError` happens at `ProducerView.at` — Fetchers raise transport
     errors; views raise typed view errors.
@@ -258,19 +262,10 @@ class ProducerView:
     ) -> "ProducerView | ProducerError":
         """Resolve `repo` at `pin`, returning the error instead of raising.
 
-        ``pin=""`` means HEAD. That sentinel is `_consumer_findings`'
-        (`check.py:328`) way of asking "where is the producer now?", and until
-        1b it was honoured by *test doubles only* — the real implementation
-        passed the empty string to git as a revision, which always fails with
-        `path 'metadata.json' does not exist`. `check.py:329-331` reads any
-        HEAD failure as "we could not reach HEAD, degrade to up-to-date", so
-        the breakage was silent and total: against a real producer `mintd
-        check` reported every stale import as current and `mintd data import
-        <name> --bump` was a permanent no-op.
-
-        Found by `tests/test_pre_units_journey.py`'s payload journeys, which
-        are the first tests to drive this path without injecting a
-        `producer_view_factory` that special-cases `""`.
+        ``pin=""`` means HEAD. That sentinel is how `check`'s consumer lanes
+        (`_consumer_findings_from_dvc`, `_consumer_findings_from_enclave_manifest`)
+        ask "where is the producer now?"; a HEAD failure there becomes a
+        `drift_unknown` finding (`_head_unreadable_finding`), not "up to date".
         """
         try:
             if pin == "":

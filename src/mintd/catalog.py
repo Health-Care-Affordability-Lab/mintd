@@ -5,13 +5,12 @@ Slice 3 adds `GitCatalogClient` (production: git + gh PR) and `status()` on
 the Protocol. The two implementations are interchangeable — every caller
 goes through `CatalogClient`.
 
-The four-method core (register / update / fetch / list) plus `status()` is
-the only public surface for catalog access. No other module reads or writes
-catalog files directly.
+The four-method core (register / update / fetch / list) plus `status()` and
+`sync()` is the only public surface for catalog access. No other module
+reads or writes catalog files directly.
 
-Audience filter: `Metadata.to_catalog_entry()` projects to the canonical
-CATALOG-audience subset. Slice 3's `_catalog_serializer.py` extends this
-with an advisory tier (PRODUCER_CONTRACT fields + `last_synced_at`).
+Projection: `Metadata.to_catalog_entry()` drops `model.CATALOG_EXCLUDED_PATHS`
+and keeps the rest; `_catalog_serializer.py` dumps that to YAML unchanged.
 """
 
 from __future__ import annotations
@@ -104,10 +103,10 @@ class CatalogFilter:
 class RegistrationStatus:
     """Result of `client.status(name)`.
 
-    For `InMemoryCatalogClient`, only REGISTERED / NOT_FOUND are possible;
+    For `InMemoryCatalogClient`, only "registered" / "not_found" are possible;
     PR-lifecycle states are git-backed concerns.
 
-    For `GitCatalogClient`, PENDING carries the open PR number so callers
+    For `GitCatalogClient`, "pending" carries the open PR number so callers
     can link to it (`https://github.com/<repo>/pull/<pr_number>`).
     """
     state: Literal["registered", "pending", "not_found"]
@@ -118,13 +117,13 @@ class RegistrationStatus:
 # CatalogEntry — projected subset of Metadata
 # ---------------------------------------------------------------------------
 #
-# Decision (see SLICE-2.md):
+# Decision:
 #   - α (dynamic projection): `class CatalogEntry(BaseModel)` with extra='allow';
-#     `to_catalog_entry()` builds the dict via the audience filter, then validates
-#     it into a CatalogEntry. The shape of CatalogEntry is *derived* from Metadata.
+#     `to_catalog_entry()` drops `CATALOG_EXCLUDED_PATHS` from the dump, then
+#     validates it into a CatalogEntry. The shape of CatalogEntry is *derived*
+#     from Metadata.
 #   - β (hand-defined): a parallel Pydantic class with the catalog fields spelled
-#     out. Two sources of truth → drift risk; β makes the slice-1 annotations
-#     decorative.
+#     out. Two sources of truth → drift risk.
 #
 # Strong rec: α. Reach for β only if α turns out to break Pydantic type-checking.
 class CatalogEntry(BaseModel):
@@ -182,20 +181,19 @@ class CatalogClient(Protocol):
         """Refresh local cache from upstream. Returns the entry count.
 
         For in-memory implementations, this is a no-op that returns the
-        current in-process count. For git-backed implementations, this
-        forces a `git pull` of the registry cache before reporting.
+        current in-process count. For git-backed implementations, this runs
+        the same registry-cache refresh every read does (clone, or fetch +
+        hard reset to `origin/main`) before reporting.
         """
         ...
 
 
 # ---------------------------------------------------------------------------
-# InMemoryCatalogClient — slice 2's only concrete implementation
+# InMemoryCatalogClient — in-process, for tests
 # ---------------------------------------------------------------------------
 
 class InMemoryCatalogClient:
-    """Catalog backed by an in-process dict. Used in tests and as the in-memory
-    store before flush in slice-3's GitCatalogClient.
-    """
+    """Catalog backed by an in-process dict. Used in tests."""
 
     def __init__(self) -> None:
         self._entries: dict[str, CatalogEntry] = {}
@@ -272,8 +270,7 @@ class GitCatalogClient:
     register / update open a branch + PR against the registry repo. fetch /
     list read from a local clone (`_catalog_cache.py`) that's kept fresh
     transparently on every read. status() resolves PR-pending entries against
-    a local state file (`pending_registrations.py`) before falling back to
-    a `gh pr list` query.
+    a local state file (`pending_registrations.py`).
 
     All subprocess interaction goes through the injected `RegistryGitOps` —
     tests pass a fake, production passes the default `SubprocessRegistryGitOps`.
@@ -395,7 +392,7 @@ class GitCatalogClient:
         # Both are asked of the registry rather than of `.mintd_pending.json`,
         # which is per-machine local state (a PR opened from a laptop is
         # invisible on the cluster). Both are AFTER the no-changes and dry-run
-        # early returns above, so neither path touches the network.
+        # early returns above, so neither path makes these two network calls.
         branch_exists = self._git_ops.remote_branch_exists(self._work_dir, branch)
         # No branch means no PR can be open on it — skip the `gh` call entirely.
         existing_pr = (

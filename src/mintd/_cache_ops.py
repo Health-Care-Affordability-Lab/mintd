@@ -129,12 +129,13 @@ def _is_forbidden_path(path_posix: str) -> bool:
     The ``""`` / ``.`` segments matter for the PULL gate specifically: a planted
     key ``<prefix>/cache/.`` (or ``…/sub/.`` or ``…/cache`` with no remainder)
     lists back as the remainder ``.`` / ``sub/.`` / ``""``. Those normalise (via
-    pathlib) back onto the ``cache/`` directory location itself, so BOTH the
-    string gate (a ``..``-only check) and the filesystem containment gate
-    (``dest.resolve()`` collapses ``.`` and lands inside ``cache_root``) would
-    otherwise pass — and ``download_object`` would write attacker bytes AS A FILE
-    onto the ``cache/`` path. A legitimate remainder never contains an empty or
-    ``.`` segment, so refusing them only rejects corrupted/hostile keys.
+    pathlib) back onto a directory — the project root itself, or ``sub/`` — so
+    BOTH the string gate (a ``..``-only check) and the filesystem containment
+    gate (``dest.resolve()`` collapses ``.`` and stays inside the project root)
+    would otherwise pass — and ``download_object`` would try to write attacker
+    bytes AS A FILE onto that directory's path. A legitimate remainder never
+    contains an empty or ``.`` segment, so refusing them only rejects
+    corrupted/hostile keys.
 
     Control characters (C0 incl. NUL/CR/LF/TAB, and DEL/ESC) are refused too —
     the same screen ``_share_ops._has_control_char`` applies to share refs. S3
@@ -1235,7 +1236,7 @@ def cache_pull(
 def lifecycle_covers_cache_tag(rules: list[dict]) -> bool:
     """Pure predicate: does any Enabled rule with ``NoncurrentVersionExpiration``
     filter on tag ``mintd-lane=cache`` (via ``Filter.Tag`` or
-    ``Filter.And.Tags[]``)? Reusable by share S3 for its prefix-rule read."""
+    ``Filter.And.Tags[]``)?"""
     for rule in rules:
         if rule.get("Status") != "Enabled":
             continue

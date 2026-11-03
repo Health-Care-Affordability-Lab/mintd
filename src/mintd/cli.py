@@ -1,14 +1,17 @@
 """``mintd`` CLI entry point.
 
-Subcommand tree wires the slice-1..9 API to argparse. No business logic
-lives here — every subcommand delegates to a public function in the
-library layer (``mintd.{check, data, enclave, catalog}``). The only
-CLI-specific concerns are:
+Subcommand tree wires the library API to argparse. Handlers delegate the
+work to the library layer (``mintd.check``, ``mintd.data``, ``mintd.enclave``,
+``mintd.publish``, ...) and keep to:
 
 - argument parsing
 - ``Config`` loading and client construction (the ``_resolve_*`` factories)
-- rendering ``CheckFinding``s and ``BumpBlocked`` exceptions for humans
+- rendering results and errors (``CheckFinding``s, ``BumpBlocked``, ...) for
+  humans and ``--json``
 - exit-code dispatch
+- a few guards no library function owns, such as ``registry register``
+  refusing an uncommitted project and ``enclave pull`` refusing to run
+  outside the enclave
 """
 
 from __future__ import annotations
@@ -797,7 +800,7 @@ def _require_fast_sync_ops(config: Config, reporter: Reporter) -> FastSyncOps | 
     per-target classification, checkout-before-pull and the entire error
     accounting, and its blanket `dvc pull` re-entered two DVC bugs
     `data_ops` carries explicit workarounds for. No lab environment runs
-    mintd without boto3 (DECISIONS-20260828 D1), so there is nothing for a
+    mintd without boto3, so there is nothing for a
     flag to serve.
 
     `reporter.error`, not `warn`: `warn` is json-suppressed, which is how
@@ -990,10 +993,10 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     if summary.error_count:
-        # Version-aware targets fast-sync could not serve. Each was already
-        # reported via reporter.error with its own targeted-retry hint
-        # inside data_pull; summarize and exit non-zero so scripts/CI can't
-        # mistake a partial pull for success.
+        # Targets data_pull did not land in the workspace. Each was already
+        # reported via reporter.error with its own hint inside data_pull;
+        # summarize and exit non-zero so scripts/CI can't mistake a partial
+        # pull for success.
         if reporter.json_mode:
             reporter.result({
                 "pulled": summary.targets_pulled,
@@ -1805,7 +1808,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         # every target — mirror
         # _handle_data_pull: no ✓ line, exit non-zero so scripts/CI can't
         # mistake a partial clone for success. Each failed target was
-        # already reported via reporter.error with its own retry hint.
+        # already reported via reporter.error with its own hint.
         if reporter.json_mode:
             payload["errors"] = clone_result.pull_error_count
             reporter.result(payload, pretty=_pretty_data_clone)
@@ -2126,8 +2129,8 @@ def _handle_data_list(args: argparse.Namespace) -> int:
          "description": (e.description or None)}
         for e in sorted(entries, key=lambda e: (e.project_type, e.name))
     ]
-    # For pretty mode, use the slice-22 grouped table (grouped by project_type
-    # with the canonical data → code → project → enclave order, name-column
+    # For pretty mode, use the grouped table (grouped by project_type with
+    # the canonical data → code → project → enclave order, description
     # truncation, "(no description)" placeholder for empty descriptions).
     if not entries:
         pretty_text = "no entries"
@@ -2577,10 +2580,9 @@ def _handle_enclave_verify(args: argparse.Namespace) -> int:
                 manifest_path=args.manifest,
                 data_root=args.data_root,
             )
-    # Both subclasses are caught BEFORE the InvalidTransferManifest base clause.
-    # One "the archive is malformed" hint is right for one of five causes and
-    # wrong for the other four — including the two most common, which have
-    # nothing to do with the archive.
+    # All three subclasses are caught BEFORE the InvalidTransferManifest base
+    # clause. Its one "the archive is malformed" hint is wrong for each of
+    # them.
     except TransferManifestNotFound as exc:
         reporter.error(
             str(exc),
@@ -2970,7 +2972,8 @@ def _handle_config_setup(args: argparse.Namespace) -> int:
             pairs = [config_ops.parse_set_pair(s) for s in args.set_pairs]
             config = config_ops.apply_set_updates(args.path, pairs, write=write)
         else:
-            # No flags → interactive walkthrough of every Config field.
+            # No flags → interactive walkthrough of the Config fields
+            # (minus config_ops._SETUP_SKIP_FIELDS).
             config = config_ops.interactive_setup(args.path, write=write)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)

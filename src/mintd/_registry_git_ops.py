@@ -1,15 +1,14 @@
-"""The only module in mintd that shells out to `git` or `gh`.
+"""The only module in mintd that shells out to `gh`; `git` also runs in
+`_init_ops.py` and `_producer_git_ops.py`.
 
 Every other module that needs to interact with the registry repo (the cache,
 GitCatalogClient) goes through the `RegistryGitOps` Protocol. Production code
 uses `SubprocessRegistryGitOps`; tests inject a fake.
 
-This is the single seam that:
+This seam:
   - Normalizes subprocess failures into typed exceptions.
   - Lets us swap implementations without touching callers.
   - Bounds the surface area of code that depends on `git` / `gh` being on PATH.
-
-If you ever find yourself reaching for `subprocess` outside this module, stop.
 """
 
 from __future__ import annotations
@@ -91,7 +90,9 @@ class RegistryBranchExists(GitOpError):
 
 
 class RegistryGitOps(Protocol):
-    """Every git/gh subprocess in mintd goes through one of these methods.
+    """Every `gh` subprocess in mintd, and every `git` one outside
+    `_init_ops.py` and `_producer_git_ops.py`, goes through one of these
+    methods.
 
     Implementations must:
       - Raise `GitOpError` / `GhAuthError` / `GhNotInstalled` / `PRConflictError`
@@ -145,9 +146,9 @@ class RegistryGitOps(Protocol):
 class SubprocessRegistryGitOps:
     """Production: shells out to `git` and `gh`.
 
-    Each method runs a single command and surfaces non-zero exits as the typed
-    exceptions defined above. Stdout/stderr capture is on by default for both
-    diagnostics (in errors) and parsing (for `gh pr list`).
+    Each method surfaces non-zero exits as the typed exceptions defined above.
+    Stdout/stderr capture is on by default for both diagnostics (in errors) and
+    parsing (for `gh pr list`).
     """
 
     def __init__(
@@ -321,7 +322,7 @@ class SubprocessRegistryGitOps:
     def push_with_tags(self, work_dir: Path) -> None:
         """Push the current branch and the annotated tags reachable from it.
 
-        ``--follow-tags`` is the whole point: ``tag`` above creates annotated
+        ``--follow-tags`` is the whole point: ``tag`` creates annotated
         tags, and this sends the commit and its tag in one round trip. A
         product cannot be advertised in the catalog at a rev the remote does
         not have, because `publish` does this before it writes the entry.
@@ -336,10 +337,12 @@ class SubprocessRegistryGitOps:
     def tag_points_at_head(self, work_dir: Path, name: str) -> bool:
         """Is ``name`` an existing tag on the current commit?
 
-        Asked only after ``tag`` reports a collision, to tell an idempotent
-        rerun (the tag a previous attempt left at this very commit) from a
-        real one (a tag of the same name somewhere else). Tag names cannot
-        contain whitespace, so ``split()`` is an exact match.
+        Asked after ``tag`` reports a collision, to tell an idempotent rerun
+        (the tag a previous attempt left at this very commit) from a real one
+        (a tag of the same name somewhere else), and by `publish` before it
+        re-publishes a version the catalog already lists, as the sign of such
+        a rerun. Tag names cannot contain whitespace, so ``split()`` is an
+        exact match.
         """
         return name in self._git(["tag", "--points-at", "HEAD"], cwd=work_dir).split()
 

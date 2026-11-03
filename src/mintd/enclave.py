@@ -1,4 +1,9 @@
-"""Typed view over `enclave_manifest.yaml` + `enclave_bump`.
+"""Typed view over `enclave_manifest.yaml`, and the enclave verbs built on it.
+
+`enclave_add` / `enclave_remove` / `enclave_bump` manage `approved_products[]`,
+`enclave_pull` fetches them into `downloaded[]`, `enclave_package` bundles
+those into a `.tar.gz` transfer archive, and `enclave_verify` lands an
+extracted one.
 """
 
 from __future__ import annotations
@@ -201,8 +206,8 @@ def subscription_label(ap: ApprovedProduct) -> str:
     # `is not None`, not truthiness: `enclave_add`'s guard keys on the triple,
     # so a row with source_path "" is a DIFFERENT subscription from a bare
     # primary. Collapsing them here would render two distinct rows identically
-    # on all five call sites — including the `enclave list` screen that
-    # AlreadyApproved's hint and D2's refusal both send the user to.
+    # on every call site — including the `enclave list` screen that
+    # AlreadyApproved's hint sends the user to.
     if ap.source_path is not None:
         return ap.source_path or "<empty source_path>"
     return "<all>" if ap.all else "<primary>"
@@ -298,7 +303,8 @@ def enclave_add(
         #
         # ORDERING IS LOAD-BEARING: AlreadyApproved must raise inside this loop,
         # i.e. BEFORE the D1 pin-conflict ValueError below.
-        # tests/test_enclave_add.py:128 and tests/test_cli.py:1242 both re-add
+        # tests/test_enclave_add.py:128 and
+        # tests/test_cli.py::test_enclave_add_duplicate_exits_one both re-add
         # the same primary with a DIFFERENT pin and assert AlreadyApproved;
         # checking the pin first flips both to ValueError (routed through
         # cli.py's generic handler, a different message) and reddens them.
@@ -469,7 +475,7 @@ def enclave_remove(
     #   --all            -> EVERY row of the repo (what bare `remove` did before
     #                       a repo could hold more than one subscription)
     # NOTE `--all` means something different on `enclave add`, where it is the
-    # all-outputs subscription. Flagged, not resolved — see BACKLOG.
+    # all-outputs subscription. Flagged, not resolved.
     manifest = EnclaveManifest.load(manifest_path)
     def _matches_approved(ap: ApprovedProduct) -> bool:
         if ap.repo != name:
@@ -595,7 +601,7 @@ def enclave_pull(
     new_downloaded: list[DownloadedItem] = list(manifest.downloaded)
     written: list[DownloadedItem] = []
     created_target_dirs: set[Path] = set()
-    # (output, pin) pairs imported during THIS call — see the dedup below.
+    # (repo, output, pin) triples imported during THIS call — see the dedup below.
     written_this_run: set[tuple[str, str, str]] = set()
 
     def _save_downloaded() -> None:
@@ -797,7 +803,7 @@ def enclave_pull(
     if kept != new_downloaded:
         new_downloaded = kept
         _save_downloaded()
-    # D7 (DECISIONS-20260828): stat each in-scope downloaded[] row and report
+    # Stat each in-scope downloaded[] row and report
     # the missing ones BY NAME; never fetch them unasked. A fresh clone tracks
     # the manifest but not downloads/, so every row above skips off the
     # manifest alone and the pull used to end in a bare "nothing to pull"
@@ -1105,8 +1111,8 @@ def enclave_package(
             encoding="utf-8",
         )
         # JSON sibling of the YAML manifest: `land.py` runs on a box with no
-        # PyYAML, so it needs a stdlib-readable copy. Same object, dumped twice
-        # three lines apart, so the two cannot drift.
+        # PyYAML, so it needs a stdlib-readable copy. Same object, dumped twice,
+        # so the two cannot drift.
         (tmp / "_transfer_manifest.json").write_text(
             json.dumps(transfer_manifest.model_dump(mode="json"), indent=2) + "\n",
             encoding="utf-8",
@@ -1229,9 +1235,9 @@ def enclave_verify(
 ) -> tuple[Path, list[TransferredItem]]:
     """Reconcile a user-extracted transfer dir into the inside-enclave manifest.
 
-    Path-traversal guard runs **before** any filesystem mutation. Three
-    string-level pre-checks (`is_absolute()` and `..` segments on both
-    `content.repo` and `content.version_folder`) plus two resolve-based
+    Path-traversal guard runs **before** any filesystem mutation. String-level
+    pre-checks on both `content.repo` and `content.version_folder` (empty,
+    `.`, a path separator, `is_absolute()`, `..` segments) plus two resolve-based
     checks (the constructed member path, and an `rglob` walk for symlinks
     inside the data) together cover the CVE-2007-4559 family. All
     `startswith` comparisons append `os.sep` to avoid sibling-directory
@@ -1302,7 +1308,7 @@ def enclave_verify(
         # otherwise pass collision validation, then crash mid-move
         # when the second `shutil.move` finds `B/C`'s source under the
         # already-moved `B`. Repo/version_folder are flat segments by
-        # design (see `_resolve_outputs` in slice 13).
+        # design (see `enclave_pull`'s `target_dir`).
         if (
             not content.repo
             or content.repo == "."

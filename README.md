@@ -27,11 +27,12 @@ It targets the workflow of a research lab where:
 - **Consumer** — a project that *imports* another project's data product
   at a specific git commit. Records what it depended on, so an analysis is
   reproducible.
-- **Registry / catalog** — a git repo that holds the
-  CATALOG-audience subset of every producer's metadata, so consumers can
-  discover what's available without scraping S3.
-- **Pin** — the pair `(contract_pin, artifact_pin)` = `(producer git commit,
-  DVC md5)`. Always recorded together. Consumers never silently re-resolve.
+- **Registry / catalog** — a git repo that holds every producer's
+  `metadata.json` (minus the `schema_version` and `mint` fields), so
+  consumers can discover what's available without scraping S3.
+- **Pin** — the producer git commit a consumer imported at
+  (`contract_pin`), recorded in the consumer's own `.dvc` files. Consumers
+  never silently re-resolve; `mintd data import --bump` moves it.
 - **Project types** — `data`, `code`, `project`, `enclave`. See
   `mintd init --help`.
 
@@ -49,17 +50,17 @@ repo (`ssh -T git@github.com` should greet you).
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
 ```
 
 Both scripts install `uv` if missing, run `uv tool install
-git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git`
+git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
 (isolated venv, `mintd` on PATH), then layer `cffi + reflink` into the
 tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
 to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
@@ -72,7 +73,7 @@ to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
 # irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
-uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git
+uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
 ```
 
 Or `pipx install git+…` / `pip install --user git+…` if you prefer.
@@ -188,7 +189,7 @@ mintd data list
 # Peek at the S3 layout of a specific product before pulling:
 mintd data ls my-cleaned-survey
 
-# Clone the whole producer repo + pull the primary data product:
+# Clone the whole producer repo + pull every tracked output:
 mintd data clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
 mintd data clone my-cleaned-survey --rev v0.1.0 --primary
@@ -322,7 +323,7 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
 mintd check    [path] [--upgrades]                Validate metadata, output delivery + (optionally) pins
-mintd data     import|clone|pull|push|add|verify|remove|list|ls
+mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
@@ -348,19 +349,18 @@ a documented deprecation. Numbers are JSON numbers (`elapsed_s: 14.3`, not
 `"14.3"`), missing values are explicit `null` rather than `""` or an omitted
 key, and arrays are always present, possibly empty, never null.
 
-- `data list` — array of entries sorted by `name`; each has `name`,
-  `project_type`, `description` (str or null).
+- `data list` — array of entries sorted by `project_type`, then `name`;
+  each has `name`, `project_type`, `description` (str or null).
 - `data list --imported` — array of entries; each has `local_path`,
   `producer_repo`, `contract_pin`, `output_path`.
 - `data clone` — object: `dest` (absolute), `primary` (str or null),
-  `elapsed_s` (two decimals), `files`, `bytes`.
+  `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
+  `remote_bucket` (str or null).
 
 ## Where to look next
 
 - [`vocab.md`](vocab.md) — domain language (producer/consumer, audience,
   pins, resolver).
-- [`DECISIONS.md`](DECISIONS.md) — why the design is the way it is, newest
-  first.
 - `mintd <command> --help` — every flag, always current.
 
 ## Development
@@ -374,9 +374,11 @@ pytest
 
 Conventions:
 
-- Design decisions are appended to [`DECISIONS.md`](DECISIONS.md), newest
-  first. Entries are never edited or marked superseded — a reversal is a new
-  entry.
+- A design decision and its reasons live in the pull request that makes it,
+  and in the docstring of the code it shapes — not in a separate log.
+- `README.md` and `vocab.md` describe the code as it is today. A change that
+  adds, renames or removes a command, flag or term updates them in the same
+  PR; `tests/test_docs.py` checks both against the code.
 - A known, unfixed defect is a `pytest.mark.xfail(strict=True)` test whose
   docstring is the spec. `grep -rn 'strict=True' tests/` lists them, and one
   that starts passing turns CI red, so the list cannot go stale.

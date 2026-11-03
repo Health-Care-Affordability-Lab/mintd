@@ -4,9 +4,10 @@ Slice 4: `import_product` — catalog lookup → path resolution → `dvc import
 Slice 5: lifts the `--rev` without `--path` restriction by resolving
 `data_products.primary` via `ProducerView.at(repo, rev)` (the producer's
 metadata.json at the pinned commit).
-Slice 7: `bump_import` — consume slice-6 `_consumer_findings`, re-resolve
-`data_products.primary` at the producer's HEAD via `ProducerView.at_head`,
-and overwrite the consumer's `.dvc` file with the new pin.
+`bump_import` — on a `drift` consumer finding from `check_project`, re-import
+the output path the import's `.dvc` records (`data_products.primary` only when
+it records none) at the producer's HEAD SHA via `ProducerView.at_head`, and
+overwrite that `.dvc` file with the new pin.
 """
 
 from __future__ import annotations
@@ -112,19 +113,23 @@ class StaleBackupExists(ImportDestinationExists):
 
 
 class ImportNotFound(Exception):
-    """`bump_import(name=...)` was called with a name that isn't imported
-    in the project's `data/imports/` directory."""
+    """The named import or subscription is not there: `bump_import` finds no
+    matching `.dvc` under `data/imports/`, an enclave verb finds no matching
+    `approved_products[]` row, or `check` has no consumer finding for it."""
 
 
 class AmbiguousImport(Exception):
-    """The `(product, --path)` selector matches more than one `.dvc` file.
+    """The `(product, --path)` selector matches more than one `.dvc` file or
+    namespace folder.
 
-    Two flavors, both refusing to pick silently: the product has several
-    imported outputs and no `--path` was given, or two `.dvc` files in one
+    Three flavors, all refusing to pick silently: the product has several
+    imported outputs and no `--path` was given, two `.dvc` files in one
     namespace record the *same* producer path (a real duplicate — e.g. an
-    import made before and after the layout change). Not the superseded
-    two-key-space class of the same name: there is one key space here (the
-    producer's output path), and this fires when it cannot name a single row.
+    import made before and after the layout change), or the product has no
+    namespace folder of its own and several `*_<name>` folders could be it.
+    Not the superseded two-key-space class of the same name: there is one key
+    space here (the producer's output path), and this fires when it cannot
+    name a single row.
     """
 
 
@@ -1110,9 +1115,11 @@ def bump_import(
     Returns a ``BumpResult`` (old pin, new pin, changed flag, rewritten
     `.dvc` path) so the CLI can render the pin transition. Raises:
 
-    - `ImportNotFound` — the `(name, path)` pair names no import on disk.
-    - `AmbiguousImport` — several imported outputs and no `path`, or two
-      `.dvc` files recording the same producer path.
+    - `ImportNotFound` — the `(name, path)` pair names no import on disk, or
+      `check_project` has no consumer finding for it.
+    - `AmbiguousImport` — several imported outputs and no `path`, two `.dvc`
+      files recording the same producer path, or several `*_<name>` folders
+      that could be the product's namespace.
     - `BumpBlocked(name, finding)` — the producer is broken at the pin
       (`pin_missing` / `metadata_missing` / `metadata_invalid`) or the
       warning is non-actionable (`unreachable` / `schema_too_old` /

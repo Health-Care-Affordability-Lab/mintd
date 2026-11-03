@@ -2,17 +2,15 @@
 
 This module is deliberately split into two strata:
 
-**Stratum T (transport — the future ``mintd cache`` core).** The three verb-
+**Stratum T (transport, shared with ``mintd cache``).** The three verb-
 agnostic primitives ``head_remote_object`` / ``upload_object`` /
 ``download_object`` (plus ``file_sha256`` and the ``TransferError`` family)
-take ``(s3, bucket, key, path, progress, extra_args)`` and MAY NOT reference
+take ``(s3, bucket, key, ...)`` and MAY NOT reference
 ``Config``, ``Reporter``, ``SHARE_PREFIX``, or the ref grammar. They *compose*
 the existing shared seams (``retry_transient`` / ``is_transient_s3_error``,
 ``_try_fsync_file`` / ``_try_fsync_parent_dir``) rather than paraphrase them.
-``mintd cache`` imports them unchanged; when cache lands, Stratum T moves
-verbatim to ``_transfer_ops.py`` (rename-only, shipped with its second
-consumer — no speculative empty module now, per the defer-cross-cutting-
-refactors norm). Integrity is a transport invariant: upload always sends
+``mintd cache`` (``_cache_ops.py``) imports them unchanged. Integrity is a
+transport invariant: upload always sends
 ``ChecksumAlgorithm="SHA256"``, download always sends ``ChecksumMode="ENABLED"``,
 and ``extra_args`` (cache's ``Tagging`` / ``Metadata`` seam) raises if it tries
 to override the reserved checksum key.
@@ -37,7 +35,7 @@ from uuid import uuid4
 # Reuse the guarded-import sentinels from _fast_sync_ops rather than
 # paraphrasing its try/except: these are the *same* class objects that
 # is_transient_s3_error / retry_transient classify against, so behaviour
-# cannot drift. When boto3 is absent both are inert placeholders whose
+# cannot drift. When boto3 is absent they are all inert placeholders whose
 # ``except`` clauses never fire (see _fast_sync_ops:37-48).
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
 from mintd._fast_sync_ops import (
@@ -120,9 +118,10 @@ class TransferError(Exception):
 
 
 class RemoteObjectNotFound(TransferError):
-    """404 / ``NoSuchKey`` — typed so policy layers (``share_get``, later
-    ``mintd cache``) can re-word it with their own grammar (R5). The message
-    names the *key* only; it carries no hint."""
+    """404 / ``NoSuchKey`` — typed so policy layers can act on it: ``share_get``
+    re-words it with its own grammar, ``cache push`` uploads when the object
+    vanished between LIST and HEAD. The message names the *key* only; it
+    carries no hint."""
 
 
 @dataclass(frozen=True)
@@ -145,7 +144,8 @@ def _credentials_error(exc: BaseException) -> TransferError:
     # sees it and retry_transient classifies it non-transient (re-raised on
     # the first attempt). Without this wrap it would escape main() as a raw
     # traceback (main catches only KeyboardInterrupt / WallTimeout /
-    # ConfigError) — the precedent is is_transient_s3_error:293-296.
+    # ConfigError / CatalogEntryInvalid) — the precedent is
+    # is_transient_s3_error's NoCredentialsError arm.
     return TransferError(
         f"AWS credentials unavailable (not retried): {exc}",
         hint="check AWS credentials: mintd config validate",
@@ -364,7 +364,7 @@ def download_object(
     """Download ``bucket/key`` to ``dest`` atomically.
 
     Borrows ``fetch_to_cache``'s tmp→verify→fsync→replace discipline
-    (_fast_sync_ops:1115-1147) with three grounded deviations:
+    (in ``_fast_sync_ops``) with three grounded deviations:
 
     1. tmp name is ``dest.name + tmp_suffix``, NOT ``with_suffix(".tmp")`` —
        the latter would collapse user-named ``report.parquet`` /
@@ -382,7 +382,7 @@ def download_object(
        pre-``replace`` hook cache uses for its metadata-SHA256 check (R2): if
        it raises, the tmp is unlinked and the error propagates;
     3. cleanup is ``except BaseException`` (vs fetch_to_cache's ``Exception``)
-       so Ctrl-C — caught later at cli.py:186-188 → exit 130 — also leaves no
+       so Ctrl-C — caught later in ``cli.main`` → exit 130 — also leaves no
        orphan tmp.
 
     Returns the downloaded byte count."""
