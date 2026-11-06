@@ -1,35 +1,33 @@
 """Unified project validation.
 
 This is the single source of validation findings for any mintd project.
-Other modules (validate_publishable, mintd registry update preflight, etc.)
-query check_project() instead of re-implementing checks.
+Other modules (publish, the `mintd registry register` preflight, the bump
+verbs) query check_project() instead of re-implementing checks.
 
-Findings are split into three sections, by which artifact they read:
+Findings are split into two sections, by which artifact they read
+(`CheckFinding.section` also admits "environment", which nothing emits):
 
-  - producer: derivable from metadata.json alone — shape, required fields,
-    Owner × Audience consistency, storage config sanity — plus, when `.dvc/`
+  - producer: derivable from metadata.json — shape, required fields,
+    storage config sanity (against `.dvc/config`) — plus, when `.dvc/`
     exists, the project's own DVC pointers and dvc.lock: every declared
     output must be one `mintd data import` can actually land. This is what
     a project owner is responsible for getting right before publishing.
-  - consumer: derivable from imports.yaml and the resolved producer metadata
-    of upstream projects — pin resolvability, version compatibility. This is
-    what a project owner is responsible for keeping current as upstreams move.
-  - environment: derivable from the local machine — dvc/git/gh availability,
-    versions, auth state. Not the project's fault; affects whether commands
-    can actually run.
+  - consumer: derivable from the project's imports (the `.dvc` pointers
+    under data/imports/ and dvc.lock deps with a `repo:` block) and
+    enclave_manifest.yaml (each row's producer URL read from the catalog),
+    plus — with `upgrades` — each upstream producer at the pin and at HEAD:
+    pin resolvability, version compatibility, drift.
+    This is what a project owner is responsible for keeping current as
+    upstreams move.
 
 Findings carry one of three severities:
 
-  - error: blocks publish / blocks `mintd registry update`. The project is
+  - error: blocks publish / blocks `mintd registry register`. The project is
     not in a valid state.
   - warning: surfaced to the user but does not block. Something is unusual
-    or likely-wrong (e.g., a USER-owned field that looks tool-generated).
+    or likely-wrong (e.g., the producer is unreachable, or its HEAD differs
+    from your pin).
   - info: purely informational. Used sparingly.
-
-Slice 1 scope:
-  - Producer section: Pydantic validation of metadata.json only.
-  - Consumer section: returns [] (added in slice 4 with imports.yaml).
-  - Environment section: returns [] (added in slice 6 with --upgrades).
 """
 
 from __future__ import annotations
@@ -56,7 +54,7 @@ from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, Pro
 
 if TYPE_CHECKING:
     # Avoid module-level import of enclave.py — enclave.py imports from this
-    # module (CheckFinding) and from data.py, but data.py is imported here.
+    # module (CheckFinding) and from data.py, which imports this module too.
     # Lazy import inside the manifest walker breaks the cycle for runtime.
     from .enclave import ApprovedProduct
 
@@ -156,14 +154,17 @@ def check_project(
 
     Returns a list of findings. Empty list means clean.
 
-    Slice 1 behavior — producer section only:
+    Producer section:
       - metadata.json missing → 1 error finding
       - metadata.json malformed JSON → 1 error finding
       - metadata.json fails Pydantic → 1 error finding per ValidationError entry
-      - valid → []
+      - storage drift → 1 error finding (checked even when Pydantic fails)
+      - valid → data_products.primary, repository.github_url and, when `.dvc/`
+        exists, DVC delivery of every declared output
 
-    Slice 4 added: imports.yaml validation, pin resolution.
-    Slice 6 added: env hygiene (dvc/git/gh), --upgrades network checks.
+    Consumer section: the project's imports and enclave approved products;
+    `upgrades=True` also resolves each producer at its pin and at HEAD and
+    reports drift.
     """
     findings = _producer_findings(path)
     try:
@@ -213,9 +214,10 @@ def consumer_walk_failure(findings: list[CheckFinding]) -> str | None:
 
 
 def _producer_findings(project_path: Path) -> list[CheckFinding]:
-    """Producer-section checks: everything derivable from metadata.json alone,
-    plus — when `.dvc/` exists — whether its declared outputs are ones DVC can
-    deliver, read from the project's own pointers and dvc.lock."""
+    """Producer-section checks: everything derivable from metadata.json (storage
+    drift also reads `.dvc/config`), plus — when `.dvc/` exists — whether its
+    declared outputs are ones DVC can deliver, read from the project's own
+    pointers and dvc.lock."""
     from ._storage_state import StorageState, inspect_storage, repair_hint
 
     metadata_path = project_path / "metadata.json"
@@ -288,8 +290,8 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
         findings.extend(_check_data_products_primary(meta, metadata_path))
         findings.extend(_check_repository_identity(meta, metadata_path))
         # No `.dvc/` means no DVC truth to compare the declaration against
-        # (`mintd init` always creates one); a bare metadata.json is not a
-        # product that promised anything DVC-delivered.
+        # (`mintd init` creates one for every type but enclave); a bare
+        # metadata.json is not a product that promised anything DVC-delivered.
         if (project_path / ".dvc").is_dir():
             # `check`, `publish` and `register` all route through here. A
             # dvc.yaml, dvc.lock or pointer file dvc itself would reject (a
@@ -349,7 +351,7 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
 def _check_repository_identity(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
     """An entry with no repository.github_url is unusable to every consumer.
 
-    `_require_repo_url` (data.py:300-304) raises on it, so `mintd data clone`
+    `_require_repo_url` (data.py) raises on it, so `mintd data clone`
     against such a catalog entry exits 1. Presence only -- the derived
     `{org}/{full_name}` shape is a scaffold default a human may legitimately
     override (the lab's `skills` entry really lives at `hcal-agent-skills`).
@@ -687,7 +689,7 @@ def _consumer_findings_from_dvc(
         # resolve HEAD, the two views are identical, `_drift_finding` sees no
         # drift, and an import with no pin at all renders as `✓ up to date`
         # where it used to render as `[warning] producer unreachable`. That
-        # also makes `data_bump` (data.py:568, gates on kind) silently no-op.
+        # also makes `bump_import` (data.py, gates on kind) silently no-op.
         #
         # Reading the pin needs no network, so this runs ABOVE the `upgrades`
         # gate: below it, plain `check` rendered an unpinned import as a clean
@@ -1016,11 +1018,13 @@ def _pointer_md5(
     Returns the matching out's `md5` verbatim — `.dir` hashes INCLUDED: a
     directory manifest's hash moves when any file inside it moves, which is
     exactly the signal drift needs (and exactly what `_match_out_files`
-    deliberately skips; do not reuse it).
+    deliberately skips; do not reuse it). Where dvc recorded no md5 for the
+    path or for a `.dir` out above it, the return is the `.files` / `.outs`
+    digest `_match_out_md5` returns.
 
-    Three states: the md5 string, `_POINTER_ABSENT` (readable rev, no pointer
-    for that path), or `None` (transport/parse failure — loud, never a
-    verdict).
+    Three states: that string, `_POINTER_ABSENT` (readable rev, no pointer
+    for that path), or `None` (transport/parse failure, or a stage dropped
+    for an absolute `wdir` — loud, never a verdict).
     """
     key = (repo, pin, output_path)
     if key in memo:
@@ -1272,9 +1276,9 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
     An exact match wins. Failing that the NEAREST enclosing out answers, which
     is how a subscription to a path inside a tracked directory gets a verdict
     at all — see `_out_identity`'s `subpath`. Failing THAT, the outs BENEATH
-    the path answer together: a declared directory (`data/final/`) that the
-    scaffold's `validate` stage tracks as per-file outs (`data/final/a.dta`,
-    …) has no pointer of its own, and reading that as absence blocked `bump`
+    the path answer together: a declared directory (`data/final/`) that a
+    stage tracks as per-file outs (`data/final/a.dta`, …) has no pointer of
+    its own, and reading that as absence blocked `bump`
     for every such producer. Its identity is a digest over the sorted
     `(path, identity)` pairs, so an out moving, appearing or vanishing beneath
     the directory is drift — the whole-directory posture `.dir` pointers

@@ -1,14 +1,11 @@
 """Typed Pydantic model for metadata.json.
 
 This is the canonical in-memory representation of a mintd project's metadata.
-Every read site goes through Metadata.from_json_file(); every write site goes
-through model.model_dump_json().
 
 Each field carries an `Owner` annotation describing who is allowed to write
 it. The audience taxonomy (LOCAL / CATALOG / PRODUCER_CONTRACT / CONSUMER)
 that earlier drafts encoded has been dropped — the catalog is "metadata
-minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below). See
-`DECISIONS.md` (2026-05-14) for the rationale.
+minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below).
 """
 
 import types
@@ -30,14 +27,13 @@ from .catalog import CatalogEntry
 class Owner(StrEnum):
     """Who is allowed to write a field.
 
-    Drives `mintd check`'s warnings ("USER field looks tool-generated") and
-    informs reviewers reading the model what to expect a field's lifecycle
-    to be.
+    Informs reviewers reading the model what to expect a field's lifecycle
+    to be; no command enforces it.
 
     - USER: human edits in metadata.json (description, tags, ownership, ...)
     - MINTD: tool writes (schema_version, mint.*, project.created_at, ...)
-    - PIPELINE: derived from project state (data_products.outputs[].path
-      from DVC tracking; status.last_updated from publish flow)
+    - PIPELINE: derived from project state (status.last_updated and
+      data_products.outputs[].last_published from the publish flow)
     - REGISTRY: catalog regenerates (none today; reserved for the
       registry-side rewriting flow)
     """
@@ -148,7 +144,7 @@ class Status(BaseModel):
 
 
 class Metadata(BaseModel):
-    model_config = ConfigDict(extra="allow")  # tightened in slice 6
+    model_config = ConfigDict(extra="allow")
 
     schema_version: Annotated[Literal["2.0"], Owner.MINTD]
     mint: Annotated[Mint, Owner.MINTD]
@@ -166,18 +162,18 @@ class Metadata(BaseModel):
     def from_json_file(cls, path: Path) -> "Metadata":
         """Read file → parse JSON → validate via Pydantic.
 
-        Raises FileNotFoundError if the file is missing, json.JSONDecodeError
-        if the bytes don't parse as JSON, or pydantic.ValidationError if the
+        Raises FileNotFoundError if the file is missing, or
+        pydantic.ValidationError if the bytes don't parse as JSON or the
         shape doesn't match the model.
         """
         data = path.read_text(encoding="utf-8")
         return cls.model_validate_json(data)
 
     def to_catalog_entry(self) -> CatalogEntry:
-        """Project this Metadata onto a CatalogEntry. The catalog stores
-        metadata.json verbatim except for the paths in CATALOG_EXCLUDED_PATHS
-        (mint-internal provenance fields that describe the file, not the
-        project).
+        """Project this Metadata onto a CatalogEntry. The catalog stores the
+        model's JSON dump (not the file's raw JSON) except for the paths in
+        CATALOG_EXCLUDED_PATHS (mint-internal provenance fields that describe
+        the file, not the project).
         """
         dumped = self.model_dump(mode="json")
         for path in CATALOG_EXCLUDED_PATHS:
@@ -194,8 +190,9 @@ class FastPullResult(BaseModel):
     """Result of a fast-pull attempt. Sole consumer: ``data_ops.data_pull``,
     which owns the routing described per field below.
 
-    Per-bucket routing (a target lands in at most one bucket; anything in no
-    bucket was fast-synced into the cache and is checked out):
+    Per-bucket routing (each out lands in at most one bucket, under its
+    target, so a target with several outs can appear in more than one;
+    anything in no bucket was fast-synced into the cache and is checked out):
 
     - ``fallback_targets`` — plain ``dvc pull`` can serve these (dvc-imports,
       md5-keyed outs, unparseable/hash-missing targets). Caller checks out any
@@ -215,7 +212,7 @@ class FastPullResult(BaseModel):
       downloads still failed after retries (cache blobs incomplete). Never
       checked out, never pulled; error loudly, non-zero exit. Each failed
       file is named in ``files_dir_failures`` (informational; the producer
-      already warned per file).
+      already warned once per out, with the failed-file count).
 
     Being outside every bucket does not guarantee workspace presence: the
     caller stat-verifies each checkout target post-hoc (data_ops'

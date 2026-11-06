@@ -2,13 +2,13 @@
 # Install mintd with reflink support.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
 #
 # Or from a specific branch:
-#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/<branch>/install.sh | bash -s -- --branch <branch>
+#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/<branch>/install.sh | bash -s -- --branch <branch>
 set -euo pipefail
 
-REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintdv2.git"
+REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git"
 BRANCH=""
 WITH_SCHEMA=0
 

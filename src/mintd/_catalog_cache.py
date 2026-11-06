@@ -68,15 +68,11 @@ class CatalogCache:
         branch (e.g. because ``gh pr create`` failed AFTER commit + push,
         or the user Ctrl-C'd mid-flow), ``reset --hard origin/main`` on
         that branch silently corrupts it — rewrites the branch to point
-        at main's HEAD with no upstream. Subsequent retries then crash
-        in ``checkout_new_branch`` ("branch already exists") OR succeed
-        but push a branch that's identical to main (PR creation fails
-        with "no commits between").
+        at main's HEAD with no upstream.
 
         Fix: always reset on main. Stale ``register/<name>`` branches
         are left in place — the ``-B`` flag in ``checkout_new_branch``
-        force-resets them on next register, and the orchestrator
-        cleans them up on success.
+        force-resets them on next register.
         """
         if not (self._work_dir / ".git").exists():
             self._work_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -97,8 +93,10 @@ class CatalogCache:
     def read_entry(self, name: str) -> CatalogEntry | None:
         """Return the deserialized CatalogEntry for `name`, or None if missing.
 
-        Searches all four `catalog/<type>/` subdirectories — entry names are
-        unique across types (validated by tests).
+        Searches all four `catalog/<type>/` subdirectories and returns the
+        first match, in `_TYPE_DIRS` order. `GitCatalogClient.register`
+        refuses a name already under any of them, but `update` with a changed
+        `project.type` writes the new file and leaves the old one.
         """
         path = self._find_entry_path(name)
         if path is None:

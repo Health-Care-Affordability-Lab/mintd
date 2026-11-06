@@ -1,17 +1,17 @@
 # Install mintd with reflink support (Windows).
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
 #
 # Or from a specific branch:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintdv2/<branch>/install.ps1))) -Branch <branch>
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/<branch>/install.ps1))) -Branch <branch>
 param(
     [string]$Branch = "",
     [switch]$WithSchema
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "https://git@github.com/Health-Care-Affordability-Lab/mintdv2.git"
+$Repo = "https://git@github.com/Health-Care-Affordability-Lab/mintd.git"
 
 # Ensure uv is installed
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {

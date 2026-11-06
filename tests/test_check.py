@@ -1,8 +1,6 @@
 """Tests for check_project().
 
-These tests pin the producer-section validation behavior. Consumer and
-environment sections are added in later slices; for slice 1, they're
-expected to return [].
+These tests pin the producer- and consumer-section validation behavior.
 """
 
 from __future__ import annotations
@@ -104,8 +102,7 @@ def test_check_malformed_json_returns_error(tmp_path: Path):
 def test_check_invalid_schema_returns_error(tmp_path: Path):
     """When metadata.json has schema_version="1.1", return an error finding.
 
-    This is the hard-cut behavior — pre-2.0 metadata is rejected with a clear
-    error pointing the user toward `mintd migrate`.
+    This is the hard-cut behavior — pre-2.0 metadata is rejected.
 
     Acceptance:
       - At least one finding with severity="error", section="producer"
@@ -151,15 +148,14 @@ def test_check_missing_required_field_returns_error(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 def test_check_returns_only_producer_findings_in_slice_1(tmp_path: Path):
-    """In slice 1, consumer and environment sections always return [].
+    """With no imports and no enclave manifest, check_project emits only
+    producer findings.
 
     Even when metadata.json is broken (errors in producer section), there
     are no findings with section="consumer" or section="environment".
-    Slices 4 and 6 will add those; this test prevents accidental early
-    additions.
     """
-    # Deliberately broken metadata to maximize the chance any section helper
-    # would have fired if it were wired up early.
+    # Deliberately broken metadata: the consumer walk still runs after a
+    # producer error, and with nothing to import must add nothing.
     (tmp_path / "metadata.json").write_text("not valid json{")
 
     findings = check_project(tmp_path)
@@ -478,7 +474,7 @@ def test_upgrades_walk_continues_after_one_error(tmp_path: Path):
     consumer_findings = [f for f in findings if f.section == "consumer"]
 
     assert len(consumer_findings) == 3
-    # Depending on filesystem order, one of them will be the error.
+    # dep2's producer is unreachable; dep1 and dep3 still get a verdict.
     assert sum(1 for f in consumer_findings if f.severity == "warning") == 1
     assert sum(1 for f in consumer_findings if f.severity == "info") == 2
 
@@ -1863,7 +1859,7 @@ def _scaffold_lock_outs(*outs: tuple[str, str]) -> bytes:
 
 
 #: A directory primary tracked as per-file lock outs BENEATH it — the shape
-#: the scaffold's `validate` stage writes, and 18 of 22 catalog products.
+#: of 18 of 22 catalog products.
 _A, _B, _OTHER = "../outputs/cms_based/a.csv", "../outputs/cms_based/b.csv", "../outputs/other.csv"
 _PIN_LOCK = _scaffold_lock_outs((_A, "a" * 32), (_B, "b" * 32), (_OTHER, "0" * 32))
 
@@ -2489,7 +2485,8 @@ def test_check_errors_on_a_cache_false_lock_out(tmp_path: Path, version_aware: b
 def test_check_skips_the_delivery_gate_without_a_dvc_dir(tmp_path: Path) -> None:
     """No `.dvc/` means no DVC truth to compare against: a bare metadata.json
     (every minimal-fixture test in this file) is not a product that promised
-    anything DVC-delivered, and `mintd init` always creates the directory.
+    anything DVC-delivered, and `mintd init` creates the directory for every
+    type but enclave.
     A pointer for some other path lying beside it does not change that (the
     shape is UNTRACKED, which fires on either remote layout, so this test
     cannot pass by accident of the version-aware rule).

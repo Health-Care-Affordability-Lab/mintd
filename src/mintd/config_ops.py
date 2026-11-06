@@ -5,10 +5,8 @@ Three concerns:
 - **mutate**: read-modify-write the on-disk config atomically.
 - **validate**: schema check + AWS profile + boto3 connectivity.
 
-This module owns the durability machinery (fsync, tmp-rename) so
-``_config.py`` stays import-cheap on the CLI hot path — ``Config.load``
-runs on every ``mintd <anything>`` invocation and shouldn't pay for
-write-side concerns.
+Config writes live here, not in ``_config.py``, which only reads; each goes
+through ``_atomic._atomic_write_text`` (temp file, fsync, rename).
 """
 
 from __future__ import annotations
@@ -75,10 +73,10 @@ _V1_KEYS = frozenset({"defaults", "platform", "registry", "storage", "tools"})
 
 
 def _check_unknown_keys(data: dict) -> None:
-    """Reject unknown config keys before Pydantic silently drops them.
+    """Reject unknown config keys with a plain-language error.
 
-    Pydantic 2's default ``extra="ignore"`` would silently discard
-    unknown fields. We probe up-front so users see a clear error.
+    ``Config`` is ``extra="forbid"``, so validation would reject them too,
+    but as a pydantic error dump; probing up-front names the keys instead.
 
     When the unknowns look like a v1 config (legacy `defaults`/`platform`/
     `registry`/`storage`/`tools` shape), surface a migration hint pointing
@@ -227,7 +225,7 @@ def validate_config(
     against). The AWS profile step is informational — it reports which
     boto3 credential source will be used but never fails. The S3 step
     is only meaningful when a ``bucket`` is supplied; otherwise it's
-    ``skipped`` (auto-discovery from the registry repo is slice-22+).
+    ``skipped``.
     """
     path = _resolve_path(config_path)
     try:
@@ -343,9 +341,10 @@ def migrate_v1_to_v2(v1_data: dict) -> dict:
     Maps the v1 keys that have a v2 equivalent;
     silently drops the rest (``platform``, ``storage.region``,
     ``storage.cache_type``, ``storage.versioning``, ``tools.github_cli``,
-    ``registry.default_branch``). Unknown top-level keys outside the v1 set
-    pass through unchanged so a partially-migrated user file isn't silently
-    mangled.
+    ``registry.default_branch``). Top-level keys that are already ``Config``
+    fields pass through unchanged (and win over the v1 mapping) so a
+    partially-migrated user file isn't silently mangled; any other key is
+    dropped.
     """
     out: dict = {}
     # Pass through any already-v2-shaped keys.
@@ -444,19 +443,21 @@ def interactive_setup(
     secret_prompt_fn=None,
     aws_credentials_path: Path | None = None,
 ) -> Config:
-    """Walk the user through each Config field; return the validated result.
+    """Walk the user through each Config field not in ``_SETUP_SKIP_FIELDS``;
+    return the validated result.
 
     Empty input keeps the existing value (or the field's Pydantic default
     when no prior value exists). Atomic-writes the result unless
     ``write=False``. Aborts cleanly on ``KeyboardInterrupt`` / EOF by
     re-raising as ``ConfigError`` (caught by the CLI handler).
 
-    Slice 30: if ``~/.aws/credentials`` doesn't already have a ``[mintd]``
+    If the AWS shared credentials file (``$AWS_SHARED_CREDENTIALS_FILE`` when
+    set, else ``~/.aws/credentials``) doesn't already have a ``[mintd]``
     section, offer to capture S3 access keys and write them. The actual
     write is guarded by ``write=True`` (same flag that gates the
     config.yaml write). ``secret_prompt_fn`` defaults to ``getpass.getpass``
     so secrets don't echo; tests inject a deterministic callable.
-    ``aws_credentials_path`` overrides ``~/.aws/credentials`` for tests.
+    ``aws_credentials_path`` overrides that file for tests.
     """
     import getpass
 
@@ -515,7 +516,7 @@ def interactive_setup(
     if write:
         _atomic_write_yaml(path, render_config(config))
 
-    # Slice 30: optionally capture AWS credentials into ~/.aws/credentials.
+    # Optionally capture AWS credentials into the AWS shared credentials file.
     # Decoupled from config.yaml because the keys go to a different file
     # (security-sensitive, mode 0600) and the prompt is opt-in.
     # shared_credentials_path, not default_credentials_path: under a sandbox
@@ -568,8 +569,9 @@ def render_validation(
     if json_out:
         import json
 
-        # JSON shape: {step_name: {"status": ..., "message": ...}}. Tests
-        # assert structure (keys present) rather than exact message strings.
+        # JSON shape: {step_name: {"status": ..., "message": ...,
+        # "latency_ms": ...}}. Tests assert structure (keys present) rather
+        # than exact message strings.
         text = json.dumps(
             {
                 step.name: {
