@@ -1007,6 +1007,7 @@ def test_import_whose_transfer_fails_leaves_no_folders(payload_journey, capsys) 
     register()
     for obj in producer.remote.rglob("*"):
         if obj.is_file() and not obj.name.endswith(".dir"):
+            obj.chmod(0o644)  # dvc stores objects read-only; Windows refuses to unlink those
             obj.unlink()
 
     rc = cli.main(["data", "import", PRODUCT])
