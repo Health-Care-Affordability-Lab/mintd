@@ -13,6 +13,7 @@ overwrite that `.dvc` file with the new pin.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator
@@ -249,6 +250,11 @@ def import_product(
     )
 
     produced: list[Path] = []
+    # What the output being imported made, for the `except` below: its
+    # destination if that did not exist yet, and the folders above it that did
+    # not. Cleared once the output lands, so no later failure touches it.
+    new_dest: Path | None = None
+    created_dirs: list[Path] = []
     try:
         with status_cm:
             for i, p in enumerate(paths, 1):
@@ -302,7 +308,12 @@ def import_product(
                 # already exist; it doesn't auto-create it. Create here so a
                 # fresh consumer project (no `data/imports/<namespace>/` yet)
                 # doesn't fail with the cryptic "stage working dir ... does not
-                # exist".
+                # exist". A failed import removes again what is missing now:
+                # see the `except` at the end of this function.
+                # Resolved, as in `_missing_dirs`: `foo/../x` does not exist while
+                # `foo` is missing, even when `x` does, and `x` must not go.
+                new_dest = None if dest.is_symlink() or dest.resolve().exists() else dest.resolve()
+                created_dirs = _missing_dirs(dest.parent)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 # What a failed postcondition below puts back: a forced
                 # re-import gets its previous pointer (`_payload_backup`
@@ -376,7 +387,18 @@ def import_product(
                                         )
                             raise
                     produced.append(written)
+                    new_dest, created_dirs = None, []
     except BaseException:
+        # The failing output's empty folders, after its own rollback above.
+        # Folders only: a file is never deleted here, whoever wrote it (a
+        # complete payload whose autostage `git add` failed, a partial
+        # transfer, another run). Here, not around the dvc step, so a failure
+        # anywhere after the mkdir (Ctrl-C during the index snapshot included)
+        # is covered. dvc builds a new destination's folder tree before it
+        # fetches, so that tree is walked first, deepest folders first.
+        if new_dest is not None:
+            created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
+        _remove_empty_dirs(created_dirs)
         if produced and reporter is not None:
             # EARLIER outputs are not rolled back — the failing one is, by
             # `_payload_backup`. Say what landed, so the user is not left
@@ -986,6 +1008,25 @@ def _remove_payload(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     else:
         path.unlink(missing_ok=True)
+
+
+def _missing_dirs(path: Path) -> list[Path]:
+    """`path` and its ancestors that do not exist yet, resolved, deepest first.
+    Resolved because `exists()` is False for `missing/..` even when the folder
+    it names exists, which would mark that folder as new. Sorted because after
+    a `..` the resolved folders are no longer in path order."""
+    missing = {r for d in (path, *path.parents) if not (r := d.resolve()).exists()}
+    return sorted(missing, key=lambda d: len(d.parts), reverse=True)
+
+
+def _remove_empty_dirs(dirs: list[Path]) -> None:
+    """Remove `dirs` in order while they are empty. `rmdir` never removes a
+    folder with anything in it, and the first one that stays ends the walk."""
+    for d in dirs:
+        try:
+            d.rmdir()
+        except OSError:
+            break
 
 
 @contextmanager
