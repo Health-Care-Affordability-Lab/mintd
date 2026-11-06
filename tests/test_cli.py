@@ -4675,6 +4675,32 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
     assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
 
 
+def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """`--all`: the first output lands, then the second is refused before
+    anything is made for it (a file already sits at its pointer's path). The
+    failure rollback never touches the payload of the output that landed.
+
+    Mutation: remove the destination whole on failure and keep the previous
+    output's rollback state -> `good/` is deleted.
+    """
+    client, _dvc_ops = patched_clients
+    sha = _undeliverable_producer(tmp_path, client)
+    root = tmp_path / "imports"
+    ns = root / "data_test_project" / "data"
+    ns.mkdir(parents=True)
+    (ns / "final.dvc").write_text("not a pointer\n")
+
+    rc = cli.main([
+        "data", "import", "test_project", "--all", "--rev", sha, "--dest-root", str(root),
+    ])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc != 0, err
+    assert (ns / "good" / "payload").is_file(), err
+
+
 def _reachable_raises(root: str) -> set[str]:
     """Exception NAMES raised by `src/mintd/data.py` functions reachable from
     `root`, following calls to other module-level functions in that file.
