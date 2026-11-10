@@ -274,6 +274,46 @@ def test_cache_pull_local_fs_error_exit_1_no_traceback(
         assert "traceback" not in err.lower()
 
 
+def test_cache_pull_unexpected_error_on_one_file_exit_1_no_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    """An error the per-file code does not map is reported as that file's
+    failure, with its type and the retry hint; the other file lands and the
+    command exits 1 with no traceback.
+
+    Mutation: collect with a bare `fut.result()` in `cache_pull` -> the
+    RuntimeError escapes `cli.main`.
+    """
+
+    class _RaisesOnBad:
+        def __init__(self, real):
+            self._real = real
+
+        def __getattr__(self, n):
+            return getattr(self._real, n)
+
+        def download_file(self, **k):
+            if k["Key"].endswith("/bad.bin"):
+                raise RuntimeError("boom")
+            return self._real.download_file(**k)
+
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        _seed(client, bucket, tmp_path, {"ok.bin": b"o" * 10, "bad.bin": b"b" * 10}, monkeypatch)
+        capsys.readouterr()
+        _use_factory(monkeypatch, _RaisesOnBad(client))
+        clone = _project(tmp_path / "cloneroot", bucket)
+        rc = cli.main(["cache", "pull", "--path", str(clone)])
+        err = _norm(capsys.readouterr().err)
+        assert rc == 1
+        assert "pull failed for bad.bin" in err
+        assert "RuntimeError" in err
+        assert "retry: mintd cache pull" in err
+        assert "pull incomplete: 1 file(s) failed, 1 pulled" in err
+        assert "traceback" not in err.lower()
+        assert (clone / "ok.bin").read_bytes() == b"o" * 10
+
+
 def test_cache_pull_json_has_failed_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ) -> None:

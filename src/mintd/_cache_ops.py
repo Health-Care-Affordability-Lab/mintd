@@ -973,17 +973,27 @@ def cache_push(
         ) as advance:
             advance.set_description(_push_label(0, n_files))
             with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-                futures = [
+                futures = {
                     ex.submit(
                         _push_one, item, s3=s3, bucket=repo.bucket,
                         prefix=repo.prefix, remote_size=_remote_size(item),
                         advance=advance, dry_run=False,
-                    )
+                    ): item.rel
                     for item in items
-                ]
+                }
                 done = 0
                 for fut in as_completed(futures):
-                    outcomes.append(fut.result())
+                    # _push_one maps the failures it knows; anything else is
+                    # still one file's failure. Raised here it would discard
+                    # every other file's outcome.
+                    try:
+                        outcomes.append(fut.result())
+                    except Exception as exc:
+                        outcomes.append(TransferOutcome(
+                            rel=futures[fut], status="failed",
+                            reason=f"unexpected error: {type(exc).__name__}: {exc}",
+                            hint=f"retry just this file: mintd cache push {futures[fut]}",
+                        ))
                     done += 1
                     advance.set_description(_push_label(done, n_files))
     outcomes.extend(symlink_outcomes)
@@ -1211,16 +1221,26 @@ def cache_pull(
         # <=jobs files in flight at once).
         advance.set_description(_pull_label(0, n_files))
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-            futures = [
+            futures = {
                 ex.submit(
                     _pull_one, obj_key, full_key, dest, remainder, size,
                     s3=s3, bucket=repo.bucket, advance=advance, force=force,
-                )
+                ): remainder
                 for (obj_key, full_key, dest, remainder, size) in safe
-            ]
+            }
             done = 0
             for fut in as_completed(futures):
-                outcomes.append(fut.result())
+                # _pull_one maps the failures it knows; anything else is still
+                # one file's failure. Raised here it would discard every other
+                # file's outcome. `remainder` passed safe_cache_remainder above.
+                try:
+                    outcomes.append(fut.result())
+                except Exception as exc:
+                    outcomes.append(TransferOutcome(
+                        rel=futures[fut], status="failed",
+                        reason=f"unexpected error: {type(exc).__name__}: {exc}",
+                        hint="retry: mintd cache pull",
+                    ))
                 done += 1
                 advance.set_description(_pull_label(done, n_files))
     return CachePullSummary(

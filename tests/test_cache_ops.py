@@ -915,6 +915,45 @@ class _FailingUploadClient(_CountingClient):
         return super().upload_file(filename, bucket, key, ExtraArgs=ExtraArgs, Callback=Callback)
 
 
+class _RaisingDownloadClient(_CountingClient):
+    def download_file(self, *a, **k):
+        if k["Key"].endswith("/bad.bin"):
+            raise RuntimeError("boom")
+        return super().download_file(*a, **k)
+
+
+class _RaisingUploadClient(_CountingClient):
+    def upload_file(self, filename, bucket, key, **k):  # upload_object passes these positionally
+        if "boom" in key:
+            raise RuntimeError("boom")
+        return super().upload_file(filename, bucket, key, **k)
+
+
+def test_push_unexpected_error_on_one_file_fails_only_that_file(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """An error `_push_one` does not map is still one file's failure: the other
+    file uploads and the ledger names the failed one with its retry command.
+
+    Mutation: collect with a bare `fut.result()` in `cache_push` -> the
+    RuntimeError escapes and every outcome is lost.
+    """
+    s3, bucket = s3_versioned
+    proj = _project(tmp_path, bucket)
+    (proj / "cache").mkdir()
+    (proj / "cache" / "ok.bin").write_bytes(b"ok" * 10)
+    (proj / "cache" / "boom.bin").write_bytes(b"no" * 10)
+    summary = c.cache_push(project_path=proj, paths=["cache"], config=_cfg(),
+                           reporter=Reporter(json_mode=True), jobs=2,
+                           s3_client_factory=_factory(_RaisingUploadClient(s3)))
+    assert summary.uploaded == 1
+    assert len(summary.failed) == 1
+    fail = summary.failed[0]
+    assert fail.rel == "cache/boom.bin"
+    assert "RuntimeError" in (fail.reason or "")
+    assert "mintd cache push cache/boom.bin" in (fail.hint or "")
+
+
 def test_push_partial_failure_ledger(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
     proj = _project(tmp_path, bucket)
@@ -1628,6 +1667,36 @@ def test_pull_intermediate_path_is_file_becomes_failed_not_traceback(
     assert "local filesystem error" in (fail.reason or "")
     # The stray file was not clobbered; nothing partial written.
     assert (dest / "sub").read_bytes() == b"stray file, not a dir"
+
+
+def test_pull_unexpected_error_on_one_file_fails_only_that_file(
+    s3_versioned, tmp_path: Path
+) -> None:
+    """An error `_pull_one` does not map is still one file's failure: the other
+    files land, the ledger names the failed one with the retry hint, and no
+    partial file is left.
+
+    Mutation: collect with a bare `fut.result()` in `cache_pull` -> the
+    RuntimeError escapes and every outcome is lost.
+    """
+    s3, bucket = s3_versioned
+    _seed_remote(
+        s3, bucket, tmp_path, {"ok1.bin": b"1" * 10, "ok2.bin": b"2" * 10, "bad.bin": b"b" * 10}
+    )
+    dest = _project(tmp_path / "clone", bucket)
+    summary = c.cache_pull(
+        project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True), jobs=2,
+        s3_client_factory=_factory(_RaisingDownloadClient(s3)),
+    )
+    assert summary.pulled == 2
+    assert len(summary.failed) == 1
+    fail = summary.failed[0]
+    assert fail.rel == "bad.bin"
+    assert "RuntimeError" in (fail.reason or "")
+    assert "retry: mintd cache pull" in (fail.hint or "")
+    assert (dest / "ok1.bin").is_file() and (dest / "ok2.bin").is_file()
+    assert not (dest / "bad.bin").exists()
+    assert not list(dest.rglob("*.mintd-tmp"))
 
 
 def test_ls_returns_remainders_via_shared_listing(s3_versioned, tmp_path: Path) -> None:
