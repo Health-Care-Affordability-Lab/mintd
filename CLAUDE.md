@@ -50,6 +50,11 @@ Closing an issue records how it was verified and which follow-ups were filed.
 - Title: `<area>: <what the user now sees>`, e.g.
   `publish: the not-valid-semver error now names the value to write back`.
 - PR body: TLDR, Problem (a concrete failing command), Solution, Reviewer notes.
+- Every merged PR is a release. mintd's version comes from git tags (setuptools-scm),
+  and merging a PR into `main` tags its merge commit (`.github/workflows/tag.yml`):
+  the next patch version, or the next minor when the PR has the `minor` label. Add
+  `minor` when the PR adds, renames or removes a command, flag or default users see.
+  Never tag by hand.
 
 ## Tests
 

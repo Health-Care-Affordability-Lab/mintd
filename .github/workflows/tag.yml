@@ -1,0 +1,48 @@
+name: tag
+# mintd's version comes from git tags (setuptools-scm). Each PR merged into main
+# tags its merge commit: the next patch version, or the next minor when the PR
+# carries the `minor` label. The first tag is v0.1.0.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  # One at a time, so two quick merges cannot both claim the same version.
+  group: tag
+  cancel-in-progress: false
+jobs:
+  tag:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # every tag, to find the latest version
+      - name: Tag the merge commit
+        env:
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR: ${{ github.event.pull_request.number }}
+          MINOR: ${{ contains(github.event.pull_request.labels.*.name, 'minor') }}
+        run: |
+          set -euo pipefail
+          if git tag --points-at "$SHA" | grep -qx 'v[0-9]*\.[0-9]*\.[0-9]*'; then
+            echo "$SHA is already tagged"; exit 0
+          fi
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          if [ -z "$last" ]; then
+            next=v0.1.0
+          else
+            IFS=. read -r major minor patch <<< "${last#v}"
+            if [ "$MINOR" = "true" ]; then
+              next="v${major}.$((minor + 1)).0"
+            else
+              next="v${major}.${minor}.$((patch + 1))"
+            fi
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "$next" "$SHA" -m "$next (#$PR)"
+          git push origin "$next"
+          echo "tagged $SHA as $next"
