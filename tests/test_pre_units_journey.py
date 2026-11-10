@@ -850,7 +850,8 @@ def test_import_of_an_unpinned_directory_out_exits_nonzero_and_leaves_nothing(
 
     `check` errors on the same producer first: the two verbs judge with one
     predicate. Mutations: delete the `_require_deliverable(...)` call -> rc 0;
-    drop the index restore -> `git status` shows the pointer still staged.
+    drop the index restore -> `git status` shows the pointer still staged;
+    drop the removal of the folders the import created -> `data/` is left.
     """
     from mintd.check import check_project
 
@@ -871,7 +872,192 @@ def test_import_of_an_unpinned_directory_out_exits_nonzero_and_leaves_nothing(
     assert "✓" not in out
     assert not (_import_dir(consumer) / "final.dvc").exists()
     assert not (_import_dir(consumer) / "final").exists()
+    assert not (consumer / "data").exists()
     assert _git(["status", "--porcelain"], cwd=consumer).strip() == ""
+
+
+def test_failed_import_keeps_an_empty_folder_that_was_already_there(
+    payload_journey, capsys
+) -> None:
+    """The rollback removes only the folders the import created. An empty
+    `data/imports/` the consumer already had is still there afterwards.
+
+    Mutation: remove folders up the tree until one will not go, instead of
+    only the ones the import made -> `data/imports/` is gone.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    _set_version_aware(producer, True)
+    register()
+    imports = consumer / "data" / "imports"
+    imports.mkdir(parents=True)
+
+    rc = cli.main(["data", "import", PRODUCT])
+
+    assert rc == 1, _drain(capsys)
+    assert imports.is_dir()
+    assert list(imports.iterdir()) == []
+
+
+def test_import_that_dvc_rejects_leaves_no_folders(payload_journey, capsys) -> None:
+    """Every failure after the folders are made removes them, not only an
+    undeliverable output: here `dvc import` itself fails on a mistyped path.
+
+    Mutation: run the folder cleanup only when the output is undeliverable ->
+    `data/` is left.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    register()
+
+    rc = cli.main(["data", "import", PRODUCT, "--path", "data/finall"])
+
+    assert rc == 1, _drain(capsys)
+    assert not (consumer / "data").exists()
+
+
+def test_failed_import_through_dotdot_keeps_folders_that_were_already_there(
+    payload_journey, capsys
+) -> None:
+    """A `..` in the destination hides folders that exist: `exists()` is False
+    for `foo/..` while `foo` is missing. The rollback must not take those for
+    folders it made.
+
+    Mutation: judge the folders by their unresolved paths -> the existing
+    empty folders are deleted and `foo/` is left.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    _set_version_aware(producer, True)
+    register()
+    existing = _import_dir(consumer)
+    existing.mkdir(parents=True)
+
+    rc = cli.main(["data", "import", PRODUCT, "--dest-root", "foo/../data/imports"])
+
+    assert rc == 1, _drain(capsys)
+    assert existing.is_dir()
+    assert not (consumer / "foo").exists()
+
+
+def test_failed_import_from_a_subfolder_leaves_no_folders(
+    payload_journey, capsys, monkeypatch
+) -> None:
+    """`--dest-root ../data/imports` from a subfolder: a `..` does not turn
+    the cleanup off.
+
+    Mutation: skip the cleanup for any path with `..` -> `data/` is left.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    _set_version_aware(producer, True)
+    register()
+    (consumer / "code").mkdir()
+    monkeypatch.chdir(consumer / "code")
+
+    rc = cli.main(["data", "import", PRODUCT, "--dest-root", "../data/imports"])
+
+    assert rc == 1, _drain(capsys)
+    assert not (consumer / "data").exists()
+
+
+def test_import_interrupted_before_dvc_runs_leaves_no_folders(
+    payload_journey, capsys, monkeypatch
+) -> None:
+    """Ctrl-C between making the folders and running dvc (here, during the
+    git index snapshot) still removes them.
+
+    Mutation: clean up only around the dvc step -> `data/` is left.
+    """
+    from mintd._registry_git_ops import SubprocessRegistryGitOps
+
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    register()
+
+    def interrupt(self, work_dir, names):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(SubprocessRegistryGitOps, "index_entries", interrupt)
+
+    rc = cli.main(["data", "import", PRODUCT])
+
+    assert rc == 130, _drain(capsys)
+    assert not (consumer / "data").exists()
+
+
+def test_import_whose_transfer_fails_leaves_no_folders(payload_journey, capsys) -> None:
+    """The remote lost the output's file objects. dvc builds the destination's
+    folder tree (`final/sub/`), fetches nothing, and fails; every one of those
+    empty folders goes too.
+
+    Mutation: do not walk the new destination -> `data/` is left.
+    """
+    nested = (
+        "stages:\n"
+        "  build:\n"
+        "    cmd: python -c \"import pathlib; d=pathlib.Path('data/final/sub'); "
+        "d.mkdir(parents=True, exist_ok=True); (d/'a.csv').write_bytes(b'a\\n'); "
+        "(d.parent/'b.csv').write_bytes(b'b\\n')\"\n"
+        "    outs:\n"
+        "      - data/final\n"
+    )
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(nested)
+    register()
+    for obj in producer.remote.rglob("*"):
+        if obj.is_file() and not obj.name.endswith(".dir"):
+            obj.chmod(0o644)  # dvc stores objects read-only; Windows refuses to unlink those
+            obj.unlink()
+
+    rc = cli.main(["data", "import", PRODUCT])
+
+    assert rc == 1, _drain(capsys)
+    assert not (consumer / "data").exists()
+
+
+def test_import_that_fails_after_dvc_landed_it_keeps_the_payload(payload_journey, capsys) -> None:
+    """dvc lands the whole payload and writes the pointer, then its autostage
+    `git add` fails on a held `index.lock` (an editor's background `git
+    status`). The rollback removes folders only, never a file, so the import
+    is left complete, as it was before this rollback existed.
+
+    Mutation: remove the new destination whole on failure -> `part.csv` is gone.
+    """
+    producer, consumer, register = payload_journey
+    _autostage(consumer)
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    register()
+    lock = consumer / ".git" / "index.lock"
+    lock.touch()
+    try:
+        rc = cli.main(["data", "import", PRODUCT])
+    finally:
+        lock.unlink()
+
+    assert rc != 0, _drain(capsys)
+    assert (_import_dir(consumer) / "final" / "part.csv").is_file()
+
+
+def test_failed_import_through_a_sideways_dotdot_leaves_no_folders(
+    payload_journey, capsys
+) -> None:
+    """`--path data/x/../final`: the `..` comes after a folder that does not
+    exist yet, so the resolved folders are not in path order. They are removed
+    deepest first all the same.
+
+    Mutation: keep the folders in path order -> `data/` is left.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    _set_version_aware(producer, True)
+    register()
+
+    rc = cli.main(["data", "import", PRODUCT, "--path", "data/x/../final"])
+
+    assert rc == 1, _drain(capsys)
+    assert not (consumer / "data").exists()
+
 
 
 def test_import_succeeds_on_a_plain_rerun_once_the_producer_fixes_it(
@@ -1356,3 +1542,30 @@ def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> No
         f"bare bump left the manifest at {pins}; expected every row moved "
         f"to {producer.head_sha}"
     )
+
+
+def test_failed_import_through_dotdot_keeps_a_destination_that_was_already_there(
+    payload_journey, capsys
+) -> None:
+    """A destination reached through `foo/..` with `foo` missing reads as
+    absent, but it is there. When the import fails (here dvc rejects the
+    path), nothing in it may be removed as the import's own, not even an empty
+    subfolder.
+
+    Mutation: judge the destination by its unresolved path -> `empty/` is gone.
+    """
+    producer, consumer, register = payload_journey
+    producer.publish_pipeline(FINAL_DIR_YAML)
+    register()
+    keep = _import_dir(consumer) / "finall" / "keep.txt"
+    keep.parent.mkdir(parents=True)
+    keep.write_text("mine\n")
+    (keep.parent / "empty").mkdir()
+
+    rc = cli.main(
+        ["data", "import", PRODUCT, "--path", "data/finall", "--dest-root", "foo/../data/imports"]
+    )
+
+    assert rc == 1, _drain(capsys)
+    assert keep.read_text() == "mine\n"
+    assert (keep.parent / "empty").is_dir()
