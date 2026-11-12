@@ -31,12 +31,14 @@ from ._fast_sync_ops import (
 from ._pin_proof import (
     CacheHashes,
     Entry,
+    Out,
     PointerWriteError,
     ProofMemo,
     RepairPlan,
     _dump,
     _records,
     cause_lines,
+    load_rt,
     plan_repair,
     prove_pins,
     publishable_scope,
@@ -120,7 +122,7 @@ def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
     return named
 
 
-def _in_selection(entry: Entry, selection: frozenset[str] | None) -> bool:
+def _in_selection(entry: Entry | Out, selection: frozenset[str] | None) -> bool:
     if selection is None:
         return True
     if entry.pointer == "dvc.lock":
@@ -130,6 +132,10 @@ def _in_selection(entry: Entry, selection: frozenset[str] | None) -> bool:
 
 def _identity(e: Entry) -> tuple:
     return (e.pointer, e.stage, e.record)
+
+
+def _proof_id(e: Entry) -> tuple:
+    return (e.key, e.version_id, e.md5, e.size)
 
 
 def _sha256(path: Path) -> str | None:
@@ -186,14 +192,15 @@ class Prepared:
     env: dict[str, str]
     _tmp: tempfile.TemporaryDirectory
     memo: ProofMemo | None = None
+    selection: frozenset[str] | None = None
 
     @property
-    def proven(self) -> dict[tuple, tuple[str | None, str | None]]:
-        """Pins proven (or allowed) before the push: the gate needn't HEAD
-        them again while they're unchanged, since a version's bytes don't."""
-        got = {_identity(e): (e.version_id, e.etag) for e in self.plan.keep}
-        got.update({_identity(old): (new.version_id, new.etag) for old, new, _ in self.plan.reattach})
-        return got
+    def proven(self) -> set[tuple]:
+        """``(key, version_id, md5, size)`` of every pin proven (or allowed)
+        before the push. A version's bytes don't change, so the gate needn't
+        HEAD one again; the tuple binds the proof to the file it proved, not
+        to a position in a pointer that DVC may rewrite or reorder."""
+        return {_proof_id(e) for e in self.plan.keep} | {_proof_id(new) for _, new, _ in self.plan.reattach}
 
     @property
     def location(self) -> str:
@@ -261,7 +268,8 @@ def prepare(
     scope = publishable_scope(root, remote=name, prefix=prefix, cache_dir=cache.cache_dir,
                               dvc_files=dvc_files)
     repair = tuple(e for e in scope.entries if _in_selection(e, selection))
-    stuck = list(scope.unrecoverable)
+    stuck = [f"{o.path} (its folder tree isn't in the local cache)" for o in scope.unrecoverable
+             if _in_selection(o, selection)]
     memo = ProofMemo(memo_path, cfg.get("endpointurl") or cfg.get("endpoint") or "aws") if memo_path else None
     plan = plan_repair(s3, bucket, repair, cache, memo)
     stuck += [f"{e.path} ({why})" for e, why in plan.unrecoverable]
@@ -278,13 +286,14 @@ def prepare(
     snapshot: dict[str, Any] = {}
     for rel in [*dvc_files, "dvc.lock"]:
         try:
-            snapshot[rel] = yaml.safe_load((root / rel).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            snapshot[rel] = load_rt((root / rel).read_text(encoding="utf-8"))
+        except Exception:  # missing or unparseable: nothing to restore from
             continue
     tmp = tempfile.TemporaryDirectory(prefix="mintd-dvc-site-", ignore_cleanup_errors=True)
     return Prepared(
         root=root, remote=name, bucket=bucket, prefix=prefix, s3=s3, cache=cache,
         dvc_files=dvc_files, repair=repair, plan=plan, written=written, snapshot=snapshot,
+        selection=selection,
         before={_identity(e): (e.version_id, e.etag) for e in scope.entries},
         env={"DVC_SITE_CACHE_DIR": tmp.name}, _tmp=tmp, memo=memo,
     )
@@ -305,8 +314,8 @@ def restore(prepared: Prepared) -> list[str]:
     for rel, before in prepared.snapshot.items():
         path = prepared.root / rel
         try:
-            after = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            after = load_rt(path.read_text(encoding="utf-8"))
+        except Exception:
             continue
         if after == before or not isinstance(after, dict) or not isinstance(before, dict):
             continue
@@ -353,6 +362,24 @@ def _changed_records(root: Path, pointer: str, head_text: str | None) -> set[tup
     return found
 
 
+def _holds_files(folder: Path) -> bool:
+    try:
+        return folder.is_dir() and any(p.is_file() for p in folder.rglob("*"))
+    except OSError:
+        return False
+
+
+def _head_lists_files(head_text: str | None, out: Out) -> bool:
+    """HEAD's record of ``out`` lists files (or names a folder tree)."""
+    try:
+        doc = yaml.safe_load(head_text) if head_text else None
+    except yaml.YAMLError:
+        return False
+    records = _records(doc, out.stage)
+    rec = records[out.index] if out.index < len(records) else None
+    return isinstance(rec, dict) and bool(rec.get("files") or str(rec.get("md5") or "").endswith(".dir"))
+
+
 def judge(
     prepared: Prepared, changed: list[str] | None, *, head: dict[str, str | None],
     dvc_uploaded_nothing: bool,
@@ -374,8 +401,15 @@ def judge(
             "git couldn't list the pointer files that differ from the last commit, so the push "
             "can't be checked"
         ])
+    # Freeze before parsing: hash every pointer that can be in gate scope,
+    # parse, then hash again. Every later step judges what was hashed.
+    candidates = sorted({e.pointer for e in prepared.repair} | set(changed))
+    frozen = {p: _sha256(root / p) for p in candidates}
     scope = publishable_scope(root, remote=prepared.remote, prefix=prepared.prefix,
                               cache_dir=prepared.cache.cache_dir, dvc_files=prepared.dvc_files)
+    moved = [p for p in candidates if _sha256(root / p) != frozen[p]]
+    if moved:
+        return Gate(False, loc, {"checked": 0}, [f"{abbreviate(moved)} changed while the push was being checked"])
     repair_ids = {_identity(e) for e in prepared.repair}
     differs = {
         (p, stage, i) for p in changed for stage, i in _changed_records(root, p, head.get(p))
@@ -384,9 +418,18 @@ def judge(
         e for e in scope.entries
         if _identity(e) in repair_ids or (e.pointer, e.stage, e.record[0]) in differs
     ]
-    frozen = {p: _sha256(root / p) for p in sorted({e.pointer for e in entries} | set(changed))}
+    # Structural: a folder out left listing no files, while the folder on disk
+    # or HEAD's pointer holds some, has no entry to prove; and every file the
+    # push was to re-upload must still be in its pointer.
+    hollow = [
+        o.path for o in scope.empty
+        if (_in_selection(o, prepared.selection) or (o.pointer, o.stage, o.index) in differs)
+        and (_holds_files(root / o.path) or _head_lists_files(head.get(o.pointer), o))
+    ]
+    after = {(e.pointer, e.out, e.relpath) for e in scope.entries}
+    dropped = [e.path for e, _ in prepared.plan.strip if (e.pointer, e.out, e.relpath) not in after]
     proven = prepared.proven
-    need = [e for e in entries if e.version_id and proven.get(_identity(e)) != (e.version_id, e.etag)]
+    need = [e for e in entries if e.version_id and _proof_id(e) not in proven]
     verdicts = prove_pins(prepared.s3, prepared.bucket, need, prepared.cache, prepared.memo)
     # A re-uploaded file still holding the version seen before the push fails
     # the proof (re-attach takes every version that proves its file), so the
@@ -403,7 +446,7 @@ def judge(
         touched = prepared.before.get(ident) != (e.version_id, e.etag)
         if not e.version_id:
             verdict = "no_id"
-        elif proven.get(ident) == (e.version_id, e.etag):
+        elif _proof_id(e) in proven:
             verdict = "ok"
         else:
             verdict = verdicts[(e.key, e.version_id)]
@@ -426,6 +469,11 @@ def judge(
         "inconclusive": "S3 didn't answer",
     }
     lines = [f"{reasons[v]}: {abbreviate(paths)}" for v, paths in failed.items()]
+    if hollow:
+        lines.append(f"lists no files, but the folder or the last commit holds some: {abbreviate(hollow)}")
+    if dropped:
+        lines.append(f"needed uploading but the push dropped them from their pointer: {abbreviate(dropped)}")
+    counts["structural"] = len(hollow) + len(dropped)
     if not_arrived and dvc_uploaded_nothing:
         lines.append(f"DVC reported nothing to upload, but {not_arrived} file(s) needed uploading")
     if gate_only:
@@ -433,7 +481,7 @@ def judge(
             f"not in this push: {abbreviate(gate_only)}; push them too (mintd data push <path>)"
         )
     return Gate(
-        ok=not failed, location=loc, counts=counts, lines=lines, frozen=frozen,
+        ok=not failed and not hollow and not dropped, location=loc, counts=counts, lines=lines, frozen=frozen,
         reattached=len(prepared.plan.reattach), uploaded=len(prepared.plan.strip),
         memo=prepared.memo.hits if prepared.memo is not None else 0,
     )

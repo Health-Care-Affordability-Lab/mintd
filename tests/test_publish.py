@@ -1497,3 +1497,38 @@ def test_publish_with_a_moved_remote_and_no_cache_is_refused_and_rolled_back(tmp
     assert "rolled back" in excinfo.value.recovery_hint
     assert dvc.push_calls == [] and git.tag_calls == []
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
+
+
+def test_publish_refuses_a_pointer_rewritten_after_the_check(tmp_path, s3_versioned, monkeypatch):
+    import yaml
+
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"other bytes")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    pointer = proj / "data" / "final" / "x.csv.dvc"
+
+    class _Uploads(_FakeDvcOps):
+        def push(self, *, cwd, **kw):
+            result = super().push(cwd=cwd, **kw)
+            put = s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+            doc = yaml.safe_load(pointer.read_text())
+            doc["outs"][0]["cloud"] = {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}
+            pointer.write_text(yaml.safe_dump(doc, sort_keys=False))
+            armed["on"] = True
+            return result
+
+    armed = {"on": False}
+
+    def rewrite_during_check(request, **_):
+        if armed["on"] and "versionId=" in request.url:
+            armed["on"] = False
+            with open(pointer, "a") as f:
+                f.write("# edited mid-check\n")
+
+    s3.meta.events.register_first("before-send.s3.HeadObject", rewrite_during_check)
+    git = _FakeRegistryGitOps()
+    with pytest.raises(DvcPushFailed, match="changed after the push was checked"):
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=_Uploads(), git_ops=git)
+    assert git.tag_calls == []
+    assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")

@@ -181,8 +181,9 @@ def push_targets(
     its ``.dvc`` file, a ``dvc.lock`` out as ``dvc.yaml:<stage>``. Naming one
     file of a tracked folder therefore pushes the folder; pushed bare, dvc
     uploads that one file and rewrites the folder's pointer to list only it.
-    A ``.dvc`` target is kept; a stage name typed beside a subdirectory's
-    own ``dvc.yaml`` becomes ``<dir>/dvc.yaml:<name>``; any other target that
+    A ``.dvc`` target and a ``dvc.yaml:<stage>`` key are kept; a stage name
+    becomes ``dvc.yaml:<name>``, or ``<dir>/dvc.yaml:<name>`` when typed
+    beside a subdirectory's own ``dvc.yaml``; any other target that
     matches nothing reaches dvc unchanged, so dvc rejects or handles it as
     before.
 
@@ -211,10 +212,15 @@ def push_targets(
         if rel.endswith(".dvc"):
             dvc_files[rel] = None
             continue
+        if rel.startswith("dvc.yaml:"):
+            stages[rel] = None
+            continue
         if all_outs is None:
             all_outs = _all_dvc_outs(root, remote_name)
         matched = outs_matching(root, rel, remote_name, outs=all_outs)
-        if not matched and here != root and _names_a_stage(here / "dvc.yaml", t):
+        if not matched and here == root and _names_a_stage(root / "dvc.yaml", t):
+            stages[f"dvc.yaml:{t}"] = None
+        elif not matched and here != root and _names_a_stage(here / "dvc.yaml", t):
             # A stage name typed beside a subdirectory's own dvc.yaml: dvc
             # found it from there, and from the root it needs the file named.
             stages[f"{Path(os.path.relpath(here, root)).as_posix()}/dvc.yaml:{t}"] = None

@@ -996,8 +996,11 @@ def data_push(
     # Raises ``PushRefused`` before any write or upload.
     from ._push_verify import prepare, restore
 
-    prepared = prepare(project_path, remote_arg=remote, selection=selection, aws_profile=aws_profile,
-                       memo_path=memo_path)
+    # A target push_targets couldn't resolve reaches dvc as typed, so which
+    # outs it uploads is unknown: repair (and allow changes to) every out.
+    unresolved = selection is not None and any(t not in selection for g in groups if g for t in g)
+    prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
+                       aws_profile=aws_profile, memo_path=memo_path)
     env = prepared.env if prepared is not None else None
     start_t = time.monotonic()
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a

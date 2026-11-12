@@ -1218,8 +1218,8 @@ def spot_check_versions(
 
 
 class S3AccessDenied(Exception):
-    """S3 refused a HEAD (403 / AccessDenied): the credentials can't read
-    these objects, so no verdict about any of them can be trusted."""
+    """S3 refused a HEAD (403 / AccessDenied), or there are no AWS
+    credentials at all: no verdict about any object can be trusted."""
 
 
 @dataclass(frozen=True)
@@ -1243,8 +1243,8 @@ class HeadVerdict:
 def _classify_head(head: Callable[[], Any]) -> HeadVerdict:
     try:
         resp = retry_transient(head)
-    except NoCredentialsError:
-        raise
+    except NoCredentialsError as exc:
+        raise S3AccessDenied("no AWS credentials were found") from exc
     except ClientError as exc:
         error = exc.response.get("Error", {})
         code = str(error.get("Code", ""))
@@ -1273,8 +1273,9 @@ def probe_versions(
     """HEAD each ``(key, version_id)`` in a thread pool; ``version_id=None``
     HEADs the key's current object. Each HEAD retries transient errors.
 
-    A 403 or missing credentials raises for the whole call, because a
-    verdict about one object would then say nothing about the rest. Any
+    A 403 or missing credentials raises ``S3AccessDenied`` for the whole
+    call, because a verdict about one object would then say nothing about
+    the rest. Any
     other exception a worker raises becomes ``inconclusive`` for that
     request alone: taken bare, one worker's exception would escape the
     ``as_completed`` loop and lose every other outcome.
@@ -1294,7 +1295,7 @@ def probe_versions(
         for fut in as_completed(futures):
             try:
                 out[futures[fut]] = fut.result()
-            except (S3AccessDenied, NoCredentialsError):
+            except S3AccessDenied:
                 raise
             except Exception as exc:
                 out[futures[fut]] = HeadVerdict(

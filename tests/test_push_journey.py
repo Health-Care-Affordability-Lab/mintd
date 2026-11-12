@@ -155,24 +155,37 @@ def test_push_pins_verifies_commits_and_an_import_lands_everything(producer, s3_
     _imports_everything(tmp_path, real_dvc, "consumer")
 
 
-def test_dvc_commit_f_costs_no_upload(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
+def _drop_ids(proj: Path) -> None:
+    """What `dvc commit -f clean` did to cms-pdc's dvc.lock: same md5s, no
+    cloud blocks. (dvc 3.67.1's `dvc commit -f` keeps them on these simple
+    stages, so the rewrite is applied directly.)"""
+    for rel in ("data/raw.dvc", "dvc.lock"):
+        doc = yaml.safe_load((proj / rel).read_text())
+        bodies = [doc] if rel.endswith(".dvc") else list(doc["stages"].values())
+        for body in bodies:
+            for out in body["outs"]:
+                out.pop("cloud", None)
+                for f in out.get("files") or []:
+                    f.pop("cloud", None)
+        (proj / rel).write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def test_a_rewrite_that_drops_the_ids_costs_no_upload(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
     _, _, puts = s3_server
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     capsys.readouterr()
     first = _ids(producer)
-    real_dvc(["commit", "-f", "-q", "build"], cwd=producer, check=True)
-    real_dvc(["commit", "-f", "-q", "data/raw.dvc"], cwd=producer, check=True)
-    dropped = set(first) - set(_ids(producer))
+    _drop_ids(producer)
+    _git(["commit", "-q", "-am", "dvc commit -f"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
     puts.clear()
 
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     err = _out(capsys)
     assert puts == []
     assert _ids(producer) == first
-    if dropped:  # what `dvc commit -f` dropped is put back and named
-        assert all(f"re-attached {p} (no ID)" in err for p in dropped)
-    if "data/final/a.csv" in dropped:
-        assert "dvc.lock lost these IDs" in err
+    assert all(f"re-attached {p} (no ID)" in err for p in first)
+    assert "dvc.lock lost these IDs" in err
     _imports_everything(tmp_path, real_dvc, "consumer")
 
 

@@ -64,13 +64,26 @@ class Entry:
 
 
 @dataclass(frozen=True)
+class Out:
+    """An out located in its pointer: ``(pointer, stage, index)`` and its
+    repo-relative ``path``."""
+
+    pointer: str
+    stage: str | None
+    index: int
+    path: str
+
+
+@dataclass(frozen=True)
 class Scope:
-    """``entries`` the pointers record for R; ``unrecoverable`` names legacy
+    """``entries`` the pointers record for R. ``unrecoverable``: legacy
     directory outs whose tree isn't in the local cache, so no entry for them
-    can be listed, proven or re-uploaded."""
+    can be listed, proven or re-uploaded. ``empty``: directory outs whose
+    ``files:`` list is empty, which have no entry to check at all."""
 
     entries: tuple[Entry, ...]
-    unrecoverable: tuple[str, ...] = ()
+    unrecoverable: tuple[Out, ...] = ()
+    empty: tuple[Out, ...] = ()
 
 
 def _load(path: Path) -> Any:
@@ -156,7 +169,8 @@ def publishable_scope(
     Only the root ``dvc.lock`` is read; nested lock files are out of scope.
     """
     entries: list[Entry] = []
-    unrecoverable: list[str] = []
+    unrecoverable: list[Out] = []
+    empty: list[Out] = []
     for rel in dvc_files:
         doc = _load(root / rel)
         if not isinstance(doc, dict) or not isinstance(doc.get("outs"), list):
@@ -175,7 +189,9 @@ def publishable_scope(
                                    remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
             entries.extend(got)
             if not ok:
-                unrecoverable.append(out_path)
+                unrecoverable.append(Out(rel, None, i, out_path))
+            elif not got:
+                empty.append(Out(rel, None, i, out_path))
 
     lock = _load(root / "dvc.lock")
     stages = lock.get("stages") if isinstance(lock, dict) else None
@@ -185,9 +201,16 @@ def publishable_scope(
         skip = flagged_outs(yaml_doc, "cache")
         for stage, paths in flagged_outs(yaml_doc, "push").items():
             skip.setdefault(stage, set()).update(paths)
+        declared = set((yaml_doc.get("stages") or {}) if isinstance(yaml_doc, dict) else ())
         for stage, data in stages.items():
+            # DVC pushes from dvc.yaml: a lock stage it no longer declares
+            # (renamed, removed) is never uploaded or re-pinned.
+            if declared and str(stage) not in declared and str(stage).split("@", 1)[0] not in declared:
+                continue
             outs = data.get("outs") if isinstance(data, dict) else None
-            wdir = stage_wdir(wdirs, str(stage)) or "."
+            wdir = stage_wdir(wdirs, str(stage))
+            if wdir is None:  # an absolute wdir: outside the project
+                continue
             declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
             for i, raw in enumerate(outs if isinstance(outs, list) else []):
                 if not isinstance(raw, dict):
@@ -202,8 +225,10 @@ def publishable_scope(
                                        remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
                 entries.extend(got)
                 if not ok:
-                    unrecoverable.append(out_path)
-    return Scope(tuple(entries), tuple(unrecoverable))
+                    unrecoverable.append(Out("dvc.lock", str(stage), i, out_path))
+                elif not got:
+                    empty.append(Out("dvc.lock", str(stage), i, out_path))
+    return Scope(tuple(entries), tuple(unrecoverable), tuple(empty))
 
 
 # --- content proof ----------------------------------------------------------
@@ -405,7 +430,9 @@ def plan_repair(
 def cause_lines(plan: RepairPlan, location: str) -> list[str]:
     """One line per likely cause, so a cause that keeps recurring is noticed."""
     lines: list[str] = []
-    no_id = [e for e, _, r in plan.reattach if r == NO_ID] + [e for e, r in plan.strip if r == NO_ID]
+    # Only a re-attached file's ID was lost: its bytes were already on S3. A
+    # stripped file with no ID is usually new data that was never pushed.
+    no_id = [e for e, _, r in plan.reattach if r == NO_ID]
     if any(e.pointer == "dvc.lock" for e in no_id):
         lines.append("dvc.lock lost these IDs; `dvc commit -f` or `dvc repro` usually does this")
     if any(e.pointer != "dvc.lock" and not e.legacy_dir for e in no_id):
@@ -453,8 +480,33 @@ def _without_ids(doc: Any, remote: str) -> Any:
     return doc
 
 
+def _yaml12(rt: bool) -> Any:
+    """ruamel (DVC's own YAML 1.2 library): ``rt`` round-trips a file keeping
+    its formatting and quoting; otherwise a plain 1.2 reader for comparing.
+    PyYAML reads YAML 1.1, where DVC's unquoted ``no`` / ``on`` / ``1:30``
+    are booleans and numbers, so a PyYAML rewrite changes them."""
+    from ruamel.yaml import YAML
+
+    y = YAML(typ="rt" if rt else "safe", pure=True)
+    y.width = 4096
+    y.preserve_quotes = True
+    return y
+
+
+def load_rt(text: str) -> Any:
+    return _yaml12(True).load(text)
+
+
+def load12(text: str) -> Any:
+    return _yaml12(False).load(text)
+
+
 def _dump(doc: Any) -> str:
-    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=4096)
+    import io
+
+    buf = io.StringIO()
+    _yaml12(True).dump(doc, buf)
+    return buf.getvalue()
 
 
 def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump) -> list[str]:
@@ -478,7 +530,7 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
         for pointer, changes in sorted(by_pointer.items()):
             path = root / pointer
             raw = path.read_bytes()
-            doc = yaml.safe_load(raw.decode("utf-8"))
+            doc = load_rt(raw.decode("utf-8"))
             for old, new in changes:
                 out_i, file_i = old.record
                 rec = _records(doc, old.stage)[out_i]
@@ -493,8 +545,8 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
                     rec.setdefault("cloud", {})[remote] = {"etag": new.etag, "version_id": new.version_id}
             originals[pointer] = raw
             _atomic_write_text(path, dump(doc))
-            if _without_ids(yaml.safe_load(path.read_text(encoding="utf-8")), remote) != _without_ids(
-                yaml.safe_load(raw.decode("utf-8")), remote
+            if _without_ids(load12(path.read_text(encoding="utf-8")), remote) != _without_ids(
+                load12(raw.decode("utf-8")), remote
             ):
                 raise PointerWriteError(pointer)
     except Exception:

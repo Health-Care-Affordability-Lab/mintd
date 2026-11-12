@@ -1425,7 +1425,145 @@ def test_check_an_endpoint_override_in_config_local_is_not_committed(moto_push, 
     (proj / ".dvc" / "config.local").write_text("['remote \"storage\"']\n    endpointurl = https://elsewhere\n")
     monkeypatch.chdir(proj)
     dvc.on_push = _dvc_uploads(s3, bucket, proj)
-    cli.main(["data", "push"])
+    assert cli.main(["data", "push"]) == 0  # uploaded and verified; the commit is left to the user
     err = _err(capsys)
     assert "config.local overrides storage's endpointurl" in err and "✓" not in err
     assert _head(proj) == head
+
+
+class _NoCredentialsS3:
+    def head_object(self, **_kw):
+        from botocore.exceptions import NoCredentialsError
+
+        raise NoCredentialsError()
+
+
+def test_check_without_aws_credentials_exits_1_with_a_hint(push_clients, tmp_path, monkeypatch, capsys) -> None:
+    proj = _producer(tmp_path)
+    monkeypatch.chdir(proj)
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: _NoCredentialsS3())
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "no AWS credentials were found" in err and "mintd config validate" in err
+    assert push_clients.push_calls == []
+
+
+@pytest.mark.parametrize("target", ["a", "dvc.yaml:a"])
+def test_check_a_stage_target_is_repaired_and_keeps_its_new_pins(
+    moto_push, tmp_path, monkeypatch, capsys, target: str,
+) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_pipeline(tmp_path, s3, bucket)
+    monkeypatch.chdir(proj)
+
+    def dvc_push_of_a(cwd, targets):
+        assert targets == ["dvc.yaml:a"]
+        lock = yaml.safe_load((proj / "dvc.lock").read_text())
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/a.csv", Body=b"a\n")
+        lock["stages"]["a"]["outs"][0]["cloud"] = {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}
+        (proj / "dvc.lock").write_text(yaml.safe_dump(lock, sort_keys=False))
+
+    dvc.on_push = dvc_push_of_a
+    assert cli.main(["data", "push", target]) == 0, _err(capsys)
+    assert "✓ 1 file(s) verified" in _err(capsys)
+    lock = yaml.safe_load((proj / "dvc.lock").read_text())
+    assert "storage" in lock["stages"]["a"]["outs"][0]["cloud"]
+
+
+def test_check_a_folder_pointer_listing_no_files_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    v = s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    proj = _moto_producer(tmp_path, s3, cloud={"storage": {"etag": v["ETag"].strip('"'), "version_id": v["VersionId"]}})
+    (proj / "data" / "raw").mkdir()
+    (proj / "data" / "raw" / "r.csv").write_text("r\n")
+    (proj / "data" / "raw.dvc").write_text(yaml.safe_dump({"outs": [{"path": "raw", "hash": "md5", "files": []}]}))
+    _commit_all(proj, "a folder pointer emptied by a raw dvc push")
+    monkeypatch.chdir(proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "lists no files, but the folder or the last commit holds some: data/raw" in err and "✓" not in err
+
+
+def test_check_a_reupload_dvc_drops_from_its_pointer_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    files = []
+    for name in ("a.csv", "b.csv"):
+        data = name.encode()
+        obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(data))
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        obj.write_bytes(data)
+        files.append({"relpath": name, "md5": _bytes_md5(data), "size": len(data),
+                      "cloud": {"storage": {"etag": "x", "version_id": "gone"}}})
+    (proj / "data" / "d.dvc").write_text(yaml.safe_dump({"outs": [{"path": "d", "hash": "md5", "files": files}]}, sort_keys=False))
+    _commit_all(proj, "folder")
+    monkeypatch.chdir(proj)
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")  # x.csv itself is fine
+
+    def dvc_keeps_only_a(cwd, targets):
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/d/a.csv", Body=b"a.csv")
+        doc = yaml.safe_load((proj / "data" / "d.dvc").read_text())
+        doc["outs"][0]["files"] = [dict(doc["outs"][0]["files"][0],
+                                        cloud={"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}})]
+        (proj / "data" / "d.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
+
+    dvc.on_push = dvc_keeps_only_a
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "dropped them from their pointer: data/d/b.csv" in err and "✓" not in err
+
+
+def test_check_refuses_outs_with_their_own_remote(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    doc = yaml.safe_load((proj / "data" / "x.csv.dvc").read_text())
+    doc["outs"][0]["remote"] = "backup"
+    (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
+    monkeypatch.chdir(proj)
+    assert cli.main(["data", "push"]) == 1
+    assert "outputs with their own remote aren't supported" in _err(capsys)
+    assert dvc.push_calls == []
+
+
+def test_check_a_commit_hook_that_stages_dvc_config_keeps_the_commit_local(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    hook = proj / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf '# hook\\n' >> .dvc/config && git add .dvc/config\n")
+    hook.chmod(0o755)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "doesn't hold exactly the checked pointer files: .dvc/config" in err
+    assert _head(tmp_path / "origin.git", "main") != _head(proj)
+
+
+def test_check_a_proof_is_bound_to_its_file_not_its_place_in_the_pointer(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """a.csv and b.csv are proven before the push. DVC rewrites the folder's
+    list so the first entry is b.csv carrying a.csv's version: the proof of
+    a.csv must not pass b.csv."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    files = []
+    for name in ("a.csv", "b.csv"):
+        put = s3.put_object(Bucket=bucket, Key=f"lab/p/data/d/{name}", Body=name.encode())
+        files.append({"relpath": name, "md5": _bytes_md5(name.encode()), "size": len(name),
+                      "cloud": {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}})
+    (proj / "data" / "d.dvc").write_text(yaml.safe_dump({"outs": [{"path": "d", "hash": "md5", "files": files}]}, sort_keys=False))
+    _commit_all(proj, "folder")
+    monkeypatch.chdir(proj)
+
+    def dvc_rewrites_the_list(cwd, targets):
+        doc = yaml.safe_load((proj / "data" / "d.dvc").read_text())
+        a, b = doc["outs"][0]["files"]
+        doc["outs"][0]["files"] = [dict(b, cloud=a["cloud"]), a]
+        (proj / "data" / "d.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
+
+    dvc.on_push = dvc_rewrites_the_list
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "data/d/b.csv" in err and "✓" not in err

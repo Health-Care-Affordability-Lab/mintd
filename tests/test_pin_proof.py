@@ -90,7 +90,7 @@ def test_a_legacy_dir_out_is_listed_from_its_cached_tree_or_unrecoverable(tmp_pa
     _write(tmp_path, "gone.dvc", {"outs": [{"path": "gone", "md5": "f" * 32 + ".dir"}]})
     scope = _scope(tmp_path, ["d.dvc", "gone.dvc"])
     assert [(e.path, e.legacy_dir, e.version_id) for e in scope.entries] == [("d/a.csv", True, None)]
-    assert scope.unrecoverable == ("gone",)
+    assert [o.path for o in scope.unrecoverable] == ["gone"]
 
 
 def _entry(md5: str, size: int | None) -> Entry:

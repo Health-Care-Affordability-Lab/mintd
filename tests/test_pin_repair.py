@@ -138,11 +138,13 @@ def test_a_write_that_changes_anything_else_restores_every_pointer(s3_versioned,
     plan = _plan(tmp_path, s3, bucket, ["a.csv.dvc", "b.csv.dvc"])
     calls = []
 
+    from mintd._pin_proof import _dump
+
     def bad_dump(doc):
         calls.append(1)
         if len(calls) == 2:  # the second file's dump also corrupts its md5
             doc["outs"][0]["md5"] = "0" * 32
-        return yaml.safe_dump(doc, sort_keys=False)
+        return _dump(doc)
 
     with pytest.raises(PointerWriteError, match="b.csv.dvc"):
         write_repair(tmp_path, plan, R, dump=bad_dump)
@@ -277,3 +279,21 @@ def test_a_size_only_pass_is_never_remembered(s3_versioned, tmp_path: Path) -> N
     import sqlite3
 
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM proven").fetchone() == (0,)
+
+
+def test_a_rewrite_keeps_dvcs_yaml_1_2_values(s3_versioned, tmp_path: Path) -> None:
+    """DVC writes dvc.lock as YAML 1.2, where an unquoted `no` is a string.
+    Rewritten through a YAML 1.1 library it would become `false`."""
+    s3, bucket = s3_versioned
+    v = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/a.csv", Body=b"A")["VersionId"]
+    lock = (
+        "schema: '2.0'\nstages:\n  build:\n    cmd: make\n    params:\n      params.yaml:\n"
+        "        flag: no\n        t: 1:30\n    outs:\n    - path: a.csv\n      hash: md5\n"
+        f"      md5: {_md5(b'A')}\n      size: 1\n"
+    )
+    (tmp_path / "dvc.lock").write_text(lock)
+    scope = publishable_scope(tmp_path, remote=R, prefix=PREFIX, cache_dir=tmp_path / ".dvc" / "cache", dvc_files=[])
+    plan = plan_repair(s3, bucket, scope.entries, CacheHashes(tmp_path / ".dvc" / "cache"))
+    assert write_repair(tmp_path, plan, R) == ["dvc.lock"]
+    text = (tmp_path / "dvc.lock").read_text()
+    assert "flag: no" in text and "t: 1:30" in text and f"version_id: {v}" in text

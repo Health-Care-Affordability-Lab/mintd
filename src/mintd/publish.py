@@ -270,6 +270,16 @@ def _apply_publish(
     from ._push_verify import PushRefused, judge, prepare, restore
 
     rolled_back = "metadata.json was rolled back; nothing was committed, tagged or advertised."
+    # Importers read the committed .dvc/config: a release checked against a
+    # location config.local redirects to would advertise versions they can't reach.
+    from ._storage_state import inspect_storage
+    from .data_ops import _local_redirect
+
+    default = inspect_storage(project_path).dvc_remote_name
+    redirect = _local_redirect(project_path, default, named=False) if default else None
+    if redirect is not None:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(redirect, recovery_hint=f"{rolled_back} Remove the override, then rerun `mintd publish`.")
     try:
         prepared = prepare(project_path, remote_arg=None, selection=None, aws_profile=aws_profile,
                            memo_path=memo_path)
@@ -278,6 +288,12 @@ def _apply_publish(
         raise DvcPushFailed(
             str(exc), recovery_hint=f"{rolled_back} {getattr(exc, 'hint', None) or ''}".strip(),
         ) from exc
+    except BaseException:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise
+    if prepared is not None and reporter is not None:
+        for line in prepared.report:
+            reporter.info(line)
     try:
         pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
     except DvcOpError as exc:
@@ -306,12 +322,17 @@ def _apply_publish(
         except S3AccessDenied as exc:
             _atomic_write_json(metadata_path, original_metadata_json)
             raise DvcPushFailed(f"S3 refused to show the pinned versions: {exc}", recovery_hint=rolled_back) from exc
+        except BaseException:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise
         if not gate.ok:
             _atomic_write_json(metadata_path, original_metadata_json)
             raise DvcPushFailed(
                 f"the push isn't verified on {gate.location}: " + "; ".join(gate.lines),
                 recovery_hint=f"{rolled_back} Finish with `mintd data push`, then rerun `mintd publish`.",
             )
+    else:
+        gate = None
 
     # The push is what pins outputs on a version-aware remote, and it can
     # change what the gate sees (dvc writes a legacy `.dir` pointer back as a
@@ -335,6 +356,15 @@ def _apply_publish(
                 "recorded ('git status' lists them): keep them and commit them with your fix. "
                 + (still_wrong[0].hint or "")
             ),
+        )
+
+    # The release commits what the check judged: a pointer rewritten since
+    # (another process, an editor) would ship pins nobody verified.
+    if gate is not None and (drifted := gate.drifted(project_path)):
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(
+            f"{', '.join(drifted)} changed after the push was checked",
+            recovery_hint=f"{rolled_back} Rerun `mintd publish`.",
         )
 
     # Step 3: commit the bump (only when there's a real content change —
