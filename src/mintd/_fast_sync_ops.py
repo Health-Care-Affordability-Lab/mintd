@@ -23,6 +23,7 @@ import yaml
 
 try:
     import boto3
+    from botocore.config import Config as BotoConfig
     from botocore.exceptions import (
         ClientError,
         ConnectionClosedError,
@@ -34,6 +35,7 @@ try:
     )
 except ImportError:
     boto3 = None  # type: ignore[assignment]
+    BotoConfig = None  # type: ignore[assignment,misc]
 
     class _BotocoreMissingError(Exception):
         """Placeholder when botocore is absent; never raised, so
@@ -301,7 +303,8 @@ def is_transient_s3_error(exc: BaseException) -> bool:
     Transient:
       - ``ClientError`` whose code is in ``_RETRYABLE_S3_ERRORS`` (5xx,
         RequestTimeout, SlowDown, throttling family) or whose HTTP status
-        is 500/503;
+        is 429/500/503. A HEAD has no error body, so its code is the bare
+        status and only the status names a throttle;
       - botocore network-layer errors: endpoint-connection, read-timeout,
         connection-closed (reset), SSL.
 
@@ -315,7 +318,7 @@ def is_transient_s3_error(exc: BaseException) -> bool:
         if str(error.get("Code", "")) in _RETRYABLE_S3_ERRORS:
             return True
         status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return status in (500, 503)
+        return status in (429, 500, 503)
     return isinstance(exc, _TRANSIENT_NETWORK_ERRORS)
 
 
@@ -1206,6 +1209,92 @@ def spot_check_versions(
     return drift
 
 
+class S3AccessDenied(Exception):
+    """S3 refused a HEAD (403 / AccessDenied): the credentials can't read
+    these objects, so no verdict about any of them can be trusted."""
+
+
+@dataclass(frozen=True)
+class HeadVerdict:
+    """What one HEAD said about an object version.
+
+    ``found``: S3 returned a real version (``version_id``, ``etag`` without
+    quotes, ``size``). ``unpinned``: the object exists but its version is
+    ``null`` (versioning suspended), so nothing can pin it. ``missing``: no
+    such key or version, or a delete marker. ``inconclusive``: transient
+    errors outlasted the retries, or an error nothing maps.
+    """
+
+    kind: str  # "found" | "unpinned" | "missing" | "inconclusive"
+    version_id: str | None = None
+    etag: str | None = None
+    size: int | None = None
+    reason: str | None = None
+
+
+def _classify_head(head: Callable[[], Any]) -> HeadVerdict:
+    try:
+        resp = retry_transient(head)
+    except NoCredentialsError:
+        raise
+    except ClientError as exc:
+        error = exc.response.get("Error", {})
+        code = str(error.get("Code", ""))
+        meta = exc.response.get("ResponseMetadata", {})
+        status = meta.get("HTTPStatusCode")
+        headers = meta.get("HTTPHeaders", {}) or {}
+        if code in ("403", "AccessDenied") or status == 403:
+            raise S3AccessDenied(str(exc)) from exc
+        if code in _DRIFT_404_CODES or status == 404:
+            return HeadVerdict("missing", reason=f"{code or status}")
+        if status == 405 and str(headers.get("x-amz-delete-marker", "")).lower() == "true":
+            return HeadVerdict("missing", reason="delete marker")
+        return HeadVerdict("inconclusive", reason=f"{code or status}: {exc}")
+    vid = resp.get("VersionId")
+    if not vid or vid == "null":
+        return HeadVerdict("unpinned", reason="no version (versioning suspended?)")
+    return HeadVerdict(
+        "found", version_id=str(vid),
+        etag=str(resp.get("ETag", "")).strip('"'), size=resp.get("ContentLength"),
+    )
+
+
+def probe_versions(
+    s3: Any, bucket: str, requests: "list[tuple[str, str | None]]", *, jobs: int = 16,
+) -> "dict[tuple[str, str | None], HeadVerdict]":
+    """HEAD each ``(key, version_id)`` in a thread pool; ``version_id=None``
+    HEADs the key's current object. Each HEAD retries transient errors.
+
+    A 403 or missing credentials raises for the whole call, because a
+    verdict about one object would then say nothing about the rest. Any
+    other exception a worker raises becomes ``inconclusive`` for that
+    request alone: taken bare, one worker's exception would escape the
+    ``as_completed`` loop and lose every other outcome.
+    """
+    out: dict[tuple[str, str | None], HeadVerdict] = {}
+    if not requests:
+        return out
+
+    def _one(key: str, vid: str | None) -> HeadVerdict:
+        kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
+        if vid:
+            kwargs["VersionId"] = vid
+        return _classify_head(lambda: s3.head_object(**kwargs))
+
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+        futures = {ex.submit(_one, key, vid): (key, vid) for key, vid in dict.fromkeys(requests)}
+        for fut in as_completed(futures):
+            try:
+                out[futures[fut]] = fut.result()
+            except (S3AccessDenied, NoCredentialsError):
+                raise
+            except Exception as exc:
+                out[futures[fut]] = HeadVerdict(
+                    "inconclusive", reason=f"unexpected error: {type(exc).__name__}: {exc}"
+                )
+    return out
+
+
 def verify_download(cache_path: Path, expected_md5: str) -> VerifyResult:
     """Stream-verify a downloaded file's md5 against the expected hash.
 
@@ -1655,7 +1744,9 @@ def _build_fast_pull_result(
     )
 
 
-def _create_s3_client(remote_cfg: dict[str, str], aws_profile_name: str | None) -> Any:
+def _create_s3_client(
+    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None,
+) -> Any:
     try:
         session = boto3.Session(profile_name=aws_profile_name)
     except ProfileNotFound:
@@ -1664,7 +1755,11 @@ def _create_s3_client(remote_cfg: dict[str, str], aws_profile_name: str | None) 
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:
         endpoint_url = remote_cfg.get("endpoint")
-    return session.client("s3", endpoint_url=endpoint_url, region_name=remote_cfg.get("region"))
+    # boto3's default pool is 10 connections; a 16-thread probe would wait on it.
+    config = BotoConfig(max_pool_connections=pool) if pool else None
+    return session.client(
+        "s3", endpoint_url=endpoint_url, region_name=remote_cfg.get("region"), config=config,
+    )
 
 
 class FastSyncOps(Protocol):
