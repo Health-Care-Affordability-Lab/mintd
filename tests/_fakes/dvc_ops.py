@@ -41,7 +41,7 @@ Licensed by tests/test_dvc_ops_contract.py -- one body, two arms.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from mintd._dvc_ops import (
     DvcImportDestinationExists,
@@ -70,6 +70,7 @@ class DvcPushCall(NamedTuple):
     remote: str | None
     jobs: int | None
     targets: list[str] | None = None
+    env: dict[str, str] | None = None
 
 
 class DvcPullCall(NamedTuple):
@@ -110,6 +111,9 @@ class _FakeDvcOps:
         self.push_calls: list[DvcPushCall] = []
         self.push_raises: Exception | None = None
         self.push_result: DvcPushResult = DvcPushResult(pushed=1, up_to_date=False)
+        # Called as on_push(cwd, targets) before push returns: a test's stand-in
+        # for what dvc does to the remote and the pointer files.
+        self.on_push: Any = None
         self.pull_calls: list[DvcPullCall] = []
         self.pull_raises: Exception | None = None
         # Per-target pull failure: raised (before recording) when a pull's
@@ -250,12 +254,15 @@ class _FakeDvcOps:
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> DvcPushResult:
         if self.push_raises:
             raise self.push_raises
         self.push_calls.append(
-            DvcPushCall(cwd=cwd, remote=remote, jobs=jobs, targets=targets)
+            DvcPushCall(cwd=cwd, remote=remote, jobs=jobs, targets=targets, env=env)
         )
+        if self.on_push is not None:
+            self.on_push(cwd, targets)
         return self.push_result
 
     def pull(

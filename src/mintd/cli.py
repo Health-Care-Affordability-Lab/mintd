@@ -51,7 +51,9 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
 )
-from ._fast_sync_ops import FastSyncOps
+from ._fast_sync_ops import FastSyncOps, S3AccessDenied
+from ._push_verify import PushRefused
+from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps  # noqa: F401
 from ._init_ops import InitOpError
 from .catalog import (
@@ -1069,7 +1071,17 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 dvc_ops=dvc_ops,
                 remote=args.remote,
                 jobs=args.jobs,
+                aws_profile=config.aws_profile_name,
             )
+    except PushRefused as e:
+        reporter.error(str(e), hint=e.hint)
+        return 1
+    except S3AccessDenied as e:
+        reporter.error(
+            f"S3 refused to show the pinned versions, so the push can't be checked: {e}",
+            hint="check AWS credentials: mintd config validate",
+        )
+        return 1
     except DvcNotInstalled as e:
         reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
         return 2
@@ -1094,11 +1106,42 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     found = pointers
     outcome: PointerCommit | None = None
     unpushed: tuple[int, str] | None = None
+    gate = None
+    prepared = summary.verification
+    if prepared is not None:
+        # The only verdict that may print a ✓ on a version-aware remote: every
+        # pinned version this push answers for resolves and holds its bytes.
+        for line in prepared.report:
+            reporter.info(line)
+        try:
+            head: dict[str, str | None] = {}
+            for p in pointers or []:
+                try:
+                    head[p] = git_ops.head_text(root, p)
+                except GitOpError:
+                    head[p] = None  # unreadable: judge every out it records
+            gate = judge_push(prepared, pointers, head=head, dvc_uploaded_nothing=summary.up_to_date)
+        except S3AccessDenied as e:
+            reporter.error(f"S3 refused to show the pinned versions: {e}",
+                           hint="check AWS credentials: mintd config validate")
+            return 1
+        if not gate.ok:
+            if reporter.json_mode:
+                reporter.result({"remote": summary.remote, "verify": gate.counts, "errors": gate.lines,
+                                 "uncommitted_pointers": pointers})
+                return 1
+            reporter.error(
+                f"the push isn't verified on {gate.location}: " + "; ".join(gate.lines),
+                hint="nothing was committed. Re-run mintd data push; if a file is named as not in "
+                     "this push, push it too",
+            )
+            return 1
     if pointers and not args.no_commit:
         with reporter.status("Committing and pushing pointer files..."):
             outcome = commit_pushed_pointers(
                 root, pointers, git_ops=git_ops, remote=args.remote,
                 selection=summary.selection, cwd=Path.cwd(),
+                frozen=gate.frozen if gate is not None else None,
             )
         if outcome.state not in ("left", "blocked"):
             try:
@@ -1125,6 +1168,15 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     else:
         state = outcome.state
     failed = state in ("blocked", "commit_failed", "push_failed")
+    # Re-check the judged bytes immediately before any ✓, --no-commit and
+    # nothing-to-commit included: what was verified is what is on disk.
+    drifted = gate.drifted(root) if gate is not None and outcome is None else []
+    if drifted:
+        reporter.error(
+            f"{abbreviate(drifted)} changed while the push was being checked",
+            hint="re-run mintd data push",
+        )
+        return 1
 
     if reporter.json_mode:
         reporter.result(
@@ -1135,6 +1187,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 "elapsed_s": round(summary.elapsed_s, 2),
                 "up_to_date": summary.up_to_date,
                 "uncommitted_pointers": pointers,
+                **({"verify": gate.counts} if gate is not None else {}),
                 "git": {
                     "state": state,
                     "commit": outcome.commit if outcome else None,
@@ -1151,7 +1204,9 @@ def _handle_data_push(args: argparse.Namespace) -> int:
 
     remote_clause = f" → s3://{summary.remote}"
     duration = _format_duration(summary.elapsed_s)
-    if summary.up_to_date:
+    if gate is not None:
+        line = f"{gate.success_line} in {duration}"
+    elif summary.up_to_date:
         line = f"already up to date{remote_clause} in {duration}"
     else:
         count_clause = (

@@ -155,6 +155,7 @@ class RegistryGitOps(Protocol):
     def repo_toplevel(self, work_dir: Path) -> Path: ...
     def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]: ...
     def head_text(self, work_dir: Path, path: str) -> str | None: ...
+    def head_paths(self, work_dir: Path) -> list[str]: ...
     def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None: ...
     def branch_info(self, work_dir: Path) -> BranchInfo: ...
     def push_to(self, work_dir: Path, remote: str, ref: str) -> None: ...
@@ -450,6 +451,16 @@ class SubprocessRegistryGitOps:
             if "does not exist in" in e.stderr or "but not in" in e.stderr:
                 return None
             raise
+
+    def head_paths(self, work_dir: Path) -> list[str]:
+        """The repo-relative paths the HEAD commit changed (against its first
+        parent; every path for a root commit)."""
+        out = self._git(
+            ["-c", "core.quotepath=false", "diff-tree", "--no-commit-id", "--name-only", "-r",
+             "--root", "HEAD"],
+            cwd=work_dir,
+        )
+        return [line for line in out.splitlines() if line]
 
     def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None:
         """Commit exactly ``paths``: ``git commit -- <paths>`` records only

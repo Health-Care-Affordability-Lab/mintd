@@ -32,6 +32,39 @@ from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness.git import _git
 
 
+class _S3HoldsWhatThePointersSay:
+    """S3 as a push that worked leaves it: every version any project's
+    pointers under ``base`` name exists, holding the bytes they record, and
+    the current object at each key does too. For tests of what happens around
+    the push (the commit flow); what S3 really answers is tested against moto
+    in test_push_verify.py."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def _truth(self, key: str) -> tuple[str, int | None]:
+        from mintd._fast_sync_ops import discover_all_outs, parse_s3_url
+        from mintd._pin_proof import publishable_scope
+        from mintd._push_verify import merged_default_remote, merged_remote
+
+        for cfg in self._base.rglob(".dvc/config"):
+            root = cfg.parent.parent
+            name = merged_default_remote(root)
+            url = merged_remote(root, name).get("url", "") if name else ""
+            if not url.startswith("s3://"):
+                continue
+            scope = publishable_scope(root, remote=name, prefix=parse_s3_url(url)[1],
+                                      cache_dir=root / ".dvc" / "cache", dvc_files=discover_all_outs(root))
+            for e in scope.entries:
+                if e.key == key:
+                    return e.md5, e.size
+        raise AssertionError(f"no pointer records {key}")
+
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str | None = None) -> dict:
+        md5, size = self._truth(Key)
+        return {"VersionId": VersionId or "v-now", "ETag": f'"{md5}"', "ContentLength": size}
+
+
 @pytest.fixture
 def push_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDvcOps:
     """Inject a fake DvcOps and a defaulted Config so ``data push`` never
@@ -40,6 +73,10 @@ def push_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDvcOps
     which tracks ``.dvc`` / ``dvc.lock`` fixtures, and outside a repo it warns."""
     _git(["init", "-q"], cwd=tmp_path)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "mintd._push_verify._create_s3_client",
+        lambda cfg, profile, **_: _S3HoldsWhatThePointersSay(tmp_path),
+    )
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr(
         "mintd.cli.Config.load", classmethod(lambda cls, path=None: cls())
@@ -158,8 +195,9 @@ def test_data_push_is_up_to_date_only_when_every_group_is(tmp_path: Path) -> Non
             targets: list[str] | None = None,
             remote: str | None = None,
             jobs: int | None = None,
+            env: dict[str, str] | None = None,
         ) -> DvcPushResult:
-            super().push(cwd=cwd, targets=targets, remote=remote, jobs=jobs)
+            super().push(cwd=cwd, targets=targets, remote=remote, jobs=jobs, env=env)
             first = len(self.push_calls) == 1
             return (
                 DvcPushResult(pushed=0, up_to_date=True)
@@ -331,9 +369,8 @@ def test_cli_push_names_uncommitted_pointers_instead_of_a_check(
     mintd only reads the pointer bytes on disk after the push, which is
     exactly what the double changes; git is real.
 
-    `--remote r` is not the project's default remote (`storage`), which
-    importers pull from, so `data push` leaves this commit to the user: this
-    is #61's warning, unchanged.
+    `--no-commit` leaves this commit to the user: this is #61's warning,
+    unchanged. The success line is the post-push check's.
 
     Mutations: `if pointers:` -> `if False:` reddens run 1; warning only when
     `not summary.up_to_date` reddens run 2; dropping the JSON key reddens
@@ -342,6 +379,9 @@ def test_cli_push_names_uncommitted_pointers_instead_of_a_check(
     proj = tmp_path / "proj"
     proj.mkdir()
     stage_undeliverable_primary(proj)
+    # The tree `dvc add` saved in the cache, which a push uploads from.
+    tree = ensure_dir_manifest(proj / ".dvc" / "cache", [DvcFileEntry(MD5, "a.parquet")])
+    write_pointer(proj, "data/final", is_dir=True, md5=tree.removesuffix(".dir"), version_id=None)
     _git(["init", "-q", "-b", "main"], cwd=proj)
     _git(["add", "-A"], cwd=proj)
     _git(["commit", "-q", "-m", "track"], cwd=proj)
@@ -356,30 +396,30 @@ def test_cli_push_names_uncommitted_pointers_instead_of_a_check(
     monkeypatch.setattr(push_clients, "push", push_and_pin)
 
     push_clients.push_result = DvcPushResult(pushed=1, up_to_date=False)
-    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    assert cli.main(["data", "push", "--no-commit"]) == 0
     err = " ".join(capsys.readouterr().err.split())
     assert "✓" not in err
-    assert "pushed 1 object(s)" in err
+    assert "1 file(s) verified on" in err
     assert "data/final.dvc" in err and "commit and push" in err
     assert _git(["status", "--porcelain"], cwd=proj).strip()  # data push writes no git
 
     # A rerun with nothing new to upload: the pointer is still not committed.
     push_clients.push_result = DvcPushResult(pushed=0, up_to_date=True)
-    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    assert cli.main(["data", "push", "--no-commit"]) == 0
     err = " ".join(capsys.readouterr().err.split())
     assert "✓" not in err
-    assert "already up to date" in err and "data/final.dvc" in err
+    assert "verified on" in err and "data/final.dvc" in err
 
-    assert cli.main(["--json", "data", "push", "--remote", "r"]) == 0
+    assert cli.main(["--json", "data", "push", "--no-commit"]) == 0
     assert json.loads(capsys.readouterr().out)["uncommitted_pointers"] == ["data/final.dvc"]
 
     _git(["commit", "-q", "-am", "pin"], cwd=proj)
     _git(["init", "-q", "--bare", "-b", "main", str(tmp_path / "origin.git")])
     _git(["remote", "add", "origin", str(tmp_path / "origin.git")], cwd=proj)
     _git(["push", "-q", "-u", "origin", "main"], cwd=proj)  # a ✓ needs the commit on a remote
-    assert cli.main(["data", "push", "--remote", "r"]) == 0
+    assert cli.main(["data", "push", "--no-commit"]) == 0
     err = " ".join(capsys.readouterr().err.split())
-    assert "✓ already up to date" in err
+    assert "✓ 1 file(s) verified on" in err
     assert "data/final.dvc" not in err
 
 
@@ -620,11 +660,11 @@ def test_push_refuses_to_commit_a_lock_stage_not_on_s3(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """`dvc.lock` is one file for every stage, so a push of stage a commits
-    whatever else changed in it. The probe judges what the commit would
-    carry: an unchanged, unpinned stage b does not block it; b re-run and not
-    pushed does, with the stage named and nothing committed.
+    whatever else changed in it. The post-push check judges what the commit
+    would carry: b re-run and not pushed fails it, named as not in this push,
+    and nothing is committed.
 
-    Mutation: judge only the stages this push targeted -> phase 2 commits
+    Mutation: check only the stages this push targeted -> phase 2 commits
     b's unpinned entry, red.
     """
     proj = _producer(tmp_path)
@@ -642,7 +682,7 @@ def test_push_refuses_to_commit_a_lock_stage_not_on_s3(
     (proj / "dvc.lock").write_text(yaml.safe_dump(lock, sort_keys=False))
     assert cli.main(["data", "push", "data/a.csv"]) == 1
     err = _err(capsys)
-    assert "stage 'b'" in err and "data/b.csv" in err and "on S3" in err
+    assert "not in this push: data/b.csv" in err and "no S3 version ID" in err
     assert "✓" not in err
     assert _head(proj) == first
 
@@ -762,15 +802,17 @@ def test_push_to_a_non_default_remote_commits_nothing(
     push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Importers pull from the default remote: version IDs recorded under
-    another one reach nobody. Mutation: drop the remote gate -> committed."""
+    """Importers pull from the default remote, and on a version-aware remote
+    DVC records versions read from it whatever `--remote` says: refused
+    before anything uploads. Mutation: drop the refusal -> uploaded, red."""
     proj = _producer(tmp_path)
     before = _head(proj)
     monkeypatch.chdir(proj)
     _rewrites_like_dvc(push_clients, monkeypatch)
 
-    assert cli.main(["data", "push", "--remote", "other", "data/final"]) == 0
-    assert "not committed: pushed to --remote other; importers pull from the default remote storage" in _err(capsys)
+    assert cli.main(["data", "push", "--remote", "other", "data/final"]) == 1
+    assert "--remote other isn't the default remote storage" in _err(capsys)
+    assert push_clients.push_calls == []
     assert _head(proj) == before
 
 
@@ -963,6 +1005,8 @@ def test_a_branch_tracking_another_name_is_judged_by_any_remote(
     whether main has them. Mutation: count `@{u}..HEAD` here -> no ✓ for a
     pushed branch, and a `git push` hint git refuses, red."""
     proj = _producer(tmp_path)
+    write_pointer(proj, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})  # pinned and pushed
+    _commit_all(proj, "pinned")
     _git(["checkout", "-q", "-b", "wip", "origin/main"], cwd=proj)
     (proj / "experiment.txt").write_text("wip\n")
     _git(["add", "experiment.txt"], cwd=proj)
@@ -1038,3 +1082,382 @@ def test_real_dvc_push_of_one_file_commits_the_whole_folder(
     assert blobs == ["x2\n", "y.csv\n"], blobs
     assert any(p.name.endswith(".dir") for p in store.rglob("*"))  # and the folder's manifest
     assert _git(["log", "-1", "--name-only", "--format="], cwd=origin).split() == ["data/final.dvc"]
+
+
+# --- the post-push check, against moto ---------------------------------------
+#
+# S3 is moto. DVC is the fake, whose on_push does to S3 and to the pointer
+# files what a dvc push would: `_dvc_uploads` uploads each file that has no
+# version ID and records the version S3 returns, and `_dvc_pins_what_is_there`
+# reproduces DVC's post-push rebuild, which pins whatever object is at the path
+# without checking its bytes.
+
+import hashlib  # noqa: E402
+
+from mintd._fast_sync_ops import cache_path_for  # noqa: E402
+
+KEY = "lab/p/data/x.csv"
+
+
+def _bytes_md5(b: bytes) -> str:
+    return hashlib.md5(b).hexdigest()
+
+
+def _x_pointer(proj: Path, data: bytes, cloud: dict | None = None) -> None:
+    rec: dict = {"md5": _bytes_md5(data), "size": len(data), "hash": "md5", "path": "x.csv"}
+    if cloud is not None:
+        rec["cloud"] = cloud
+    (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump({"outs": [rec]}, sort_keys=False))
+
+
+def _moto_producer(tmp_path: Path, s3, *, data: bytes = b"x-data\n", cache: bool = True,
+                   cloud: dict | None = None) -> Path:
+    """`data/x.csv` tracked by `data/x.csv.dvc`, committed and pushed to a
+    bare upstream; its bytes in the cache unless `cache=False`."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=proj)
+    _identity(proj)
+    stage_dvc_project(proj)
+    (proj / ".gitignore").write_text("/data/x.csv\n/.dvc/cache/\n")
+    (proj / "data").mkdir()
+    (proj / "data" / "x.csv").write_bytes(data)
+    if cache:
+        obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(data))
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(data)
+    _x_pointer(proj, data, cloud)
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "track"], cwd=proj)
+    _upstream(tmp_path, proj)
+    return proj
+
+
+@pytest.fixture
+def moto_push(push_clients: _FakeDvcOps, s3_versioned, monkeypatch: pytest.MonkeyPatch):
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    return push_clients, s3, bucket
+
+
+def _records_of(proj: Path):
+    doc = yaml.safe_load((proj / "data" / "x.csv.dvc").read_text())
+    return doc, doc["outs"][0]
+
+
+def _dvc_uploads(s3, bucket: str, proj: Path, *, body: bytes | None = None):
+    def on_push(cwd, targets):
+        doc, rec = _records_of(proj)
+        if "storage" in (rec.get("cloud") or {}):
+            return
+        data = body if body is not None else cache_path_for(proj / ".dvc" / "cache", rec["md5"]).read_bytes()
+        put = s3.put_object(Bucket=bucket, Key=KEY, Body=data)
+        rec["cloud"] = {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}
+        (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
+    return on_push
+
+
+def _dvc_pins_what_is_there(s3, bucket: str, proj: Path):
+    def on_push(cwd, targets):
+        doc, rec = _records_of(proj)
+        if "storage" in (rec.get("cloud") or {}):
+            return
+        head = s3.head_object(Bucket=bucket, Key=KEY)
+        rec["cloud"] = {"storage": {"etag": head["ETag"].strip('"'), "version_id": head["VersionId"]}}
+        (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
+    return on_push
+
+
+def test_check_a_push_that_uploads_is_verified_committed_and_pushed(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 0, _err(capsys)
+    err = _err(capsys)
+    assert "✓ 1 file(s) verified on s3://test-bucket/lab/p (1 uploaded and verified)" in err
+    assert "pushed it to origin/main" in err
+    # Every dvc push of the command ran with one throwaway site cache, gone after.
+    site = {c.env["DVC_SITE_CACHE_DIR"] for c in dvc.push_calls}
+    assert len(site) == 1 and not Path(site.pop()).exists()
+
+
+def test_check_dvc_pinning_other_bytes_fails_and_commits_nothing(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """DVC's rebuild pins the object at the path whatever it holds. The offline
+    judge passes (an ID is present); only the content proof catches it."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    head = _head(proj)
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"someone else's bytes")
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_pins_what_is_there(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "the pinned version holds other bytes: data/x.csv" in err and "✓" not in err
+    assert _head(proj) == head
+
+
+def test_check_ids_only_under_another_prefix_with_a_push_that_does_nothing_fail(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """cms-pdc: the recorded IDs exist only under the old prefix, the file is
+    in the cache, and DVC uploads nothing. Repair strips the stale ID; the
+    check finds no ID after the push and says DVC uploaded nothing."""
+    dvc, s3, bucket = moto_push
+    old = s3.put_object(Bucket=bucket, Key="old-prefix/data/x.csv", Body=b"x-data\n")["VersionId"]
+    proj = _moto_producer(tmp_path, s3, cloud={"storage": {"etag": _bytes_md5(b"x-data\n"), "version_id": old}})
+    monkeypatch.chdir(proj)
+    dvc.push_result = DvcPushResult(pushed=0, up_to_date=True)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "re-uploading data/x.csv (stale ID)" in err
+    assert "the remote has probably moved" in err
+    assert "no S3 version ID recorded: data/x.csv" in err and "✓" not in err
+
+
+def test_check_a_stale_id_with_no_object_and_no_cache_stops_before_anything(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3, cache=False,
+                          cloud={"storage": {"etag": _bytes_md5(b"x-data\n"), "version_id": "gone"}})
+    # A second, fixable pointer: its stale ID would be stripped, but nothing
+    # is written while another file can't be fixed.
+    y = b"y-data\n"
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(y))
+    obj.parent.mkdir(parents=True)
+    obj.write_bytes(y)
+    (proj / "data" / "y.csv.dvc").write_text(yaml.safe_dump({"outs": [{
+        "md5": _bytes_md5(y), "size": len(y), "hash": "md5", "path": "y.csv",
+        "cloud": {"storage": {"etag": _bytes_md5(y), "version_id": "gone"}}}]}, sort_keys=False))
+    before = {p: (proj / "data" / p).read_bytes() for p in ("x.csv.dvc", "y.csv.dvc")}
+    monkeypatch.chdir(proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "nothing was written or pushed" in err and "data/x.csv" in err and "data/y.csv" not in err
+    assert "mintd data pull" in err
+    assert dvc.push_calls == []
+    assert {p: (proj / "data" / p).read_bytes() for p in before} == before
+
+
+def test_check_dvc_commit_f_is_reattached_with_no_upload(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    v = s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")["VersionId"]
+    proj = _moto_producer(tmp_path, s3)  # committed with no ID, as `dvc commit -f` leaves it
+    monkeypatch.chdir(proj)
+    puts: list[str] = []
+    s3.meta.events.register("before-send.s3.PutObject", lambda request, **_: puts.append(request.url))
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 0, _err(capsys)
+    err = _err(capsys)
+    assert "re-attached data/x.csv (no ID)" in err
+    assert "`dvc add` or `dvc commit` rewrote these .dvc files" in err
+    assert puts == []
+    assert _records_of(proj)[1]["cloud"]["storage"]["version_id"] == v
+
+
+def test_check_refuses_a_non_default_remote_before_uploading(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    monkeypatch.chdir(proj)
+    assert cli.main(["data", "push", "--remote", "backup"]) == 1
+    assert "isn't the default remote storage" in _err(capsys)
+    assert dvc.push_calls == []
+
+
+def test_check_refuses_a_remote_with_its_own_access_keys(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    with open(proj / ".dvc" / "config.local", "w") as f:
+        f.write("['remote \"storage\"']\n    access_key_id = AKIA\n    secret_access_key = s\n")
+    monkeypatch.chdir(proj)
+    assert cli.main(["data", "push"]) == 1
+    assert "carries its own access keys" in _err(capsys)
+    assert dvc.push_calls == []
+
+
+def test_check_needs_the_pointer_list_from_git(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    shutil.rmtree(proj / ".git")
+    (tmp_path / ".git").rename(tmp_path / ".git-moved")  # no repo above it either
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "git couldn't list the pointer files" in err and "✓" not in err
+
+
+def test_check_a_failed_second_group_says_the_tree_holds_repinned_pointers(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    from mintd._dvc_ops import DvcPushError
+
+    dvc, s3, bucket = moto_push
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    proj = _moto_producer(tmp_path, s3)
+    head = _head(proj)
+    monkeypatch.chdir(proj)
+    calls: list[int] = []
+
+    def second_fails(cwd, targets):
+        calls.append(1)
+        if len(calls) == 2:
+            raise DvcPushError("dvc push failed (exit 1): boom")
+
+    dvc.on_push = second_fails
+    assert cli.main(["data", "push", "data/x.csv.dvc", "dvc.yaml:nope"]) == 1
+    err = _err(capsys)
+    assert "re-pinned pointer files (data/x.csv.dvc); re-run mintd data push" in err
+    assert _head(proj) == head
+
+
+def test_check_a_pointer_rewritten_while_being_checked_is_not_committed(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    head = _head(proj)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    armed = {"on": False}
+    real_upload = dvc.on_push
+
+    def upload_then_arm(cwd, targets):
+        real_upload(cwd, targets)
+        armed["on"] = True
+
+    def rewrite_during_check(request, **_):
+        if armed["on"] and "versionId=" in request.url:
+            armed["on"] = False
+            with open(proj / "data" / "x.csv.dvc", "a") as f:
+                f.write("# edited mid-check\n")
+
+    dvc.on_push = upload_then_arm
+    s3.meta.events.register_first("before-send.s3.HeadObject", rewrite_during_check)
+    cli.main(["data", "push"])
+    err = _err(capsys)
+    assert "data/x.csv.dvc changed after the push was checked" in err and "✓" not in err
+    assert _head(proj) == head
+
+    # --no-commit: the re-check before the ✓ catches it too.
+    _git(["checkout", "-q", "--", "data/x.csv.dvc"], cwd=proj)
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    _x_pointer(proj, b"x-data\n")
+    dvc.on_push = upload_then_arm
+    assert cli.main(["data", "push", "--no-commit"]) == 1
+    err = _err(capsys)
+    assert "changed while the push was being checked" in err and "✓" not in err
+
+
+def test_check_a_commit_hook_that_rewrites_a_pointer_keeps_the_commit_local(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    hook = proj / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf '# hook\\n' >> data/x.csv.dvc && git add data/x.csv.dvc\n")
+    hook.chmod(0o755)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "doesn't hold exactly the checked pointer files" in err and "stays local" in err
+    assert _head(tmp_path / "origin.git", "main") != _head(proj)  # never pushed
+
+
+def _moto_pipeline(tmp_path: Path, s3, bucket: str) -> Path:
+    """Stage a writes data/a.csv from the data/raw folder; stage b's
+    data/b.csv is pinned to a version already on S3. Committed and pushed."""
+    proj = _moto_producer(tmp_path, s3)
+    b = s3.put_object(Bucket=bucket, Key="lab/p/data/b.csv", Body=b"b\n")
+    (proj / "dvc.yaml").write_text(
+        "stages:\n"
+        "  a:\n    cmd: make a\n    deps: [data/raw]\n    outs: [data/a.csv]\n"
+        "  b:\n    cmd: make b\n    outs: [data/b.csv]\n"
+    )
+    a_bytes = b"a\n"
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(a_bytes))
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(a_bytes)
+    lock = {"schema": "2.0", "stages": {
+        "a": {"cmd": "make a",
+              "deps": [{"path": "data/raw", "hash": "md5", "md5": "d" * 32 + ".dir", "size": 3, "nfiles": 1}],
+              "outs": [{"path": "data/a.csv", "hash": "md5", "md5": _bytes_md5(a_bytes), "size": 2}]},
+        "b": {"cmd": "make b",
+              "outs": [{"path": "data/b.csv", "hash": "md5", "md5": _bytes_md5(b"b\n"), "size": 2,
+                        "cloud": {"storage": {"etag": b["ETag"].strip('"'), "version_id": b["VersionId"]}}}]},
+    }}
+    (proj / "dvc.lock").write_text(yaml.safe_dump(lock, sort_keys=False))
+    _commit_all(proj, "pipeline")
+    return proj
+
+
+def test_check_records_dvc_wasnt_asked_to_change_are_put_back(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """DVC re-dumps whole stages after a push: stage a's folder dep can come
+    back bare (no md5) and an out of another stage degraded. Push doesn't
+    change the workspace, so the records from before it are put back."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_pipeline(tmp_path, s3, bucket)
+    before = yaml.safe_load((proj / "dvc.lock").read_text())
+    monkeypatch.chdir(proj)
+
+    def dvc_push_of_a(cwd, targets):
+        lock = yaml.safe_load((proj / "dvc.lock").read_text())
+        out = lock["stages"]["a"]["outs"][0]
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/a.csv", Body=b"a\n")
+        out["cloud"] = {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}
+        del lock["stages"]["a"]["deps"][0]["md5"]          # the bare dep
+        del lock["stages"]["b"]["outs"][0]["cloud"]        # a sibling stage degraded
+        (proj / "dvc.lock").write_text(yaml.safe_dump(lock, sort_keys=False))
+
+    dvc.on_push = dvc_push_of_a
+    assert cli.main(["data", "push", "data/a.csv"]) == 0, _err(capsys)
+    after = yaml.safe_load((proj / "dvc.lock").read_text())
+    assert after["stages"]["a"]["deps"] == before["stages"]["a"]["deps"]
+    assert after["stages"]["b"] == before["stages"]["b"]
+    assert "storage" in after["stages"]["a"]["outs"][0]["cloud"]
+
+
+def test_check_an_untouched_pin_holding_other_bytes_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """S3 didn't answer for the pin before the push, so repair left it; the
+    check after the push finds it holds other bytes."""
+    from botocore.awsrequest import AWSResponse
+
+    dvc, s3, bucket = moto_push
+    bad = s3.put_object(Bucket=bucket, Key=KEY, Body=b"other bytes")["VersionId"]
+    proj = _moto_producer(tmp_path, s3, cloud={"storage": {"etag": _bytes_md5(b"x-data\n"), "version_id": bad}})
+    monkeypatch.chdir(proj)
+    first = {"done": False}
+
+    class _Empty:
+        def stream(self, **_):
+            yield b""
+
+        def read(self, *_):
+            return b""
+
+    def no_answer_once(request, **_):
+        if not first["done"] and "versionId=" in request.url:
+            first["done"] = True
+            # 409: unmapped, so inconclusive (botocore re-sends a HEAD's 400 as a region redirect).
+            return AWSResponse(request.url, 409, {}, _Empty())
+        return None
+
+    s3.meta.events.register_first("before-send.s3.HeadObject", no_answer_once)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "the pinned version holds other bytes: data/x.csv" in err and "✓" not in err
+
+
+def test_check_an_endpoint_override_in_config_local_is_not_committed(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    head = _head(proj)
+    (proj / ".dvc" / "config.local").write_text("['remote \"storage\"']\n    endpointurl = https://elsewhere\n")
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    cli.main(["data", "push"])
+    err = _err(capsys)
+    assert "config.local overrides storage's endpointurl" in err and "✓" not in err
+    assert _head(proj) == head

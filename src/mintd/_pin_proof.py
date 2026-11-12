@@ -342,7 +342,8 @@ def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHa
        passes on size alone; the push didn't set it): keep.
     2. Otherwise the current object at its key, if that proves the file:
        re-attach.
-    3. Otherwise, the cache holds bytes that hash to its md5: strip.
+    3. Otherwise, the cache holds bytes that hash to its md5, or the entry is
+       a legacy ``.dir`` file (never re-attached; DVC uploads it): strip.
     4. Otherwise: unrecoverable.
     An entry S3 gave no clear answer for is left as it is.
     """
@@ -380,7 +381,10 @@ def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHa
         if not e.legacy_dir and prove(e, now, cache) == "ok":
             reattach.append((e, pinned(e, now), reason))
             continue
-        if cache.holds(e.md5):
+        # A legacy entry's pointer isn't written (DVC rewrites the out as a
+        # files list when it uploads), so nothing needs stopping before the
+        # push; the gate's upload check proves each file arrived.
+        if e.legacy_dir or cache.holds(e.md5):
             strip.append((e, reason))
             observed[e.key] = now.version_id if now.kind == "found" else None
             continue

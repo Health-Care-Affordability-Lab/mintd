@@ -116,7 +116,7 @@ def test_a_worker_that_raises_is_inconclusive_and_keeps_every_other_outcome(s3_v
     assert {k for (k, _), v in got.items() if v.kind == "found"} == set(keys) - {"p/3.csv"}
 
 
-@pytest.mark.parametrize("status", [400, 409, 412])
+@pytest.mark.parametrize("status", [409, 412, 501])
 def test_an_unmapped_error_is_inconclusive_never_found(s3_versioned, status: int) -> None:
     s3, bucket = s3_versioned
     vid = s3.put_object(Bucket=bucket, Key="p/a.csv", Body=b"x")["VersionId"]

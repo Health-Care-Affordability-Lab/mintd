@@ -193,7 +193,7 @@ def test_no_answer_for_the_current_object_leaves_the_entry_unchanged(s3_versione
     s3, bucket = s3_versioned
     _cache(tmp_path, b"A")
     _pointer(tmp_path, "a.csv.dvc", "a.csv", b"A")
-    _head_reply(s3, 400, versioned=False)
+    _head_reply(s3, 409, versioned=False)  # unmapped: inconclusive (a HEAD's 400 is re-sent)
     plan = _plan(tmp_path, s3, bucket, ["a.csv.dvc"])
     assert [e.path for e in plan.inconclusive] == ["a.csv"]
     assert not plan.changes
