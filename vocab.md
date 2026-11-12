@@ -213,7 +213,13 @@ Why: the CLI's own messages keep the lanes apart: "the repo file cache (S3) is d
 
 ### Pointer and out
 
-A **pointer** is a git-tracked DVC file that records data by hash: a `.dvc` file or a `dvc.lock` (`_POINTER_PATHSPEC`). An **out** (`DvcOut`) is one output a pointer records: a file, a `.dir` directory, or a files-format directory with per-file entries; outs in `dvc.lock` are stage outs. On a version-aware remote, `dvc push` also writes S3 version IDs into the pointers, so after uploading, `mintd data push` lists every pointer that differs from `HEAD` (`uncommitted_pointers` under `--json`, `null` if git could not answer) and prints its ✓ only when there are none.
+A **pointer** is a git-tracked DVC file that records data by hash: a `.dvc` file or a `dvc.lock` (`_POINTER_PATHSPEC`). An **out** (`DvcOut`) is one output a pointer records: a file, a `.dir` directory, or a files-format directory with per-file entries; outs in `dvc.lock` are stage outs. On a version-aware remote, `dvc push` also writes S3 version IDs into the pointers. So after uploading, `mintd data push` lists every pointer that differs from `HEAD` (`uncommitted_pointers` under `--json`, `null` if git could not answer). It then commits those pointer files by path and pushes them to the branch's upstream of the same name (`commit_pushed_pointers`), and the result is under `git` in `--json`. It never pulls, rebases or forces. It leaves the commit to the user, says why and exits 1 in any of these cases:
+- a changed pointer records something importers couldn't pull (`judge_pointers`): missing version IDs under the default remote, or a folder list that is empty or names a tree the cache never held;
+- another tracked file also differs from `HEAD`;
+- the push went to a remote importers don't read;
+- the project isn't its git repository's top level.
+
+A target inside a tracked output pushes the whole output. `--no-commit` uploads only.
 
 Why: importers read the producer's pushed commit, never its working tree, so a pointer that is not committed and pushed is one no importer can see yet.
 
