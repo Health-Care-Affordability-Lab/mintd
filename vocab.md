@@ -229,6 +229,22 @@ A DVC remote with `version_aware = true`, which `mintd init` always sets. Its S3
 
 Why `init` sets it: the S3 key is then the file's real path, which is mintd's mental model and matches `metadata.storage.versioning = True`.
 
+### Pin repair and the push check ([src/mintd/_push_verify.py](src/mintd/_push_verify.py), [src/mintd/_pin_proof.py](src/mintd/_pin_proof.py))
+
+On a version-aware remote, `mintd data push` and `mintd publish` don't trust `dvc push`'s report. An **entry** is one file version a pointer records (`publishable_scope`: what a `dvc push` uploads, so not repo imports, `cache: false` or `push: false` outs). A pin **proves** its file (`prove`) when S3, asked for that version at the file's key, returns a single-part ETag equal to the md5, or a multipart ETag equal to the one recomputed from the cache file. A multipart pin with no cache file passes on size alone, but only when this command didn't set it.
+
+- **Before the upload** (`prepare`), push refuses a `--remote` other than the default, a remote with its own access keys, and outs with their own remote. For each pin that doesn't prove its file (`plan_repair`):
+  - **re-attach**: the object at the key proves it, so its ID goes back into the pointer and nothing is uploaded;
+  - **strip**: the cache holds it, so the ID is removed and DVC uploads it;
+  - otherwise push stops, writing nothing.
+
+  `write_repair` changes only `cloud.<remote>` and re-reads each file it wrote. Every `dvc push` of the command runs with one throwaway `DVC_SITE_CACHE_DIR`.
+- **After the upload**, `restore` puts back records DVC wasn't asked to change. `judge` then proves every pin this push set, or whose record differs from HEAD's. Only its verdict prints the ✓ line and the `verify` counts. The commit carries exactly the pointer files it judged, byte for byte.
+
+`ProofMemo` (`proven-versions.sqlite` under `cache_dir`) remembers full proofs, so a later push HEADs only a sample of 16 of them.
+
+Why: on a version-aware remote `dvc push` can print "Everything is up to date" and upload nothing (a stale site cache, or a version check that a denied ListObjectVersions empties). Its post-push rebuild also pins whatever object is at a path without checking its bytes. A ✓ from DVC's report shipped pins that pointed nowhere.
+
 ### Fast-sync (`try_fast_pull`) ([src/mintd/_fast_sync_ops.py](src/mintd/_fast_sync_ops.py))
 
 mintd's own pull path for every non-import DVC out on an S3 remote: each object is downloaded straight into `.dvc/cache` (version-aware outs at their pinned S3 version, md5-keyed outs at `<prefix>/files/md5/…`) via temp file, md5 check, fsync, rename, without `dvc pull`. It needs bundled dvc ≥ 3.66 and < 4.0, an S3 remote, boto3, AWS credentials and bucket versioning; if any is missing every target is degraded with a named reason. A spot-check HEADs the pinned versions of up to 5 outs, and an out that has drifted is blocked. `--dvc-arg` is ignored on fast-sync paths.

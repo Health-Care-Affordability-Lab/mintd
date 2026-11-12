@@ -485,7 +485,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clone.set_defaults(_handler=_handle_data_clone)
 
     p_push = p_data_sub.add_parser(
-        "push", help="Upload DVC data, then commit and push the .dvc / dvc.lock files it rewrote",
+        "push", help="Upload DVC data, check every pinned S3 version, then commit and push the .dvc / dvc.lock files it rewrote",
     )
     p_push.add_argument(
         "targets", nargs="*",
