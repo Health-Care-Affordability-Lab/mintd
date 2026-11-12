@@ -488,14 +488,14 @@ def wdir_map(dvc_yaml_doc: object) -> dict[str, str | None]:
     return out
 
 
-def uncached_outs(dvc_yaml_doc: object) -> dict[str, set[str]]:
+def flagged_outs(dvc_yaml_doc: object, flag: str) -> dict[str, set[str]]:
     """``stage name -> {out path}`` for every out ``dvc.yaml`` declares
-    ``cache: false`` (under ``outs``, ``metrics`` or ``plots``).
+    ``<flag>: false`` (under ``outs``, ``metrics`` or ``plots``). Paths stay as
+    written (relative to the stage ``wdir``, normalized) to compare against
+    the lock's raw ``path``.
 
-    ``dvc.lock`` records such an out like any other -- path, md5, size, no
-    ``cache`` key -- but dvc never caches or pushes it, so ``dvc pull`` exits
-    0 and lands nothing. Paths stay as written (relative to the stage
-    ``wdir``, normalized) to compare against the lock's raw ``path``.
+    A `${...}` path never equals the lock's expanded one, so a templated
+    flagged out is missed; expand it if a product ever declares one.
     """
     if not isinstance(dvc_yaml_doc, dict):
         return {}
@@ -510,13 +510,21 @@ def uncached_outs(dvc_yaml_doc: object) -> dict[str, set[str]]:
         for key in ("outs", "metrics", "plots"):
             entries = body.get(key)
             for entry in entries if isinstance(entries, list) else []:
-                # A `${...}` path never equals the lock's expanded one, so a
-                # templated cache: false out is still pulled and probed;
-                # expand it if a product ever declares one.
                 for path, opts in entry.items() if isinstance(entry, dict) else ():
-                    if isinstance(opts, dict) and opts.get("cache") is False:
+                    if isinstance(opts, dict) and opts.get(flag) is False:
                         out.setdefault(str(stage), set()).add(posixpath.normpath(str(path)))
     return out
+
+
+def uncached_outs(dvc_yaml_doc: object) -> dict[str, set[str]]:
+    """``stage name -> {out path}`` for every out ``dvc.yaml`` declares
+    ``cache: false``.
+
+    ``dvc.lock`` records such an out like any other -- path, md5, size, no
+    ``cache`` key -- but dvc never caches or pushes it, so ``dvc pull`` exits
+    0 and lands nothing.
+    """
+    return flagged_outs(dvc_yaml_doc, "cache")
 
 
 def stage_wdir(stage_wdirs: dict[str, str | None], stage: str) -> str | None:
