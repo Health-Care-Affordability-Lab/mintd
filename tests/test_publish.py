@@ -12,7 +12,14 @@ from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
-from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, write_pointer
+from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from tests._dvc_fixtures import (
+    MD5,
+    S3HoldsWhatThePointersSay,
+    stage_dvc_project,
+    stage_undeliverable_primary,
+    write_pointer,
+)
 from tests._enclave_fixtures import client_with_provider_xw, stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
@@ -1294,6 +1301,15 @@ class TestDeliveryGate:
 
         assert preview.new_version == "0.1.1"
 
+    @pytest.fixture(autouse=True)
+    def _s3_holds_what_the_pointers_say(self, tmp_path, monkeypatch):
+        """publish HEADs every pin it pushes (see test_data_push.py for the
+        check against moto); here S3 holds what the pointers record."""
+        monkeypatch.setattr(
+            "mintd._push_verify._create_s3_client",
+            lambda cfg, profile, **_: S3HoldsWhatThePointersSay(tmp_path),
+        )
+
     def test_publish_releases_an_output_its_own_push_pins(self, tmp_path):
         """The path the exemption and the re-check exist for: tracked but
         unpinned before the push, pinned by it, then committed and tagged with
@@ -1304,6 +1320,7 @@ class TestDeliveryGate:
         """
         proj = _seed_project(tmp_path)
         stage_undeliverable_primary(proj)
+        _cache_the_tree(proj)
         subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
 
@@ -1336,11 +1353,15 @@ class TestDeliveryGate:
         push writes nothing, like a push that silently moved nothing), publish
         must stop before commit, tag or catalog: metadata rolled back, no tag.
 
-        Mutation: drop the post-push re-check in `_apply_publish` -> the
-        release is tagged unpinned, reddens.
+        The check after the push (the one `data push` runs) catches it: the
+        files have no version ID.
+
+        Mutation: drop the post-push check in `_apply_publish` -> the offline
+        re-check still refuses, with its own message, reddens.
         """
         proj = _seed_project(tmp_path)
         stage_undeliverable_primary(proj)
+        _cache_the_tree(proj)
         subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
         dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
@@ -1354,7 +1375,8 @@ class TestDeliveryGate:
                 git_ops=git,
             )
 
-        assert "dvc push reported success but" in str(excinfo.value)
+        assert "the push isn't verified" in str(excinfo.value)
+        assert "no S3 version ID recorded: data/final/a.parquet" in str(excinfo.value)
         assert "nothing was committed, tagged or advertised" in excinfo.value.recovery_hint
         assert len(dvc.push_calls) == 1
         assert git.tag_calls == []
@@ -1375,6 +1397,7 @@ class TestDeliveryGate:
         proj = _seed_project(tmp_path)
         stage_dvc_project(proj, declared=("data/final/", "data/final/summary.csv"))
         write_pointer(proj, "data/final", is_dir=True, version_id=None)
+        _cache_the_tree(proj)
         subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
 
@@ -1401,3 +1424,76 @@ class TestDeliveryGate:
         assert "keep them and commit them with your fix" in excinfo.value.recovery_hint
         assert git.tag_calls == []
         assert _commit_count(proj) == 2
+
+
+def _cache_the_tree(proj: Path) -> None:
+    """The directory tree `dvc add` saved in the cache, which a push uploads
+    from; rewrites `data/final.dvc` to name it."""
+    tree = ensure_dir_manifest(proj / ".dvc" / "cache", [DvcFileEntry(MD5, "a.parquet")])
+    write_pointer(proj, "data/final", is_dir=True, md5=tree.removesuffix(".dir"), version_id=None)
+
+
+# --- publish runs the same repair and check as data push (moto) --------------
+
+
+def _publish_on_moto(tmp_path: Path, s3, *, cloud: dict | None, cache: bool) -> Path:
+    """A project declaring data/final/, whose `data/final/x.csv` is tracked by
+    a `.dvc` pointer with real hashes, committed."""
+    import hashlib
+
+    import yaml
+
+    from mintd._fast_sync_ops import cache_path_for
+
+    proj = _seed_project(tmp_path)
+    stage_dvc_project(proj)
+    data = b"x\n"
+    md5 = hashlib.md5(data).hexdigest()
+    (proj / "data" / "final").mkdir(parents=True)
+    (proj / "data" / "final" / "x.csv").write_bytes(data)
+    (proj / ".gitignore").write_text("/data/final/x.csv\n/.dvc/cache/\n")
+    if cache:
+        obj = cache_path_for(proj / ".dvc" / "cache", md5)
+        obj.parent.mkdir(parents=True)
+        obj.write_bytes(data)
+    rec: dict = {"md5": md5, "size": len(data), "hash": "md5", "path": "x.csv"}
+    if cloud is not None:
+        rec["cloud"] = cloud
+    (proj / "data" / "final" / "x.csv.dvc").write_text(yaml.safe_dump({"outs": [rec]}, sort_keys=False))
+    subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "track"], cwd=proj, check=True)
+    return proj
+
+
+def test_publish_after_dvc_commit_f_reattaches_the_ids_with_no_upload(tmp_path, s3_versioned, monkeypatch):
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    v = s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")["VersionId"]
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)  # as `dvc commit -f` leaves it
+    puts: list[str] = []
+    s3.meta.events.register("before-send.s3.PutObject", lambda request, **_: puts.append(request.url))
+    git = _FakeRegistryGitOps()
+
+    result = publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(),
+                             dvc_ops=_FakeDvcOps(), git_ops=git)
+
+    assert result.tagged and puts == []
+    committed = subprocess.run(["git", "show", "HEAD:data/final/x.csv.dvc"], cwd=proj, check=True,
+                               capture_output=True, text=True).stdout
+    assert f"version_id: {v}" in committed
+
+
+def test_publish_with_a_moved_remote_and_no_cache_is_refused_and_rolled_back(tmp_path, s3_versioned, monkeypatch):
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    old = s3.put_object(Bucket=bucket, Key="old/data/final/x.csv", Body=b"x\n")["VersionId"]
+    proj = _publish_on_moto(tmp_path, s3, cloud={"storage": {"etag": "e", "version_id": old}}, cache=False)
+    dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
+
+    with pytest.raises(DvcPushFailed) as excinfo:
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc, git_ops=git)
+
+    assert "not provably on S3" in str(excinfo.value) and "data/final/x.csv" in str(excinfo.value)
+    assert "rolled back" in excinfo.value.recovery_hint
+    assert dvc.push_calls == [] and git.tag_calls == []
+    assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")

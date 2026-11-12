@@ -3039,6 +3039,8 @@ def _handle_publish(args: argparse.Namespace) -> int:
                 git_ops=git_ops,
                 message=args.message,
                 reporter=reporter,
+                aws_profile=config.aws_profile_name,
+                memo_path=config.resolved_cache_dir() / "proven-versions.sqlite",
             )
         except (WorkingTreeDirty, PublishError) as exc:
             reporter.error(str(exc), hint=exc.recovery_hint or None)

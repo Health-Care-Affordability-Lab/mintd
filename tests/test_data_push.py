@@ -21,6 +21,7 @@ from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
 from mintd._registry_git_ops import GitOpError, SubprocessRegistryGitOps
 from mintd.data_ops import PushSummary, commit_pushed_pointers, data_push
 from tests._dvc_fixtures import (
+    S3HoldsWhatThePointersSay,
     LOCK_MD5,
     MD5,
     stage_dvc_project,
@@ -30,39 +31,6 @@ from tests._dvc_fixtures import (
 )
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness.git import _git
-
-
-class _S3HoldsWhatThePointersSay:
-    """S3 as a push that worked leaves it: every version any project's
-    pointers under ``base`` name exists, holding the bytes they record, and
-    the current object at each key does too. For tests of what happens around
-    the push (the commit flow); what S3 really answers is tested against moto
-    in test_push_verify.py."""
-
-    def __init__(self, base: Path) -> None:
-        self._base = base
-
-    def _truth(self, key: str) -> tuple[str, int | None]:
-        from mintd._fast_sync_ops import discover_all_outs, parse_s3_url
-        from mintd._pin_proof import publishable_scope
-        from mintd._push_verify import merged_default_remote, merged_remote
-
-        for cfg in self._base.rglob(".dvc/config"):
-            root = cfg.parent.parent
-            name = merged_default_remote(root)
-            url = merged_remote(root, name).get("url", "") if name else ""
-            if not url.startswith("s3://"):
-                continue
-            scope = publishable_scope(root, remote=name, prefix=parse_s3_url(url)[1],
-                                      cache_dir=root / ".dvc" / "cache", dvc_files=discover_all_outs(root))
-            for e in scope.entries:
-                if e.key == key:
-                    return e.md5, e.size
-        raise AssertionError(f"no pointer records {key}")
-
-    def head_object(self, *, Bucket: str, Key: str, VersionId: str | None = None) -> dict:
-        md5, size = self._truth(Key)
-        return {"VersionId": VersionId or "v-now", "ETag": f'"{md5}"', "ContentLength": size}
 
 
 @pytest.fixture
@@ -75,7 +43,7 @@ def push_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDvcOps
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "mintd._push_verify._create_s3_client",
-        lambda cfg, profile, **_: _S3HoldsWhatThePointersSay(tmp_path),
+        lambda cfg, profile, **_: S3HoldsWhatThePointersSay(tmp_path),
     )
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr(

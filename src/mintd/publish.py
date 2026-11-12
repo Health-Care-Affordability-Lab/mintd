@@ -228,6 +228,8 @@ def _apply_publish(
     git_ops: RegistryGitOps,
     message: str | None,
     reporter: Optional["Reporter"] = None,
+    aws_profile: str | None = None,
+    memo_path: Path | None = None,
 ) -> PublishResult:
     # Slice 32 (reviewer P1): pull new_metadata from the preview, NOT
     # recompute from disk. prepare_publish is the single source of
@@ -259,17 +261,57 @@ def _apply_publish(
             metadata_path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
         )
 
-    # Step 2: dvc push
+    # Step 2: dvc push, with the same repair before it and check after it as
+    # `mintd data push` (_push_verify): a release whose pins point nowhere, or
+    # a full re-upload after `dvc commit -f`, is what this stops.
     if reporter is not None:
         reporter.update_status("Pushing data to DVC...")
+    from ._fast_sync_ops import S3AccessDenied
+    from ._push_verify import PushRefused, judge, prepare, restore
+
+    rolled_back = "metadata.json was rolled back; nothing was committed, tagged or advertised."
     try:
-        dvc_ops.push(cwd=project_path)
+        prepared = prepare(project_path, remote_arg=None, selection=None, aws_profile=aws_profile,
+                           memo_path=memo_path)
+    except (PushRefused, S3AccessDenied) as exc:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(
+            str(exc), recovery_hint=f"{rolled_back} {getattr(exc, 'hint', None) or ''}".strip(),
+        ) from exc
+    try:
+        pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
     except DvcOpError as exc:
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
             f"dvc push failed: {exc}",
             recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
         ) from exc
+    finally:
+        if prepared is not None:
+            restore(prepared)
+            prepared.close()
+    if prepared is not None:
+        try:
+            changed: list[str] | None = git_ops.uncommitted_pointers(project_path)
+        except GitOpError:
+            changed = None
+        head = {}
+        for rel in changed or []:
+            try:
+                head[rel] = git_ops.head_text(project_path, rel)
+            except GitOpError:
+                head[rel] = None
+        try:
+            gate = judge(prepared, changed, head=head, dvc_uploaded_nothing=pushed.up_to_date)
+        except S3AccessDenied as exc:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise DvcPushFailed(f"S3 refused to show the pinned versions: {exc}", recovery_hint=rolled_back) from exc
+        if not gate.ok:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise DvcPushFailed(
+                f"the push isn't verified on {gate.location}: " + "; ".join(gate.lines),
+                recovery_hint=f"{rolled_back} Finish with `mintd data push`, then rerun `mintd publish`.",
+            )
 
     # The push is what pins outputs on a version-aware remote, and it can
     # change what the gate sees (dvc writes a legacy `.dir` pointer back as a

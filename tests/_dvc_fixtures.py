@@ -199,3 +199,36 @@ def stage_undeliverable_primary(project: Path, *, version_aware: bool = True) ->
     meta_path = stage_dvc_project(project, version_aware=version_aware)
     write_pointer(project, "data/final", is_dir=True, version_id=None)
     return meta_path
+
+
+class S3HoldsWhatThePointersSay:
+    """S3 as a push that worked leaves it: every version any project's
+    pointers under ``base`` name exists, holding the bytes they record, and
+    the current object at each key does too. For tests of what happens around
+    the push (the commit flow); what S3 really answers is tested against moto
+    in test_data_push.py and test_pin_repair.py."""
+
+    def __init__(self, base: Path) -> None:
+        self._base = base
+
+    def _truth(self, key: str) -> tuple[str, int | None]:
+        from mintd._fast_sync_ops import discover_all_outs, parse_s3_url
+        from mintd._pin_proof import publishable_scope
+        from mintd._push_verify import merged_default_remote, merged_remote
+
+        for cfg in self._base.rglob(".dvc/config"):
+            root = cfg.parent.parent
+            name = merged_default_remote(root)
+            url = merged_remote(root, name).get("url", "") if name else ""
+            if not url.startswith("s3://"):
+                continue
+            scope = publishable_scope(root, remote=name, prefix=parse_s3_url(url)[1],
+                                      cache_dir=root / ".dvc" / "cache", dvc_files=discover_all_outs(root))
+            for e in scope.entries:
+                if e.key == key:
+                    return e.md5, e.size
+        raise AssertionError(f"no pointer records {key}")
+
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str | None = None) -> dict:
+        md5, size = self._truth(Key)
+        return {"VersionId": VersionId or "v-now", "ETag": f'"{md5}"', "ContentLength": size}
