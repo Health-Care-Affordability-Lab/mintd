@@ -335,7 +335,10 @@ NO_ID = "no ID"
 STALE_ID = "stale ID"
 
 
-def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHashes) -> RepairPlan:
+def plan_repair(
+    s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHashes,
+    memo: "ProofMemo | None" = None,
+) -> RepairPlan:
     """Decide, for every entry, keep / re-attach / strip / unrecoverable.
 
     1. Its own version proves the file (a multipart pin with no cache file
@@ -349,9 +352,7 @@ def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHa
     """
     from ._fast_sync_ops import probe_versions
 
-    pinned_heads = probe_versions(
-        s3, bucket, [(e.key, e.version_id) for e in entries if e.version_id and not e.legacy_dir]
-    )
+    pins = prove_pins(s3, bucket, [e for e in entries if e.version_id and not e.legacy_dir], cache, memo)
     keep: list[Entry] = []
     rest: list[Entry] = []
     inconclusive: list[Entry] = []
@@ -359,7 +360,7 @@ def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHa
         if e.legacy_dir or not e.version_id:
             rest.append(e)
             continue
-        verdict = prove(e, pinned_heads[(e.key, e.version_id)], cache)
+        verdict = pins[(e.key, e.version_id)]
         if verdict in ("ok", "size_only"):
             keep.append(e)
         elif verdict == "inconclusive":
@@ -380,6 +381,8 @@ def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHa
             continue
         if not e.legacy_dir and prove(e, now, cache) == "ok":
             reattach.append((e, pinned(e, now), reason))
+            if memo is not None:
+                memo.remember(bucket, pinned(e, now), now.size)
             continue
         # A legacy entry's pointer isn't written (DVC rewrites the out as a
         # files list when it uploads), so nothing needs stopping before the
@@ -499,3 +502,88 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
             _atomic_write_text(root / pointer, raw.decode("utf-8"))
         raise
     return sorted(originals)
+
+
+# --- proof memo ---------------------------------------------------------------
+
+MEMO_SAMPLE = 16
+
+
+class ProofMemo:
+    """Versions this machine has proven to hold their bytes:
+    ``(endpoint, bucket, key, version_id) -> (md5, size)``.
+
+    A version's bytes never change, so a full proof stays true; only a
+    deletion could break it, and the lab never deletes on S3. Read access can
+    change, though, so each push still HEADs a random sample of what it
+    remembers (``MEMO_SAMPLE`` per bucket and prefix) and ignores the memo
+    for the rest of the command if any of them fails. Only full proofs are
+    written, never the multipart size-only allowance.
+    """
+
+    def __init__(self, path: Path, endpoint: str) -> None:
+        import sqlite3
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._db = sqlite3.connect(path)
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS proven (endpoint TEXT, bucket TEXT, key TEXT, version_id TEXT,"
+            " md5 TEXT, size INTEGER, PRIMARY KEY (endpoint, bucket, key, version_id))"
+        )
+        self._endpoint = endpoint
+        self.disabled = False
+        self.hits = 0
+
+    def knows(self, bucket: str, e: Entry) -> bool:
+        if self.disabled or not e.version_id:
+            return False
+        row = self._db.execute(
+            "SELECT md5, size FROM proven WHERE endpoint=? AND bucket=? AND key=? AND version_id=?",
+            (self._endpoint, bucket, e.key, e.version_id),
+        ).fetchone()
+        return row is not None and row[0] == e.md5 and (e.size is None or row[1] == e.size)
+
+    def remember(self, bucket: str, e: Entry, size: int | None) -> None:
+        self._db.execute(
+            "INSERT OR REPLACE INTO proven VALUES (?, ?, ?, ?, ?, ?)",
+            (self._endpoint, bucket, e.key, e.version_id, e.md5, size),
+        )
+        self._db.commit()
+
+
+def prove_pins(
+    s3: Any, bucket: str, entries: list[Entry], cache: CacheHashes, memo: ProofMemo | None,
+) -> dict[tuple, str]:
+    """``prove`` for each entry's own pin, by HEAD or from the memo.
+
+    Remembered entries skip the HEAD, apart from a random sample that must
+    still prove; one that fails disables the memo and every entry is HEADed.
+    Every full proof is remembered. Keyed by ``(key, version_id)``.
+    """
+    import random
+
+    from ._fast_sync_ops import probe_versions
+
+    remembered = [e for e in entries if memo is not None and memo.knows(bucket, e)]
+    sample = random.sample(remembered, min(MEMO_SAMPLE, len(remembered)))
+    skipped = {(e.key, e.version_id) for e in remembered} - {(e.key, e.version_id) for e in sample}
+    heads = probe_versions(s3, bucket, [(e.key, e.version_id) for e in entries
+                                        if (e.key, e.version_id) not in skipped])
+    verdicts = {(e.key, e.version_id): prove(e, heads[(e.key, e.version_id)], cache)
+                for e in entries if (e.key, e.version_id) in heads}
+    if memo is not None and any(verdicts[(e.key, e.version_id)] != "ok" for e in sample):
+        memo.disabled = True
+        rest = [e for e in entries if (e.key, e.version_id) in skipped]
+        more = probe_versions(s3, bucket, [(e.key, e.version_id) for e in rest])
+        heads.update(more)
+        verdicts.update({(e.key, e.version_id): prove(e, more[(e.key, e.version_id)], cache) for e in rest})
+        skipped = set()
+    for pin in skipped:
+        verdicts[pin] = "ok"
+    if memo is not None:
+        memo.hits += len(skipped)
+        for e in entries:
+            pin = (e.key, e.version_id)
+            if pin in heads and verdicts[pin] == "ok":
+                memo.remember(bucket, e, heads[pin].size)
+    return verdicts

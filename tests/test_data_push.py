@@ -79,7 +79,7 @@ def push_clients(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeDvcOps
     )
     dvc_ops = _FakeDvcOps()
     monkeypatch.setattr(
-        "mintd.cli.Config.load", classmethod(lambda cls, path=None: cls())
+        "mintd.cli.Config.load", classmethod(lambda cls, path=None: cls(cache_dir=tmp_path / "mintd-cache"))
     )
     monkeypatch.setattr(
         "mintd.cli._resolve_dvc_ops",
@@ -1342,7 +1342,7 @@ def test_check_a_pointer_rewritten_while_being_checked_is_not_committed(
 
     # --no-commit: the re-check before the ✓ catches it too.
     _git(["checkout", "-q", "--", "data/x.csv.dvc"], cwd=proj)
-    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"other bytes")  # so the file is uploaded and checked
     _x_pointer(proj, b"x-data\n")
     dvc.on_push = upload_then_arm
     assert cli.main(["data", "push", "--no-commit"]) == 1

@@ -1072,6 +1072,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 remote=args.remote,
                 jobs=args.jobs,
                 aws_profile=config.aws_profile_name,
+                memo_path=config.resolved_cache_dir() / "proven-versions.sqlite",
             )
     except PushRefused as e:
         reporter.error(str(e), hint=e.hint)

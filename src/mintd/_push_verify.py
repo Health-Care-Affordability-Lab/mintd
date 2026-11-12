@@ -27,18 +27,18 @@ from ._fast_sync_ops import (
     _default_remote_name_from_config,
     discover_all_outs,
     parse_s3_url,
-    probe_versions,
 )
 from ._pin_proof import (
     CacheHashes,
     Entry,
     PointerWriteError,
+    ProofMemo,
     RepairPlan,
     _dump,
     _records,
     cause_lines,
     plan_repair,
-    prove,
+    prove_pins,
     publishable_scope,
     write_repair,
 )
@@ -152,12 +152,15 @@ class Gate:
     frozen: dict[str, str | None] = field(default_factory=dict)
     reattached: int = 0
     uploaded: int = 0
+    memo: int = 0
 
     @property
     def success_line(self) -> str:
         parts = [f"{self.uploaded} uploaded and verified"] if self.uploaded else []
         if self.reattached:
             parts.append(f"{self.reattached} re-attached")
+        if self.memo:
+            parts.append(f"{self.memo} from memo")
         extra = f" ({', '.join(parts)})" if parts else ""
         return f"{self.counts['checked']} file(s) verified on {self.location}{extra}"
 
@@ -182,6 +185,15 @@ class Prepared:
     before: dict[tuple, tuple[str | None, str | None]]
     env: dict[str, str]
     _tmp: tempfile.TemporaryDirectory
+    memo: ProofMemo | None = None
+
+    @property
+    def proven(self) -> dict[tuple, tuple[str | None, str | None]]:
+        """Pins proven (or allowed) before the push: the gate needn't HEAD
+        them again while they're unchanged, since a version's bytes don't."""
+        got = {_identity(e): (e.version_id, e.etag) for e in self.plan.keep}
+        got.update({_identity(old): (new.version_id, new.etag) for old, new, _ in self.plan.reattach})
+        return got
 
     @property
     def location(self) -> str:
@@ -202,12 +214,14 @@ class Prepared:
         return lines
 
     def close(self) -> None:
+        """Remove the throwaway DVC site cache once the uploads are done. The
+        memo stays open for the check after them; it closes with the process."""
         self._tmp.cleanup()
 
 
 def prepare(
     root: Path, *, remote_arg: str | None, selection: frozenset[str] | None,
-    aws_profile: str | None,
+    aws_profile: str | None, memo_path: Path | None = None,
 ) -> Prepared | None:
     """Refuse, plan and write the repair; None when the remote isn't
     version-aware (nothing there is pinned by version)."""
@@ -248,7 +262,8 @@ def prepare(
                               dvc_files=dvc_files)
     repair = tuple(e for e in scope.entries if _in_selection(e, selection))
     stuck = list(scope.unrecoverable)
-    plan = plan_repair(s3, bucket, repair, cache)
+    memo = ProofMemo(memo_path, cfg.get("endpointurl") or cfg.get("endpoint") or "aws") if memo_path else None
+    plan = plan_repair(s3, bucket, repair, cache, memo)
     stuck += [f"{e.path} ({why})" for e, why in plan.unrecoverable]
     if stuck:
         raise PushRefused(
@@ -271,7 +286,7 @@ def prepare(
         root=root, remote=name, bucket=bucket, prefix=prefix, s3=s3, cache=cache,
         dvc_files=dvc_files, repair=repair, plan=plan, written=written, snapshot=snapshot,
         before={_identity(e): (e.version_id, e.etag) for e in scope.entries},
-        env={"DVC_SITE_CACHE_DIR": tmp.name}, _tmp=tmp,
+        env={"DVC_SITE_CACHE_DIR": tmp.name}, _tmp=tmp, memo=memo,
     )
 
 
@@ -370,8 +385,9 @@ def judge(
         if _identity(e) in repair_ids or (e.pointer, e.stage, e.record[0]) in differs
     ]
     frozen = {p: _sha256(root / p) for p in sorted({e.pointer for e in entries} | set(changed))}
-    heads = probe_versions(prepared.s3, prepared.bucket,
-                           [(e.key, e.version_id) for e in entries if e.version_id])
+    proven = prepared.proven
+    need = [e for e in entries if e.version_id and proven.get(_identity(e)) != (e.version_id, e.etag)]
+    verdicts = prove_pins(prepared.s3, prepared.bucket, need, prepared.cache, prepared.memo)
     # A re-uploaded file still holding the version seen before the push fails
     # the proof (re-attach takes every version that proves its file), so the
     # proof alone settles whether each upload arrived.
@@ -387,8 +403,10 @@ def judge(
         touched = prepared.before.get(ident) != (e.version_id, e.etag)
         if not e.version_id:
             verdict = "no_id"
+        elif proven.get(ident) == (e.version_id, e.etag):
+            verdict = "ok"
         else:
-            verdict = prove(e, heads[(e.key, e.version_id)], prepared.cache)
+            verdict = verdicts[(e.key, e.version_id)]
             if verdict == "size_only":
                 verdict = "unproven" if touched else "ok"
         counts[verdict] += 1
@@ -398,6 +416,7 @@ def judge(
             if ident not in repair_ids:
                 gate_only.append(e.path)
     counts["checked"] = len(entries)
+    counts["memo"] = prepared.memo.hits if prepared.memo is not None else 0
     reasons = {
         "missing": "S3 has no such version at the file's path",
         "unpinned": "S3 holds no pinnable version (versioning suspended?)",
@@ -416,4 +435,5 @@ def judge(
     return Gate(
         ok=not failed, location=loc, counts=counts, lines=lines, frozen=frozen,
         reattached=len(prepared.plan.reattach), uploaded=len(prepared.plan.strip),
+        memo=prepared.memo.hits if prepared.memo is not None else 0,
     )

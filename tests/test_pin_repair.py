@@ -197,3 +197,83 @@ def test_no_answer_for_the_current_object_leaves_the_entry_unchanged(s3_versione
     plan = _plan(tmp_path, s3, bucket, ["a.csv.dvc"])
     assert [e.path for e in plan.inconclusive] == ["a.csv"]
     assert not plan.changes
+
+
+# --- the proof memo -----------------------------------------------------------
+
+from mintd._fast_sync_ops import S3AccessDenied  # noqa: E402
+from mintd._pin_proof import MEMO_SAMPLE, ProofMemo  # noqa: E402
+
+
+def _pinned_files(root: Path, s3, bucket: str, n: int) -> list[str]:
+    files = []
+    for i in range(n):
+        data = f"file {i}\n".encode()
+        v = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/f{i}.csv", Body=data)["VersionId"]
+        _pointer(root, f"f{i}.csv.dvc", f"f{i}.csv", data, {R: {"etag": _md5(data), "version_id": v}})
+        files.append(f"f{i}.csv.dvc")
+    return files
+
+
+def _count_heads(s3) -> list[str]:
+    seen: list[str] = []
+    s3.meta.events.register("before-send.s3.HeadObject", lambda request, **_: seen.append(request.url))
+    return seen
+
+
+def _plan_with(root: Path, s3, bucket: str, files: list[str], memo: ProofMemo):
+    scope = publishable_scope(root, remote=R, prefix=PREFIX, cache_dir=root / ".dvc" / "cache", dvc_files=files)
+    return plan_repair(s3, bucket, scope.entries, CacheHashes(root / ".dvc" / "cache"), memo)
+
+
+def test_a_second_push_of_unchanged_data_heads_only_the_sample(s3_versioned, tmp_path: Path) -> None:
+    s3, bucket = s3_versioned
+    files = _pinned_files(tmp_path, s3, bucket, MEMO_SAMPLE + 8)
+    db = tmp_path / "memo.sqlite"
+    heads = _count_heads(s3)
+    assert len(_plan_with(tmp_path, s3, bucket, files, ProofMemo(db, "e")).keep) == len(files)
+    assert len(heads) == len(files)
+    heads.clear()
+    memo = ProofMemo(db, "e")
+    assert len(_plan_with(tmp_path, s3, bucket, files, memo).keep) == len(files)
+    assert len(heads) == MEMO_SAMPLE and memo.hits == 8
+
+
+def test_a_remembered_version_whose_md5_changed_is_probed_again(s3_versioned, tmp_path: Path) -> None:
+    """Whether or not the sample happens to include it, a file whose md5
+    changed since its version was proven is HEADed, fails, and the rest of
+    the memo still answers."""
+    s3, bucket = s3_versioned
+    n = MEMO_SAMPLE * 2 + 8
+    files = _pinned_files(tmp_path, s3, bucket, n)
+    db = tmp_path / "memo.sqlite"
+    _plan_with(tmp_path, s3, bucket, files, ProofMemo(db, "e"))
+    rec = yaml.safe_load((tmp_path / files[0]).read_text())
+    rec["outs"][0]["md5"] = _md5(b"new data")
+    (tmp_path / files[0]).write_text(yaml.safe_dump(rec, sort_keys=False))
+    memo = ProofMemo(db, "e")
+    plan = _plan_with(tmp_path, s3, bucket, files, memo)
+    assert "f0.csv" not in [e.path for e in plan.keep]
+    assert memo.hits == n - 1 - MEMO_SAMPLE  # every other file: remembered, beyond the sample
+
+
+def test_lost_read_access_is_caught_by_the_sample(s3_versioned, tmp_path: Path) -> None:
+    s3, bucket = s3_versioned
+    files = _pinned_files(tmp_path, s3, bucket, 3)
+    db = tmp_path / "memo.sqlite"
+    _plan_with(tmp_path, s3, bucket, files, ProofMemo(db, "e"))
+    _head_reply(s3, 403, versioned=True)  # versioned reads now denied
+    with pytest.raises(S3AccessDenied):
+        _plan_with(tmp_path, s3, bucket, files, ProofMemo(db, "e"))
+
+
+def test_a_size_only_pass_is_never_remembered(s3_versioned, tmp_path: Path) -> None:
+    s3, bucket = s3_versioned
+    _pointer(tmp_path, "a.csv.dvc", "a.csv", b"A" * 7, {R: {"etag": "e" * 32 + "-3", "version_id": "v1"}})
+    _head_reply(s3, 200, {"ETag": '"' + "e" * 32 + '-3"', "Content-Length": "7", "x-amz-version-id": "v1"})
+    db = tmp_path / "memo.sqlite"
+    plan = _plan_with(tmp_path, s3, bucket, ["a.csv.dvc"], ProofMemo(db, "e"))
+    assert [e.path for e in plan.keep] == ["a.csv"]
+    import sqlite3
+
+    assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM proven").fetchone() == (0,)

@@ -967,6 +967,7 @@ def data_push(
     jobs: int | None = None,
     cwd: Path | None = None,
     aws_profile: str | None = None,
+    memo_path: Path | None = None,
 ) -> PushSummary:
     # Resolve the effective remote for display only (explicit > .dvc/config >
     # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
@@ -995,7 +996,8 @@ def data_push(
     # Raises ``PushRefused`` before any write or upload.
     from ._push_verify import prepare, restore
 
-    prepared = prepare(project_path, remote_arg=remote, selection=selection, aws_profile=aws_profile)
+    prepared = prepare(project_path, remote_arg=remote, selection=selection, aws_profile=aws_profile,
+                       memo_path=memo_path)
     env = prepared.env if prepared is not None else None
     start_t = time.monotonic()
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
