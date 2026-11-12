@@ -62,6 +62,7 @@ from .catalog import (
     CatalogNotFound,
     GitCatalogClient,
 )
+from ._dvc_state import abbreviate
 from .check import CheckFinding, check_project
 from .data import (
     AmbiguousImport,
@@ -77,7 +78,16 @@ from .data import (
     clone_and_pull_product,
     import_product,
 )
-from .data_ops import data_add, data_pull, data_push, data_remove, data_verify
+from .data_ops import (
+    COMMIT_MESSAGE,
+    PointerCommit,
+    commit_pushed_pointers,
+    data_add,
+    data_pull,
+    data_push,
+    data_remove,
+    data_verify,
+)
 from ._s3_listing_ops import (
     BucketAccessError,
     BucketNotFound,
@@ -472,14 +482,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_clone.set_defaults(_handler=_handle_data_clone)
 
-    p_push = p_data_sub.add_parser("push", help="Push DVC data")
+    p_push = p_data_sub.add_parser(
+        "push", help="Upload DVC data, then commit and push the .dvc / dvc.lock files it rewrote",
+    )
     p_push.add_argument(
         "targets", nargs="*",
-        help="Limit push to these tracked files/directories, .dvc files or "
-             "stage names (default: push everything tracked)",
+        help="tracked files or folders (each pushes the whole output containing it), "
+             ".dvc files or stage names (default: push everything tracked)",
     )
     p_push.add_argument("--remote")
     p_push.add_argument("--jobs", type=int)
+    p_push.add_argument(
+        "--no-commit", action="store_true",
+        help="upload only; leave the .dvc / dvc.lock files uncommitted",
+    )
     p_push.set_defaults(_handler=_handle_data_push)
 
     p_add = p_data_sub.add_parser("add", help="Add DVC data")
@@ -1041,10 +1057,14 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
+    # dvc runs from the project it finds by walking up to `.dvc/`; targets are
+    # read relative to where the user typed them.
+    root = _dvc_root(Path.cwd())
     try:
         with reporter.status("Pushing data to DVC..."):
             summary = data_push(
-                project_path=Path("."),
+                project_path=root,
+                cwd=Path.cwd(),
                 targets=args.targets or None,
                 dvc_ops=dvc_ops,
                 remote=args.remote,
@@ -1059,18 +1079,53 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     except DvcOpError as e:
         reporter.error(str(e))
         return 1
-    # The upload worked either way, so this only decides the ✓. Importers read
-    # the producer's pushed commit, never this working tree, and a
-    # version-aware push writes S3 version IDs into exactly these files, so a
-    # pointer that differs from HEAD is one no importer can see yet.
+    # Importers read the producer's pushed commit, never this working tree,
+    # and a version-aware push writes S3 version IDs into exactly these files,
+    # so a pointer that differs from HEAD is one no importer can see yet.
     # None, not []: a JSON reader must not mistake "git could not answer"
     # (outside a repo, say) for a clean tree, and `warn` is silent under --json.
+    git_ops = _resolve_git_ops(config)
     pointers: list[str] | None
     try:
-        pointers = _resolve_git_ops(config).uncommitted_pointers(_dvc_root(Path.cwd()))
+        pointers = git_ops.uncommitted_pointers(root)
     except GitOpError as exc:
         reporter.warn(f"could not check .dvc / dvc.lock files against HEAD: {exc.stderr.strip() or exc}")
         pointers = None
+    found = pointers
+    outcome: PointerCommit | None = None
+    unpushed: tuple[int, str] | None = None
+    if pointers and not args.no_commit:
+        with reporter.status("Committing and pushing pointer files..."):
+            outcome = commit_pushed_pointers(
+                root, pointers, git_ops=git_ops, remote=args.remote,
+                selection=summary.selection, cwd=Path.cwd(),
+            )
+        if outcome.state not in ("left", "blocked"):
+            try:
+                pointers = git_ops.uncommitted_pointers(root)
+            except GitOpError:
+                pointers = None
+    elif pointers == []:
+        # Nothing to commit, but a pointer commit a rejected push left local
+        # still reaches no importer: no ✓ while the branch is ahead of its upstream.
+        try:
+            info = git_ops.branch_info(root)
+        except GitOpError:
+            info = None
+        if info and info.ahead:
+            same_name = info.merge_ref is not None and info.merge_ref.removeprefix("refs/heads/") == info.branch
+            unpushed = (info.ahead, f"{info.remote}/{info.branch}" if same_name else "any remote")
+
+    if found is None:
+        state = "unchecked"
+    elif not found:
+        state = "unpushed" if unpushed else "clean"
+    elif outcome is None:
+        state = "skipped"
+    else:
+        state = outcome.state
+    failed = state in ("blocked", "commit_failed", "push_failed")
+
     if reporter.json_mode:
         reporter.result(
             {
@@ -1080,33 +1135,81 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 "elapsed_s": round(summary.elapsed_s, 2),
                 "up_to_date": summary.up_to_date,
                 "uncommitted_pointers": pointers,
+                "git": {
+                    "state": state,
+                    "commit": outcome.commit if outcome else None,
+                    "pushed_to": outcome.pushed_to if outcome else None,
+                    "reason": (outcome.reason if outcome else None)
+                    or (f"{unpushed[0]} commit(s) not on {unpushed[1]}" if unpushed else None),
+                    "blocked": list(outcome.blocked) if outcome else [],
+                    "note": outcome.note if outcome else None,
+                },
             },
             pretty=_pretty_data_push,
         )
+        return 1 if failed else 0
+
+    remote_clause = f" → s3://{summary.remote}"
+    duration = _format_duration(summary.elapsed_s)
+    if summary.up_to_date:
+        line = f"already up to date{remote_clause} in {duration}"
     else:
-        remote_clause = f" → s3://{summary.remote}"
-        duration = _format_duration(summary.elapsed_s)
-        if summary.up_to_date:
-            line = f"already up to date{remote_clause} in {duration}"
-        else:
-            count_clause = (
-                f" {summary.pushed} object(s)" if summary.pushed is not None else ""
-            )
-            size_clause = (
-                f" ({_human_bytes(summary.bytes)})" if summary.bytes else ""
-            )
-            line = f"pushed{count_clause}{size_clause}{remote_clause} in {duration}"
-        if pointers:
+        count_clause = (
+            f" {summary.pushed} object(s)" if summary.pushed is not None else ""
+        )
+        size_clause = (
+            f" ({_human_bytes(summary.bytes)})" if summary.bytes else ""
+        )
+        line = f"pushed{count_clause}{size_clause}{remote_clause} in {duration}"
+    if found is None:
+        # The warning above says why: no ✓ over pointers nobody checked.
+        reporter.success(line)
+    elif not found:
+        if unpushed:
             reporter.warn(
-                f"{line}, but these pointer files differ from the last commit: "
-                f"{', '.join(pointers)} — commit and push them; importers read your pushed commit, not these files"
+                f"{line}, but {unpushed[0]} commit(s) on this branch are not on {unpushed[1]} yet "
+                "— git push; importers read your pushed commit"
             )
-        elif pointers is None:
-            # The warning above says why: no ✓ over pointers nobody checked.
-            reporter.success(line)
         else:
             reporter.success(f"✓ {line}")
-    return 0
+    elif outcome is None or outcome.state == "left":
+        reporter.warn(
+            f"{line}, but these pointer files differ from the last commit: "
+            f"{', '.join(found)} — commit and push them; importers read your pushed commit, not these files"
+        )
+        if outcome is not None:
+            reporter.warn(f"not committed: {outcome.reason}")
+    elif outcome.state == "blocked":
+        reporter.error(
+            f"{line}, but nothing was committed: importers could not pull what these "
+            f"pointer files record: {abbreviate(list(outcome.blocked))}",
+            hint="the data is on S3. Push the named outputs too (mintd data push <path>); "
+                 "re-record a damaged folder with `dvc commit -f <its .dvc file or stage>` "
+                 "and push again; or pass --no-commit to leave git alone",
+        )
+    elif outcome.state == "commit_failed":
+        reporter.error(
+            f"{line}; the data is on S3, but git commit failed: {outcome.reason}",
+            hint=(
+                f"git -C {shlex.quote(str(root))} commit -m {shlex.quote(COMMIT_MESSAGE)} -- "
+                f"{' '.join(shlex.quote(p) for p in found)} && git -C {shlex.quote(str(root))} push"
+            ),
+        )
+    elif outcome.state == "push_failed":
+        reporter.error(
+            f"{line}; the data is on S3 and committed locally as {outcome.commit}, "
+            f"but git push failed: {outcome.reason}",
+            hint=outcome.hint,
+        )
+    else:
+        earlier = f" with {outcome.earlier} earlier unpushed commit(s)" if outcome.earlier else ""
+        reporter.success(
+            f"✓ {line}; committed {outcome.commit} ({abbreviate(list(outcome.pointers))}) "
+            f"and pushed it to {outcome.pushed_to}{earlier}"
+        )
+        if outcome.note:
+            reporter.info(outcome.note)
+    return 1 if failed else 0
 
 
 def _share_boto3_available(reporter: Reporter) -> bool:

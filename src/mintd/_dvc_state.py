@@ -16,25 +16,33 @@ pointers, `dvc.lock` stage outs, or both in the same prefix.
 
 `outs_matching` answers "which outs does this declared path reach"; `delivery`
 answers the consumer's question on top of it — "would `mintd data import` of
-this path land bytes?". `check` and the import postcondition
-(`data._require_deliverable`) call it; the push probe is meant to as well
-rather than re-derive it, so the three verbs cannot disagree about what
-"delivered" means.
+this path land bytes?". `check`, the import postcondition
+(`data._require_deliverable`) and `data push`'s pointer probe
+(`judge_pointers`) all call it rather than re-derive it, so the three verbs
+cannot disagree about what "delivered" means.
 """
 from __future__ import annotations
 
+import configparser
 import dataclasses
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+import yaml
 
 from ._fast_sync_ops import (
+    EMPTY_DIR_MD5,
     DvcOut,
+    cache_path_for,
+    dir_manifest_md5,
     discover_all_outs,
     normalize_target,
     out_pins_no_files,
     outs_for_target,
+    parse_dvc_lock_outs,
+    parse_dvc_outs,
     partition_pipeline_outs,
     workspace_path_for,
 )
@@ -150,6 +158,75 @@ def outs_matching(
         if path_covers(rel, declared_rel) or path_covers(declared_rel, rel):
             matched.append(dataclasses.replace(out, target=rel))
     return matched
+
+
+def _names_a_stage(dvc_yaml: Path, name: str) -> bool:
+    """Is ``name`` (``build``, or a ``fan@a`` instance) a stage ``dvc_yaml`` declares?"""
+    try:
+        doc = yaml.safe_load(dvc_yaml.read_text(encoding="utf-8")) if dvc_yaml.is_file() else None
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    stages = doc.get("stages") if isinstance(doc, dict) else None
+    return isinstance(stages, dict) and name.split("@", 1)[0] in stages
+
+
+def push_targets(
+    project_path: Path, targets: list[str], remote_name: str, *, cwd: Path
+) -> tuple[list[list[str]], frozenset[str]]:
+    """``(argv groups, selection)`` for ``dvc push`` run from the project root.
+
+    A target naming a tracked output, or a file or folder inside or above
+    one, becomes every out it reaches (``outs_matching``'s three
+    directions), each spelled the way dvc pushes it whole: a pointer out as
+    its ``.dvc`` file, a ``dvc.lock`` out as ``dvc.yaml:<stage>``. Naming one
+    file of a tracked folder therefore pushes the folder; pushed bare, dvc
+    uploads that one file and rewrites the folder's pointer to list only it.
+    A ``.dvc`` target is kept; a stage name typed beside a subdirectory's
+    own ``dvc.yaml`` becomes ``<dir>/dvc.yaml:<name>``; any other target that
+    matches nothing reaches dvc unchanged, so dvc rejects or handles it as
+    before.
+
+    Targets are read relative to ``cwd`` and re-spelled relative to the root
+    (an escaping one stays absolute). The groups are ``.dvc`` paths, stage
+    keys, then the rest, never mixed in one argv (see
+    ``data_ops._shape_groups``). The selection holds the ``.dvc`` paths and
+    stage keys: what this push uploads whole.
+    """
+    root = Path(os.path.normpath(project_path))
+    here = Path(os.path.normpath(cwd))
+    dvc_files: dict[str, None] = {}
+    stages: dict[str, None] = {}
+    rest: dict[str, None] = {}
+    all_outs: list[DvcOut] | None = None
+    for t in targets:
+        absolute = os.path.normpath(here / t)
+        try:
+            rel = os.path.relpath(absolute, root)
+        except ValueError:  # Windows: another drive, so outside the project
+            rel = ".."
+        if rel == ".." or rel.startswith(f"..{os.sep}"):
+            rest[absolute] = None
+            continue
+        rel = Path(rel).as_posix()
+        if rel.endswith(".dvc"):
+            dvc_files[rel] = None
+            continue
+        if all_outs is None:
+            all_outs = _all_dvc_outs(root, remote_name)
+        matched = outs_matching(root, rel, remote_name, outs=all_outs)
+        if not matched and here != root and _names_a_stage(here / "dvc.yaml", t):
+            # A stage name typed beside a subdirectory's own dvc.yaml: dvc
+            # found it from there, and from the root it needs the file named.
+            stages[f"{Path(os.path.relpath(here, root)).as_posix()}/dvc.yaml:{t}"] = None
+        elif not matched:
+            rest[t if here == root else rel] = None
+        for o in matched:
+            if o.stage is not None:
+                stages[f"dvc.yaml:{o.stage}"] = None
+            elif o.dvc_file is not None:
+                dvc_files[Path(os.path.relpath(root / o.dvc_file, root)).as_posix()] = None
+    groups = [list(g) for g in (dvc_files, stages, rest) if g]
+    return groups, frozenset([*dvc_files, *stages])
 
 
 # ---------------------------------------------------------------------------
@@ -356,3 +433,229 @@ def delivery(
     if version_aware:
         return Delivery("pinned", f"{pinned}/{total} files carry an S3 version ID ({shape})")
     return Delivery("pinned", f"remote is not version-aware; plain dvc pull serves it ({shape})")
+
+
+# ---------------------------------------------------------------------------
+# The push probe: may `data push` commit these pointer files?
+# ---------------------------------------------------------------------------
+
+
+def dvc_cache_dir(root: Path) -> Path:
+    """The project's DVC cache: ``[cache] dir`` from ``.dvc/config.local``,
+    then ``.dvc/config`` (relative to ``.dvc/``), else ``.dvc/cache``."""
+    for name in ("config.local", "config"):
+        parser = configparser.ConfigParser(strict=False, interpolation=None)
+        try:
+            parser.read(root / ".dvc" / name, encoding="utf-8")
+        except configparser.Error:
+            continue
+        value = parser.get("cache", "dir", fallback="")
+        if value:
+            return Path(os.path.normpath(root / ".dvc" / value))
+    return root / ".dvc" / "cache"
+
+
+@dataclasses.dataclass(frozen=True)
+class PointerJudgement:
+    """``blocked``: what a commit would record that importers could not pull.
+    ``not_committed``: why the pointers are left for a person to commit."""
+
+    blocked: tuple[str, ...] = ()
+    not_committed: tuple[str, ...] = ()
+
+
+def _load(text: str | None) -> Any:
+    try:
+        return yaml.safe_load(text) if text else None
+    except yaml.YAMLError:
+        return None
+
+
+def _hashed(raw_outs: Any) -> list[dict] | None:
+    """The raw outs the parsers turn into ``DvcOut``s, in their order; None
+    when the list is not a list of mappings."""
+    if not isinstance(raw_outs, list) or not all(isinstance(r, dict) for r in raw_outs):
+        return None
+    return [r for r in raw_outs if r.get("md5") or "files" in r]
+
+
+def _by_path(raw_outs: Any) -> dict[str, dict]:
+    if not isinstance(raw_outs, list):
+        return {}
+    return {str(r.get("path")): r for r in raw_outs if isinstance(r, dict)}
+
+
+def _lists_files(raw: dict | None) -> bool:
+    if not raw:
+        return False
+    if isinstance(raw.get("files"), list):
+        return bool(raw["files"])
+    md5 = str(raw.get("md5", ""))
+    return md5.endswith(".dir") and md5 != EMPTY_DIR_MD5
+
+
+def _judge_out(
+    root: Path,
+    o: DvcOut,
+    raw: dict,
+    head_raw: dict | None,
+    label: str,
+    *,
+    remote_name: str,
+    version_aware: bool,
+    cache: Path,
+    blocked: list[str],
+    soft: list[str],
+) -> None:
+    if raw == head_raw:
+        return  # committed as it is: this commit does not change what importers get
+    rel = _workspace_rel(root, o)
+    if rel is None:
+        soft.append(f"{label} records an output outside the project")
+        return
+    o = dataclasses.replace(o, target=rel)
+    label = f"{label}: {rel}"
+    if _never_pushed(o) or raw.get("cache") is False or raw.get("push") is False:
+        return
+    if version_aware:
+        d = delivery(root, rel, remote_name, version_aware=True, outs=[o])
+        if not d.deliverable and d.state != "not_pullable":
+            blocked.append(f"{label} ({d.detail})")
+            return
+    if not o.materializes_as_dir:
+        return
+    if out_pins_no_files(o):
+        ws = root / rel
+        if _lists_files(head_raw):
+            blocked.append(f"{label} lists no files, but the last commit's pointer lists some")
+        elif ws.is_dir() and next(ws.iterdir(), None) is not None:
+            blocked.append(f"{label} lists no files, but the folder on disk holds some")
+        return
+    tree = dir_manifest_md5(o.files) if o.files is not None else o.md5
+    if not cache.is_dir():
+        soft.append(f"no local DVC cache to check {label} against")
+    elif not (cache_path_for(cache, tree).exists() or (cache / tree[:2] / tree[2:]).exists()):
+        count = f"{len(o.files)} file(s)" if o.files is not None else f"tree {tree}"
+        blocked.append(
+            f"{label} lists {count}, a tree DVC never saved in this project's cache: the push "
+            "recorded a different file list than `dvc add` / `dvc commit` did"
+        )
+
+
+def judge_pointers(
+    project_path: Path,
+    pointers: Sequence[str],
+    *,
+    head: Mapping[str, str | None],
+    remote_name: str,
+    version_aware: bool,
+    selection: frozenset[str] | None,
+) -> PointerJudgement:
+    """May ``data push`` commit ``pointers`` (root-relative ``.dvc`` /
+    ``dvc.lock`` files that differ from HEAD; ``head`` maps each to its text
+    at HEAD, None when new)? Judges what a commit would carry, not what the
+    push targeted: every out of a changed ``.dvc``, or of a root ``dvc.lock``
+    stage whose entry differs from HEAD, unless the out's own entry is the
+    same as HEAD's (the commit does not change it). Runs no git and no
+    network.
+
+    Blocked, because importers could not pull what the commit records:
+
+    - on a version-aware remote, an out ``delivery`` calls undeliverable
+      (version IDs missing under ``remote_name``, the default remote
+      importers read);
+    - a changed folder out that lists no files while the last commit's
+      pointer, or the folder on disk, holds some;
+    - a changed folder out whose file list hashes to a tree this project's
+      cache never held. dvc's version-aware push digests the list it
+      uploaded in memory (``dvc_data.index.save.build_tree``) and never
+      saves that tree, so a list cut down by a narrow push names a tree no
+      ``dvc add`` or ``dvc commit`` wrote, while a complete list hashes back
+      to the one they saved;
+    - a ``.dvc`` out with no hash.
+
+    Not committed, for a person to decide: a deleted pointer, a ``dvc
+    import``, a nested or unparseable file, an orphan stage or an out
+    outside the project, no local cache to check a folder against, and on an
+    md5-layout remote a pointer this targeted push did not upload (nothing
+    there shows it reached the remote).
+
+    Blind spots, stated: an empty tree once saved beside an empty folder; a
+    cut-down list equal to an older tree still in the cache; and a tree
+    fast-sync's ``ensure_dir_manifest`` wrote while pulling a damaged pointer.
+    """
+    root = Path(os.path.normpath(project_path))
+    cache = dvc_cache_dir(root)
+    blocked: list[str] = []
+    soft: list[str] = []
+
+    def judge(o: DvcOut, raw: dict, head_raw: dict | None, label: str) -> None:
+        _judge_out(
+            root, o, raw, head_raw, label, remote_name=remote_name,
+            version_aware=version_aware, cache=cache, blocked=blocked, soft=soft,
+        )
+
+    for p in pointers:
+        path = root / p
+        if not path.is_file():
+            soft.append(f"{p} was deleted")
+            continue
+        if Path(p).name == "dvc.lock" and p != "dvc.lock":
+            soft.append(f"{p} is not the project's root dvc.lock")
+            continue
+        doc = _load(path.read_text(encoding="utf-8", errors="replace"))
+        head_doc = _load(head.get(p))
+        if not isinstance(doc, dict):
+            soft.append(f"{p} does not parse")
+            continue
+        if p == "dvc.lock":
+            stages = doc.get("stages")
+            if not isinstance(stages, dict):
+                soft.append(f"{p} does not parse")
+                continue
+            head_stages = head_doc.get("stages") if isinstance(head_doc, dict) else None
+            head_stages = head_stages if isinstance(head_stages, dict) else {}
+            parsed: dict[str | None, list[DvcOut]] = {}
+            for o in parse_dvc_lock_outs(root, remote_name):
+                parsed.setdefault(o.stage, []).append(o)
+            for stage, entry in stages.items():
+                head_entry = head_stages.get(stage)
+                if entry == head_entry:
+                    continue
+                key = f"dvc.yaml:{stage}"
+                if not version_aware and selection is not None and key not in selection:
+                    soft.append(
+                        f"on an md5-layout remote nothing shows dvc.lock stage '{stage}' reached "
+                        "S3, and this push did not upload it"
+                    )
+                    continue
+                raw_outs = _hashed((entry.get("outs") or []) if isinstance(entry, dict) else None)
+                outs = parsed.get(stage, [])
+                if raw_outs is None or len(raw_outs) != len(outs):
+                    soft.append(f"dvc.lock stage '{stage}' has outs mintd cannot resolve (an orphan stage, or an out outside the project)")
+                    continue
+                head_by_path = _by_path(head_entry.get("outs") if isinstance(head_entry, dict) else None)
+                for raw, o in zip(raw_outs, outs, strict=True):
+                    judge(o, raw, head_by_path.get(str(raw.get("path"))), f"dvc.lock stage '{stage}'")
+            continue
+        if "deps" in doc:
+            soft.append(f"{p} is a dvc import")
+            continue
+        raw_outs = _hashed(doc.get("outs"))
+        if raw_outs is None:
+            soft.append(f"{p} does not parse")
+            continue
+        if any(isinstance(r, dict) and not r.get("md5") and "files" not in r for r in doc.get("outs") or []):
+            blocked.append(f"{p} records an output with no hash; re-record it with `dvc commit {p}`")
+            continue
+        if not version_aware and selection is not None and p not in selection:
+            soft.append(f"on an md5-layout remote nothing shows {p} reached S3, and this push did not upload it")
+            continue
+        outs = parse_dvc_outs(path, remote_name)
+        if len(outs) != len(raw_outs):
+            soft.append(f"{p} does not parse")
+            continue
+        head_by_path = _by_path(head_doc.get("outs") if isinstance(head_doc, dict) else None)
+        for raw, o in zip(raw_outs, outs, strict=True):
+            judge(o, raw, head_by_path.get(str(raw.get("path"))), p)
+    return PointerJudgement(blocked=tuple(blocked), not_committed=tuple(soft))

@@ -161,6 +161,9 @@ class DvcOut:
     # (clone selectors and the cache-lane screens must keep seeing it); only
     # data_pull's discovery drops it.
     use_cache: bool = True
+    # The dvc.lock stage key (``build``, ``fan@a``) a lock out was parsed
+    # from; None for a ``.dvc`` out. Push pushes a lock out by this key.
+    stage: str | None = None
 
     @property
     def materializes_as_dir(self) -> bool:
@@ -395,9 +398,11 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     empty so the caller routes them to fallback.
     """
     try:
-        with open(dvc_path) as f:
+        # dvc writes UTF-8 whatever the locale; the platform default (cp1252
+        # on Windows) misreads a non-ASCII relpath, and the tree it hashes to.
+        with open(dvc_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError):
+    except (FileNotFoundError, yaml.YAMLError, UnicodeDecodeError):
         return []
 
     outs = []
@@ -574,17 +579,17 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     stage_uncached: dict[str, set[str]] = {}
     try:
         if yaml_path.exists():
-            with open(yaml_path) as f:
+            with open(yaml_path, encoding="utf-8") as f:
                 yaml_doc = yaml.safe_load(f)
             stage_wdirs = wdir_map(yaml_doc)
             stage_uncached = uncached_outs(yaml_doc)
-    except (FileNotFoundError, yaml.YAMLError, OSError):
+    except (FileNotFoundError, yaml.YAMLError, OSError, UnicodeDecodeError):
         pass
 
     try:
-        with open(lock_path) as f:
+        with open(lock_path, encoding="utf-8") as f:
             lock_data = yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError, OSError):
+    except (FileNotFoundError, yaml.YAMLError, OSError, UnicodeDecodeError):
         return []
 
     if not isinstance(lock_data, dict) or "stages" not in lock_data:
@@ -659,6 +664,7 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
                 dvc_file=lock_path,
                 is_import=False,
                 use_cache=posixpath.normpath(str(raw_path)) not in uncached,
+                stage=stage,
             ))
     return outs
 
@@ -1225,6 +1231,18 @@ def is_dir_fully_cached(cache_dir: Path, entries: list[DvcFileEntry]) -> bool:
     return all(is_cached(cache_dir, e.md5) for e in entries)
 
 
+def _dir_manifest_bytes(entries: list[DvcFileEntry]) -> bytes:
+    """The ``.dir`` manifest DVC writes for ``entries``; see ``ensure_dir_manifest``."""
+    payload = [{"md5": e.md5, "relpath": e.relpath} for e in sorted(entries, key=lambda e: e.relpath)]
+    return json.dumps(payload, sort_keys=True).encode()
+
+
+def dir_manifest_md5(entries: list[DvcFileEntry]) -> str:
+    """``<md5>.dir``: the tree hash DVC gives a directory holding ``entries``,
+    so ``dir_manifest_md5([]) == EMPTY_DIR_MD5``. Pure; nothing is written."""
+    return f"{hashlib.md5(_dir_manifest_bytes(entries), usedforsecurity=False).hexdigest()}.dir"
+
+
 def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
     """Write a synthetic .dir manifest into the local cache.
 
@@ -1243,11 +1261,8 @@ def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
     (``dvc_data.hashfile.db.local.LocalHashFileDB.oid_to_path``); any
     deviation breaks `dvc checkout`'s cache lookup. Returns ``{md5}.dir``.
     """
-    sorted_entries = sorted(entries, key=lambda e: e.relpath)
-    payload = [{"md5": e.md5, "relpath": e.relpath} for e in sorted_entries]
-    serialized = json.dumps(payload, sort_keys=True).encode()
-    manifest_md5 = hashlib.md5(serialized, usedforsecurity=False).hexdigest()
-    full_md5 = f"{manifest_md5}.dir"
+    serialized = _dir_manifest_bytes(entries)
+    full_md5 = dir_manifest_md5(entries)
     manifest_path = cache_path_for(cache_dir, full_md5)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
