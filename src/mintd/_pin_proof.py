@@ -41,7 +41,9 @@ class Entry:
     ``dvc.lock``); ``out`` the out's repo-relative path; ``relpath`` the
     file's path inside a directory out, else None. ``version_id`` / ``etag``
     come only from ``cloud[R]``. ``legacy_dir``: enumerated from a cached
-    ``.dir`` tree because the pointer lists no files.
+    ``.dir`` tree because the pointer lists no files. ``record`` locates the
+    YAML record the ID lives in: ``(out index, files index or None)`` within
+    the ``.dvc`` file's ``outs`` or the lock stage's ``outs``.
     """
 
     pointer: str
@@ -54,6 +56,7 @@ class Entry:
     version_id: str | None = None
     etag: str | None = None
     legacy_dir: bool = False
+    record: tuple[int, int | None] = (0, None)
 
     @property
     def path(self) -> str:
@@ -91,7 +94,7 @@ def _key(prefix: str, repo_path: str) -> str:
 
 def _out_entries(
     raw: dict, *, pointer: str, stage: str | None, out_path: str, remote: str, prefix: str,
-    cache_dir: Path,
+    cache_dir: Path, index: int,
 ) -> tuple[list[Entry], bool]:
     """Entries of one out; the bool is False when a legacy directory out's
     tree isn't cached, so its files can't be listed."""
@@ -99,7 +102,7 @@ def _out_entries(
     files = raw.get("files")
     if isinstance(files, list):
         entries = []
-        for fe in files:
+        for j, fe in enumerate(files):
             if not isinstance(fe, dict):
                 continue
             rel = str(fe.get("relpath", ""))
@@ -108,6 +111,7 @@ def _out_entries(
                 pointer=pointer, stage=stage, out=out_path, relpath=rel,
                 md5=str(fe.get("md5", "")), size=_int(fe.get("size")),
                 key=_key(prefix, f"{out_path}/{rel}"), version_id=vid, etag=etag,
+                record=(index, j),
             ))
         return entries, True
     if md5.endswith(".dir"):
@@ -118,7 +122,7 @@ def _out_entries(
             Entry(
                 pointer=pointer, stage=stage, out=out_path, relpath=fe.relpath, md5=fe.md5,
                 size=fe.size or None, key=_key(prefix, f"{out_path}/{fe.relpath}"),
-                legacy_dir=True,
+                legacy_dir=True, record=(index, None),
             )
             for fe in tree
         ], True
@@ -126,6 +130,7 @@ def _out_entries(
     return [Entry(
         pointer=pointer, stage=stage, out=out_path, relpath=None, md5=md5,
         size=_int(raw.get("size")), key=_key(prefix, out_path), version_id=vid, etag=etag,
+        record=(index, None),
     )], True
 
 
@@ -160,14 +165,14 @@ def publishable_scope(
         if any(isinstance(d, dict) and isinstance(d.get("repo"), dict) for d in deps):
             continue
         base = posixpath.join(posixpath.dirname(rel) or ".", str(doc.get("wdir") or "."))
-        for raw in doc["outs"]:
+        for i, raw in enumerate(doc["outs"]):
             if not isinstance(raw, dict) or raw.get("cache") is False or raw.get("push") is False:
                 continue
             out_path = resolve_out(base, str(raw.get("path", "")))
             if _escapes(out_path):
                 continue
             got, ok = _out_entries(raw, pointer=rel, stage=None, out_path=out_path,
-                                   remote=remote, prefix=prefix, cache_dir=cache_dir)
+                                   remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
             entries.extend(got)
             if not ok:
                 unrecoverable.append(out_path)
@@ -184,7 +189,7 @@ def publishable_scope(
             outs = data.get("outs") if isinstance(data, dict) else None
             wdir = stage_wdir(wdirs, str(stage)) or "."
             declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
-            for raw in outs if isinstance(outs, list) else []:
+            for i, raw in enumerate(outs if isinstance(outs, list) else []):
                 if not isinstance(raw, dict):
                     continue
                 written = posixpath.normpath(str(raw.get("path", "")))
@@ -194,7 +199,7 @@ def publishable_scope(
                 if _escapes(out_path):
                     continue
                 got, ok = _out_entries(raw, pointer="dvc.lock", stage=str(stage), out_path=out_path,
-                                       remote=remote, prefix=prefix, cache_dir=cache_dir)
+                                       remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
                 entries.extend(got)
                 if not ok:
                     unrecoverable.append(out_path)
@@ -296,3 +301,197 @@ def prove(entry: Entry, verdict: HeadVerdict, cache: CacheHashes) -> str:
 def pinned(entry: Entry, verdict: HeadVerdict) -> Entry:
     """``entry`` re-pinned to the version ``verdict`` found."""
     return replace(entry, version_id=verdict.version_id, etag=(verdict.etag or "").strip('"'))
+
+
+# --- repair (before the push) -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class RepairPlan:
+    """What push does with each entry in repair scope, decided before any write.
+
+    ``reattach``: ``(entry, re-pinned entry, reason)``; the object already at
+    the key proves the file, so its ID goes into the pointer and DVC uploads
+    nothing. ``strip``: ``(entry, reason)``; the cache holds the file, so this
+    remote's ID is removed and DVC uploads it. ``unrecoverable``:
+    ``(entry, why)``. ``inconclusive``: S3 didn't answer, left unchanged.
+    ``observed``: the version at each stripped or legacy entry's key before
+    the push (None: no object), which the upload must replace.
+    """
+
+    keep: tuple[Entry, ...] = ()
+    reattach: tuple[tuple[Entry, Entry, str], ...] = ()
+    strip: tuple[tuple[Entry, str], ...] = ()
+    unrecoverable: tuple[tuple[Entry, str], ...] = ()
+    inconclusive: tuple[Entry, ...] = ()
+    observed: dict[str, str | None] | None = None
+
+    @property
+    def changes(self) -> bool:
+        return bool(self.reattach or self.strip)
+
+
+NO_ID = "no ID"
+STALE_ID = "stale ID"
+
+
+def plan_repair(s3: Any, bucket: str, entries: tuple[Entry, ...], cache: CacheHashes) -> RepairPlan:
+    """Decide, for every entry, keep / re-attach / strip / unrecoverable.
+
+    1. Its own version proves the file (a multipart pin with no cache file
+       passes on size alone; the push didn't set it): keep.
+    2. Otherwise the current object at its key, if that proves the file:
+       re-attach.
+    3. Otherwise, the cache holds bytes that hash to its md5: strip.
+    4. Otherwise: unrecoverable.
+    An entry S3 gave no clear answer for is left as it is.
+    """
+    from ._fast_sync_ops import probe_versions
+
+    pinned_heads = probe_versions(
+        s3, bucket, [(e.key, e.version_id) for e in entries if e.version_id and not e.legacy_dir]
+    )
+    keep: list[Entry] = []
+    rest: list[Entry] = []
+    inconclusive: list[Entry] = []
+    for e in entries:
+        if e.legacy_dir or not e.version_id:
+            rest.append(e)
+            continue
+        verdict = prove(e, pinned_heads[(e.key, e.version_id)], cache)
+        if verdict in ("ok", "size_only"):
+            keep.append(e)
+        elif verdict == "inconclusive":
+            inconclusive.append(e)
+        else:
+            rest.append(e)
+
+    current = probe_versions(s3, bucket, [(e.key, None) for e in rest])
+    reattach: list[tuple[Entry, Entry, str]] = []
+    strip: list[tuple[Entry, str]] = []
+    unrecoverable: list[tuple[Entry, str]] = []
+    observed: dict[str, str | None] = {}
+    for e in rest:
+        now = current[(e.key, None)]
+        reason = NO_ID if not e.version_id else STALE_ID
+        if now.kind == "inconclusive":
+            inconclusive.append(e)
+            continue
+        if not e.legacy_dir and prove(e, now, cache) == "ok":
+            reattach.append((e, pinned(e, now), reason))
+            continue
+        if cache.holds(e.md5):
+            strip.append((e, reason))
+            observed[e.key] = now.version_id if now.kind == "found" else None
+            continue
+        cached = cache.get(e.md5)
+        why = (
+            f"the cache file {cache_path_for(cache.cache_dir, e.md5)} doesn't hash to {e.md5}"
+            if cached is not None
+            else "not provably on S3 at its current path and not in the local cache"
+        )
+        unrecoverable.append((e, why))
+    return RepairPlan(tuple(keep), tuple(reattach), tuple(strip), tuple(unrecoverable),
+                      tuple(inconclusive), observed)
+
+
+def cause_lines(plan: RepairPlan, location: str) -> list[str]:
+    """One line per likely cause, so a cause that keeps recurring is noticed."""
+    lines: list[str] = []
+    no_id = [e for e, _, r in plan.reattach if r == NO_ID] + [e for e, r in plan.strip if r == NO_ID]
+    if any(e.pointer == "dvc.lock" for e in no_id):
+        lines.append("dvc.lock lost these IDs; `dvc commit -f` or `dvc repro` usually does this")
+    if any(e.pointer != "dvc.lock" and not e.legacy_dir for e in no_id):
+        lines.append("`dvc add` or `dvc commit` rewrote these .dvc files without their IDs")
+    if any(r == STALE_ID for _, _, r in plan.reattach) or any(r == STALE_ID for _, r in plan.strip):
+        lines.append(f"the recorded versions aren't at {location}; the remote has probably moved")
+    return lines
+
+
+class PointerWriteError(Exception):
+    """A pointer write changed more than this remote's version IDs."""
+
+    def __init__(self, pointer: str) -> None:
+        super().__init__(
+            f"rewriting {pointer} changed more than its S3 version IDs; every pointer was "
+            "put back as it was and nothing was pushed"
+        )
+        self.pointer = pointer
+
+
+def _records(doc: Any, stage: str | None) -> list:
+    if stage is None:
+        outs = doc.get("outs") if isinstance(doc, dict) else None
+    else:
+        outs = ((doc.get("stages") or {}).get(stage) or {}).get("outs") if isinstance(doc, dict) else None
+    return outs if isinstance(outs, list) else []
+
+
+def _without_ids(doc: Any, remote: str) -> Any:
+    """``doc`` with ``cloud[remote]`` (and a ``cloud`` left empty) removed
+    from every out and files entry, for comparing two versions of a pointer."""
+    import copy
+
+    doc = copy.deepcopy(doc)
+    bodies = [doc] if isinstance(doc, dict) and "outs" in doc else [
+        s for s in ((doc.get("stages") or {}).values() if isinstance(doc, dict) else ()) if isinstance(s, dict)
+    ]
+    for body in bodies:
+        for out in body.get("outs") or []:
+            for rec in [out, *((out.get("files") or []) if isinstance(out, dict) else [])]:
+                if isinstance(rec, dict) and isinstance(rec.get("cloud"), dict):
+                    rec["cloud"].pop(remote, None)
+                    if not rec["cloud"]:
+                        del rec["cloud"]
+    return doc
+
+
+def _dump(doc: Any) -> str:
+    return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=4096)
+
+
+def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump) -> list[str]:
+    """Write the plan's re-attached IDs and strips into the pointer files.
+
+    Only ``cloud[remote]`` changes. Each written file is re-read and compared
+    with its original, IDs aside; any other difference puts every written
+    file back to its original bytes and raises ``PointerWriteError``.
+    Returns the pointers written.
+    """
+    from ._atomic import _atomic_write_text
+
+    by_pointer: dict[str, list[tuple[Entry, Entry | None]]] = {}
+    for was, now, _ in plan.reattach:
+        by_pointer.setdefault(was.pointer, []).append((was, now))
+    for was, _ in plan.strip:
+        if not was.legacy_dir:
+            by_pointer.setdefault(was.pointer, []).append((was, None))
+    originals: dict[str, bytes] = {}
+    try:
+        for pointer, changes in sorted(by_pointer.items()):
+            path = root / pointer
+            raw = path.read_bytes()
+            doc = yaml.safe_load(raw.decode("utf-8"))
+            for old, new in changes:
+                out_i, file_i = old.record
+                rec = _records(doc, old.stage)[out_i]
+                if file_i is not None:
+                    rec = rec["files"][file_i]
+                if new is None:
+                    cloud = rec.get("cloud") if isinstance(rec.get("cloud"), dict) else {}
+                    cloud.pop(remote, None)
+                    if not cloud:
+                        rec.pop("cloud", None)
+                else:
+                    rec.setdefault("cloud", {})[remote] = {"etag": new.etag, "version_id": new.version_id}
+            originals[pointer] = raw
+            _atomic_write_text(path, dump(doc))
+            if _without_ids(yaml.safe_load(path.read_text(encoding="utf-8")), remote) != _without_ids(
+                yaml.safe_load(raw.decode("utf-8")), remote
+            ):
+                raise PointerWriteError(pointer)
+    except Exception:
+        for pointer, raw in originals.items():
+            _atomic_write_text(root / pointer, raw.decode("utf-8"))
+        raise
+    return sorted(originals)
