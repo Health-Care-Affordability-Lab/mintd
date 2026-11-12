@@ -1532,3 +1532,19 @@ def test_publish_refuses_a_pointer_rewritten_after_the_check(tmp_path, s3_versio
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=_Uploads(), git_ops=git)
     assert git.tag_calls == []
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
+
+
+def test_publish_refuses_to_tag_a_commit_a_hook_rewrote(tmp_path, s3_versioned, monkeypatch):
+    from mintd.publish import PublishError
+
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    hook = proj / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf '# hook\\n' >> data/final/x.csv.dvc && git add data/final/x.csv.dvc\n")
+    hook.chmod(0o755)
+    git = _FakeRegistryGitOps()
+    with pytest.raises(PublishError, match="doesn't hold the pointer files the check judged"):
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(), git_ops=git)
+    assert git.tag_calls == []

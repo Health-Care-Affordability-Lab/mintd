@@ -306,9 +306,10 @@ def _apply_publish(
         if prepared is not None:
             restore(prepared)
             prepared.close()
+    changed: list[str] | None = None
     if prepared is not None:
         try:
-            changed: list[str] | None = git_ops.uncommitted_pointers(project_path)
+            changed = git_ops.uncommitted_pointers(project_path)
         except GitOpError:
             changed = None
         head = {}
@@ -369,7 +370,9 @@ def _apply_publish(
 
     # Step 3: commit the bump (only when there's a real content change —
     # retries at the same version stay idempotent w.r.t. git history).
-    if preview.local_diff:
+    # The pointer files the push rewrote (and the check judged) are committed
+    # with it, on a rerun with no metadata change too: the tag must carry them.
+    if preview.local_diff or changed:
         if reporter is not None:
             reporter.update_status("Committing version bump...")
         try:
@@ -378,6 +381,22 @@ def _apply_publish(
             _atomic_write_json(metadata_path, original_metadata_json)
             git_ops.reset_hard(project_path, "HEAD")
             raise PublishError(f"failed to commit metadata bump: {exc}") from exc
+        if gate is not None:
+            # A commit hook can rewrite a pointer after the check: the commit
+            # must hold the judged bytes before anything is tagged or pushed.
+            import hashlib
+
+            wrong = [
+                rel for rel, digest in gate.frozen.items()
+                if hashlib.sha256((git_ops.head_text(project_path, rel) or "").replace("\r\n", "\n").encode()).hexdigest()
+                != digest
+            ]
+            if wrong:
+                raise PublishError(
+                    f"the release commit doesn't hold the pointer files the check judged: {', '.join(wrong)} "
+                    "(a commit hook?); nothing was tagged or advertised",
+                    recovery_hint="inspect it with `git show`, fix it, then rerun `mintd publish`.",
+                )
 
     # Step 4: git tag
     if reporter is not None:
