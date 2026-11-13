@@ -1247,7 +1247,7 @@ def test_check_refuses_a_remote_with_its_own_access_keys(moto_push, tmp_path, mo
 def test_check_needs_the_pointer_list_from_git(moto_push, tmp_path, monkeypatch, capsys) -> None:
     dvc, s3, bucket = moto_push
     proj = _moto_producer(tmp_path, s3)
-    shutil.rmtree(proj / ".git")
+    (proj / ".git").rename(tmp_path / "proj.git")  # moved, not deleted: Windows can't unlink git's read-only objects
     (tmp_path / ".git").rename(tmp_path / ".git-moved")  # no repo above it either
     monkeypatch.chdir(proj)
     dvc.on_push = _dvc_uploads(s3, bucket, proj)
