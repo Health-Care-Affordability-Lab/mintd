@@ -192,6 +192,36 @@ class _FakeRegistryGitOps:
     def current_commit(self, work_dir: Path) -> str:
         return self.current_commit_value
 
+    # `data push`'s commit lane: real git through the production seam, like
+    # `uncommitted_pointers` above.
+    def repo_toplevel(self, work_dir: Path) -> Path:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().repo_toplevel(work_dir)
+
+    def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().tracked_changes(work_dir)
+
+    def head_text(self, work_dir: Path, path: str) -> str | None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().head_text(work_dir, path)
+
+    def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        SubprocessRegistryGitOps().commit_paths(work_dir, paths, message)
+
+    def branch_info(self, work_dir: Path):
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().branch_info(work_dir)
+
+    def push_to(self, work_dir: Path, remote: str, ref: str) -> None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        SubprocessRegistryGitOps().push_to(work_dir, remote, ref)
+
+    def remote_default_branch(self, work_dir: Path, remote: str) -> str | None:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().remote_default_branch(work_dir, remote)
+
     # ------------------------------------------------------------------
     # gh (stubbed)
     # ------------------------------------------------------------------

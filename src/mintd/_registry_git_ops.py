@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import dataclass
 
 from ._git_invoke import git_env
 from pathlib import Path
@@ -32,6 +33,26 @@ from typing import Any, Protocol
 _POINTER_PATHSPEC = (":(top,glob)**/*.dvc", ":(top,glob)**/dvc.lock")
 
 
+def is_pointer_path(path: str) -> bool:
+    """Does ``path`` (repo-relative, posix) match ``_POINTER_PATHSPEC``? Keep
+    the two in step."""
+    return path.endswith(".dvc") or path == "dvc.lock" or path.endswith("/dvc.lock")
+
+
+@dataclass(frozen=True)
+class BranchInfo:
+    """The checked-out branch and its upstream. ``branch`` is None when HEAD is
+    detached; ``remote`` / ``merge_ref`` are None with no upstream. ``ahead``
+    counts the commits not on the upstream, or, with no upstream or one of
+    another name, the commits on no remote at all; None when git cannot
+    count them."""
+
+    branch: str | None
+    remote: str | None
+    merge_ref: str | None
+    ahead: int | None
+
+
 class GitOpError(Exception):
     """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
 
@@ -39,6 +60,11 @@ class GitOpError(Exception):
         super().__init__(f"git command failed: {' '.join(command)}\n{stderr}")
         self.command = command
         self.stderr = stderr
+
+
+class GitPushRejected(GitOpError):
+    """`git push` was rejected because the remote branch has commits this
+    clone does not (non-fast-forward)."""
 
 
 class GitTagError(GitOpError):
@@ -126,6 +152,13 @@ class RegistryGitOps(Protocol):
     def uncommitted_pointers(self, work_dir: Path) -> list[str]: ...
     def uncommitted_files(self, work_dir: Path) -> list[str]: ...
     def current_commit(self, work_dir: Path) -> str: ...
+    def repo_toplevel(self, work_dir: Path) -> Path: ...
+    def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]: ...
+    def head_text(self, work_dir: Path, path: str) -> str | None: ...
+    def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None: ...
+    def branch_info(self, work_dir: Path) -> BranchInfo: ...
+    def push_to(self, work_dir: Path, remote: str, ref: str) -> None: ...
+    def remote_default_branch(self, work_dir: Path, remote: str) -> str | None: ...
     def open_pr(
         self,
         repo_dir: Path,
@@ -395,6 +428,90 @@ class SubprocessRegistryGitOps:
     def current_commit(self, work_dir: Path) -> str:
         return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
 
+    def repo_toplevel(self, work_dir: Path) -> Path:
+        """The top level of the repository ``work_dir`` is in."""
+        return Path(self._git(["rev-parse", "--show-toplevel"], cwd=work_dir).strip())
+
+    def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]:
+        """``(XY, path)`` for every tracked file that differs from HEAD, staged
+        or not, staged-new files included; untracked files are left out. Paths
+        are repo-relative, as in ``_uncommitted``."""
+        out = self._git(
+            ["status", "--porcelain", "-z", "--no-renames", "--untracked-files=no"], cwd=work_dir
+        )
+        return [(rec[:2], rec[3:]) for rec in out.split("\0") if rec]
+
+    def head_text(self, work_dir: Path, path: str) -> str | None:
+        """``path`` (repo-relative) as committed at HEAD; None when HEAD does
+        not hold it. Any other failure raises."""
+        try:
+            return self._git(["show", f"HEAD:{path}"], cwd=work_dir)
+        except GitOpError as e:
+            if "does not exist in" in e.stderr or "but not in" in e.stderr:
+                return None
+            raise
+
+    def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None:
+        """Commit exactly ``paths``: ``git commit -- <paths>`` records only
+        those, so anything else already staged stays staged and out of the
+        commit, and untracked files are never added. ``--literal-pathspecs``
+        keeps a ``[`` or ``*`` in a name literal. Hooks run, so the transfer
+        timeout applies rather than the fast cap."""
+        self._git(["--literal-pathspecs", "add", "--", *paths], cwd=work_dir)
+        self._git(["--literal-pathspecs", "commit", "-m", message, "--", *paths], cwd=work_dir, slow=True)
+
+    def branch_info(self, work_dir: Path) -> BranchInfo:
+        try:
+            branch = self._git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=work_dir).strip()
+        except GitOpError:
+            return BranchInfo(None, None, None, None)
+        try:
+            remote = self._git(["config", "--get", f"branch.{branch}.remote"], cwd=work_dir).strip()
+            merge_ref = self._git(["config", "--get", f"branch.{branch}.merge"], cwd=work_dir).strip()
+        except GitOpError:
+            remote = merge_ref = ""
+        if not remote or not merge_ref or remote == ".":
+            return BranchInfo(branch, None, None, self._count(work_dir, ["HEAD", "--not", "--remotes"]))
+        if merge_ref.removeprefix("refs/heads/") != branch:
+            # Not where `git push` sends this branch (push.default=simple), so
+            # "ahead of it" says nothing about whether the commits are pushed.
+            return BranchInfo(branch, remote, merge_ref, self._count(work_dir, ["HEAD", "--not", "--remotes"]))
+        return BranchInfo(branch, remote, merge_ref, self._count(work_dir, ["@{u}..HEAD"]))
+
+    def _count(self, work_dir: Path, revs: list[str]) -> int | None:
+        try:
+            return int(self._git(["rev-list", "--count", *revs], cwd=work_dir).strip())
+        except (GitOpError, ValueError):
+            return None
+
+    def push_to(self, work_dir: Path, remote: str, ref: str) -> None:
+        """``git push <remote> HEAD:<ref>``. The explicit refspec means
+        ``push.default``, ``pushRemote`` and ``remote.<n>.push`` cannot send it
+        elsewhere. Never fetches, pulls, rebases or forces. A non-fast-forward
+        rejection raises ``GitPushRejected``; hook and protected-branch
+        rejections stay plain ``GitOpError`` (the same narrow test as
+        ``push_branch``). ``GIT_TERMINAL_PROMPT=0``: an HTTPS credential prompt
+        fails at once instead of waiting on a terminal nobody is watching."""
+        try:
+            self._git(["push", remote, f"HEAD:{ref}"], cwd=work_dir, slow=True, env={"GIT_TERMINAL_PROMPT": "0"})
+        except GitOpError as e:
+            if "non-fast-forward" in e.stderr or "fetch first" in e.stderr:
+                raise GitPushRejected(e.command, e.stderr) from e
+            raise
+
+    def remote_default_branch(self, work_dir: Path, remote: str) -> str | None:
+        """The branch ``remote``'s HEAD names, the one importers read; None when
+        git cannot say. Asks the remote, so it works where
+        ``refs/remotes/<remote>/HEAD`` was never set."""
+        try:
+            out = self._git(["ls-remote", "--symref", remote, "HEAD"], cwd=work_dir, env={"GIT_TERMINAL_PROMPT": "0"})
+        except GitOpError:
+            return None
+        for line in out.splitlines():
+            if line.startswith("ref: refs/heads/") and line.endswith("\tHEAD"):
+                return line[len("ref: refs/heads/"):-len("\tHEAD")]
+        return None
+
     # ------------------------------------------------------------------
     # gh
     # ------------------------------------------------------------------
@@ -443,8 +560,14 @@ class SubprocessRegistryGitOps:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _git(self, args: list[str], *, cwd: Path | None) -> str:
+    def _git(
+        self, args: list[str], *, cwd: Path | None, slow: bool = False, env: dict[str, str] | None = None,
+    ) -> str:
+        """``slow`` swaps the fast cap for the transfer timeout (unbounded by
+        default), for a commit whose hooks or a push whose remote can take
+        longer than 30 s. ``env`` is merged over ``git_env()``."""
         cmd = ["git", *args]
+        timeout = (self._timeouts.transfer if self._timeouts is not None else None) if slow else self._fast_timeout
         try:
             # git writes paths as raw bytes under `-z` (UTF-8 for any name it
             # did not get from elsewhere): decode them as UTF-8 whatever the
@@ -459,14 +582,14 @@ class SubprocessRegistryGitOps:
                 text=True,
                 encoding="utf-8",
                 errors="surrogateescape",
-                timeout=self._fast_timeout,
-                env=git_env(),
+                timeout=timeout,
+                env={**git_env(), **(env or {})},
                 check=True,
             )
         except FileNotFoundError as e:
             raise GitOpError(cmd, "git not installed") from e
         except subprocess.TimeoutExpired as e:
-            raise GitOpError(cmd, f"timed out after {self._fast_timeout}s") from e
+            raise GitOpError(cmd, f"timed out after {timeout}s") from e
         except subprocess.CalledProcessError as e:
             raise GitOpError(cmd, e.stderr or e.stdout or "") from e
         return result.stdout

@@ -243,8 +243,10 @@ def test_cli_data_push_calls_data_push(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, dvc_ops = patched_clients
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push"])
     assert rc == 0
     assert len(dvc_ops.push_calls) == 1
@@ -254,10 +256,12 @@ def test_cli_data_push_forwards_targets(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end regression for the reported bug: a positional target reaches
     the fake as `["data/x.dvc"]` instead of being silently dropped."""
     _, dvc_ops = patched_clients
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push", "data/x.dvc"])
     assert rc == 0
     assert dvc_ops.push_calls[0].targets == ["data/x.dvc"]
@@ -267,10 +271,12 @@ def test_cli_data_push_no_targets_is_none(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     patched_clients,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bare `data push` pins the `args.targets or None` conversion: no
     positionals means a full-repo push (targets is None)."""
     _, dvc_ops = patched_clients
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push"])
     assert rc == 0
     assert dvc_ops.push_calls[0].targets is None
@@ -2907,10 +2913,11 @@ def test_cli_data_import_bump_catches_dvc_op_error(
 
 
 def test_cli_data_push_catches_dvc_push_error_with_hint(
-    patched_clients, recording_reporter,
+    patched_clients, recording_reporter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from mintd._dvc_ops import DvcPushError
     _, dvc_ops = patched_clients
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     dvc_ops.push_raises = DvcPushError("denied")
     rc = cli.main(["data", "push"])
     assert rc == 1
@@ -3145,10 +3152,10 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     # the D7 missing report, which the real pull has always guaranteed exists.
     EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
 
+    monkeypatch.chdir(tmp_path)  # before `data push`: it commits from the cwd's project
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
     cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
-    monkeypatch.chdir(tmp_path)
     cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
 
     assert len(captured) == 4
@@ -4027,10 +4034,12 @@ def test_local_data_commands_do_not_require_registry_url(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     unconfigured_machine: _FakeDvcOps,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """All five wrap dvc and never contact the catalog."""
     _stage_tracked_out(tmp_path)
     dvc_ops = unconfigured_machine
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
 
     rc = cli.main(_local_data_argv(verb, tmp_path))
 
@@ -4056,6 +4065,7 @@ def test_local_data_handlers_never_build_a_catalog_client(
         pytest.fail("local data handlers must not build a catalog client")
 
     monkeypatch.setattr("mintd.cli._resolve_catalog_client", must_not_call)
+    monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
 
     for verb in ("add", "pull", "push", "verify", "remove"):
         assert cli.main(_local_data_argv(verb, tmp_path)) == 0

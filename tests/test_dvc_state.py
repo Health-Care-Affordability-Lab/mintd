@@ -7,15 +7,16 @@ itself lives in `tests/test_harness_contract.py`
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from mintd._dvc_state import delivery, outs_matching
-from mintd._fast_sync_ops import EMPTY_DIR_MD5
-from tests._dvc_fixtures import REMOTE, write_pipeline, write_pointer
+from mintd._dvc_state import PointerJudgement, delivery, judge_pointers, outs_matching, push_targets
+from mintd._fast_sync_ops import EMPTY_DIR_MD5, DvcFileEntry, dir_manifest_md5, ensure_dir_manifest
+from tests._dvc_fixtures import REMOTE, write_dvc_config, write_pipeline, write_pointer
 
 # ---------------------------------------------------------------------------
 # builders
@@ -468,3 +469,304 @@ def test_delivery_keeps_a_symlinked_checkout_on_its_workspace_path(tmp_path: Pat
     verdict = delivery(tmp_path, "data/final/x.parquet", REMOTE, version_aware=True)
 
     assert verdict.state == "pinned", verdict
+
+
+# ---------------------------------------------------------------------------
+# push_targets: what `data push` hands dvc
+# ---------------------------------------------------------------------------
+
+
+_FAN_YAML = (
+    "stages:\n"
+    "  build:\n    cmd: run\n    outs:\n    - data/out.csv\n"
+    "  fan:\n    foreach: [a]\n    do:\n      cmd: run\n      outs:\n      - data/fan/${item}.csv\n"
+)
+_FAN_LOCK = (
+    "schema: '2.0'\nstages:\n"
+    "  build:\n    cmd: run\n    outs:\n    - path: data/out.csv\n      md5: " + "b" * 32 + "\n      size: 12\n"
+    "  fan@a:\n    cmd: run\n    outs:\n    - path: data/fan/a.csv\n      md5: " + "b" * 32 + "\n      size: 12\n"
+)
+
+
+@pytest.fixture
+def tracked(tmp_path: Path) -> Path:
+    """A folder pointer, two per-file pointers, a stage out and a foreach out."""
+    write_pointer(tmp_path, "data/final", is_dir=True)
+    write_pointer(tmp_path, "data/per/a.csv")
+    write_pointer(tmp_path, "data/per/b.csv")
+    (tmp_path / "dvc.yaml").write_text(_FAN_YAML)
+    (tmp_path / "dvc.lock").write_text(_FAN_LOCK)
+    (tmp_path / "code").mkdir()
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    "cwd, target, groups",
+    [
+        (".", "data/final/x.csv", [["data/final.dvc"]]),
+        (".", "data/out.csv", [["dvc.yaml:build"]]),
+        (".", "data/fan/a.csv", [["dvc.yaml:fan@a"]]),
+        (".", "data/per", [["data/per/a.csv.dvc", "data/per/b.csv.dvc"]]),
+        (".", "data", [
+            ["data/final.dvc", "data/per/a.csv.dvc", "data/per/b.csv.dvc"],
+            ["dvc.yaml:build", "dvc.yaml:fan@a"],
+        ]),
+        (".", "untracked.csv", [["untracked.csv"]]),
+        (".", "data/typed.dvc", [["data/typed.dvc"]]),
+        ("code", "../data/final/x.csv", [["data/final.dvc"]]),
+        ("code", "nothing.csv", [["code/nothing.csv"]]),
+    ],
+    ids=[
+        "file-in-a-folder-out", "lock-out", "foreach-out", "folder-of-pointers",
+        "folder-of-everything", "untracked-passes-through", "typed-dvc-kept",
+        "from-a-subdirectory", "unmatched-from-a-subdirectory",
+    ],
+)
+def test_push_targets_push_whole_outputs_in_unmixed_groups(
+    tracked: Path, cwd: str, target: str, groups: list[list[str]]
+) -> None:
+    """Every tracked target becomes the `.dvc` file or `dvc.yaml:<stage>` key
+    of each out it reaches, spelled from the root; the rest pass through; an
+    argv never mixes kinds. Mutation: push the target as typed -> the first
+    five rows go red."""
+    got, selection = push_targets(tracked, [target], REMOTE, cwd=tracked / cwd)
+    assert sorted(map(sorted, got)) == sorted(map(sorted, groups))
+    assert selection == frozenset(t for g in groups for t in g if t.endswith(".dvc") or t.startswith("dvc.yaml:"))
+
+
+@pytest.mark.parametrize(
+    "target, groups",
+    [
+        ("build", [["code/dvc.yaml:build"]]),
+        ("dvc.yaml:build", [["code/dvc.yaml:build"]]),
+        ("out.csv", [["code/out.csv"]]),
+    ],
+    ids=["bare-stage-name", "file-and-stage", "output-missing-from-disk"],
+)
+def test_push_targets_from_a_subdirectory_pipeline(tmp_path: Path, target: str, groups: list[list[str]]) -> None:
+    """dvc runs from the root, so a stage name typed beside `code/dvc.yaml`
+    needs the file named; anything else re-spelled from the root already
+    resolves there. Mutation: pass the bare name through -> `code/build`,
+    red; rewrite every unmatched name -> the other two rows red."""
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - out.csv\n")
+    got, _ = push_targets(tmp_path, [target], REMOTE, cwd=tmp_path / "code")
+    assert got == groups
+
+
+def test_push_targets_passes_a_target_on_another_drive_through(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows' relpath raises for a path on another drive; that target is
+    outside the project, so dvc gets it as typed rather than a traceback.
+    Mutation: drop the ValueError arm -> raises, red."""
+    def other_drive(path, start=None):
+        raise ValueError("path is on mount 'D:', start on mount 'C:'")
+
+    monkeypatch.setattr(os.path, "relpath", other_drive)
+    groups, selection = push_targets(tmp_path, ["x.csv"], REMOTE, cwd=tmp_path)
+    assert groups == [[os.path.normpath(tmp_path / "x.csv")]] and selection == frozenset()
+
+
+def test_lock_outs_carry_their_stage(tracked: Path) -> None:
+    from mintd._fast_sync_ops import parse_dvc_lock_outs
+    assert {o.target: o.stage for o in parse_dvc_lock_outs(tracked, REMOTE)} == {
+        "data/out.csv": "build", "data/fan/a.csv": "fan@a",
+    }
+
+
+# ---------------------------------------------------------------------------
+# judge_pointers: may `data push` commit these pointer files?
+# ---------------------------------------------------------------------------
+
+_XY = [DvcFileEntry("a" * 32, "x.csv"), DvcFileEntry("a" * 32, "y.csv")]
+
+
+def _folder_project(tmp_path: Path, *, version_aware: bool = True, workspace: bool = True) -> tuple[Path, str]:
+    """`.dvc/config`, the x/y tree saved in the cache, the folder on disk, and
+    the HEAD text of `data/final.dvc` (a `.dir` pointer to that tree)."""
+    write_dvc_config(tmp_path, version_aware=version_aware)
+    tree = ensure_dir_manifest(tmp_path / ".dvc" / "cache", _XY)
+    if workspace:
+        (tmp_path / "data" / "final").mkdir(parents=True)
+        for e in _XY:
+            (tmp_path / "data" / "final" / e.relpath).write_text("x\n")
+    head = write_pointer(tmp_path, "data/final", is_dir=True, md5=tree.removesuffix(".dir"), version_id=None).read_text()
+    return tmp_path, head
+
+
+def _judge(root: Path, pointers: list[str], head: dict, *, version_aware: bool = True, selection=None):
+    return judge_pointers(
+        root, pointers, head=head, remote_name=REMOTE, version_aware=version_aware, selection=selection,
+    )
+
+
+def test_judge_passes_a_folder_pinned_whole(tmp_path: Path) -> None:
+    root, head = _folder_project(tmp_path)
+    write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})
+    assert _judge(root, ["data/final.dvc"], {"data/final.dvc": head}) == PointerJudgement()
+
+
+def test_judge_blocks_a_pointer_without_version_ids(tmp_path: Path) -> None:
+    """Mutation: drop the delivery check -> passes, red."""
+    root, head = _folder_project(tmp_path)
+    write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": None})
+    j = _judge(root, ["data/final.dvc"], {"data/final.dvc": head})
+    assert len(j.blocked) == 1 and j.blocked[0].startswith("data/final.dvc: data/final (")
+
+
+def test_judge_blocks_a_cut_down_folder_listing(tmp_path: Path) -> None:
+    """The list a one-file push leaves names a tree the cache never held.
+    Mutation: drop the tree check -> passes, red."""
+    root, head = _folder_project(tmp_path)
+    write_pointer(root, "data/final", files={"x.csv": "v-1"})
+    (j,) = _judge(root, ["data/final.dvc"], {"data/final.dvc": head}).blocked
+    assert "lists 1 file(s), a tree DVC never saved" in j
+
+
+@pytest.mark.parametrize(
+    "committed, where", [(True, "the last commit's pointer"), (False, "the folder on disk")],
+    ids=["against-head", "against-the-folder"],
+)
+def test_judge_blocks_an_emptied_folder(tmp_path: Path, committed: bool, where: str) -> None:
+    """Against HEAD with the folder gone from disk too (a `dvc checkout` of
+    the emptied pointer), so each check is the only one that can block.
+    Mutation: drop either half of the empty-listing check -> its row passes, red."""
+    root, head = _folder_project(tmp_path, workspace=not committed)
+    write_pointer(root, "data/final", files={})
+    (j,) = _judge(root, ["data/final.dvc"], {"data/final.dvc": head if committed else None}).blocked
+    assert f"lists no files, but {where}" in j
+
+
+def test_judge_passes_a_folder_empty_at_head_and_on_disk(tmp_path: Path) -> None:
+    root, _ = _folder_project(tmp_path, workspace=False)
+    write_pointer(root, "data/final", files={})
+    assert _judge(root, ["data/final.dvc"], {"data/final.dvc": None}) == PointerJudgement()
+
+
+def test_judge_names_the_lock_stage(tmp_path: Path) -> None:
+    write_dvc_config(tmp_path)
+    write_pipeline(tmp_path, "data/out.csv")
+    (j,) = _judge(tmp_path, ["dvc.lock"], {"dvc.lock": None}).blocked
+    assert j.startswith("dvc.lock stage 'build': data/out.csv (")
+
+
+def test_judge_skips_an_unchanged_out_of_a_changed_stage(tmp_path: Path) -> None:
+    """A commit that does not change an out does not change what importers
+    get from it. Mutation: judge every out of a changed stage -> blocked."""
+    write_dvc_config(tmp_path)
+    (tmp_path / "dvc.yaml").write_text("stages:\n  s:\n    cmd: run\n    outs:\n    - data/a.csv\n    - data/b.csv\n")
+    lock = (
+        "schema: '2.0'\nstages:\n  s:\n    cmd: {cmd}\n    outs:\n"
+        "    - path: data/a.csv\n      md5: " + "b" * 32 + "\n      size: 12\n{a_cloud}"
+        "    - path: data/b.csv\n      md5: " + "b" * 32 + "\n      size: 12\n"
+    )
+    head = lock.format(cmd="run", a_cloud="")
+    (tmp_path / "dvc.lock").write_text(
+        lock.format(cmd="run2", a_cloud=f"      cloud:\n        {REMOTE}:\n          version_id: v-1\n")
+    )
+    assert _judge(tmp_path, ["dvc.lock"], {"dvc.lock": head}) == PointerJudgement()
+
+
+def test_judge_blocks_a_dvc_out_with_no_hash(tmp_path: Path) -> None:
+    write_dvc_config(tmp_path)
+    (tmp_path / "x.csv.dvc").write_text("outs:\n- path: x.csv\n")
+    (j,) = _judge(tmp_path, ["x.csv.dvc"], {"x.csv.dvc": None}).blocked
+    assert "no hash" in j and "dvc commit x.csv.dvc" in j
+
+
+@pytest.mark.parametrize(
+    "build, pointer, reason",
+    [
+        (lambda r: None, "gone.dvc", "gone.dvc was deleted"),
+        (lambda r: write_pointer(r, "data/imp", imported=True), "data/imp.dvc", "is a dvc import"),
+        (lambda r: (r / "url.csv.dvc").write_text(
+            f"deps:\n- path: s3://elsewhere/url.csv\nouts:\n- path: url.csv\n  md5: {'a' * 32}\n"),
+         "url.csv.dvc", "is a dvc import"),
+        (lambda r: ((r / "sub").mkdir(), (r / "sub" / "out.dvc").write_text(
+            f"outs:\n- path: ../../outside.csv\n  md5: {'a' * 32}\n")),
+         "sub/out.dvc", "records an output outside the project"),
+        (lambda r: (r / "bad.dvc").write_text("outs: [\n"), "bad.dvc", "bad.dvc does not parse"),
+        (lambda r: ((r / "sub").mkdir(), (r / "sub" / "dvc.lock").write_text("stages: {}\n")),
+         "sub/dvc.lock", "not the project's root dvc.lock"),
+        (lambda r: ((r / "dvc.yaml").write_text("stages:\n  other:\n    cmd: run\n"),
+                    (r / "dvc.lock").write_text("schema: '2.0'\nstages:\n  gone:\n    cmd: run\n    outs:\n"
+                                                "    - path: data/g.csv\n      md5: " + "b" * 32 + "\n")),
+         "dvc.lock", "dvc.lock stage 'gone' has outs mintd cannot resolve"),
+    ],
+    ids=["deleted", "dvc-import", "import-url", "escaped-out", "unparseable", "nested-lock", "orphan-stage"],
+)
+def test_judge_leaves_what_it_cannot_judge(tmp_path: Path, build, pointer: str, reason: str) -> None:
+    write_dvc_config(tmp_path)
+    build(tmp_path)
+    j = _judge(tmp_path, [pointer], {pointer: None})
+    assert not j.blocked and any(reason in r for r in j.not_committed), j
+
+
+def test_judge_skips_a_lock_stage_the_commit_does_not_change(tmp_path: Path) -> None:
+    """On an md5 remote, a targeted push of stage a commits dvc.lock with stage
+    b unchanged in it. Mutation: judge unchanged stages too -> b is left as
+    'not uploaded by this push', red."""
+    write_dvc_config(tmp_path, version_aware=False)
+    (tmp_path / "dvc.yaml").write_text(
+        "stages:\n  a:\n    cmd: run\n    outs:\n    - data/a.csv\n  b:\n    cmd: run\n    outs:\n    - data/b.csv\n"
+    )
+    lock = (
+        "schema: '2.0'\nstages:\n  a:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {a}\n      size: 12\n"
+        "  b:\n    cmd: run\n    outs:\n    - path: data/b.csv\n      md5: " + "b" * 32 + "\n      size: 12\n"
+    )
+    (tmp_path / "dvc.lock").write_text(lock.format(a="c" * 32))  # `dvc repro a`
+    j = _judge(tmp_path, ["dvc.lock"], {"dvc.lock": lock.format(a="b" * 32)}, version_aware=False,
+               selection=frozenset({"dvc.yaml:a"}))
+    assert j == PointerJudgement()
+
+
+def test_judge_on_an_md5_remote_leaves_a_pointer_this_push_did_not_upload(tmp_path: Path) -> None:
+    """Mutation: drop the selection check -> passes, red."""
+    root, head = _folder_project(tmp_path, version_aware=False)
+    write_pointer(root, "data/other", md5="c" * 32, version_id=None)
+    j = _judge(root, ["data/other.dvc"], {"data/other.dvc": None}, version_aware=False,
+               selection=frozenset({"data/final.dvc"}))
+    assert j.not_committed and "data/other.dvc reached S3" in j.not_committed[0]
+
+
+def test_judge_without_a_cache_leaves_the_folder(tmp_path: Path) -> None:
+    root, head = _folder_project(tmp_path)
+    write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})
+    shutil.rmtree(root / ".dvc" / "cache")
+    j = _judge(root, ["data/final.dvc"], {"data/final.dvc": head})
+    assert not j.blocked and "no local DVC cache" in j.not_committed[0]
+
+
+@pytest.mark.parametrize("where", ["config-local", "dvc2-layout"])
+def test_judge_finds_the_tree_where_dvc_keeps_it(tmp_path: Path, where: str) -> None:
+    root, head = _folder_project(tmp_path)
+    write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})
+    tree = dir_manifest_md5(_XY)
+    shutil.rmtree(root / ".dvc" / "cache")
+    if where == "config-local":
+        (root / ".dvc" / "config.local").write_text("[cache]\n    dir = ../elsewhere\n")
+        ensure_dir_manifest(root / "elsewhere", _XY)
+    else:
+        (root / ".dvc" / "cache" / tree[:2]).mkdir(parents=True)
+        (root / ".dvc" / "cache" / tree[:2] / tree[2:]).write_text("[]")
+    assert _judge(root, ["data/final.dvc"], {"data/final.dvc": head}) == PointerJudgement()
+
+
+@pytest.mark.parametrize("shape", ["lock-cache-false", "lock-cache-false-folder", "dvc-push-false"])
+def test_judge_exempts_outs_dvc_never_pushes(tmp_path: Path, shape: str) -> None:
+    """A folder dvc never caches has no tree in the cache to check.
+    Mutation: drop the exemption -> the folder row is left or blocked, red."""
+    write_dvc_config(tmp_path)
+    if shape == "lock-cache-false":
+        write_pipeline(tmp_path, "data/metrics.json", cache=False)
+        pointer = "dvc.lock"
+    elif shape == "lock-cache-false-folder":
+        (tmp_path / "dvc.yaml").write_text("stages:\n  r:\n    cmd: run\n    outs:\n    - data/reports:\n        cache: false\n")
+        (tmp_path / "dvc.lock").write_text(
+            "schema: '2.0'\nstages:\n  r:\n    cmd: run\n    outs:\n    - path: data/reports\n"
+            "      md5: " + "b" * 32 + ".dir\n      size: 12\n      nfiles: 2\n"
+        )
+        pointer = "dvc.lock"
+    else:
+        (tmp_path / "x.csv.dvc").write_text(f"outs:\n- path: x.csv\n  md5: {'a' * 32}\n  push: false\n")
+        pointer = "x.csv.dvc"
+    assert _judge(tmp_path, [pointer], {pointer: None}) == PointerJudgement()

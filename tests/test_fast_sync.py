@@ -1041,6 +1041,50 @@ def test_fetch_files_dir_uses_real_paths(s3_versioned, tmp_path: Path) -> None:
         assert mock.call_args[1]['Key'] == 'data/f/a.csv'
 
 
+def test_pointer_parsers_read_utf8_whatever_the_locale(tmp_path: Path) -> None:
+    """dvc writes UTF-8. Read with the platform default (cp1252 on Windows), a
+    non-ASCII relpath hashes to a tree the cache never held, and `data push`
+    refuses a good folder. Run in a child that turns every encoding-less
+    `open()` into an error, so this reddens on any machine.
+    Mutation: drop `encoding="utf-8"` from either parser -> red."""
+    import subprocess
+    import sys
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text(
+        "outs:\n- path: final\n  files:\n  - relpath: donn\u00e9es.csv\n    md5: " + "a" * 32 + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "dvc.yaml").write_text("stages:\n  b:\n    cmd: run\n", encoding="utf-8")
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  b:\n    cmd: run\n    outs:\n    - path: r\u00e9sum\u00e9.csv\n"
+        "      md5: " + "b" * 32 + "\n",
+        encoding="utf-8",
+    )
+    code = (
+        "import sys, pathlib\n"
+        "from mintd._fast_sync_ops import parse_dvc_outs, parse_dvc_lock_outs\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "assert parse_dvc_outs(root / 'data' / 'final.dvc', 's')[0].files[0].relpath == 'donn\\u00e9es.csv'\n"
+        "assert parse_dvc_lock_outs(root, 's')[0].path == 'r\\u00e9sum\\u00e9.csv'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-X", "warn_default_encoding", "-W", "error::EncodingWarning", "-c", code, str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_dir_manifest_md5_is_the_hash_ensure_dir_manifest_writes(tmp_path: Path) -> None:
+    """The pure hash `data push`'s tree check uses: the empty list is DVC's
+    empty-directory hash, and any list hashes to the name ensure_dir_manifest
+    saves it under."""
+    from mintd._fast_sync_ops import EMPTY_DIR_MD5, dir_manifest_md5
+    entries = [DvcFileEntry("b", "b.csv"), DvcFileEntry("a", "a.csv")]
+    assert dir_manifest_md5([]) == EMPTY_DIR_MD5
+    assert dir_manifest_md5(entries) == ensure_dir_manifest(tmp_path, entries)
+
+
 def test_ensure_dir_manifest_writes_synthetic_dir_file(tmp_path: Path) -> None:
     """Byte-match anchor: synthetic manifest bytes must equal what real DVC
     produces — ``{md5, relpath}`` only, sorted by relpath,

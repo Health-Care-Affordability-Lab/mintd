@@ -25,7 +25,9 @@ from pathlib import Path
 import pytest
 
 from mintd._registry_git_ops import (
+    BranchInfo,
     GitOpError,
+    GitPushRejected,
     PRConflictError,
     RegistryBranchExists,
     SubprocessRegistryGitOps,
@@ -668,3 +670,140 @@ def test_uncommitted_pointers_lists_an_unstaged_pointer_once(tmp_path: Path) -> 
     _git(["rm", "-q", "--cached", "a.dvc"], cwd=repo)
 
     assert SubprocessRegistryGitOps().uncommitted_pointers(repo) == ["a.dvc"]
+
+
+# ---------------------------------------------------------------------------
+# `data push`'s commit lane: real git, one test per seam method
+# ---------------------------------------------------------------------------
+
+
+def _repo(tmp_path: Path, name: str = "work") -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=repo)
+    for key, value in (("user.email", "test@mintd"), ("user.name", "test"), ("commit.gpgsign", "false")):
+        _git(["config", key, value], cwd=repo)  # commit_paths uses the repo's own identity
+    (repo / "seed.txt").write_text("seed\n")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "seed"], cwd=repo)
+    return repo
+
+
+def _with_origin(tmp_path: Path, repo: Path) -> Path:
+    origin = tmp_path / "origin.git"
+    _git(["init", "-q", "--bare", "-b", "main", str(origin)])
+    _git(["remote", "add", "origin", str(origin)], cwd=repo)
+    _git(["push", "-q", "-u", "origin", "main"], cwd=repo)
+    return origin
+
+
+def test_commit_paths_commits_exactly_the_named_paths(tmp_path: Path) -> None:
+    """A `[` in a name stays literal, a separately staged file stays staged
+    and out of the commit, an untracked file is not added. Mutation: commit
+    with `add -A` / without `-- <paths>` -> notes.txt or junk.txt committed."""
+    repo = _repo(tmp_path)
+    (repo / "fin[a]l.dvc").write_text("a\n")
+    (repo / "sp ace.dvc").write_text("b\n")
+    (repo / "notes.txt").write_text("draft\n")
+    _git(["add", "notes.txt"], cwd=repo)
+    (repo / "junk.txt").write_text("junk\n")
+
+    SubprocessRegistryGitOps().commit_paths(repo, ["fin[a]l.dvc", "sp ace.dvc"], "pin")
+
+    assert sorted(_git(["show", "--name-only", "--format=", "HEAD"], cwd=repo).splitlines()) == [
+        "fin[a]l.dvc", "sp ace.dvc",
+    ]
+    status = _git(["status", "--porcelain"], cwd=repo)
+    assert "A  notes.txt" in status and "?? junk.txt" in status
+
+
+def test_tracked_changes_reports_staged_and_modified_not_untracked(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "new.txt").write_text("n\n")
+    _git(["add", "new.txt"], cwd=repo)
+    _git(["rm", "-q", "--cached", "seed.txt"], cwd=repo)
+    (repo / "loose.txt").write_text("l\n")
+    changes = SubprocessRegistryGitOps().tracked_changes(repo)
+    assert ("A ", "new.txt") in changes and ("D ", "seed.txt") in changes
+    assert all(path != "loose.txt" for _, path in changes)
+
+
+def test_head_text_reads_head_and_says_none_when_absent(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    ops = SubprocessRegistryGitOps()
+    assert ops.head_text(repo, "seed.txt") == "seed\n"
+    assert ops.head_text(repo, "missing.dvc") is None
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    with pytest.raises(GitOpError):  # not a repository: an error, not "absent"
+        ops.head_text(plain, "seed.txt")
+
+
+def test_repo_toplevel_names_the_enclosing_repository(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "sub").mkdir()
+    nested = _repo(repo, "nested")
+    ops = SubprocessRegistryGitOps()
+    assert ops.repo_toplevel(repo / "sub").resolve() == repo.resolve()
+    assert ops.repo_toplevel(nested).resolve() == nested.resolve()
+
+
+def test_branch_info_reads_branch_upstream_and_ahead(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    ops = SubprocessRegistryGitOps()
+    # No upstream: `ahead` counts the commits on no remote at all.
+    assert ops.branch_info(repo) == BranchInfo("main", None, None, 1)
+    _with_origin(tmp_path, repo)
+    (repo / "more.txt").write_text("m\n")
+    _git(["add", "more.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "more"], cwd=repo)
+    assert ops.branch_info(repo) == BranchInfo("main", "origin", "refs/heads/main", 1)
+    _git(["checkout", "-q", "--detach"], cwd=repo)
+    assert ops.branch_info(repo).branch is None
+
+
+def test_push_to_honours_an_upstream_with_another_name(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    origin = _with_origin(tmp_path, repo)
+    _git(["checkout", "-q", "-b", "local-name"], cwd=repo)
+    (repo / "x.txt").write_text("x\n")
+    _git(["add", "x.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "x"], cwd=repo)
+    SubprocessRegistryGitOps().push_to(repo, "origin", "refs/heads/main")
+    assert _git(["rev-parse", "main"], cwd=origin) == _git(["rev-parse", "HEAD"], cwd=repo)
+
+
+def test_push_to_types_a_rival_commit_and_leaves_a_hook_plain(tmp_path: Path) -> None:
+    """A non-fast-forward rejection is `GitPushRejected`; a hook that declines
+    is a plain `GitOpError`, because `git pull --rebase` is no fix for it."""
+    repo = _repo(tmp_path)
+    origin = _with_origin(tmp_path, repo)
+    rival = tmp_path / "rival"
+    _git(["clone", "-q", str(origin), str(rival)])
+    (rival / "r.txt").write_text("r\n")
+    _git(["add", "r.txt"], cwd=rival)
+    _git(["commit", "-q", "-m", "rival"], cwd=rival)
+    _git(["push", "-q", "origin", "main"], cwd=rival)
+    (repo / "x.txt").write_text("x\n")
+    _git(["add", "x.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "x"], cwd=repo)
+    ops = SubprocessRegistryGitOps()
+    with pytest.raises(GitPushRejected):
+        ops.push_to(repo, "origin", "refs/heads/main")
+
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_bytes(b"#!/bin/sh\nexit 1\n")  # LF, so Git for Windows' sh runs it
+    hook.chmod(0o755)
+    _git(["pull", "-q", "--rebase"], cwd=repo)
+    with pytest.raises(GitOpError) as excinfo:
+        ops.push_to(repo, "origin", "refs/heads/main")
+    assert not isinstance(excinfo.value, GitPushRejected)
+
+
+def test_remote_default_branch_asks_the_remote(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _with_origin(tmp_path, repo)
+    ops = SubprocessRegistryGitOps()
+    assert ops.remote_default_branch(repo, "origin") == "main"
+    _git(["remote", "add", "gone", str(tmp_path / "missing.git")], cwd=repo)
+    assert ops.remote_default_branch(repo, "gone") is None

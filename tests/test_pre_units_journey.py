@@ -1186,18 +1186,22 @@ def test_import_of_a_genuinely_empty_directory_out_still_succeeds(
     assert (_import_dir(consumer) / "final").is_dir()
 
 
-def test_readme_produce_flow_names_pointers_until_committed_and_pushed(
+def test_readme_produce_flow_commits_before_data_push(
     payload_journey, monkeypatch, capsys
 ) -> None:
-    """The README's produce steps with real dvc and real git. `dvc repro`
-    writes `dvc.lock`, so `mintd data push` names it rather than printing a
-    check mark; `registry register` refuses it uncommitted and goes through
-    once it is committed and pushed. Only `gh` is faked, at the catalog
-    client's constructor, as `journey` does.
+    """The README's produce steps with real dvc and real git, in the README's
+    order: `dvc repro`, the project commit, then `mintd data push`, which on
+    this md5-layout remote rewrites no pointer, so commits nothing and names
+    the commit still waiting for `git push`;
+    `registry register` refuses the uncommitted project and goes through once
+    it is committed and pushed. Only `gh` is faked, at the catalog client's
+    constructor, as `journey` does.
 
     `check` reads the lab's S3 remote (md5 layout, so the lock needs no
     version IDs) and a matching `metadata.storage`; the pushes go to the
-    harness's local directory through `--remote local`.
+    harness's local directory through `--remote local`. The commit `data push`
+    makes itself, on a version-aware remote, is covered in test_data_push.py:
+    `--remote local` is not the default remote, so it never commits here.
     """
     from tests._dvc_fixtures import storage_block, write_dvc_config
     from tests._harness.payload import publish_pipeline_payload
@@ -1221,11 +1225,6 @@ def test_readme_produce_flow_names_pointers_until_committed_and_pushed(
     producer._write_metadata(meta)
     monkeypatch.chdir(producer.work)
 
-    assert cli.main(["data", "push", "--remote", "local"]) == 0, _drain(capsys)
-    out = " ".join(_drain(capsys).split())
-    assert "✓" not in out
-    assert "dvc.lock" in out and "commit and push" in out
-
     def register() -> tuple[int, str]:
         rc = cli.main(["registry", "register", str(producer.work)])
         return rc, " ".join(_drain(capsys).split())
@@ -1235,19 +1234,31 @@ def test_readme_produce_flow_names_pointers_until_committed_and_pushed(
     assert "the project has uncommitted changes:" in out
     assert all(f in out for f in ("dvc.lock", "dvc.yaml", "metadata.json")), out
 
-    # The README's commit step, run exactly as written there.
+    # The README's commit step, run exactly as written there...
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
-    for line in ("git status", "git add -A", 'git commit -m "Record pushed data versions"', "git push"):
+    commit = 'git commit -m "Produce the cleaned survey"'
+    for line in ("git status", "git add -A", commit):
         assert f"\n{line}\n" in readme, f"README no longer says {line!r}"
         _git(shlex.split(line)[1:], cwd=producer.work)
-    # ...and between the push and the register, where a reader meets it.
+    # ...after `dvc repro` and before the push, where a reader meets it.
     assert (
-        readme.index("\nmintd data push\n")
-        < readme.index('\ngit commit -m "Record pushed data versions"\n')
+        readme.index("\ndvc repro\n")
+        < readme.index(f"\n{commit}\n")
+        < readme.index("\nmintd data push\n")
         < readme.index("\nmintd registry register\n")
-    ), "README's commit step is no longer between data push and registry register"
+    ), "README's commit step is no longer between dvc repro and data push"
+    assert "Record pushed data versions" not in readme  # data push commits the pointers itself
+    # No routine `git push` step: data push pushes, so skipping it leaves the
+    # last importable commit on the remote, not one whose data is not on S3.
+    assert "\ngit push\n" not in readme, "README has a git push step before data push again"
+    # Nothing to commit on this remote, so the waiting commit is named, not
+    # pushed, and the README says to `git push` then.
     assert cli.main(["data", "push", "--remote", "local"]) == 0
-    assert "✓ already up to date" in _drain(capsys)
+    out = " ".join(_drain(capsys).split())
+    assert "already up to date" in out and "✓" not in out, out
+    assert "1 commit(s) on this branch are not on" in out and "git push" in out, out
+    _git(["push"], cwd=producer.work)
+    assert _git(["status", "--porcelain"], cwd=producer.work).strip() == ""
     rc, out = register()
     assert rc == 0, out
 

@@ -490,7 +490,7 @@ def _delivery_hint(verdict: Delivery, path: str, remote_name: str, project_path:
         return (
             "; ".join(facts) + ". Declare a path DVC tracks, or track this one: for a dvc.yaml "
             f"output, run the stage that produces it ({_STAGE_RUN_DELETES}); for a loose file, "
-            "'mintd data add'. Then 'mintd data push' and commit and push the pointer or dvc.lock."
+            "'mintd data add'. Then 'mintd data push', which commits and pushes the pointer or dvc.lock when nothing else is uncommitted."
         )
     if verdict.state == "not_pullable":
         return (
@@ -514,7 +514,8 @@ def _delivery_hint(verdict: Delivery, path: str, remote_name: str, project_path:
     return (
         f"remote {remote_name!r} is version_aware, so a consumer's pull needs an S3 version ID "
         f"recorded under that remote; none is for {abbreviate(verdict.unpinned)}. Run 'mintd data "
-        "push' from this project, then commit and push the rewritten .dvc / dvc.lock files."
+        "push' from this project; it commits and pushes the rewritten .dvc / dvc.lock files, or "
+        "names them for you to commit when anything else is uncommitted."
     )
 
 

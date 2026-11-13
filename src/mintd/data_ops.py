@@ -3,7 +3,9 @@
 Distinct module from slice-7's `data.py` (which holds `import_product`
 and `bump_import`). The naming asymmetry is deliberate: `data.py` is the
 *catalog-aware* family (uses CatalogClient + DvcOps), while `data_ops.py`
-is the *DVC-only* family (consumer's own data). They could share a module
+is the *project-local* family (the user's own data): DVC, plus the git
+commit and push of the pointer files `data push` rewrites
+(`commit_pushed_pointers`, through `RegistryGitOps`). They could share a module
 in a slice-19 cleanup; for now, the rename would touch slice 7-12 tests.
 
 ``data_pull``'s degraded-path behavior (checkout-before-pull ordering, the
@@ -19,7 +21,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, Literal
 
 from ._dvc_ops import (
     DvcOps,
@@ -38,7 +40,10 @@ from ._fast_sync_ops import (
     partition_pipeline_outs,
     resolve_target_outs,
 )
+from ._dvc_state import abbreviate, judge_pointers, push_targets
 from ._import_rescue_ops import RescueResult, rescue_import_pull
+from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
+from ._storage_state import inspect_storage
 from .model import FastPullResult
 
 if TYPE_CHECKING:
@@ -113,6 +118,9 @@ class PushSummary:
     bytes: int | None
     elapsed_s: float
     up_to_date: bool
+    # The ``.dvc`` paths and ``dvc.yaml:<stage>`` keys a targeted push
+    # uploaded whole (``_dvc_state.push_targets``); None when untargeted.
+    selection: frozenset[str] | None = None
 
 
 def _out_aggregate_bytes(out: DvcOut) -> int:
@@ -187,8 +195,9 @@ def _shape_groups(targets: list[str]) -> list[list[str]]:
     stage name the user types before a path (``mintd data pull s1
     data/s2.txt``), still takes the leaking fast path. On the pull and checkout
     lanes both leaks fail LOUDLY — the ``outs_materialized`` probe names what
-    did not land. On the push lane they do NOT: ``data_push`` has no such
-    probe, so a stage-name collision there still exits 0 under a ✓."""
+    did not land. Push no longer uses this split: ``_dvc_state.push_targets``
+    spells every tracked target as a ``.dvc`` file or a ``dvc.yaml:<stage>``
+    key, so only targets that match nothing reach dvc bare."""
     groups = ([t for t in targets if t.endswith(".dvc")],
               [t for t in targets if not t.endswith(".dvc")])
     return [g for g in groups if g]
@@ -951,22 +960,30 @@ def data_push(
     dvc_ops: DvcOps,
     remote: str | None = None,
     jobs: int | None = None,
+    cwd: Path | None = None,
 ) -> PushSummary:
     # Resolve the effective remote for display only (explicit > .dvc/config >
     # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
     # applies its own default when None. ``targets=None`` pushes everything
     # tracked (dvc's default) in one argv.
     #
-    # Push needs no fast-sync analog — it uploads from an intact local cache —
-    # but it DOES need the same argv grouping as pull and checkout: dvc collects
-    # push targets through the same ``index_from_targets`` fast path, so an argv
-    # mixing ``.dvc`` paths and bare out paths uploads only the last ``.dvc``
-    # target's outs and still exits 0 (measured: ``mintd data push x.csv.dvc
-    # data/s1.txt`` put 1 of 2 objects on the remote under a ✓). The collaborator
-    # who later pulls the missing out is the one who finds out. See
-    # ``_shape_groups`` — including the residual stage-name leak it documents,
-    # which is silent here because push has no post-op probe.
+    # Push needs no fast-sync analog — it uploads from an intact local cache.
+    # Targets are read relative to ``cwd`` (default: the project) and pushed
+    # from the project root as whole outputs: ``_dvc_state.push_targets``
+    # spells each tracked target as its ``.dvc`` file or ``dvc.yaml:<stage>``
+    # key. Pushed bare, one file of a tracked folder uploads alone and dvc
+    # rewrites the folder's pointer to list only it; and an argv mixing
+    # ``.dvc`` paths with bare paths uploads only the last ``.dvc`` target's
+    # outs at exit 0 (the ``index_from_targets`` leak ``_shape_groups``
+    # documents), so the groups are never mixed.
     effective_remote = remote or _default_dvc_remote(project_path) or "origin"
+    groups: list[list[str] | None] = [None]
+    selection: frozenset[str] | None = None
+    if targets:
+        resolved, selection = push_targets(
+            project_path, targets, effective_remote, cwd=cwd or project_path
+        )
+        groups = list(resolved)
     start_t = time.monotonic()
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
     # raising group aborts the rest and surfaces as a non-zero exit. Deliberate
@@ -975,7 +992,7 @@ def data_push(
     # there is nothing for a survivor list to add.
     results: list[DvcPushResult] = [
         dvc_ops.push(targets=group, cwd=project_path, remote=remote, jobs=jobs)
-        for group in (_shape_groups(targets) if targets else [targets])
+        for group in groups
     ]
     # Best-effort counts stay best-effort: a group dvc reported no number for
     # drops out rather than counting as zero, and the push is "up to date" only
@@ -988,6 +1005,186 @@ def data_push(
         bytes=sum(byte_counts) if byte_counts else None,
         elapsed_s=time.monotonic() - start_t,
         up_to_date=all(r.up_to_date for r in results),
+        selection=selection,
+    )
+
+
+COMMIT_MESSAGE = "Record pushed data versions"
+
+
+@dataclass(frozen=True)
+class PointerCommit:
+    """What ``commit_pushed_pointers`` did with the pointer files.
+
+    ``left``: nothing committed, ``reason`` says why, for a person to commit.
+    ``blocked``: nothing committed, because ``blocked`` names outputs those
+    files record that importers could not pull. ``commit_failed``: git commit
+    failed. ``push_failed``: committed as ``commit``, not pushed. ``pushed``:
+    committed and pushed to ``pushed_to``, with ``earlier`` unpushed commits
+    before it. ``hint`` is the command to finish by hand; ``note`` says when
+    importers will see a branch other than the one they read.
+    """
+
+    state: Literal["left", "blocked", "commit_failed", "push_failed", "pushed"]
+    pointers: tuple[str, ...]
+    reason: str | None = None
+    blocked: tuple[str, ...] = ()
+    commit: str | None = None
+    pushed_to: str | None = None
+    earlier: int = 0
+    hint: str | None = None
+    note: str | None = None
+
+
+def _last_line(exc: GitOpError) -> str:
+    lines = [ln.strip() for ln in exc.stderr.splitlines() if ln.strip()]
+    return lines[-1] if lines else "git printed no reason"
+
+
+def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
+    """Why ``.dvc/config.local`` sends this push somewhere other than where
+    importers pull, or None. dvc merges ``config.local`` over ``.dvc/config``;
+    a consumer's clone has only the latter. So another ``[core] remote``, or
+    the default remote's ``url`` or ``version_aware`` set locally, records
+    version IDs (or an object layout) importers cannot use. ``named``: the
+    push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
+    import configparser
+
+    from ._storage_state import _extract_remote_section_name
+
+    parser = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        parser.read(root / ".dvc" / "config.local", encoding="utf-8")
+    except configparser.Error:
+        return None
+    local = parser.get("core", "remote", fallback="")
+    if local and local != default and not named:
+        return f".dvc/config.local sends pushes to {local}; importers pull from the default remote {default}"
+    for section in parser.sections():
+        if _extract_remote_section_name(section) == default:
+            keys = sorted(k for k in ("url", "version_aware") if parser.has_option(section, k))
+            if keys:
+                return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
+    return None
+
+
+def commit_pushed_pointers(
+    root: Path,
+    pointers: list[str],
+    *,
+    git_ops: RegistryGitOps,
+    remote: str | None,
+    selection: frozenset[str] | None,
+    cwd: Path | None = None,
+) -> PointerCommit:
+    """Commit and push ``pointers`` (repo-relative ``.dvc`` / ``dvc.lock``
+    files that differ from HEAD) when it is safe, after ``data push``.
+
+    Importers read the pushed commit, so the S3 version IDs a version-aware
+    push writes into these files reach nobody until they are committed and
+    pushed. Every check comes before any write. Nothing is committed when the
+    push went to a remote importers do not read, when the DVC project is not
+    its git repository's top level or ``cwd`` is in another repository (a
+    nested project or a nested clone must not commit the repo around it),
+    when a pointer records something importers could not pull
+    (``_dvc_state.judge_pointers``), or when any other tracked file differs
+    from HEAD (a person mid-edit decides what goes in). The commit names its
+    paths, so nothing else is swept in; the push goes to the branch's
+    upstream of the same name, as git's own ``push.default=simple`` requires,
+    with an explicit refspec, and never pulls, rebases or forces.
+    """
+    pts = tuple(pointers)
+
+    def left(reason: str) -> PointerCommit:
+        return PointerCommit("left", pts, reason=reason)
+
+    storage = inspect_storage(root)
+    default = storage.dvc_remote_name
+    if default is None:
+        return left("no default DVC remote in .dvc/config")
+    if remote is not None and remote != default:
+        return left(f"pushed to --remote {remote}; importers pull from the default remote {default}")
+    redirect = _local_redirect(root, default, named=remote is not None)
+    if redirect is not None:
+        return left(redirect)
+    try:
+        top = git_ops.repo_toplevel(root).resolve()
+        if top != root.resolve():
+            return left("the DVC project is not the root of its git repository")
+        if cwd is not None and git_ops.repo_toplevel(cwd).resolve() != top:
+            return left(f"you are in another git repository than the DVC project's ({root})")
+        try:
+            before = git_ops.current_commit(root)
+        except GitOpError:
+            return left("the repository has no commit yet")
+        head = {p: git_ops.head_text(root, p) for p in pts}
+        judged = judge_pointers(
+            root, pts, head=head, remote_name=default,
+            version_aware=storage.dvc_version_aware, selection=selection,
+        )
+        if judged.blocked:
+            return PointerCommit("blocked", pts, blocked=judged.blocked)
+        if judged.not_committed:
+            return left(judged.not_committed[0])
+        changes = git_ops.tracked_changes(root)
+        others = [path for _, path in changes if not is_pointer_path(path)]
+        if others:
+            return left(f"{abbreviate(others)} also differs from the last commit")
+        deleting = [path for xy, path in changes if "D" in xy]
+        if deleting:
+            return left(f"{deleting[0]} is staged for deletion")
+        if git_ops.head_text(root, ".dvc/config") is None:
+            return left(".dvc/config is not committed, so importers cannot find the remote")
+        if "dvc.lock" in pts and git_ops.head_text(root, "dvc.yaml") is None:
+            return left("dvc.yaml is not committed")
+        info = git_ops.branch_info(root)
+        if info.branch is None:
+            return left("HEAD is detached")
+        if info.merge_ref is not None and info.merge_ref.removeprefix("refs/heads/") != info.branch:
+            upstream = info.merge_ref.removeprefix("refs/heads/")
+            return left(
+                f"{info.branch} tracks {info.remote}/{upstream}, a branch of another name; "
+                "git will not push it there either"
+            )
+    except GitOpError as exc:
+        return left(f"git could not answer: {_last_line(exc)}")
+
+    try:
+        git_ops.commit_paths(root, list(pts), COMMIT_MESSAGE)
+    except GitOpError as exc:
+        # A hook or the timeout can kill git after the commit landed.
+        try:
+            moved = git_ops.current_commit(root) != before
+        except GitOpError:
+            moved = False
+        if not moved:
+            return PointerCommit("commit_failed", pts, reason=_last_line(exc))
+    try:
+        sha = git_ops.current_commit(root)
+    except GitOpError as exc:
+        return PointerCommit("commit_failed", pts, reason=_last_line(exc))
+    if info.remote is None or info.merge_ref is None:
+        return PointerCommit(
+            "push_failed", pts, reason=f"{info.branch} has no upstream", commit=sha,
+            hint=f"git push -u origin {info.branch}",
+        )
+    try:
+        git_ops.push_to(root, info.remote, info.merge_ref)
+    except GitPushRejected:
+        return PointerCommit(
+            "push_failed", pts, reason="the remote branch has commits this clone does not",
+            commit=sha, hint="git pull --rebase, then git push (mintd never pulls, rebases or forces)",
+        )
+    except GitOpError as exc:
+        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint="git push")
+    upstream = info.merge_ref.removeprefix("refs/heads/")
+    note = None
+    reads = git_ops.remote_default_branch(root, info.remote)
+    if reads and reads != upstream:
+        note = f"importers read {reads}: they see this once {upstream} merges into {reads}"
+    return PointerCommit(
+        "pushed", pts, commit=sha, pushed_to=f"{info.remote}/{upstream}",
+        earlier=info.ahead or 0, note=note,
     )
 
 

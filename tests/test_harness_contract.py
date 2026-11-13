@@ -1586,3 +1586,24 @@ def test_wdir_relative_lock_from_real_dvc_drives_check(
 
     consumer = [f for f in findings if f.section == "consumer"]
     assert [f.kind for f in consumer] == [expected], [f.message for f in consumer]
+
+
+def test_dir_manifest_md5_matches_the_tree_dvc_add_records(tmp_path: Path, real_dvc) -> None:
+    """Real dvc is the oracle for `data push`'s tree check: hashing the file
+    list a folder's cached manifest holds gives the md5 `dvc add` wrote into
+    its pointer, so a complete list always names a tree the cache holds."""
+    import yaml
+
+    from mintd._fast_sync_ops import dir_manifest_md5, read_cached_dir_manifest
+
+    ws = tmp_path / "ws"
+    (ws / "data" / "final").mkdir(parents=True)
+    for name in ("x.csv", "y.csv"):
+        (ws / "data" / "final" / name).write_text(f"{name}\n")
+    real_dvc(["init", "--no-scm", "-q"], cwd=ws, check=True)
+    real_dvc(["add", "data/final"], cwd=ws, check=True)
+
+    md5 = yaml.safe_load((ws / "data" / "final.dvc").read_text())["outs"][0]["md5"]
+    entries = read_cached_dir_manifest(ws / ".dvc" / "cache", md5)
+    assert entries is not None and len(entries) == 2
+    assert dir_manifest_md5(entries) == md5

@@ -145,33 +145,40 @@ cd data_my-cleaned-survey
 
 # Edit metadata.json (description, contact, data_products.outputs, …)
 
-# Produce the outputs and push the bytes. The scaffold's pipeline owns
-# data/final/: `dvc repro` rebuilds it from data/raw/ and deletes anything
-# placed there by hand, so keep source files in data/raw/:
+# Produce the outputs. The scaffold's pipeline owns data/final/: `dvc repro`
+# rebuilds it from data/raw/ and deletes anything placed there by hand, so
+# keep source files in data/raw/:
 dvc repro
-mintd data push
 
-# Validate before you commit. check also errors on any declared output DVC
-# cannot deliver to importers (untracked, or pushed without S3 version IDs):
-mintd check
-
-# Commit and push the project. On a version-aware remote `mintd data push`
-# writes each object's S3 version ID into the .dvc / dvc.lock files, and
-# importers read your pushed commit, not your disk. data push names the
-# pointers it left uncommitted; registry register refuses while git has
-# any uncommitted change or untracked file that is not ignored (whatever
-# status.showUntrackedFiles says). Data belongs in DVC, not
+# Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status
 # lists elsewhere goes to `mintd data add` or .gitignore before you commit.
-# First push only: create the GitHub repository named in metadata.json
+# First time only: create the GitHub repository named in metadata.json
 # (repository.github_url), `git remote add origin <that url>`, and push
 # with `git push -u origin main`.
 git status
 git add -A
-git commit -m "Record pushed data versions"
-git push
+git commit -m "Produce the cleaned survey"
 
-# Announce the project to the lab registry (opens a PR):
+# Push the bytes, then the commits. On a version-aware remote this writes
+# each object's S3 version ID into the .dvc / dvc.lock files, checks every
+# output they record is on S3, then commits those files, and only those, and
+# pushes them with your commit to the branch's upstream: importers read your
+# pushed commit, not your disk. Skip this step and GitHub keeps your last
+# importable version rather than a commit whose data is not on S3. It never
+# pulls, rebases or forces. If any other tracked file differs from the last
+# commit, it uploads, commits nothing and names the files for you to commit.
+# With no pointer to commit it pushes nothing, and says when commits are
+# waiting: run `git push` then. --no-commit uploads only.
+mintd data push
+
+# Validate. check also errors on any declared output DVC cannot deliver to
+# importers (untracked, or pushed without S3 version IDs):
+mintd check
+
+# Announce the project to the lab registry (opens a PR). register refuses
+# while git has any uncommitted change or untracked file that is not ignored
+# (whatever status.showUntrackedFiles says):
 mintd registry register
 
 # Cut a versioned release. Tags, pushes, and updates the catalog
