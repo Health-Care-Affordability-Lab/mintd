@@ -278,3 +278,43 @@ def test_push_false_and_cache_false_outs_are_outside_what_push_checks(producer, 
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     assert "✓ 3 file(s) verified" in _out(capsys)
     assert not any("keep.csv" in p or "tmp.csv" in p for p in puts)
+
+
+def test_a_file_sent_in_parts_is_proven_reattached_and_imported(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
+    """A file of 100 MiB or more goes up in 50 MiB parts, so its ETag isn't its
+    md5. mintd proves it by recomputing that ETag from the cache, both after
+    the first push and when a rewrite loses the ID, which costs no upload."""
+    _, s3, puts = s3_server
+    big = os.urandom(100 * 2**20 + 7)
+    (producer / "data" / "big.bin").write_bytes(big)
+    real_dvc(["add", "-q", "data/big.bin"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "big"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    assert "✓ 4 file(s) verified" in _out(capsys)
+    pointer = producer / "data" / "big.bin.dvc"
+    pin = yaml.safe_load(pointer.read_text())["outs"][0]["cloud"]["storage"]
+    etag = s3.head_object(Bucket=BUCKET, Key="lab/a/data/big.bin", VersionId=pin["version_id"])["ETag"]
+    assert etag.strip('"').endswith("-3")  # 50 MiB + 50 MiB + 7 bytes: really sent in parts
+
+    doc = yaml.safe_load(pointer.read_text())
+    doc["outs"][0].pop("cloud")
+    pointer.write_text(yaml.safe_dump(doc, sort_keys=False))
+    _git(["commit", "-q", "-am", "dvc add again, without the ID"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    puts.clear()
+
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    err = _out(capsys)
+    assert puts == []
+    assert "re-attached data/big.bin (no ID)" in err
+    assert yaml.safe_load(pointer.read_text())["outs"][0]["cloud"]["storage"]["version_id"] == pin["version_id"]
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=consumer)
+    real_dvc(["init", "-q"], cwd=consumer, check=True)
+    r = real_dvc(["import", "-q", str(tmp_path / "origin.git"), "data/big.bin", "-o", "big.bin"], cwd=consumer)
+    assert r.returncode == 0, r.stderr
+    assert (consumer / "big.bin").read_bytes() == big
