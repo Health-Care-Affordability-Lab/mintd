@@ -1521,6 +1521,23 @@ def test_publish_rerun_at_the_same_version_commits_the_reattached_pointers(tmp_p
     assert f"version_id: {v}" in committed
 
 
+def test_publish_after_a_failed_push_names_the_pointer_files_to_commit(tmp_path, s3_versioned, monkeypatch):
+    """The repair re-attached an ID before the push failed. The working tree
+    keeps it, so the rerun needs it committed, and the hint says which."""
+    from mintd._dvc_ops import DvcPushError
+
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    dvc = _FakeDvcOps()
+    dvc.push_raises = DvcPushError("dvc push exited 1")
+    with pytest.raises(DvcPushFailed) as excinfo:
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc,
+                        git_ops=_FakeRegistryGitOps())
+    assert "data/final/x.csv.dvc" in excinfo.value.recovery_hint and "Commit them" in excinfo.value.recovery_hint
+
+
 def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)

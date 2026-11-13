@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 from ._fast_sync_ops import (
+    DvcFileEntry,
     HeadVerdict,
     cache_path_for,
+    dir_manifest_md5,
     flagged_outs,
     read_cached_dir_manifest,
     resolve_out,
@@ -335,8 +337,10 @@ def prove(entry: Entry, verdict: HeadVerdict, cache: CacheHashes) -> str:
 
 
 def pinned(entry: Entry, verdict: HeadVerdict) -> Entry:
-    """``entry`` re-pinned to the version ``verdict`` found."""
-    return replace(entry, version_id=verdict.version_id, etag=(verdict.etag or "").strip('"'))
+    """``entry`` re-pinned to the version ``verdict`` found (and its size, when
+    the pointer didn't record one: a ``.dir`` tree holds none)."""
+    return replace(entry, version_id=verdict.version_id, etag=(verdict.etag or "").strip('"'),
+                   size=entry.size if entry.size is not None else verdict.size)
 
 
 # --- repair (before the push) -----------------------------------------------
@@ -528,8 +532,9 @@ def _as_files(rec: Any, files: list[tuple[Entry, Entry | None]], remote: str | N
     listed = []
     for was, now in sorted(files, key=lambda c: c[0].relpath or ""):
         fe: dict[str, Any] = {"relpath": was.relpath, "md5": was.md5}
-        if was.size is not None:
-            fe["size"] = was.size
+        size = was.size if was.size is not None else (now.size if now is not None else None)
+        if size is not None:  # a re-attached file's size is S3's; an upload's DVC writes
+            fe["size"] = size
         if now is not None and remote is not None:
             fe["cloud"] = {remote: {"etag": now.etag, "version_id": now.version_id}}
         listed.append(fe)
@@ -573,6 +578,11 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
             meant = load12(raw.decode("utf-8"))
             for (p, stage, out_i), files in folders.items():
                 if p == pointer:
+                    # The list must hash to the tree the record names, or the
+                    # record changed since it was planned (a concurrent repro).
+                    tree = dir_manifest_md5([DvcFileEntry(w.md5, w.relpath or "") for w, _ in files])
+                    if str(_records(doc, stage)[out_i].get("md5")) != tree:
+                        raise PointerWriteError(pointer)
                     _as_files(_records(doc, stage)[out_i], files, remote)
                     _as_files(_records(meant, stage)[out_i], files, None)
             for old, new in changes:

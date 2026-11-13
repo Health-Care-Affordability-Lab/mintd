@@ -75,10 +75,34 @@ def test_a_folder_dvc_rewrote_as_a_dir_entry_is_reattached_as_a_files_list(s3_ve
     assert write_repair(tmp_path, plan, R) == ["dvc.lock"]
     (out,) = yaml.safe_load((tmp_path / "dvc.lock").read_text())["stages"]["many"]["outs"]
     assert out == {"path": "data/out", "hash": "md5", "files": [
-        {"relpath": "a.csv", "md5": _md5(b"A"),
+        {"relpath": "a.csv", "md5": _md5(b"A"), "size": 1,  # S3's size: a .dir tree records none
          "cloud": {R: {"etag": a["ETag"].strip('"'), "version_id": a["VersionId"]}}},
         {"relpath": "b.csv", "md5": _md5(b"B")},
     ]}
+
+
+def test_a_folder_record_changed_since_the_plan_is_not_rewritten(s3_versioned, tmp_path: Path) -> None:
+    """A `dvc repro` between the plan and the write points the record at
+    another tree: the planned list doesn't hash to it, so nothing is written."""
+    import json
+
+    s3, bucket = s3_versioned
+    s3.put_object(Bucket=bucket, Key=f"{PREFIX}/data/out/a.csv", Body=b"A")
+    tree = [{"md5": _cache(tmp_path, b"A"), "relpath": "a.csv"}]
+    tree_md5 = _md5(json.dumps(tree).encode()) + ".dir"
+    obj = cache_path_for(tmp_path / ".dvc" / "cache", tree_md5)
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_text(json.dumps(tree))
+    (tmp_path / "dvc.yaml").write_text("stages:\n  many:\n    cmd: make\n    outs: [data/out]\n")
+    lock = "schema: '2.0'\nstages:\n  many:\n    cmd: make\n    outs:\n    - path: data/out\n      hash: md5\n"
+    (tmp_path / "dvc.lock").write_text(lock + f"      md5: {tree_md5}\n")
+    plan = _plan(tmp_path, s3, bucket, [])
+    assert plan.reattach
+    (tmp_path / "dvc.lock").write_text(lock + f"      md5: {'9' * 32}.dir\n")
+    before = (tmp_path / "dvc.lock").read_bytes()
+    with pytest.raises(PointerWriteError):
+        write_repair(tmp_path, plan, R)
+    assert (tmp_path / "dvc.lock").read_bytes() == before
 
 
 def test_new_data_with_no_id_writes_nothing(s3_versioned, tmp_path: Path) -> None:

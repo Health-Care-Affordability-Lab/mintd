@@ -138,7 +138,9 @@ def _in_selection(entry: Entry | Out, selection: frozenset[str] | None) -> bool:
 
 
 def _identity(e: Entry) -> tuple:
-    return (e.pointer, e.stage, e.record)
+    """A file by pointer, stage, out index and relpath: a folder's files keep
+    it when DVC or the repair rewrites a ``.dir`` record as a files list."""
+    return (e.pointer, e.stage, e.record[0], e.relpath)
 
 
 def _proof_id(e: Entry) -> tuple:
@@ -324,7 +326,7 @@ def restore(prepared: Prepared) -> list[str]:
     """
     from ._atomic import _atomic_write_text
 
-    in_scope = {_identity(e)[:2] + (e.record[0],) for e in prepared.repair}
+    in_scope = {_identity(e)[:3] for e in prepared.repair}
     rewritten: list[str] = []
     for rel, before in prepared.snapshot.items():
         path = prepared.root / rel

@@ -99,7 +99,7 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 5,
-    "mintd._push_verify._create_s3_client": 12,
+    "mintd._push_verify._create_s3_client": 13,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.time.sleep": 9,
@@ -261,7 +261,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (206 sites / 48 targets), not
+    """The literals above are the *whole* census (207 sites / 48 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -272,14 +272,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (206 → 205), or drop ``patch`` (206 → 176).
+    ``monkeypatch``-receiver calls (207 → 206), or drop ``patch`` (207 → 177).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 206
+    assert sum(scanned.values()) == 207
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

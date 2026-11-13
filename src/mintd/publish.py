@@ -298,12 +298,15 @@ def _apply_publish(
         pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
     except DvcOpError as exc:
         _atomic_write_json(metadata_path, original_metadata_json)
-        repinned = prepared.written if prepared is not None else []
+        try:  # mintd's re-pins and whatever DVC recorded before failing
+            repinned = git_ops.uncommitted_pointers(project_path) if prepared is not None else []
+        except GitOpError:
+            repinned = list(prepared.written) if prepared is not None else []
         raise DvcPushFailed(
             f"dvc push failed: {exc}",
             recovery_hint=(
-                f"metadata.json was rolled back. mintd re-pinned {', '.join(repinned)} before the push: "
-                "commit them, fix the DVC remote and rerun `mintd publish`."
+                f"metadata.json was rolled back. These pointer files now record re-pinned or uploaded "
+                f"versions: {', '.join(repinned)}. Commit them, fix the DVC remote and rerun `mintd publish`."
                 if repinned else "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
             ),
         ) from exc
@@ -393,11 +396,14 @@ def _apply_publish(
 
             # ...and nothing else: a hook that stages .dvc/config would point
             # importers at a location the check never saw.
-            wrong = sorted(set(git_ops.head_paths(project_path)) - {"metadata.json", *gate.frozen}) or [
-                rel for rel, digest in gate.frozen.items()
-                if hashlib.sha256((git_ops.head_text(project_path, rel) or "").replace("\r\n", "\n").encode()).hexdigest()
-                != digest
-            ]
+            try:
+                wrong = sorted(set(git_ops.head_paths(project_path)) - {"metadata.json", *gate.frozen}) or [
+                    rel for rel, digest in gate.frozen.items()
+                    if hashlib.sha256((git_ops.head_text(project_path, rel) or "").replace("\r\n", "\n").encode()).hexdigest()
+                    != digest
+                ]
+            except GitOpError as exc:
+                wrong = [f"(git could not answer: {exc})"]
             if wrong:
                 raise PublishError(
                     f"the release commit doesn't hold exactly the pointer files the check judged: {', '.join(wrong)} "

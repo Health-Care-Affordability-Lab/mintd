@@ -1608,6 +1608,7 @@ def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, m
     assert cli.main(["data", "push", "--no-commit"]) == 1
     err = _err(capsys)
     assert "can't be proven" in err and "data/final/b.csv" in err and "✓" not in err
+    assert "not in this push: data/final/b.csv" not in err  # it was: the folder's files keep their identity
 
 
 def test_check_an_untouched_pin_holding_other_bytes_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
