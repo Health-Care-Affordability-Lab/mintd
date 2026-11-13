@@ -281,6 +281,16 @@ def test_a_size_only_pass_is_never_remembered(s3_versioned, tmp_path: Path) -> N
     assert sqlite3.connect(db).execute("SELECT COUNT(*) FROM proven").fetchone() == (0,)
 
 
+def test_a_memo_that_stops_answering_is_turned_off_not_raised(s3_versioned, tmp_path: Path) -> None:
+    s3, bucket = s3_versioned
+    v = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/a.csv", Body=b"A")
+    _pointer(tmp_path, "a.csv.dvc", "a.csv", b"A", {R: {"etag": v["ETag"].strip('"'), "version_id": v["VersionId"]}})
+    memo = ProofMemo(tmp_path / "memo.sqlite", "e")
+    memo._db.close()  # any sqlite error from here on
+    plan = _plan_with(tmp_path, s3, bucket, ["a.csv.dvc"], memo)
+    assert [e.path for e in plan.keep] == ["a.csv"] and memo.disabled
+
+
 def test_a_rewrite_keeps_dvcs_yaml_1_2_values(s3_versioned, tmp_path: Path) -> None:
     """DVC writes dvc.lock as YAML 1.2, where an unquoted `no` is a string.
     Rewritten through a YAML 1.1 library it would become `false`."""

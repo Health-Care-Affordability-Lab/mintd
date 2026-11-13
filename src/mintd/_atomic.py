@@ -64,7 +64,9 @@ def _try_fsync_parent_dir(path: Path) -> None:
 _TMP_TAIL = ".tmp"
 
 
-def _atomic_write_text(path: Path, content: str, *, tmp_suffix: str | None = None) -> None:
+def _atomic_write_text(
+    path: Path, content: str, *, tmp_suffix: str | None = None, newline: str | None = None,
+) -> None:
     """Write ``content`` to ``path`` atomically, destroying no neighbour.
 
     Sequence: sibling temp → fsync the temp's contents → rename onto ``path``
@@ -101,6 +103,9 @@ def _atomic_write_text(path: Path, content: str, *, tmp_suffix: str | None = Non
     is a mutation nothing kills. ``download_object`` carries the same
     parameter for the same reason.
 
+    ``newline`` is ``open``'s: the default writes ``\n`` as the platform's
+    line ending; ``""`` writes ``content`` exactly, to put bytes back as read.
+
     The failure arm is not optional. A guessable temp self-healed (the next
     run overwrote it); an unguessable one would strand a fresh orphan per
     failed write, and nothing in this lane sweeps them. It starts AFTER the
@@ -122,7 +127,7 @@ def _atomic_write_text(path: Path, content: str, *, tmp_suffix: str | None = Non
     tmp = path.with_name(path.name + suffix)
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())

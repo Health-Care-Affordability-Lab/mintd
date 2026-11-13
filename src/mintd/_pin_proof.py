@@ -551,7 +551,7 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
                 raise PointerWriteError(pointer)
     except Exception:
         for pointer, raw in originals.items():
-            _atomic_write_text(root / pointer, raw.decode("utf-8"))
+            _atomic_write_text(root / pointer, raw.decode("utf-8"), newline="")  # bytes as they were
         raise
     return sorted(originals)
 
@@ -587,20 +587,33 @@ class ProofMemo:
         self.hits = 0
 
     def knows(self, bucket: str, e: Entry) -> bool:
+        import sqlite3
+
         if self.disabled or not e.version_id:
             return False
-        row = self._db.execute(
-            "SELECT md5, size FROM proven WHERE endpoint=? AND bucket=? AND key=? AND version_id=?",
-            (self._endpoint, bucket, e.key, e.version_id),
-        ).fetchone()
+        try:
+            row = self._db.execute(
+                "SELECT md5, size FROM proven WHERE endpoint=? AND bucket=? AND key=? AND version_id=?",
+                (self._endpoint, bucket, e.key, e.version_id),
+            ).fetchone()
+        except sqlite3.Error:  # locked or damaged: HEAD everything instead
+            self.disabled = True
+            return False
         return row is not None and row[0] == e.md5 and (e.size is None or row[1] == e.size)
 
     def remember(self, bucket: str, e: Entry, size: int | None) -> None:
-        self._db.execute(
-            "INSERT OR REPLACE INTO proven VALUES (?, ?, ?, ?, ?, ?)",
-            (self._endpoint, bucket, e.key, e.version_id, e.md5, size),
-        )
-        self._db.commit()
+        import sqlite3
+
+        if self.disabled:
+            return
+        try:
+            self._db.execute(
+                "INSERT OR REPLACE INTO proven VALUES (?, ?, ?, ?, ?, ?)",
+                (self._endpoint, bucket, e.key, e.version_id, e.md5, size),
+            )
+            self._db.commit()
+        except sqlite3.Error:
+            self.disabled = True
 
 
 def prove_pins(

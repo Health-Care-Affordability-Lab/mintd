@@ -1199,7 +1199,7 @@ def commit_pushed_pointers(
         return left(f"git could not answer: {_last_line(exc)}")
 
     if frozen is not None:
-        drifted = [p for p in pts if _sha256_text(root / p) != frozen.get(p)]
+        drifted = [p for p in sorted({*pts, *frozen}) if _sha256_text(root / p) != frozen.get(p)]
         if drifted:
             return left(f"{abbreviate(drifted)} changed after the push was checked")
     try:

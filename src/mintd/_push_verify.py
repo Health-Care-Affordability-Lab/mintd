@@ -14,6 +14,7 @@ from __future__ import annotations
 import configparser
 import hashlib
 import os
+import sqlite3
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,7 +127,8 @@ def _in_selection(entry: Entry | Out, selection: frozenset[str] | None) -> bool:
     if selection is None:
         return True
     if entry.pointer == "dvc.lock":
-        return f"dvc.yaml:{entry.stage}" in selection
+        # `dvc push dvc.yaml:fan` pushes every `fan@*` of a foreach/matrix group.
+        return bool({f"dvc.yaml:{entry.stage}", f"dvc.yaml:{(entry.stage or '').split('@', 1)[0]}"} & selection)
     return entry.pointer in selection
 
 
@@ -254,7 +256,8 @@ def prepare(
         )
     if not str(cfg.get("url", "")).startswith("s3://"):
         return None
-    dvc_files = discover_all_outs(root)
+    dvc_files = [f for f in discover_all_outs(root)  # DVC skips subrepos (their own .dvc/)
+                 if not any((root / d / ".dvc").is_dir() for d in Path(f).parents if d != Path("."))]
     own = _own_remotes(root, dvc_files, name)
     if own:
         raise PushRefused(
@@ -270,7 +273,12 @@ def prepare(
     repair = tuple(e for e in scope.entries if _in_selection(e, selection))
     stuck = [f"{o.path} (its folder tree isn't in the local cache)" for o in scope.unrecoverable
              if _in_selection(o, selection)]
-    memo = ProofMemo(memo_path, cfg.get("endpointurl") or cfg.get("endpoint") or "aws") if memo_path else None
+    memo = None
+    if memo_path:
+        try:
+            memo = ProofMemo(memo_path, cfg.get("endpointurl") or cfg.get("endpoint") or "aws")
+        except (OSError, sqlite3.Error):
+            memo = None  # an unwritable cache dir costs HEADs, never the push
     plan = plan_repair(s3, bucket, repair, cache, memo)
     stuck += [f"{e.path} ({why})" for e, why in plan.unrecoverable]
     if stuck:
@@ -332,9 +340,11 @@ def restore(prepared: Prepared) -> list[str]:
             old_outs, new_outs = _records(before, stage), _records(after, stage)
             if len(old_outs) != len(new_outs):
                 continue
-            for i, (old, new) in enumerate(zip(old_outs, new_outs, strict=True)):
-                if (rel, stage, i) not in in_scope and old != new:
-                    new_outs[i] = old
+            old_at = {o.get("path"): (i, o) for i, o in enumerate(old_outs) if isinstance(o, dict)}
+            for j, new in enumerate(new_outs):
+                i, old = old_at.get(new.get("path") if isinstance(new, dict) else None, (None, None))
+                if old is not None and (rel, stage, i) not in in_scope and old != new:
+                    new_outs[j] = old
                     changed = True
         if changed:
             _atomic_write_text(path, _dump(after))

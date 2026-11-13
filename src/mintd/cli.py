@@ -1169,9 +1169,10 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     else:
         state = outcome.state
     failed = state in ("blocked", "commit_failed", "push_failed")
-    # Re-check the judged bytes immediately before any ✓, --no-commit and
-    # nothing-to-commit included: what was verified is what is on disk.
-    drifted = gate.drifted(root) if gate is not None and outcome is None else []
+    # Re-check the judged bytes before any ✓ or advice to commit by hand,
+    # --no-commit and nothing-to-commit included: what was verified is what
+    # is on disk. A commit made checks its own blobs instead.
+    drifted = gate.drifted(root) if gate is not None and (outcome is None or outcome.state == "left") else []
     if drifted:
         reporter.error(
             f"{abbreviate(drifted)} changed while the push was being checked",

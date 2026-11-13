@@ -1303,9 +1303,9 @@ def test_check_a_pointer_rewritten_while_being_checked_is_not_committed(
 
     dvc.on_push = upload_then_arm
     s3.meta.events.register_first("before-send.s3.HeadObject", rewrite_during_check)
-    cli.main(["data", "push"])
+    assert cli.main(["data", "push"]) == 1
     err = _err(capsys)
-    assert "data/x.csv.dvc changed after the push was checked" in err and "✓" not in err
+    assert "data/x.csv.dvc changed while the push was being checked" in err and "✓" not in err
     assert _head(proj) == head
 
     # --no-commit: the re-check before the ✓ catches it too.
@@ -1316,6 +1316,45 @@ def test_check_a_pointer_rewritten_while_being_checked_is_not_committed(
     assert cli.main(["data", "push", "--no-commit"]) == 1
     err = _err(capsys)
     assert "changed while the push was being checked" in err and "✓" not in err
+
+
+def test_check_a_checked_pointer_rewritten_while_another_is_committed_stops_the_commit(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """data/y.csv.dvc is already pinned and committed, so it isn't in the
+    commit; it is still judged, and rewriting it mid-check fails the push."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    y = b"y-data\n"
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(y))
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(y)
+    put = s3.put_object(Bucket=bucket, Key="lab/p/data/y.csv", Body=y)
+    (proj / "data" / "y.csv.dvc").write_text(yaml.safe_dump({"outs": [{
+        "md5": _bytes_md5(y), "size": len(y), "hash": "md5", "path": "y.csv",
+        "cloud": {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}}]}, sort_keys=False))
+    _commit_all(proj, "y")
+    head = _head(proj)
+    monkeypatch.chdir(proj)
+    upload = _dvc_uploads(s3, bucket, proj)
+    armed = {"on": False}
+
+    def upload_then_arm(cwd, targets):
+        upload(cwd, targets)
+        armed["on"] = True
+
+    def rewrite_y(request, **_):
+        if armed["on"] and "versionId=" in request.url:
+            armed["on"] = False
+            with open(proj / "data" / "y.csv.dvc", "a") as f:
+                f.write("# edited mid-check\n")
+
+    dvc.on_push = upload_then_arm
+    s3.meta.events.register_first("before-send.s3.HeadObject", rewrite_y)
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "data/y.csv.dvc changed while the push was being checked" in err and "✓" not in err
+    assert _head(proj) == head
 
 
 def test_check_a_commit_hook_that_rewrites_a_pointer_keeps_the_commit_local(
@@ -1385,6 +1424,106 @@ def test_check_records_dvc_wasnt_asked_to_change_are_put_back(moto_push, tmp_pat
     assert after["stages"]["a"]["deps"] == before["stages"]["a"]["deps"]
     assert after["stages"]["b"] == before["stages"]["b"]
     assert "storage" in after["stages"]["a"]["outs"][0]["cloud"]
+
+
+def test_check_restore_pairs_records_by_path_when_dvc_reorders_a_stage(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """DVC re-dumps a stage's lock outs sorted by path. Putting back the
+    unpushed `cache: false` sibling must not land it on the pushed out's slot."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    (proj / "dvc.yaml").write_text(
+        "stages:\n  a:\n    cmd: make a\n    outs:\n    - data/z.csv\n    - data/m.csv:\n        cache: false\n"
+    )
+    z = b"z\n"
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(z))
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(z)
+    z_out = {"path": "data/z.csv", "hash": "md5", "md5": _bytes_md5(z), "size": 2}
+    m_out = {"path": "data/m.csv", "hash": "md5", "md5": "e" * 32, "size": 5}
+    (proj / "dvc.lock").write_text(yaml.safe_dump(
+        {"schema": "2.0", "stages": {"a": {"cmd": "make a", "outs": [z_out, m_out]}}}, sort_keys=False))
+    _commit_all(proj, "pipeline")
+    monkeypatch.chdir(proj)
+
+    def dvc_push_sorted(cwd, targets):
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/z.csv", Body=z)
+        pinned = {**z_out, "cloud": {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}}
+        (proj / "dvc.lock").write_text(yaml.safe_dump(
+            {"schema": "2.0", "stages": {"a": {"cmd": "make a", "outs": [m_out, pinned]}}}, sort_keys=False))
+
+    dvc.on_push = dvc_push_sorted
+    assert cli.main(["data", "push", "a"]) == 0, _err(capsys)
+    outs = yaml.safe_load((proj / "dvc.lock").read_text())["stages"]["a"]["outs"]
+    assert [o["path"] for o in outs] == ["data/m.csv", "data/z.csv"]
+    assert outs[0] == m_out and "storage" in outs[1]["cloud"]
+
+
+@pytest.mark.parametrize("target", ["fan", "dvc.yaml:fan"])
+def test_check_a_foreach_group_target_checks_and_keeps_every_instance(
+    moto_push, tmp_path, monkeypatch, capsys, target: str,
+) -> None:
+    """`dvc push dvc.yaml:fan` pushes every `fan@*`, so each is in the
+    check, and the pins DVC writes for them are kept and committed."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    (proj / "dvc.yaml").write_text(
+        "stages:\n  fan:\n    foreach: [a]\n    do:\n      cmd: make ${item}\n      outs:\n      - data/${item}.csv\n"
+    )
+    a = b"a\n"
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(a))
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(a)
+    out = {"path": "data/a.csv", "hash": "md5", "md5": _bytes_md5(a), "size": 2}
+    (proj / "dvc.lock").write_text(yaml.safe_dump(
+        {"schema": "2.0", "stages": {"fan@a": {"cmd": "make a", "outs": [out]}}}, sort_keys=False))
+    _commit_all(proj, "pipeline")
+    monkeypatch.chdir(proj)
+
+    def dvc_push(cwd, targets):
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/a.csv", Body=a)
+        pinned = {**out, "cloud": {"storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}}
+        (proj / "dvc.lock").write_text(yaml.safe_dump(
+            {"schema": "2.0", "stages": {"fan@a": {"cmd": "make a", "outs": [pinned]}}}, sort_keys=False))
+
+    dvc.on_push = dvc_push
+    assert cli.main(["data", "push", target]) == 0, _err(capsys)
+    assert "✓ 1 file(s) verified" in _err(capsys)
+    committed = yaml.safe_load(_git(["show", "HEAD:dvc.lock"], cwd=proj))
+    assert "storage" in committed["stages"]["fan@a"]["outs"][0]["cloud"]
+
+
+def test_check_an_unwritable_memo_costs_heads_not_the_push(moto_push, tmp_path, monkeypatch) -> None:
+    from mintd._push_verify import prepare
+
+    _, s3, _ = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    (tmp_path / "not-a-dir").write_text("")
+    prepared = prepare(proj, remote_arg=None, selection=None, aws_profile=None,
+                       memo_path=tmp_path / "not-a-dir" / "proven-versions.sqlite")
+    try:
+        assert prepared.memo is None
+    finally:
+        prepared.close()
+
+
+def test_check_a_nested_dvc_project_is_not_in_scope(moto_push, tmp_path) -> None:
+    """DVC skips a folder with its own .dvc/; so does the check, rather than
+    refusing the push over a pointer the root project never pushes."""
+    from mintd._push_verify import prepare
+
+    _, s3, _ = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    (proj / "sub" / ".dvc").mkdir(parents=True)
+    (proj / "sub" / "data").mkdir()
+    (proj / "sub" / "data" / "y.csv.dvc").write_text(yaml.safe_dump(
+        {"outs": [{"md5": "f" * 32, "size": 1, "hash": "md5", "path": "y.csv"}]}))
+    prepared = prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    try:
+        assert prepared.dvc_files == ["data/x.csv.dvc"]
+    finally:
+        prepared.close()
 
 
 def test_check_an_untouched_pin_holding_other_bytes_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
