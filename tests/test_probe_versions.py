@@ -13,6 +13,14 @@ from botocore.awsrequest import AWSResponse
 from mintd._fast_sync_ops import S3AccessDenied, probe_versions
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """botocore and mintd sleep between retries; these tests count the tries."""
+    import time
+
+    monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+
 class _RawBody:
     def __init__(self, data: bytes = b"") -> None:
         self._data = data
