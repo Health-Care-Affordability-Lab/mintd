@@ -1611,6 +1611,44 @@ def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, m
     assert "not in this push: data/final/b.csv" not in err  # it was: the folder's files keep their identity
 
 
+def test_check_a_rewritten_folder_stays_in_the_check_when_the_push_restores_heads_pointer(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """HEAD pins a folder whose b.csv version holds other bytes, and b.csv
+    isn't cached. `dvc commit -f` turns the folder into the `.dir` form; the
+    repair re-attaches a.csv and leaves b.csv for upload. DVC skips the
+    uncached file and pins what is at its key again, so the pointer ends up
+    equal to HEAD's. The folder's files are still checked, and b.csv fails."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    a, b = b"a-data\n", b"b-data\n"
+    va = s3.put_object(Bucket=bucket, Key="lab/p/data/final/a.csv", Body=a)
+    vb = s3.put_object(Bucket=bucket, Key="lab/p/data/final/b.csv", Body=b"other bytes")
+    obj = cache_path_for(proj / ".dvc" / "cache", _bytes_md5(a))
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_bytes(a)
+    tree = ensure_dir_manifest(proj / ".dvc" / "cache", [DvcFileEntry(_bytes_md5(a), "a.csv"), DvcFileEntry(_bytes_md5(b), "b.csv")])
+    (proj / "data" / "final.dvc").write_text(yaml.safe_dump({"outs": [{"path": "final", "hash": "md5", "files": [
+        {"relpath": "a.csv", "md5": _bytes_md5(a), "size": len(a),
+         "cloud": {"storage": {"etag": va["ETag"].strip('"'), "version_id": va["VersionId"]}}},
+        {"relpath": "b.csv", "md5": _bytes_md5(b), "size": len(b),
+         "cloud": {"storage": {"etag": vb["ETag"].strip('"'), "version_id": vb["VersionId"]}}},
+    ]}]}, sort_keys=False))
+    _commit_all(proj, "folder")
+    write_pointer(proj, "data/final", is_dir=True, md5=tree.removesuffix(".dir"), version_id=None)  # dvc commit -f
+    monkeypatch.chdir(proj)
+    upload_x = _dvc_uploads(s3, bucket, proj)
+
+    def dvc_skips_b_and_repins_the_key(cwd, targets):
+        upload_x(cwd, targets)
+        (proj / "data" / "final.dvc").write_text(_git(["show", "HEAD:data/final.dvc"], cwd=proj))
+
+    dvc.on_push = dvc_skips_b_and_repins_the_key
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "data/final/b.csv" in err and "✓" not in err
+
+
 def test_check_an_untouched_pin_holding_other_bytes_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
     """S3 didn't answer for the pin before the push, so repair left it; the
     check after the push finds it holds other bytes."""
