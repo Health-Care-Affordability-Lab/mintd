@@ -17,15 +17,17 @@ from __future__ import annotations
 
 import logging
 import re
+import hashlib
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from ._dvc_ops import (
     DvcOps,
     DvcPullError,
+    DvcPushError,
     DvcPushResult,
     DvcStorageKeyError,
     pull_retry_hint,
@@ -121,6 +123,9 @@ class PushSummary:
     # The ``.dvc`` paths and ``dvc.yaml:<stage>`` keys a targeted push
     # uploaded whole (``_dvc_state.push_targets``); None when untargeted.
     selection: frozenset[str] | None = None
+    # ``_push_verify.Prepared`` on a version-aware remote: the repair it did,
+    # and what ``judge`` checks after the push. None elsewhere.
+    verification: Any = None
 
 
 def _out_aggregate_bytes(out: DvcOut) -> int:
@@ -961,6 +966,8 @@ def data_push(
     remote: str | None = None,
     jobs: int | None = None,
     cwd: Path | None = None,
+    aws_profile: str | None = None,
+    memo_path: Path | None = None,
 ) -> PushSummary:
     # Resolve the effective remote for display only (explicit > .dvc/config >
     # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
@@ -984,16 +991,39 @@ def data_push(
             project_path, targets, effective_remote, cwd=cwd or project_path
         )
         groups = list(resolved)
+    # On a version-aware remote: refuse what can't be checked, then repair
+    # the pins in this push's scope before DVC sees them (``_push_verify``).
+    # Raises ``PushRefused`` before any write or upload.
+    from ._push_verify import prepare, restore
+
+    # A target push_targets couldn't resolve reaches dvc as typed, so which
+    # outs it uploads is unknown: repair (and allow changes to) every out.
+    unresolved = selection is not None and any(t not in selection for g in groups if g for t in g)
+    prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
+                       aws_profile=aws_profile, memo_path=memo_path)
+    env = prepared.env if prepared is not None else None
     start_t = time.monotonic()
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
     # raising group aborts the rest and surfaces as a non-zero exit. Deliberate
     # — push is idempotent (the re-run skips what already landed) and its
     # failure modes (credentials, remote unreachable) hit every group alike, so
     # there is nothing for a survivor list to add.
-    results: list[DvcPushResult] = [
-        dvc_ops.push(targets=group, cwd=project_path, remote=remote, jobs=jobs)
-        for group in groups
-    ]
+    try:
+        results: list[DvcPushResult] = [
+            dvc_ops.push(targets=group, cwd=project_path, remote=remote, jobs=jobs, env=env)
+            for group in groups
+        ]
+    except DvcPushError as exc:
+        if prepared is not None and prepared.written:
+            raise DvcPushError(
+                f"{exc}\nThe working tree holds the re-pinned pointer files "
+                f"({', '.join(prepared.written)}); re-run mintd data push"
+            ) from exc
+        raise
+    finally:
+        if prepared is not None:
+            restore(prepared)
+            prepared.close()
     # Best-effort counts stay best-effort: a group dvc reported no number for
     # drops out rather than counting as zero, and the push is "up to date" only
     # when every group was.
@@ -1006,6 +1036,7 @@ def data_push(
         elapsed_s=time.monotonic() - start_t,
         up_to_date=all(r.up_to_date for r in results),
         selection=selection,
+        verification=prepared,
     )
 
 
@@ -1036,6 +1067,14 @@ class PointerCommit:
     note: str | None = None
 
 
+def _sha256_text(path: Path) -> str | None:
+    """sha256 of the file's text with CRLF read as LF, as git stores it."""
+    try:
+        return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    except OSError:
+        return None
+
+
 def _last_line(exc: GitOpError) -> str:
     lines = [ln.strip() for ln in exc.stderr.splitlines() if ln.strip()]
     return lines[-1] if lines else "git printed no reason"
@@ -1045,8 +1084,9 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     """Why ``.dvc/config.local`` sends this push somewhere other than where
     importers pull, or None. dvc merges ``config.local`` over ``.dvc/config``;
     a consumer's clone has only the latter. So another ``[core] remote``, or
-    the default remote's ``url`` or ``version_aware`` set locally, records
-    version IDs (or an object layout) importers cannot use. ``named``: the
+    the default remote's ``url``, ``version_aware`` or endpoint set locally,
+    records version IDs (or an object layout) importers cannot use, or checks
+    them against a service importers don't read. ``named``: the
     push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
     import configparser
 
@@ -1062,7 +1102,9 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
         return f".dvc/config.local sends pushes to {local}; importers pull from the default remote {default}"
     for section in parser.sections():
         if _extract_remote_section_name(section) == default:
-            keys = sorted(k for k in ("url", "version_aware") if parser.has_option(section, k))
+            keys = sorted(
+                k for k in ("url", "version_aware", "endpointurl", "endpoint") if parser.has_option(section, k)
+            )
             if keys:
                 return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
     return None
@@ -1076,6 +1118,7 @@ def commit_pushed_pointers(
     remote: str | None,
     selection: frozenset[str] | None,
     cwd: Path | None = None,
+    frozen: dict[str, str | None] | None = None,
 ) -> PointerCommit:
     """Commit and push ``pointers`` (repo-relative ``.dvc`` / ``dvc.lock``
     files that differ from HEAD) when it is safe, after ``data push``.
@@ -1092,6 +1135,12 @@ def commit_pushed_pointers(
     paths, so nothing else is swept in; the push goes to the branch's
     upstream of the same name, as git's own ``push.default=simple`` requires,
     with an explicit refspec, and never pulls, rebases or forces.
+
+    ``frozen`` (``pointer -> sha256``) is what the post-push check judged.
+    A pointer whose bytes differ from it now is not committed; and after the
+    commit, before any ``git push``, the commit must hold exactly these
+    paths with exactly these bytes, or it stays local (a commit hook that
+    rewrote or added a file).
     """
     pts = tuple(pointers)
 
@@ -1149,6 +1198,10 @@ def commit_pushed_pointers(
     except GitOpError as exc:
         return left(f"git could not answer: {_last_line(exc)}")
 
+    if frozen is not None:
+        drifted = [p for p in sorted({*pts, *frozen}) if _sha256_text(root / p) != frozen.get(p)]
+        if drifted:
+            return left(f"{abbreviate(drifted)} changed after the push was checked")
     try:
         git_ops.commit_paths(root, list(pts), COMMIT_MESSAGE)
     except GitOpError as exc:
@@ -1163,6 +1216,23 @@ def commit_pushed_pointers(
         sha = git_ops.current_commit(root)
     except GitOpError as exc:
         return PointerCommit("commit_failed", pts, reason=_last_line(exc))
+    if frozen is not None:
+        try:
+            committed = git_ops.head_paths(root)
+            wrong = sorted(set(committed) ^ set(pts)) or [
+                p for p in pts
+                if hashlib.sha256((git_ops.head_text(root, p) or "").replace("\r\n", "\n").encode()).hexdigest()
+                != frozen.get(p)
+            ]
+        except GitOpError as exc:
+            wrong = [f"(git could not answer: {_last_line(exc)})"]
+        if wrong:
+            return PointerCommit(
+                "push_failed", pts, commit=sha,
+                reason=f"the commit doesn't hold exactly the checked pointer files: {abbreviate(wrong)} "
+                "(a commit hook?); it stays local",
+                hint="inspect it (git show), then git push",
+            )
     if info.remote is None or info.merge_ref is None:
         return PointerCommit(
             "push_failed", pts, reason=f"{info.branch} has no upstream", commit=sha,

@@ -25,6 +25,10 @@ dev = [
     "ruff == 0.15.13",
     "types-PyYAML",
     "moto[s3] ~= 5.0",
+    # moto's ThreadedMotoServer, for tests that run a real dvc subprocess
+    # against S3; moto[server] would also pull in every other service's deps.
+    "flask",
+    "flask-cors",
     "types-boto3",
     "mintd[schema]",
 ]

@@ -300,8 +300,10 @@ class DvcOps(Protocol):
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> DvcPushResult:
-        """Run `dvc push`; report best-effort pushed count / up-to-date state."""
+        """Run `dvc push`; report best-effort pushed count / up-to-date state.
+        ``env`` is laid over the subprocess environment."""
         ...
 
     def pull(
@@ -347,7 +349,7 @@ class SubprocessDvcOps:
         self._reporter = reporter
         self._aws_profile_name = aws_profile_name
 
-    def _env(self) -> dict[str, str]:
+    def _env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
         """Subprocess env for dvc: ``dvc_env()`` plus AWS_PROFILE, so dvc's
         boto3 picks up mintd's [mintd] credentials (no [default] profile
         required in the shared credentials file -- $AWS_SHARED_CREDENTIALS_FILE
@@ -365,6 +367,7 @@ class SubprocessDvcOps:
         env = dvc_env()
         if self._aws_profile_name:
             env.setdefault("AWS_PROFILE", self._aws_profile_name)
+        env.update(extra or {})
         return env
 
     def _spawn(
@@ -374,6 +377,7 @@ class SubprocessDvcOps:
         cwd: Path,
         wall_timeout: float | None,
         json_mode: bool = False,
+        extra_env: dict[str, str] | None = None,
     ) -> "StreamResult":
         """Run one dvc command in `cwd`, and answer "is dvc even installed?"
         in one place rather than eight.
@@ -393,7 +397,7 @@ class SubprocessDvcOps:
         try:
             r = run_streaming(
                 cmd, wall_timeout=wall_timeout, reporter=self._reporter,
-                cwd=cwd, json_mode=json_mode, env=self._env(),
+                cwd=cwd, json_mode=json_mode, env=self._env(extra_env),
             )
         except FileNotFoundError:
             # cwd was validated above, so this really is the binary.
@@ -496,6 +500,7 @@ class SubprocessDvcOps:
         targets: list[str] | None = None,
         remote: str | None = None,
         jobs: int | None = None,
+        env: dict[str, str] | None = None,
     ) -> DvcPushResult:
         cmd = [*dvc_cmd(), "push"]
         if remote:
@@ -509,7 +514,8 @@ class SubprocessDvcOps:
         # we render our own summary instead, and JSON consumers must not see
         # it. Live transfer progress is on stderr and is unaffected, so the
         # spinner still ticks during the upload.
-        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd, json_mode=True)
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd, json_mode=True,
+                        extra_env=env)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
             raise DvcPushError(

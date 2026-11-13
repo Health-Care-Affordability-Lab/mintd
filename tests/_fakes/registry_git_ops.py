@@ -206,6 +206,10 @@ class _FakeRegistryGitOps:
         from mintd._registry_git_ops import SubprocessRegistryGitOps
         return SubprocessRegistryGitOps().head_text(work_dir, path)
 
+    def head_paths(self, work_dir: Path) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().head_paths(work_dir)
+
     def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None:
         from mintd._registry_git_ops import SubprocessRegistryGitOps
         SubprocessRegistryGitOps().commit_paths(work_dir, paths, message)

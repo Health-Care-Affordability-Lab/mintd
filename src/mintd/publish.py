@@ -228,6 +228,8 @@ def _apply_publish(
     git_ops: RegistryGitOps,
     message: str | None,
     reporter: Optional["Reporter"] = None,
+    aws_profile: str | None = None,
+    memo_path: Path | None = None,
 ) -> PublishResult:
     # Slice 32 (reviewer P1): pull new_metadata from the preview, NOT
     # recompute from disk. prepare_publish is the single source of
@@ -259,17 +261,87 @@ def _apply_publish(
             metadata_path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n"
         )
 
-    # Step 2: dvc push
+    # Step 2: dvc push, with the same repair before it and check after it as
+    # `mintd data push` (_push_verify): a release whose pins point nowhere, or
+    # a full re-upload after `dvc commit -f`, is what this stops.
     if reporter is not None:
         reporter.update_status("Pushing data to DVC...")
+    from ._fast_sync_ops import S3AccessDenied
+    from ._push_verify import PushRefused, judge, prepare, restore
+
+    rolled_back = "metadata.json was rolled back; nothing was committed, tagged or advertised."
+    # Importers read the committed .dvc/config: a release checked against a
+    # location config.local redirects to would advertise versions they can't reach.
+    from ._storage_state import inspect_storage
+    from .data_ops import _local_redirect
+
+    default = inspect_storage(project_path).dvc_remote_name
+    redirect = _local_redirect(project_path, default, named=False) if default else None
+    if redirect is not None:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(redirect, recovery_hint=f"{rolled_back} Remove the override, then rerun `mintd publish`.")
     try:
-        dvc_ops.push(cwd=project_path)
-    except DvcOpError as exc:
+        prepared = prepare(project_path, remote_arg=None, selection=None, aws_profile=aws_profile,
+                           memo_path=memo_path)
+    except (PushRefused, S3AccessDenied) as exc:
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
-            f"dvc push failed: {exc}",
-            recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
+            str(exc), recovery_hint=f"{rolled_back} {getattr(exc, 'hint', None) or ''}".strip(),
         ) from exc
+    except BaseException:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise
+    if prepared is not None and reporter is not None:
+        for line in prepared.report:
+            reporter.info(line)
+    try:
+        pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
+    except DvcOpError as exc:
+        _atomic_write_json(metadata_path, original_metadata_json)
+        try:  # mintd's re-pins and whatever DVC recorded before failing
+            repinned = git_ops.uncommitted_pointers(project_path) if prepared is not None else []
+        except GitOpError:
+            repinned = list(prepared.written) if prepared is not None else []
+        raise DvcPushFailed(
+            f"dvc push failed: {exc}",
+            recovery_hint=(
+                f"metadata.json was rolled back. These pointer files now record re-pinned or uploaded "
+                f"versions: {', '.join(repinned)}. Commit them, fix the DVC remote and rerun `mintd publish`."
+                if repinned else "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
+            ),
+        ) from exc
+    finally:
+        if prepared is not None:
+            restore(prepared)
+            prepared.close()
+    changed: list[str] | None = None
+    if prepared is not None:
+        try:
+            changed = git_ops.uncommitted_pointers(project_path)
+        except GitOpError:
+            changed = None
+        head = {}
+        for rel in changed or []:
+            try:
+                head[rel] = git_ops.head_text(project_path, rel)
+            except GitOpError:
+                head[rel] = None
+        try:
+            gate = judge(prepared, changed, head=head, dvc_uploaded_nothing=pushed.up_to_date)
+        except S3AccessDenied as exc:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise DvcPushFailed(f"S3 refused to show the pinned versions: {exc}", recovery_hint=rolled_back) from exc
+        except BaseException:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise
+        if not gate.ok:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise DvcPushFailed(
+                f"the push isn't verified on {gate.location}: " + "; ".join(gate.lines),
+                recovery_hint=f"{rolled_back} Finish with `mintd data push`, then rerun `mintd publish`.",
+            )
+    else:
+        gate = None
 
     # The push is what pins outputs on a version-aware remote, and it can
     # change what the gate sees (dvc writes a legacy `.dir` pointer back as a
@@ -295,9 +367,20 @@ def _apply_publish(
             ),
         )
 
+    # The release commits what the check judged: a pointer rewritten since
+    # (another process, an editor) would ship pins nobody verified.
+    if gate is not None and (drifted := gate.drifted(project_path)):
+        _atomic_write_json(metadata_path, original_metadata_json)
+        raise DvcPushFailed(
+            f"{', '.join(drifted)} changed after the push was checked",
+            recovery_hint=f"{rolled_back} Rerun `mintd publish`.",
+        )
+
     # Step 3: commit the bump (only when there's a real content change —
     # retries at the same version stay idempotent w.r.t. git history).
-    if preview.local_diff:
+    # The pointer files the push rewrote (and the check judged) are committed
+    # with it, on a rerun with no metadata change too: the tag must carry them.
+    if preview.local_diff or changed:
         if reporter is not None:
             reporter.update_status("Committing version bump...")
         try:
@@ -306,6 +389,27 @@ def _apply_publish(
             _atomic_write_json(metadata_path, original_metadata_json)
             git_ops.reset_hard(project_path, "HEAD")
             raise PublishError(f"failed to commit metadata bump: {exc}") from exc
+        if gate is not None:
+            # A commit hook can rewrite a pointer after the check: the commit
+            # must hold the judged bytes before anything is tagged or pushed.
+            import hashlib
+
+            # ...and nothing else: a hook that stages .dvc/config would point
+            # importers at a location the check never saw.
+            try:
+                wrong = sorted(set(git_ops.head_paths(project_path)) - {"metadata.json", *gate.frozen}) or [
+                    rel for rel, digest in gate.frozen.items()
+                    if hashlib.sha256((git_ops.head_text(project_path, rel) or "").replace("\r\n", "\n").encode()).hexdigest()
+                    != digest
+                ]
+            except GitOpError as exc:
+                wrong = [f"(git could not answer: {exc})"]
+            if wrong:
+                raise PublishError(
+                    f"the release commit doesn't hold exactly the pointer files the check judged: {', '.join(wrong)} "
+                    "(a commit hook?); nothing was tagged or advertised",
+                    recovery_hint="inspect it with `git show`, fix it, then rerun `mintd publish`.",
+                )
 
     # Step 4: git tag
     if reporter is not None:
