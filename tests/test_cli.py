@@ -4655,7 +4655,7 @@ def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
 
 
 def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`--all` over a product with one deliverable output and one that is not.
 
@@ -4666,6 +4666,7 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
 
     Mutation: delete the `_require_deliverable(...)` call -> rc 0.
     """
+    monkeypatch.setenv("COLUMNS", "1000")  # paths are checked whole; a wrap can split one
     client, dvc_ops = patched_clients
     sha = _undeliverable_producer(tmp_path, client)
     dvc_ops.import_lands_nothing = {"data/final"}
