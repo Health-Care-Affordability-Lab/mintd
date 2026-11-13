@@ -231,7 +231,7 @@ Why `init` sets it: the S3 key is then the file's real path, which is mintd's me
 
 ### Pin repair and the push check ([src/mintd/_push_verify.py](src/mintd/_push_verify.py), [src/mintd/_pin_proof.py](src/mintd/_pin_proof.py))
 
-On a version-aware remote, `mintd data push` and `mintd publish` don't trust `dvc push`'s report. An **entry** is one file version a pointer records (`publishable_scope`: what a `dvc push` uploads, so not repo imports, `cache: false` or `push: false` outs). A pin **proves** its file (`prove`) when S3, asked for that version at the file's key, returns a single-part ETag equal to the md5, or a multipart ETag equal to the one recomputed from the cache file. A multipart pin with no cache file passes on size alone, but only when this command didn't set it.
+On a version-aware remote, `mintd data push` and `mintd publish` don't trust `dvc push`'s report. An **entry** is one file version a pointer records (`publishable_scope`: what a `dvc push` uploads, so not repo imports, `cache: false` or `push: false` outs). A pin **proves** its file (`prove`) when S3, asked for that version at the file's key, returns a single-part ETag equal to the md5, or a multipart ETag equal to the one recomputed from the cache file. A multipart pin with no cache file passes on size alone, but only when this command didn't set it and the commit leaves its record as the last commit has it.
 
 - **Before the upload** (`prepare`), push refuses a `--remote` other than the default, a remote with its own access keys, and outs with their own remote. For each pin that doesn't prove its file (`plan_repair`):
   - **re-attach**: the object at the key proves it, so its ID goes back into the pointer and nothing is uploaded;

@@ -205,11 +205,13 @@ class Prepared:
 
     @property
     def proven(self) -> set[tuple]:
-        """``(key, version_id, md5, size)`` of every pin proven (or allowed)
-        before the push. A version's bytes don't change, so the gate needn't
-        HEAD one again; the tuple binds the proof to the file it proved, not
-        to a position in a pointer that DVC may rewrite or reorder."""
-        return {_proof_id(e) for e in self.plan.keep} | {_proof_id(new) for _, new, _ in self.plan.reattach}
+        """``(key, version_id, md5, size)`` of every pin proven before the
+        push, not those kept on size alone. A version's bytes don't change, so
+        the gate needn't HEAD one again; the tuple binds the proof to the file
+        it proved, not to a position in a pointer that DVC may rewrite or
+        reorder."""
+        kept = {_proof_id(e) for e in self.plan.keep} - {_proof_id(e) for e in self.plan.on_size}
+        return kept | {_proof_id(new) for _, new, _ in self.plan.reattach}
 
     @property
     def location(self) -> str:
@@ -406,9 +408,9 @@ def judge(
     HEAD's (what the commit would change; ``head`` maps each changed pointer
     to its HEAD text). An unchanged record can't be made worse by the commit.
     An entry this command set or
-    re-attached must prove its file; one it didn't touch may also pass a
-    multipart allowance on size. Every file re-uploaded must now hold a new
-    version that proves it.
+    re-attached, or whose record the commit would change, must prove its file;
+    any other may also pass a multipart allowance on size. Every file
+    re-uploaded must now hold a new version that proves it.
     """
     root = prepared.root
     loc = prepared.location
@@ -466,8 +468,8 @@ def judge(
             verdict = "ok"
         else:
             verdict = verdicts[(e.key, e.version_id)]
-            if verdict == "size_only":
-                verdict = "unproven" if touched else "ok"
+            if verdict == "size_only":  # only a pin the commit leaves as HEAD has it
+                verdict = "unproven" if touched or (e.pointer, e.stage, e.record[0]) in differs else "ok"
         counts[verdict] += 1
         if verdict != "ok":
             failed.setdefault(verdict, []).append(e.path)

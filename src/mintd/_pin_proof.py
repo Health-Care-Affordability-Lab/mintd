@@ -355,6 +355,8 @@ class RepairPlan:
     nothing. ``strip``: ``(entry, reason)``; the cache holds the file, so this
     remote's ID is removed and DVC uploads it. ``unrecoverable``:
     ``(entry, why)``. ``inconclusive``: S3 didn't answer, left unchanged.
+    ``on_size``: the kept entries that passed only on size, which the check
+    after the push judges again.
     ``observed``: the version at each stripped or legacy entry's key before
     the push (None: no object), which the upload must replace.
     """
@@ -365,6 +367,7 @@ class RepairPlan:
     unrecoverable: tuple[tuple[Entry, str], ...] = ()
     inconclusive: tuple[Entry, ...] = ()
     observed: dict[str, str | None] | None = None
+    on_size: tuple[Entry, ...] = ()
 
     @property
     def changes(self) -> bool:
@@ -394,6 +397,7 @@ def plan_repair(
 
     pins = prove_pins(s3, bucket, [e for e in entries if e.version_id and not e.legacy_dir], cache, memo)
     keep: list[Entry] = []
+    on_size: list[Entry] = []
     rest: list[Entry] = []
     inconclusive: list[Entry] = []
     for e in entries:
@@ -403,6 +407,8 @@ def plan_repair(
         verdict = pins[(e.key, e.version_id)]
         if verdict in ("ok", "size_only"):
             keep.append(e)
+            if verdict == "size_only":
+                on_size.append(e)
         elif verdict == "inconclusive":
             inconclusive.append(e)
         else:
@@ -439,7 +445,7 @@ def plan_repair(
         )
         unrecoverable.append((e, why))
     return RepairPlan(tuple(keep), tuple(reattach), tuple(strip), tuple(unrecoverable),
-                      tuple(inconclusive), observed)
+                      tuple(inconclusive), observed, tuple(on_size))
 
 
 def cause_lines(plan: RepairPlan, location: str) -> list[str]:

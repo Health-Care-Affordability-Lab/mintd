@@ -1568,11 +1568,9 @@ def test_check_a_target_push_targets_cant_resolve_checks_every_out(moto_push, tm
     assert "storage" in committed["stages"]["a"]["outs"][0]["cloud"]
 
 
-def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, monkeypatch, capsys) -> None:
-    """The multipart size-only allowance is for pins this command didn't set.
-    A legacy folder file missing from the cache is skipped by DVC's upload,
-    which then pins whatever is at the key: here a multipart version of the
-    right size that nothing can prove. That fails the check."""
+def _multipart_head(size: int):
+    """A HeadObject handler: version `v-mp` is a multipart object of `size`
+    bytes, so only its size can be checked without the file."""
     from botocore.awsrequest import AWSResponse
 
     class _Empty:
@@ -1582,6 +1580,20 @@ def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, m
         def read(self, *_):
             return b""
 
+    def handler(request, **_):
+        if "versionId=v-mp" in request.url:
+            return AWSResponse(request.url, 200, {"ETag": '"' + "e" * 32 + '-2"', "Content-Length": str(size),
+                                                  "x-amz-version-id": "v-mp"}, _Empty())
+        return None
+
+    return handler
+
+
+def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """The multipart size-only allowance is for pins this command didn't set.
+    A legacy folder file missing from the cache is skipped by DVC's upload,
+    which then pins whatever is at the key: here a multipart version of the
+    right size that nothing can prove. That fails the check."""
     dvc, s3, bucket = moto_push
     proj = _moto_producer(tmp_path, s3)
     b_md5 = _bytes_md5(b"b-data\n")  # never cached
@@ -1597,18 +1609,40 @@ def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, m
             {"relpath": "b.csv", "md5": b_md5, "size": 7,
              "cloud": {"storage": {"etag": "e" * 32 + "-2", "version_id": "v-mp"}}}]}]}, sort_keys=False))
 
-    def multipart_head(request, **_):
-        if "versionId=v-mp" in request.url:
-            return AWSResponse(request.url, 200, {"ETag": '"' + "e" * 32 + '-2"', "Content-Length": "7",
-                                                  "x-amz-version-id": "v-mp"}, _Empty())
-        return None
-
     dvc.on_push = dvc_pins_what_is_at_the_key
-    s3.meta.events.register_first("before-send.s3.HeadObject", multipart_head)
+    s3.meta.events.register_first("before-send.s3.HeadObject", _multipart_head(7))
     assert cli.main(["data", "push", "--no-commit"]) == 1
     err = _err(capsys)
     assert "can't be proven" in err and "data/final/b.csv" in err and "✓" not in err
     assert "not in this push: data/final/b.csv" not in err  # it was: the folder's files keep their identity
+
+
+@pytest.mark.parametrize("committed", [True, False], ids=["already-committed", "new-to-the-commit"])
+def test_check_a_size_only_pin_passes_only_where_the_commit_leaves_it_unchanged(
+    moto_push, tmp_path, monkeypatch, capsys, committed,
+) -> None:
+    """A multipart pin whose file isn't cached can only be checked by size. If
+    the last commit already holds it, it passes: committing can't make it
+    worse. If the commit would add it (an ID copied in by hand or from another
+    branch), it must prove its bytes, so the push fails and commits nothing."""
+    _, s3, _ = moto_push
+    data = b"x-data\n"
+    proj = _moto_producer(tmp_path, s3, data=data, cache=False)
+    _x_pointer(proj, data, {"storage": {"etag": "e" * 32 + "-2", "version_id": "v-mp"}})
+    if committed:
+        _commit_all(proj, "pin")
+    head = _head(proj)
+    s3.meta.events.register_first("before-send.s3.HeadObject", _multipart_head(len(data)))
+    monkeypatch.chdir(proj)
+    code = cli.main(["data", "push"])
+    err = _err(capsys)
+    if committed:
+        assert code == 0, err
+        assert "✓" in err
+    else:
+        assert code == 1
+        assert "can't be proven" in err and "data/x.csv" in err and "✓" not in err
+        assert _head(proj) == head
 
 
 def test_check_a_rewritten_folder_stays_in_the_check_when_the_push_restores_heads_pointer(
