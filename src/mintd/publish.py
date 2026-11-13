@@ -298,9 +298,14 @@ def _apply_publish(
         pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
     except DvcOpError as exc:
         _atomic_write_json(metadata_path, original_metadata_json)
+        repinned = prepared.written if prepared is not None else []
         raise DvcPushFailed(
             f"dvc push failed: {exc}",
-            recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
+            recovery_hint=(
+                f"metadata.json was rolled back. mintd re-pinned {', '.join(repinned)} before the push: "
+                "commit them, fix the DVC remote and rerun `mintd publish`."
+                if repinned else "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
+            ),
         ) from exc
     finally:
         if prepared is not None:
@@ -386,14 +391,16 @@ def _apply_publish(
             # must hold the judged bytes before anything is tagged or pushed.
             import hashlib
 
-            wrong = [
+            # ...and nothing else: a hook that stages .dvc/config would point
+            # importers at a location the check never saw.
+            wrong = sorted(set(git_ops.head_paths(project_path)) - {"metadata.json", *gate.frozen}) or [
                 rel for rel, digest in gate.frozen.items()
                 if hashlib.sha256((git_ops.head_text(project_path, rel) or "").replace("\r\n", "\n").encode()).hexdigest()
                 != digest
             ]
             if wrong:
                 raise PublishError(
-                    f"the release commit doesn't hold the pointer files the check judged: {', '.join(wrong)} "
+                    f"the release commit doesn't hold exactly the pointer files the check judged: {', '.join(wrong)} "
                     "(a commit hook?); nothing was tagged or advertised",
                     recovery_hint="inspect it with `git show`, fix it, then rerun `mintd publish`.",
                 )

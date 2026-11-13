@@ -49,6 +49,48 @@ def _plan(root: Path, s3, bucket: str, files: list[str]):
     return plan_repair(s3, bucket, scope.entries, CacheHashes(root / ".dvc" / "cache"))
 
 
+def test_a_folder_dvc_rewrote_as_a_dir_entry_is_reattached_as_a_files_list(s3_versioned, tmp_path: Path) -> None:
+    """`dvc commit -f` and `dvc repro` write a folder out back as `md5: <tree>.dir`,
+    dropping every ID. Files whose bytes are at their key are re-attached in the
+    files list DVC writes after a push; the rest are listed for DVC to upload."""
+    import json
+
+    s3, bucket = s3_versioned
+    a = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/data/out/a.csv", Body=b"A")
+    tree = [{"md5": _cache(tmp_path, b"A"), "relpath": "a.csv"}, {"md5": _cache(tmp_path, b"B"), "relpath": "b.csv"}]
+    tree_md5 = _md5(json.dumps(tree).encode()) + ".dir"
+    obj = cache_path_for(tmp_path / ".dvc" / "cache", tree_md5)
+    obj.parent.mkdir(parents=True, exist_ok=True)
+    obj.write_text(json.dumps(tree))
+    (tmp_path / "dvc.yaml").write_text("stages:\n  many:\n    cmd: make\n    outs: [data/out]\n")
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  many:\n    cmd: make\n    outs:\n    - path: data/out\n"
+        f"      hash: md5\n      md5: {tree_md5}\n      size: 2\n      nfiles: 2\n"
+    )
+    plan = _plan(tmp_path, s3, bucket, [])
+    assert [(e.path, r) for e, _, r in plan.reattach] == [("data/out/a.csv", NO_ID)]
+    assert [e.path for e, _ in plan.strip] == ["data/out/b.csv"]
+    assert "dvc.lock lost these IDs" in " ".join(cause_lines(plan, "s3://b/lab/p"))
+
+    assert write_repair(tmp_path, plan, R) == ["dvc.lock"]
+    (out,) = yaml.safe_load((tmp_path / "dvc.lock").read_text())["stages"]["many"]["outs"]
+    assert out == {"path": "data/out", "hash": "md5", "files": [
+        {"relpath": "a.csv", "md5": _md5(b"A"),
+         "cloud": {R: {"etag": a["ETag"].strip('"'), "version_id": a["VersionId"]}}},
+        {"relpath": "b.csv", "md5": _md5(b"B")},
+    ]}
+
+
+def test_new_data_with_no_id_writes_nothing(s3_versioned, tmp_path: Path) -> None:
+    s3, bucket = s3_versioned
+    _pointer(tmp_path, "a.csv.dvc", "a.csv", b"A")
+    _cache(tmp_path, b"A")
+    before = (tmp_path / "a.csv.dvc").read_bytes()
+    plan = _plan(tmp_path, s3, bucket, ["a.csv.dvc"])
+    assert [e.path for e, _ in plan.strip] == ["a.csv"]
+    assert write_repair(tmp_path, plan, R) == [] and (tmp_path / "a.csv.dvc").read_bytes() == before
+
+
 def test_a_pin_that_proves_its_file_is_kept(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
     v = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/a.csv", Body=b"A")

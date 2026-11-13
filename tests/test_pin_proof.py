@@ -74,6 +74,32 @@ def test_lock_outs_resolve_against_the_stage_wdir_and_skip_cache_and_push_false(
     ]
 
 
+def test_names_are_read_as_dvc_reads_them_yaml_1_2(tmp_path: Path) -> None:
+    """DVC leaves `on`, `no` and `12:30` unquoted; under YAML 1.1 they would
+    be a boolean stage name (dropped) and keys like `.../True`."""
+    (tmp_path / "dvc.yaml").write_text("stages:\n  on:\n    cmd: x\n    outs: [no]\n")
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  on:\n    cmd: x\n    outs:\n    - path: no\n"
+        f"      hash: md5\n      md5: {'a' * 32}\n      size: 1\n"
+    )
+    (tmp_path / "labels.dvc").write_text(
+        f"outs:\n- path: labels\n  files:\n  - relpath: on\n    md5: {'b' * 32}\n    size: 1\n"
+        f"  - relpath: 12:30\n    md5: {'c' * 32}\n    size: 1\n"
+    )
+    keys = sorted(e.key for e in _scope(tmp_path, ["labels.dvc"]).entries)
+    assert keys == ["lab/p/labels/12:30", "lab/p/labels/on", "lab/p/no"]
+
+
+def test_a_dvc_file_out_with_push_false_and_an_undeclared_lock_stage_are_out_of_scope(tmp_path: Path) -> None:
+    _write(tmp_path, "local.dvc", {"outs": [{"path": "local.csv", "md5": "a" * 32, "push": False}]})
+    _write(tmp_path, "dvc.yaml", {"stages": {"kept": {"cmd": "x", "outs": ["k.csv"]}}})
+    _write(tmp_path, "dvc.lock", {"schema": "2.0", "stages": {
+        "kept": {"cmd": "x", "outs": [{"path": "k.csv", "md5": "b" * 32, "size": 1}]},
+        "renamed": {"cmd": "x", "outs": [{"path": "r.csv", "md5": "c" * 32, "size": 1}]},
+    }})
+    assert [e.path for e in _scope(tmp_path, ["local.dvc"]).entries] == ["k.csv"]
+
+
 def test_repo_imports_are_out_of_scope(tmp_path: Path) -> None:
     _write(tmp_path, "imp.dvc", {"deps": [{"path": "d", "repo": {"url": "u", "rev_lock": "r"}}],
                                  "outs": [{"path": "d", "md5": "a" * 32}]})

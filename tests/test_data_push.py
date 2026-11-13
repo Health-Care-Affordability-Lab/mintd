@@ -1526,6 +1526,90 @@ def test_check_a_nested_dvc_project_is_not_in_scope(moto_push, tmp_path) -> None
         prepared.close()
 
 
+def test_check_a_config_local_naming_only_another_remote_keeps_the_default(tmp_path: Path) -> None:
+    """`dvc remote add --local scratch ...` leaves `.dvc/config`'s
+    `core.remote` the default; DVC still pushes there, so mintd checks there."""
+    from mintd._push_verify import merged_default_remote
+
+    stage_dvc_project(tmp_path)
+    (tmp_path / ".dvc" / "config.local").write_text("['remote \"scratch\"']\n    url = /tmp/scratch\n")
+    assert merged_default_remote(tmp_path) == "storage"
+
+
+def test_check_a_first_push_of_new_data_is_not_reported_as_a_repair(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)  # never pushed: no ID, nothing at the key
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 0
+    err = _err(capsys)
+    assert "re-pinned" not in err and "re-uploading" not in err and "✓ 1 file(s) verified" in err
+
+
+def test_check_a_target_push_targets_cant_resolve_checks_every_out(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """`dvc.yaml` is a target DVC takes and mintd can't map to outs, so the
+    check covers everything rather than nothing."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_pipeline(tmp_path, s3, bucket)
+    monkeypatch.chdir(proj)
+    upload_x = _dvc_uploads(s3, bucket, proj)
+
+    def dvc_push_everything(cwd, targets):
+        upload_x(cwd, targets)
+        lock = yaml.safe_load((proj / "dvc.lock").read_text())
+        put = s3.put_object(Bucket=bucket, Key="lab/p/data/a.csv", Body=b"a\n")
+        lock["stages"]["a"]["outs"][0]["cloud"] = {
+            "storage": {"etag": put["ETag"].strip('"'), "version_id": put["VersionId"]}}
+        (proj / "dvc.lock").write_text(yaml.safe_dump(lock, sort_keys=False))
+
+    dvc.on_push = dvc_push_everything
+    assert cli.main(["data", "push", "dvc.yaml"]) == 0, _err(capsys)
+    committed = yaml.safe_load(_git(["show", "HEAD:dvc.lock"], cwd=proj))
+    assert "storage" in committed["stages"]["a"]["outs"][0]["cloud"]
+
+
+def test_check_a_pin_the_push_set_cant_pass_on_size_alone(moto_push, tmp_path, monkeypatch, capsys) -> None:
+    """The multipart size-only allowance is for pins this command didn't set.
+    A legacy folder file missing from the cache is skipped by DVC's upload,
+    which then pins whatever is at the key: here a multipart version of the
+    right size that nothing can prove. That fails the check."""
+    from botocore.awsrequest import AWSResponse
+
+    class _Empty:
+        def stream(self, **_):
+            yield b""
+
+        def read(self, *_):
+            return b""
+
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    b_md5 = _bytes_md5(b"b-data\n")  # never cached
+    tree = ensure_dir_manifest(proj / ".dvc" / "cache", [DvcFileEntry(b_md5, "b.csv")])
+    write_pointer(proj, "data/final", is_dir=True, md5=tree.removesuffix(".dir"), version_id=None)
+    _commit_all(proj, "legacy folder")
+    monkeypatch.chdir(proj)
+    upload_x = _dvc_uploads(s3, bucket, proj)
+
+    def dvc_pins_what_is_at_the_key(cwd, targets):
+        upload_x(cwd, targets)
+        (proj / "data" / "final.dvc").write_text(yaml.safe_dump({"outs": [{"path": "final", "hash": "md5", "files": [
+            {"relpath": "b.csv", "md5": b_md5, "size": 7,
+             "cloud": {"storage": {"etag": "e" * 32 + "-2", "version_id": "v-mp"}}}]}]}, sort_keys=False))
+
+    def multipart_head(request, **_):
+        if "versionId=v-mp" in request.url:
+            return AWSResponse(request.url, 200, {"ETag": '"' + "e" * 32 + '-2"', "Content-Length": "7",
+                                                  "x-amz-version-id": "v-mp"}, _Empty())
+        return None
+
+    dvc.on_push = dvc_pins_what_is_at_the_key
+    s3.meta.events.register_first("before-send.s3.HeadObject", multipart_head)
+    assert cli.main(["data", "push", "--no-commit"]) == 1
+    err = _err(capsys)
+    assert "can't be proven" in err and "data/final/b.csv" in err and "✓" not in err
+
+
 def test_check_an_untouched_pin_holding_other_bytes_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:
     """S3 didn't answer for the pin before the push, so repair left it; the
     check after the push finds it holds other bytes."""

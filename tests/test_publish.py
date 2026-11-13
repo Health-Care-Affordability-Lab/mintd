@@ -1347,7 +1347,7 @@ class TestDeliveryGate:
         ).stdout
         assert "version_id: v-1" in committed
 
-    def test_publish_refuses_a_push_that_pinned_nothing(self, tmp_path):
+    def test_publish_refuses_a_push_that_pinned_nothing(self, tmp_path, monkeypatch):
         """The push is what pins outputs on a version-aware remote. When it
         reports success and the lock still carries no version ID (the fake
         push writes nothing, like a push that silently moved nothing), publish
@@ -1359,6 +1359,13 @@ class TestDeliveryGate:
         Mutation: drop the post-push check in `_apply_publish` -> the offline
         re-check still refuses, with its own message, reddens.
         """
+        from botocore.exceptions import ClientError
+
+        class _NothingOnS3Yet:  # so the repair has nothing to re-attach
+            def head_object(self, **_kw):
+                raise ClientError({"Error": {"Code": "404"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "HeadObject")
+
+        monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: _NothingOnS3Yet())
         proj = _seed_project(tmp_path)
         stage_undeliverable_primary(proj)
         _cache_the_tree(proj)
@@ -1483,6 +1490,53 @@ def test_publish_after_dvc_commit_f_reattaches_the_ids_with_no_upload(tmp_path, 
     assert f"version_id: {v}" in committed
 
 
+def test_publish_rerun_at_the_same_version_commits_the_reattached_pointers(tmp_path, s3_versioned, monkeypatch):
+    """`mintd publish 0.1.0` again after `dvc commit -f`: metadata.json has
+    nothing to change, but the tag must carry the IDs the repair put back."""
+    from datetime import datetime, timezone
+
+    from mintd.publish import _apply_publish, prepare_publish
+
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    v = s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")["VersionId"]
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    pinned = datetime(2026, 5, 11, tzinfo=timezone.utc)
+    meta = json.loads((proj / "metadata.json").read_text(encoding="utf-8"))
+    meta["status"]["last_updated"] = pinned.isoformat()
+    meta["status"]["last_published_version"] = "0.1.0"
+    meta["data_products"]["outputs"][0]["last_published"] = pinned.isoformat()
+    (proj / "metadata.json").write_text(json.dumps(meta, indent=2))
+    subprocess.run(["git", "commit", "-q", "-am", "already published"], cwd=proj, check=True)
+    preview = prepare_publish(project_path=proj, version="0.1.0", dry_run=False, client=_FakeCatalogClient(),
+                              git_ops=_FakeRegistryGitOps(), now=pinned)
+    assert preview.local_diff == []
+
+    result = _apply_publish(preview, project_path=proj, client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(),
+                            git_ops=_FakeRegistryGitOps(), message=None)
+
+    assert result.tagged
+    committed = subprocess.run(["git", "show", "HEAD:data/final/x.csv.dvc"], cwd=proj, check=True,
+                               capture_output=True, text=True).stdout
+    assert f"version_id: {v}" in committed
+
+
+def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    (proj / ".dvc" / ".gitignore").write_text("/config.local\n")  # as `dvc init` writes it
+    subprocess.run(["git", "add", ".dvc/.gitignore"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "ignore config.local"], cwd=proj, check=True)
+    (proj / ".dvc" / "config.local").write_text('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n')
+    dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
+    with pytest.raises(DvcPushFailed, match="config.local overrides storage's endpointurl"):
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc, git_ops=git)
+    assert dvc.push_calls == [] and git.tag_calls == []
+    assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
+
+
 def test_publish_with_a_moved_remote_and_no_cache_is_refused_and_rolled_back(tmp_path, s3_versioned, monkeypatch):
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
@@ -1534,6 +1588,24 @@ def test_publish_refuses_a_pointer_rewritten_after_the_check(tmp_path, s3_versio
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
 
 
+def test_publish_refuses_to_tag_a_commit_a_hook_added_dvc_config_to(tmp_path, s3_versioned, monkeypatch):
+    """The pointers are as judged, but the commit also changes .dvc/config:
+    importers would resolve the pins somewhere the check never looked."""
+    from mintd.publish import PublishError
+
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    hook = proj / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf '    url = s3://elsewhere/unverified/\\n' >> .dvc/config && git add .dvc/config\n")
+    hook.chmod(0o755)
+    git = _FakeRegistryGitOps()
+    with pytest.raises(PublishError, match=r"doesn't hold exactly the pointer files the check judged: \.dvc/config"):
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(), git_ops=git)
+    assert git.tag_calls == []
+
+
 def test_publish_refuses_to_tag_a_commit_a_hook_rewrote(tmp_path, s3_versioned, monkeypatch):
     from mintd.publish import PublishError
 
@@ -1545,6 +1617,6 @@ def test_publish_refuses_to_tag_a_commit_a_hook_rewrote(tmp_path, s3_versioned, 
     hook.write_text("#!/bin/sh\nprintf '# hook\\n' >> data/final/x.csv.dvc && git add data/final/x.csv.dvc\n")
     hook.chmod(0o755)
     git = _FakeRegistryGitOps()
-    with pytest.raises(PublishError, match="doesn't hold the pointer files the check judged"):
+    with pytest.raises(PublishError, match="doesn't hold exactly the pointer files the check judged"):
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=_FakeDvcOps(), git_ops=git)
     assert git.tag_calls == []

@@ -70,6 +70,15 @@ def test_suspended_versioning_is_unpinned(s3_versioned) -> None:
     assert probe_versions(s3, bucket, [("p/s.csv", None)])[("p/s.csv", None)].kind == "unpinned"
 
 
+def test_the_literal_null_version_real_s3_reports_is_unpinned(s3_versioned) -> None:
+    """Real S3 and Wasabi answer a suspended bucket's object with
+    `x-amz-version-id: null`; moto leaves the header out."""
+    s3, bucket = s3_versioned
+    s3.meta.events.register_first("before-send.s3.HeadObject", lambda request, **_: AWSResponse(
+        request.url, 200, {"x-amz-version-id": "null", "ETag": '"e"', "Content-Length": "1"}, _RawBody()))
+    assert probe_versions(s3, bucket, [("p/s.csv", None)])[("p/s.csv", None)].kind == "unpinned"
+
+
 def test_429_outlasting_botocores_retries_is_retried_by_mintd(s3_versioned) -> None:
     s3, bucket = s3_versioned
     vid = s3.put_object(Bucket=bucket, Key="p/a.csv", Body=b"x")["VersionId"]

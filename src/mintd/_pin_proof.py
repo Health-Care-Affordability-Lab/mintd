@@ -18,8 +18,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from ._fast_sync_ops import (
     HeadVerdict,
     cache_path_for,
@@ -88,8 +86,21 @@ class Scope:
 
 def _load(path: Path) -> Any:
     try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return read12(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def read12(text: str | None) -> Any:
+    """``text`` read as DVC reads its files (YAML 1.2, where an unquoted
+    ``on`` / ``no`` / ``12:30`` stays a string); None when absent or unparseable."""
+    from ruamel.yaml import YAMLError
+
+    if not text:
+        return None
+    try:
+        return load12(text)
+    except YAMLError:
         return None
 
 
@@ -371,7 +382,7 @@ def plan_repair(
     2. Otherwise the current object at its key, if that proves the file:
        re-attach.
     3. Otherwise, the cache holds bytes that hash to its md5, or the entry is
-       a legacy ``.dir`` file (never re-attached; DVC uploads it): strip.
+       a file of a legacy ``.dir`` out (DVC uploads it): strip.
     4. Otherwise: unrecoverable.
     An entry S3 gave no clear answer for is left as it is.
     """
@@ -404,14 +415,14 @@ def plan_repair(
         if now.kind == "inconclusive":
             inconclusive.append(e)
             continue
-        if not e.legacy_dir and prove(e, now, cache) == "ok":
+        if prove(e, now, cache) == "ok":
             reattach.append((e, pinned(e, now), reason))
             if memo is not None:
                 memo.remember(bucket, pinned(e, now), now.size)
             continue
-        # A legacy entry's pointer isn't written (DVC rewrites the out as a
-        # files list when it uploads), so nothing needs stopping before the
-        # push; the gate's upload check proves each file arrived.
+        # A legacy out with nothing re-attached isn't written (DVC rewrites
+        # it as a files list when it uploads), so nothing needs stopping
+        # before the push; the gate's proof checks each file arrived.
         if e.legacy_dir or cache.holds(e.md5):
             strip.append((e, reason))
             observed[e.key] = now.version_id if now.kind == "found" else None
@@ -435,7 +446,7 @@ def cause_lines(plan: RepairPlan, location: str) -> list[str]:
     no_id = [e for e, _, r in plan.reattach if r == NO_ID]
     if any(e.pointer == "dvc.lock" for e in no_id):
         lines.append("dvc.lock lost these IDs; `dvc commit -f` or `dvc repro` usually does this")
-    if any(e.pointer != "dvc.lock" and not e.legacy_dir for e in no_id):
+    if any(e.pointer != "dvc.lock" for e in no_id):
         lines.append("`dvc add` or `dvc commit` rewrote these .dvc files without their IDs")
     if any(r == STALE_ID for _, _, r in plan.reattach) or any(r == STALE_ID for _, r in plan.strip):
         lines.append(f"the recorded versions aren't at {location}; the remote has probably moved")
@@ -509,28 +520,61 @@ def _dump(doc: Any) -> str:
     return buf.getvalue()
 
 
+def _as_files(rec: Any, files: list[tuple[Entry, Entry | None]], remote: str | None) -> None:
+    """Rewrite a ``.dir`` out record as a files list, one entry per file in
+    relpath order, with ``remote``'s re-attached ID where there is one."""
+    for k in ("md5", "size", "nfiles"):
+        rec.pop(k, None)
+    listed = []
+    for was, now in sorted(files, key=lambda c: c[0].relpath or ""):
+        fe: dict[str, Any] = {"relpath": was.relpath, "md5": was.md5}
+        if was.size is not None:
+            fe["size"] = was.size
+        if now is not None and remote is not None:
+            fe["cloud"] = {remote: {"etag": now.etag, "version_id": now.version_id}}
+        listed.append(fe)
+    rec["files"] = listed
+
+
 def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump) -> list[str]:
     """Write the plan's re-attached IDs and strips into the pointer files.
 
-    Only ``cloud[remote]`` changes. Each written file is re-read and compared
-    with its original, IDs aside; any other difference puts every written
-    file back to its original bytes and raises ``PointerWriteError``.
-    Returns the pointers written.
+    Only ``cloud[remote]`` changes, except that a legacy ``.dir`` out with a
+    file re-attached is rewritten as the files list DVC itself writes after
+    pushing to a version-aware remote (``dvc commit -f`` and ``dvc repro``
+    turn a folder back into the ``.dir`` form, dropping every ID). Each
+    written file is re-read and compared with what was meant, IDs aside; any
+    other difference puts every written file back to its original bytes and
+    raises ``PointerWriteError``. Returns the pointers written.
     """
     from ._atomic import _atomic_write_text
 
     by_pointer: dict[str, list[tuple[Entry, Entry | None]]] = {}
+    folders: dict[tuple[str, str | None, int], list[tuple[Entry, Entry | None]]] = {}
     for was, now, _ in plan.reattach:
-        by_pointer.setdefault(was.pointer, []).append((was, now))
+        if was.legacy_dir:
+            folders.setdefault((was.pointer, was.stage, was.record[0]), []).append((was, now))
+        else:
+            by_pointer.setdefault(was.pointer, []).append((was, now))
     for was, _ in plan.strip:
-        if not was.legacy_dir:
+        if not was.legacy_dir and (was.version_id or was.etag):  # new data has no ID to remove
             by_pointer.setdefault(was.pointer, []).append((was, None))
+    for was in [e for e, _ in plan.strip] + list(plan.inconclusive):
+        if was.legacy_dir and (was.pointer, was.stage, was.record[0]) in folders:
+            folders[(was.pointer, was.stage, was.record[0])].append((was, None))
+    for pointer, _, _ in folders:
+        by_pointer.setdefault(pointer, [])
     originals: dict[str, bytes] = {}
     try:
         for pointer, changes in sorted(by_pointer.items()):
             path = root / pointer
             raw = path.read_bytes()
             doc = load_rt(raw.decode("utf-8"))
+            meant = load12(raw.decode("utf-8"))
+            for (p, stage, out_i), files in folders.items():
+                if p == pointer:
+                    _as_files(_records(doc, stage)[out_i], files, remote)
+                    _as_files(_records(meant, stage)[out_i], files, None)
             for old, new in changes:
                 out_i, file_i = old.record
                 rec = _records(doc, old.stage)[out_i]
@@ -545,9 +589,7 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
                     rec.setdefault("cloud", {})[remote] = {"etag": new.etag, "version_id": new.version_id}
             originals[pointer] = raw
             _atomic_write_text(path, dump(doc))
-            if _without_ids(load12(path.read_text(encoding="utf-8")), remote) != _without_ids(
-                load12(raw.decode("utf-8")), remote
-            ):
+            if _without_ids(load12(path.read_text(encoding="utf-8")), remote) != _without_ids(meant, remote):
                 raise PointerWriteError(pointer)
     except Exception:
         for pointer, raw in originals.items():

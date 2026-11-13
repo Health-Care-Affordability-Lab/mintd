@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -48,6 +49,8 @@ def s3_server():
     endpoint = f"http://127.0.0.1:{server.server_port}"
     s3 = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1",
                       aws_access_key_id="test", aws_secret_access_key="test")
+    # moto's backends are process-wide: start each test from an empty server.
+    urllib.request.urlopen(urllib.request.Request(f"{endpoint}/moto-api/reset", method="POST")).close()
     s3.create_bucket(Bucket=BUCKET)
     s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
     puts.clear()
@@ -187,6 +190,46 @@ def test_a_rewrite_that_drops_the_ids_costs_no_upload(producer, s3_server, real_
     assert all(f"re-attached {p} (no ID)" in err for p in first)
     assert "dvc.lock lost these IDs" in err
     _imports_everything(tmp_path, real_dvc, "consumer")
+
+
+def test_a_folder_stage_dvc_commit_f_rewrote_costs_no_upload(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
+    """`dvc commit -f` (and `dvc repro` of an unchanged output) writes a folder
+    out back as `md5: <tree>.dir`, with no files list and no IDs. mintd
+    re-attaches every file from S3 as the files list DVC writes after a push,
+    so nothing is uploaded again and DVC still sees the stage as up to date."""
+    _, _, puts = s3_server
+    write = ("import pathlib; p=pathlib.Path('../data/out'); p.mkdir(parents=True, exist_ok=True); "
+             "[(p/n).write_text(n) for n in ('a.csv', 'b.csv', 'c.csv')]")
+    doc = yaml.safe_load((producer / "dvc.yaml").read_text())
+    doc["stages"]["many"] = {"wdir": "code", "cmd": f'"{sys.executable}" -c "{write}"', "outs": ["../data/out"]}
+    (producer / "dvc.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    real_dvc(["repro", "-q"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "folder stage"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    capsys.readouterr()
+
+    real_dvc(["commit", "-f", "-q", "dvc.yaml:many"], cwd=producer, check=True)
+    (rec,) = yaml.safe_load((producer / "dvc.lock").read_text())["stages"]["many"]["outs"]
+    assert "files" not in rec and rec["md5"].endswith(".dir")  # what DVC does to a folder out
+    _git(["commit", "-q", "-am", "dvc commit -f many"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    puts.clear()
+
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    err = _out(capsys)
+    assert puts == []
+    assert all(f"re-attached data/out/{n} (no ID)" in err for n in ("a.csv", "b.csv", "c.csv"))
+    assert "dvc.lock lost these IDs" in err
+    assert "up to date" in real_dvc(["status"], cwd=producer).stdout
+    consumer = tmp_path / "consumer"
+    consumer.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=consumer)
+    real_dvc(["init", "-q"], cwd=consumer, check=True)
+    r = real_dvc(["import", "-q", str(tmp_path / "origin.git"), "data/out", "-o", "out"], cwd=consumer)
+    assert r.returncode == 0, r.stderr
+    assert sorted(f.read_text() for f in (consumer / "out").iterdir()) == ["a.csv", "b.csv", "c.csv"]
 
 
 def test_a_moved_remote_is_reuploaded_despite_a_stale_dvc_site_cache(

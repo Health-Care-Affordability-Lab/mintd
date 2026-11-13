@@ -20,12 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from ._fast_sync_ops import (
     _create_s3_client,
-    _default_remote_name_from_config,
     discover_all_outs,
     parse_s3_url,
 )
@@ -43,6 +41,7 @@ from ._pin_proof import (
     plan_repair,
     prove_pins,
     publishable_scope,
+    read12,
     write_repair,
 )
 
@@ -92,10 +91,16 @@ def _version_aware(cfg: dict[str, str]) -> bool:
 
 
 def merged_default_remote(root: Path) -> str | None:
-    name = None
-    for parser in _parsers(root):
-        name = _default_remote_name_from_config(parser) or name
-    return name
+    """``core.remote`` with config.local over config, as DVC merges them;
+    else the one remote both files name between them."""
+    from ._storage_state import _extract_remote_section_name
+
+    parsers = _parsers(root)
+    for parser in reversed(parsers):
+        if parser.has_option("core", "remote"):
+            return parser.get("core", "remote")
+    names = {n for p in parsers for s in p.sections() if (n := _extract_remote_section_name(s))}
+    return names.pop() if len(names) == 1 else None
 
 
 def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
@@ -104,15 +109,15 @@ def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
     named: list[str] = []
     for rel in dvc_files:
         try:
-            doc = yaml.safe_load((root / rel).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            doc = read12((root / rel).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
             continue
         for out in (doc.get("outs") or []) if isinstance(doc, dict) else []:
             if isinstance(out, dict) and out.get("remote") not in (None, default):
                 named.append(f"{rel}: {out.get('path')}")
     try:
-        dvc_yaml = yaml.safe_load((root / "dvc.yaml").read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        dvc_yaml = read12((root / "dvc.yaml").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
         dvc_yaml = None
     stages = dvc_yaml.get("stages") if isinstance(dvc_yaml, dict) else None
     for stage, body in (stages or {}).items() if isinstance(stages, dict) else ():
@@ -212,13 +217,15 @@ class Prepared:
     def report(self) -> list[str]:
         """What the repair did, for the user: each file and why, then causes."""
         lines: list[str] = []
-        if self.plan.changes:
+        # A file with no ID and nothing provable at its key is new data, not a repair.
+        strips = [(e, r) for e, r in self.plan.strip if e.version_id or e.etag]
+        if self.plan.reattach or strips:
             lines.append(
-                f"re-pinned {len(self.plan.reattach) + len(self.plan.strip)} file(s): "
-                f"{len(self.plan.reattach)} re-attached from S3, {len(self.plan.strip)} re-uploading"
+                f"re-pinned {len(self.plan.reattach) + len(strips)} file(s): "
+                f"{len(self.plan.reattach)} re-attached from S3, {len(strips)} re-uploading"
             )
             lines += [f"  re-attached {e.path} ({reason})" for e, _, reason in self.plan.reattach]
-            lines += [f"  re-uploading {e.path} ({reason})" for e, reason in self.plan.strip]
+            lines += [f"  re-uploading {e.path} ({reason})" for e, reason in strips]
             lines += cause_lines(self.plan, self.location)
         return lines
 
@@ -356,10 +363,10 @@ def _changed_records(root: Path, pointer: str, head_text: str | None) -> set[tup
     """``(stage, out index)`` of every out in ``pointer`` whose record differs
     from HEAD's record of the same path (all of them when HEAD has no file)."""
     try:
-        now = yaml.safe_load((root / pointer).read_text(encoding="utf-8"))
-        old = yaml.safe_load(head_text) if head_text else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        now, old = None, None
+        now = read12((root / pointer).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        now = None
+    old = read12(head_text)
     stages: list[str | None] = (
         list((now.get("stages") or {})) if pointer == "dvc.lock" and isinstance(now, dict) else [None]
     )
@@ -381,10 +388,7 @@ def _holds_files(folder: Path) -> bool:
 
 def _head_lists_files(head_text: str | None, out: Out) -> bool:
     """HEAD's record of ``out`` lists files (or names a folder tree)."""
-    try:
-        doc = yaml.safe_load(head_text) if head_text else None
-    except yaml.YAMLError:
-        return False
+    doc = read12(head_text)
     records = _records(doc, out.stage)
     rec = records[out.index] if out.index < len(records) else None
     return isinstance(rec, dict) and bool(rec.get("files") or str(rec.get("md5") or "").endswith(".dir"))
