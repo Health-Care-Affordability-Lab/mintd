@@ -72,6 +72,19 @@ except ImportError:  # boto3 absent — inert placeholder; the except clause nev
     class FlexibleChecksumError(Exception):  # type: ignore[no-redef]
         """Placeholder when botocore is absent (mirrors _fast_sync_ops:37-48)."""
 
+# botocore 1.43.0 wraps a GetObject error body in StreamingChecksumBody when the
+# 5xx carries an x-amz-checksum-* header (httpchecksum.handle_checksum_body does
+# not check the status), and parsers._is_generic_error_response then calls
+# .strip() on it for status >= 500. A real server error therefore arrives as
+# AttributeError. Its own guard, not the boto3 block in _fast_sync_ops: if a
+# botocore release moves the class, only this workaround goes inert.
+try:
+    from botocore.httpchecksum import StreamingChecksumBody
+except ImportError:  # boto3 absent — inert placeholder; isinstance never matches
+
+    class StreamingChecksumBody:  # type: ignore[no-redef]
+        """Placeholder when botocore is absent (mirrors _fast_sync_ops:37-48)."""
+
 # boto3's high-level ``upload_file`` catches every botocore ``ClientError`` from
 # the transfer and re-raises it wrapped in ``S3UploadFailedError`` (which is NOT
 # a ``ClientError``; boto3/s3/transfer.py:456-459). We import it via the same
@@ -380,7 +393,10 @@ def download_object(
        ``ChecksumMode="ENABLED"`` (botocore verifies the stored SHA256 on the
        response, raising on mismatch). ``verify_tmp`` is the policy-free
        pre-``replace`` hook cache uses for its metadata-SHA256 check (R2): if
-       it raises, the tmp is unlinked and the error propagates;
+       it raises, the tmp is unlinked and the error propagates. A GetObject
+       5xx that botocore raises as ``AttributeError`` (see
+       ``StreamingChecksumBody`` above) is re-raised as the 5xx
+       ``ClientError`` it was, so it is retried and mapped like any 500;
     3. cleanup is ``except BaseException`` (vs fetch_to_cache's ``Exception``)
        so Ctrl-C — caught later in ``cli.main`` → exit 130 — also leaves no
        orphan tmp.
@@ -401,13 +417,28 @@ def download_object(
         # overwrite its target. Unlinking first forces a fresh regular file.
         tmp.unlink(missing_ok=True)
         try:
-            s3.download_file(
-                Bucket=bucket,
-                Key=key,
-                Filename=str(tmp),
-                ExtraArgs={"ChecksumMode": "ENABLED"},
-                Callback=progress,
-            )
+            try:
+                s3.download_file(
+                    Bucket=bucket,
+                    Key=key,
+                    Filename=str(tmp),
+                    ExtraArgs={"ChecksumMode": "ENABLED"},
+                    Callback=progress,
+                )
+            except AttributeError as exc:
+                if not isinstance(exc.obj, StreamingChecksumBody):
+                    raise  # a real bug: propagate verbatim
+                raise ClientError(
+                    {
+                        "Error": {
+                            "Code": "InternalError",
+                            "Message": "S3 returned a server error (5xx) whose body botocore could not parse",
+                        },
+                        # The stubs want every metadata key; only the status is read.
+                        "ResponseMetadata": {"HTTPStatusCode": 500},  # type: ignore[typeddict-item]
+                    },
+                    "GetObject",
+                ) from exc
             # Enforce the HEAD ContentLength: for a checksummed object botocore
             # already validated the SHA256, but for an un-checksummed one this
             # size check is the ONLY integrity guarantee — it makes share_get's
