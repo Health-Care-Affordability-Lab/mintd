@@ -53,8 +53,10 @@ Closing an issue records how it was verified and which follow-ups were filed.
 - Every merged PR is a release. mintd's version comes from git tags (setuptools-scm),
   and merging a PR into `main` tags its merge commit (`.github/workflows/tag.yml`):
   the next patch version, or the next minor when the PR has the `minor` label. Add
-  `minor` when the PR adds, renames or removes a command, flag or default users see.
-  Never tag by hand.
+  `minor` when the PR adds, renames or removes a command, flag or default users see,
+  or changes what a command does in a way users notice, such as failing where it used
+  to pass. Add it before merging: the tag is chosen when the PR closes, and a label
+  added later changes nothing. Never tag by hand.
 
 ## Tests
 
