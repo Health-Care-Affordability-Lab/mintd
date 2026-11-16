@@ -1347,6 +1347,43 @@ class TestDeliveryGate:
         ).stdout
         assert "version_id: v-1" in committed
 
+    def test_publish_releases_past_an_untracked_pointer_gitignore_excludes(self, tmp_path):
+        """A stray `.dvc` file in a folder `.gitignore` excludes, never
+        committed and with its data nowhere, is one DVC never reads: publish
+        tags as if it weren't there.
+
+        Mutation: drop the .gitignore filter in `discover_all_outs` -> the
+        stray pointer is in push scope, gets re-pinned and joins the files the
+        check judged, and publish refuses to tag a release commit that doesn't
+        hold it, reddens.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+        _cache_the_tree(proj)
+        (proj / "ext" / "partner").mkdir(parents=True)
+        (proj / "ext" / ".gitignore").write_text("partner\n")
+        (proj / "ext" / "partner" / "external.dvc").write_text(
+            "outs:\n- md5: " + "f" * 32 + "\n  size: 1\n  hash: md5\n  path: external.csv\n"
+        )
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)  # takes the .gitignore, not the ignored pointer
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+
+        class _PushPinsTheOutput(_FakeDvcOps):
+            def push(self, *, cwd, **kw):
+                result = super().push(cwd=cwd, **kw)
+                write_pointer(cwd, "data/final", files={"a.parquet": "v-1"})
+                return result
+
+        result = publish_project(
+            project_path=proj,
+            version="0.1.1",
+            client=_FakeCatalogClient(),
+            dvc_ops=_PushPinsTheOutput(),
+            git_ops=_FakeRegistryGitOps(),
+        )
+
+        assert result.tagged
+
     def test_publish_refuses_a_push_that_pinned_nothing(self, tmp_path, monkeypatch):
         """The push is what pins outputs on a version-aware remote. When it
         reports success and the lock still carries no version ID (the fake

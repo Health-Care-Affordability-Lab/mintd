@@ -1588,6 +1588,64 @@ def test_wdir_relative_lock_from_real_dvc_drives_check(
     assert [f.kind for f in consumer] == [expected], [f.message for f in consumer]
 
 
+_POINTERS = (
+    "code/b/sub/x.dvc", "code/k/drop.dvc", "code/k/keep.dvc", "data/drop.dvc", "data/ext/vendor/deep/w.dvc",
+    "data/ext/vendor/z.dvc", "data/keep.dvc", "data/lib/b.dvc", "data/transfers/in/partner/l.dvc",
+)
+
+
+@pytest.mark.parametrize("layout", ["journey", "scaffold-nested", "negation", "file-rule"])
+def test_discover_all_outs_reads_the_pointers_dvc_reads(tmp_path: Path, real_dvc, monkeypatch, layout) -> None:
+    """Real dvc is the oracle for which `.dvc` files exist: `dvc stage list
+    --all` names exactly the pointers mintd discovers, and the rest are the
+    ones mintd reports as skipped because of .gitignore. Which pointers DVC
+    reads changes with the installed dulwich, so the expected list is never
+    written down; the comparison holds on any version.
+
+    Mutations: no ignore verdict -> every layout red; `git check-ignore
+    --no-index` in place of DVC's check -> `negation` red (and
+    `scaffold-nested` on dulwich 1.2.4); no folder check or no inheritance
+    from an ignored folder -> `negation` red; no per-file check ->
+    `file-rule` red."""
+    import mintd
+    from mintd._fast_sync_ops import discover_all_outs, gitignored_pointers
+
+    scaffold = (Path(mintd.__file__).parent / "files" / "gitignore.txt").read_text()
+    ignores = {
+        "journey": {"data/ext/.gitignore": "vendor\n"},
+        "scaffold-nested": {".gitignore": scaffold, "data/transfers/in/.gitignore": "partner\n"},
+        # git reads code/k/keep.dvc here; DVC (dulwich 1.2.21) reads none of the three
+        "negation": {"code/.gitignore": "k/*\n!k/keep.dvc\nb\n!b/sub/\n!b/sub/*.dvc\n"},
+        "file-rule": {".gitignore": "drop.dvc\n"},
+    }[layout]
+    # In-process dulwich and the dvc subprocess must read the same (empty)
+    # global excludes, not the developer's.
+    home = real_dvc.env["HOME"]
+    for key in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME"):
+        monkeypatch.setenv(key, home)
+    real_dvc.env["XDG_CONFIG_HOME"] = home
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=ws)
+    real_dvc(["init", "-q"], cwd=ws, check=True)
+    for rel, text in ignores.items():
+        (ws / rel).parent.mkdir(parents=True, exist_ok=True)
+        (ws / rel).write_text(text)
+    for rel in _POINTERS:
+        p = ws / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # A hex md5 with letters: an all-digit one is read by YAML as an int.
+        p.write_text(f"outs:\n- md5: ffffffffffffffffffffffffffffffff\n  size: 1\n  hash: md5\n  path: {p.stem}.bin\n")
+
+    listed = real_dvc(["stage", "list", "--all", "--name-only"], cwd=ws, check=True).stdout.split()
+    dvc_reads = sorted(line.replace("\\", "/") for line in listed if line.endswith(".dvc"))
+
+    assert discover_all_outs(ws) == dvc_reads
+    assert gitignored_pointers(ws) == sorted(set(_POINTERS) - set(dvc_reads))
+    assert gitignored_pointers(ws) != []  # every layout skips at least one, on any dulwich
+
+
 def test_dir_manifest_md5_matches_the_tree_dvc_add_records(tmp_path: Path, real_dvc) -> None:
     """Real dvc is the oracle for `data push`'s tree check: hashing the file
     list a folder's cached manifest holds gives the md5 `dvc add` wrote into

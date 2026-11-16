@@ -1331,7 +1331,8 @@ def test_fetch_files_dir_contents_dedups_by_md5(s3_versioned, tmp_path: Path) ->
 
 def test_discover_all_outs_walks_repo(tmp_path: Path) -> None:
     """Recursive walk emits all .dvc files relative to project_path,
-    sorted lexicographically."""
+    sorted lexicographically. tmp_path is not a git repository, where DVC
+    ignores nothing (mutation: let SCMError propagate -> this test raises)."""
     (tmp_path / "a.dvc").write_text("outs:\n", encoding="utf-8")
     (tmp_path / "sub").mkdir()
     (tmp_path / "sub" / "b.dvc").write_text("outs:\n", encoding="utf-8")
@@ -1355,6 +1356,36 @@ def test_discover_all_outs_excludes_dvc_internals_and_lock(tmp_path: Path) -> No
 
 def test_discover_all_outs_handles_empty_repo(tmp_path: Path) -> None:
     assert discover_all_outs(tmp_path) == []
+
+
+def test_discover_all_outs_without_scmrepo_reads_every_pointer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No scmrepo means no dvc, whose own missing-dvc error comes from the dvc
+    call; discovery doesn't raise first. Mutation: let the ImportError
+    propagate -> raises, red."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "scmrepo.git", None)
+    (tmp_path / "a.dvc").write_text("outs:\n", encoding="utf-8")
+    assert discover_all_outs(tmp_path) == ["a.dvc"]
+
+
+def test_a_project_inside_a_larger_git_repo_skips_what_its_gitignore_excludes(tmp_path: Path) -> None:
+    """DVC opens the git repository above a project nested in it, and a
+    folder its .gitignore excludes hides every pointer under it, however deep.
+    Mutation: drop search_parent_directories -> nothing is skipped, red."""
+    from mintd._fast_sync_ops import gitignored_pointers
+    from tests._harness.git import _git
+
+    _git(["init", "-q", "-b", "main"], cwd=tmp_path)
+    proj = tmp_path / "proj"
+    (proj / "ext" / "vendor" / "sub").mkdir(parents=True)
+    (proj / "a.dvc").write_text("outs:\n", encoding="utf-8")
+    (proj / "ext" / ".gitignore").write_text("vendor\n", encoding="utf-8")
+    (proj / "ext" / "vendor" / "z.dvc").write_text("outs:\n", encoding="utf-8")
+    (proj / "ext" / "vendor" / "sub" / "y.dvc").write_text("outs:\n", encoding="utf-8")
+
+    assert discover_all_outs(proj) == ["a.dvc"]
+    assert gitignored_pointers(proj) == ["ext/vendor/sub/y.dvc", "ext/vendor/z.dvc"]
 
 
 # ---------- slice 27: path-based (version_aware) mode ------------------
