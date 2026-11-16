@@ -566,6 +566,42 @@ def test_push_targets_passes_a_target_on_another_drive_through(tmp_path: Path, m
     assert groups == [[os.path.normpath(tmp_path / "x.csv")]] and selection == frozenset()
 
 
+def test_pull_check_and_push_all_skip_a_pointer_gitignore_excludes(tmp_path: Path) -> None:
+    """A force-added pointer in a folder `.gitignore` excludes is one DVC never
+    reads, so check doesn't read it, a folder push target doesn't reach it and
+    pull-all doesn't fetch it. One is unparseable, so check reading it at all
+    would show; the other parses, so a push target or pull-all reaching it
+    would show.
+
+    Mutation: drop the .gitignore filter in `discover_all_outs` -> check
+    reports the unreadable pointer, push_targets parses or includes it and
+    pull-all targets it, red."""
+    from mintd.check import check_project
+    from mintd.data_ops import data_pull
+    from tests._dvc_fixtures import stage_dvc_project
+    from tests._fakes.dvc_ops import _FakeDvcOps
+    from tests._fakes.fast_sync_ops import _FakeFastSyncOps
+    from tests._harness.git import _git
+
+    _git(["init", "-q", "-b", "main"], cwd=tmp_path)
+    stage_dvc_project(tmp_path)
+    write_pointer(tmp_path, "data/final", files={"a.csv": "v-1"})
+    (tmp_path / "data" / "ext" / "vendor").mkdir(parents=True)
+    (tmp_path / "data" / "ext" / ".gitignore").write_text("vendor\n")
+    (tmp_path / "data" / "ext" / "vendor" / "z.csv.dvc").write_text("<<<<<<< HEAD\nouts: []\n=======\n")
+    write_pointer(tmp_path, "data/ext/vendor/ok.csv", files=None)  # parseable: push would target it
+    _git(["add", "-A"], cwd=tmp_path)
+    _git(["add", "-f", "data/ext/vendor/z.csv.dvc", "data/ext/vendor/ok.csv.dvc"], cwd=tmp_path)
+    _git(["commit", "-q", "-m", "x"], cwd=tmp_path)
+
+    findings = check_project(tmp_path)
+    assert [f for f in findings if "ext/vendor" in f.message or "ext/vendor" in str(f.source or "")] == []
+    assert push_targets(tmp_path, ["data"], REMOTE, cwd=tmp_path)[0] == [["data/final.dvc"]]
+    fast = _FakeFastSyncOps()
+    data_pull(tmp_path, dvc_ops=_FakeDvcOps(), fast_sync_ops=fast)
+    assert fast.calls[0].targets == ["data/final.dvc"]
+
+
 def test_lock_outs_carry_their_stage(tracked: Path) -> None:
     from mintd._fast_sync_ops import parse_dvc_lock_outs
     assert {o.target: o.stage for o in parse_dvc_lock_outs(tracked, REMOTE)} == {

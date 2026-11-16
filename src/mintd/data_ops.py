@@ -41,8 +41,9 @@ from ._fast_sync_ops import (
     outs_materialized,
     partition_pipeline_outs,
     resolve_target_outs,
+    skipped_targets,
 )
-from ._dvc_state import abbreviate, judge_pointers, push_targets
+from ._dvc_state import _names_a_stage, abbreviate, judge_pointers, push_targets
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
 from ._storage_state import inspect_storage
@@ -782,6 +783,13 @@ def data_pull(
     # Track the original request shape: "pull-all" (None) carries different
     # post-fast-sync semantics than "pull these specific .dvc files."
     pull_all_requested = targets is None
+    # DVC refuses a pointer .gitignore excludes; refuse it first, so fast-sync
+    # never fetches what DVC would never pull. Pull reads targets from the root.
+    for target, pointer in skipped_targets(project_path, targets or [], base=project_path):
+        raise DvcPullError(
+            f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pulled; "
+            "change the .gitignore, or drop this target"
+        )
     remote_name = remote or _default_dvc_remote(project_path) or "origin"
 
     # dvc.lock stage outs are discovered ONLY on pull-all. A targeted pull
@@ -987,6 +995,17 @@ def data_push(
     groups: list[list[str] | None] = [None]
     selection: frozenset[str] | None = None
     if targets:
+        # DVC refuses a pointer .gitignore excludes; say so before any upload,
+        # reading each target from the folder push_targets reads it from.
+        for target, pointer in skipped_targets(project_path, targets, base=cwd or project_path):
+            if not target.endswith(".dvc") and _names_a_stage(Path(cwd or project_path) / "dvc.yaml", target):
+                continue  # push_targets reads a bare stage name as the stage, as dvc does
+            from ._push_verify import PushRefused
+
+            raise PushRefused(
+                f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pushed",
+                hint="change the .gitignore, or drop this target",
+            )
         resolved, selection = push_targets(
             project_path, targets, effective_remote, cwd=cwd or project_path
         )

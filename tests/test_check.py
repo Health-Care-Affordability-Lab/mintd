@@ -2845,7 +2845,7 @@ def test_check_ignores_a_git_ref_named_like_a_pointer(tmp_path: Path) -> None:
     as unreadable pointers blocked check, publish and register on a healthy
     product.
 
-    Mutation: stop pruning `.git` in `discover_all_outs` -> reddens.
+    Mutation: stop pruning `.git` in `_walk_pointers` -> reddens.
     """
     stage_dvc_project(tmp_path)
     write_pointer(tmp_path, "data/final", files={"a.csv": "v-1"})

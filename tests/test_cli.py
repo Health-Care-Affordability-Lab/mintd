@@ -5064,3 +5064,14 @@ def test_registry_register_refuses_when_git_cannot_answer(
     assert "Traceback" not in err
     with pytest.raises(CatalogNotFound):
         client.fetch("test_project")
+
+
+def test_the_skipped_line_names_every_pointer() -> None:
+    """Every skipped pointer is named, not the first eight and an ellipsis.
+    Mutation: abbreviate the list -> red."""
+    from mintd.cli import _skipped_line
+
+    names = [f"data/ext/p{i}.dvc" for i in range(9)]
+    line = _skipped_line(names)
+    assert all(n in line for n in names)
+    assert line.endswith("DVC never pushes or pulls them, because .gitignore rules exclude them")

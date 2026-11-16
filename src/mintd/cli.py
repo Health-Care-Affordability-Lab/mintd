@@ -51,7 +51,7 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
 )
-from ._fast_sync_ops import FastSyncOps, S3AccessDenied
+from ._fast_sync_ops import FastSyncOps, S3AccessDenied, gitignored_pointers
 from ._push_verify import PushRefused
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps  # noqa: F401
@@ -1055,6 +1055,12 @@ def _dvc_root(start: Path) -> Path:
     return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
 
 
+def _skipped_line(skipped: list[str]) -> str:
+    """The warning naming every pointer DVC skips because of .gitignore."""
+    it = "it" if len(skipped) == 1 else "them"
+    return f"skipped {', '.join(skipped)}: DVC never pushes or pulls {it}, because .gitignore rules exclude {it}"
+
+
 def _handle_data_push(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
@@ -1098,9 +1104,15 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     # None, not []: a JSON reader must not mistake "git could not answer"
     # (outside a repo, say) for a clean tree, and `warn` is silent under --json.
     git_ops = _resolve_git_ops(config)
+    # DVC never collects a .dvc file that .gitignore excludes, so it never
+    # pushes or pulls one: say which ones were left out, and keep them out of
+    # the check and the commit, which read git status rather than DVC's view.
+    skipped = gitignored_pointers(root)
+    if skipped:
+        reporter.warn(_skipped_line(skipped))
     pointers: list[str] | None
     try:
-        pointers = git_ops.uncommitted_pointers(root)
+        pointers = [p for p in git_ops.uncommitted_pointers(root) if p not in skipped]
     except GitOpError as exc:
         reporter.warn(f"could not check .dvc / dvc.lock files against HEAD: {exc.stderr.strip() or exc}")
         pointers = None
@@ -1146,7 +1158,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
             )
         if outcome.state not in ("left", "blocked"):
             try:
-                pointers = git_ops.uncommitted_pointers(root)
+                pointers = [p for p in git_ops.uncommitted_pointers(root) if p not in skipped]
             except GitOpError:
                 pointers = None
     elif pointers == []:

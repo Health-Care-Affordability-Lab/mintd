@@ -731,19 +731,109 @@ def discover_all_outs(project_path: Path) -> list[str]:
     Used by ``data_pull`` when ``targets is None`` to route through
     fast-sync (boto3 → cache) instead of straight to ``dvc pull``, which
     hits a cache-write bug in DVC 3.66.1 on version_aware buckets.
+
+    Only the ``.dvc`` files DVC reads: one that DVC skips because of
+    ``.gitignore`` is left out (see ``_walk_pointers``), so push, pull and
+    check see what DVC sees.
     """
-    results: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(project_path, followlinks=False):
-        # Prune .dvc/ internals in-place so os.walk doesn't descend; dvc never
-        # reads .git/ either, where a branch or tag named `*.dvc` is a ref file.
-        dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")]
-        for name in filenames:
-            if not name.endswith(".dvc") or name == "dvc.lock":
-                continue
-            abs_path = Path(dirpath) / name
-            rel = abs_path.relative_to(project_path)
-            results.append(rel.as_posix())
-    return sorted(results)
+    return [rel for rel, ignored in _walk_pointers(project_path) if not ignored]
+
+
+def gitignored_pointers(project_path: Path) -> list[str]:
+    """The ``.dvc`` files ``discover_all_outs`` leaves out because DVC reads
+    ``.gitignore`` as excluding them. ``data push`` names them."""
+    return [rel for rel, ignored in _walk_pointers(project_path) if ignored]
+
+
+def skipped_targets(project_path: Path, targets: list[str], *, base: Path) -> list[tuple[str, str]]:
+    """``(target, pointer)`` for each target that names a ``.dvc`` file DVC
+    skips because of ``.gitignore``, as ``x.dvc`` or as ``x`` for ``x.dvc``.
+
+    A target is read from ``base`` the way its command reads it (push from
+    the folder it runs in, pull from the project root) and compared in
+    project-relative form, lexically: ``..`` is collapsed and an absolute
+    path mapped, but symlinks are not followed. A target outside the project
+    never matches.
+    """
+    skipped = set(gitignored_pointers(project_path))
+    if not skipped:
+        return []
+    root = os.path.abspath(project_path)
+    found: list[tuple[str, str]] = []
+    for t in targets:
+        absolute = os.path.join(os.path.abspath(base), normalize_target(t))  # relpath normalises `..`
+        try:
+            rel = Path(os.path.relpath(absolute, root)).as_posix()
+        except ValueError:  # Windows: another drive, so outside the project
+            continue
+        if rel == ".." or rel.startswith("../"):
+            continue
+        pointer = rel if rel.endswith(".dvc") else f"{rel}.dvc"
+        if pointer in skipped:
+            found.append((t, pointer))
+    return found
+
+
+class _NothingIgnored:
+    """Outside a git repository, or without scmrepo: DVC ignores nothing."""
+
+    def __enter__(self) -> "_NothingIgnored":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def is_ignored(self, path: str) -> bool:
+        return False
+
+
+def _walk_pointers(project_path: Path) -> list[tuple[str, bool]]:
+    """Every ``*.dvc`` file under project_path, relative and posix, with
+    whether DVC skips it because of ``.gitignore``.
+
+    It mirrors DVC's own walk (``dvc/repo/index.py`` ``collect_files``): a
+    folder DVC reads as ignored is never read, so everything under it is
+    skipped, and the check is by pattern only, so a pointer git tracks (one
+    added with ``git add -f``) still counts as ignored. It asks scmrepo, the
+    library DVC asks, rather than ``git check-ignore``: the two disagree on
+    some re-include layouts (one is in the oracle test in
+    ``tests/test_harness_contract.py``) and, on older dulwich, on a folder
+    line under the scaffold's ``!/data/**/``; and DVC's answer changes with
+    the installed dulwich. Asked in-process, from the environment whose dvc
+    mintd runs, it can't drift from DVC. Ignored folders are still walked, so
+    push can name what it skipped. It doesn't apply ``.dvcignore``,
+    ``core.no_scm``, or DVC's pruning of folders that are outputs.
+    """
+    root = os.path.abspath(project_path)
+    scm: Any = _NothingIgnored()
+    try:
+        from scmrepo.exceptions import SCMError
+        from scmrepo.git import Git
+    except ImportError:  # no scmrepo means no dvc, whose own missing-dvc error comes next
+        pass
+    else:
+        try:
+            scm = Git(root, search_parent_directories=True)  # how dvc.scm.SCM opens it
+        except SCMError:  # not in a git repo: DVC without git ignores nothing
+            pass
+    found: list[tuple[str, bool]] = []
+    ignored_dirs: set[str] = set()
+    with scm:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            # Prune .dvc/ internals in-place so os.walk doesn't descend; dvc never
+            # reads .git/ either, where a branch or tag named `*.dvc` is a ref file.
+            dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")]
+            inside = dirpath in ignored_dirs
+            for d in dirnames:
+                sub = os.path.join(dirpath, d)
+                if inside or scm.is_ignored(sub + os.sep):  # trailing sep: how DVC asks about a folder
+                    ignored_dirs.add(sub)
+            for name in filenames:
+                if not name.endswith(".dvc") or name == "dvc.lock":
+                    continue
+                path = os.path.join(dirpath, name)
+                found.append((Path(os.path.relpath(path, root)).as_posix(), inside or scm.is_ignored(path)))
+    return sorted(found)
 
 
 def cache_path_for(cache_dir: Path, md5: str) -> Path:

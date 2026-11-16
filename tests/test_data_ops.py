@@ -1837,3 +1837,69 @@ def test_data_add_and_remove_aim_dvc_at_their_project_path(tmp_path: Path) -> No
 
     assert [c.cwd for c in fake.add_calls] == [proj]
     assert [c.cwd for c in fake.remove_calls] == [proj]
+
+
+def _skipped_pointer_project(root: Path) -> Path:
+    """A git repo whose `data/ext/.gitignore` excludes `vendor/`, holding the
+    pointer `data/ext/vendor/z.csv.dvc` (DVC never reads it) and a `code/` folder."""
+    from tests._harness.git import _git
+
+    _git(["init", "-q", "-b", "main"], cwd=root)
+    (root / "code").mkdir()
+    (root / "data" / "ext" / "vendor").mkdir(parents=True)
+    (root / "data" / "ext" / ".gitignore").write_text("vendor\n")
+    (root / "data" / "ext" / "vendor" / "z.csv.dvc").write_text(
+        "outs:\n- md5: " + "f" * 32 + "\n  size: 1\n  hash: md5\n  path: z.csv\n"
+    )
+    return root
+
+
+@pytest.mark.parametrize("target", ["data/ext/vendor/z.csv", "data/ext/vendor/../vendor/z.csv", "absolute"],
+                         ids=["plain", "alias", "absolute"])
+def test_a_pull_target_naming_a_skipped_pointer_is_refused_before_any_transfer(tmp_path: Path, target: str) -> None:
+    """DVC refuses a pointer `.gitignore` excludes; mintd refuses it first, so
+    fast-sync never fetches what DVC would never pull. However it is spelled.
+    Mutations: delete the check in data_pull -> every case red; compare the
+    target as typed instead of resolving it -> alias and absolute red."""
+    root = _skipped_pointer_project(tmp_path)
+    if target == "absolute":
+        target = str(root / "data" / "ext" / "vendor" / "z.csv.dvc")
+    fast, dvc = _FakeFastSyncOps(), _FakeDvcOps()
+    with pytest.raises(DvcPullError, match=r"DVC skips data/ext/vendor/z\.csv\.dvc because \.gitignore rules exclude it"):
+        data_pull(root, targets=[target], dvc_ops=dvc, fast_sync_ops=fast)
+    assert fast.calls == [] and dvc.pull_calls == []
+
+
+@pytest.mark.parametrize("target,cwd", [("data/ext/vendor/z.csv.dvc", "."), ("../data/ext/vendor/z.csv.dvc", "code")],
+                         ids=["root", "subdirectory"])
+def test_a_push_target_naming_a_skipped_pointer_is_refused_before_any_transfer(
+    tmp_path: Path, target: str, cwd: str,
+) -> None:
+    """Push resolves targets against the folder it runs in, so the check does
+    too. Mutations: delete the check in data_push -> both red; resolve against
+    the project root instead of cwd -> subdirectory red."""
+    from mintd._push_verify import PushRefused
+
+    root = _skipped_pointer_project(tmp_path)
+    dvc = _FakeDvcOps()
+    with pytest.raises(PushRefused, match=r"DVC skips data/ext/vendor/z\.csv\.dvc because \.gitignore rules exclude it"):
+        data_push(root, targets=[target], dvc_ops=dvc, cwd=root / cwd)
+    assert dvc.push_calls == []
+
+
+@pytest.mark.parametrize("here,stage_key", [(".", "dvc.yaml:build"), ("code", "code/dvc.yaml:build")],
+                         ids=["root", "subdirectory"])
+def test_a_bare_stage_name_is_pushed_even_beside_a_skipped_pointer_of_that_name(
+    tmp_path: Path, here: str, stage_key: str,
+) -> None:
+    """`build` names the stage the dvc.yaml where push runs declares; a stray
+    `build.dvc` beside it that .gitignore excludes is not what push reads it
+    as. Mutations: drop the stage-name check in data_push -> both red; read
+    the project root's dvc.yaml instead of cwd's -> subdirectory red."""
+    root = _skipped_pointer_project(tmp_path)
+    (root / here / "dvc.yaml").write_text("stages:\n  build:\n    cmd: make\n    outs:\n      - out.csv\n")
+    (root / ".gitignore").write_text("build.dvc\n")
+    (root / here / "build.dvc").write_text("outs:\n- md5: " + "f" * 32 + "\n  size: 1\n  hash: md5\n  path: build.csv\n")
+    dvc = _FakeDvcOps()
+    data_push(root, targets=["build"], dvc_ops=dvc, cwd=root / here)
+    assert [c.targets for c in dvc.push_calls] == [[stage_key]]

@@ -8,6 +8,7 @@ to the pointer files, which the fakes elsewhere only describe.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -318,3 +319,63 @@ def test_a_file_sent_in_parts_is_proven_reattached_and_imported(producer, s3_ser
     r = real_dvc(["import", "-q", str(tmp_path / "origin.git"), "data/big.bin", "-o", "big.bin"], cwd=consumer)
     assert r.returncode == 0, r.stderr
     assert (consumer / "big.bin").read_bytes() == big
+
+
+@pytest.mark.parametrize("argv,kind", [
+    (["data", "push"], "forced"),
+    (["data", "push", "data/"], "forced"),
+    (["data", "push"], "untracked"),
+    (["data", "push"], "modified-forced"),
+    (["--json", "data", "push"], "modified-forced"),
+], ids=["plain-forced", "folder-target-forced", "plain-untracked", "plain-modified-forced", "json-modified-forced"])
+def test_a_pointer_gitignore_excludes_is_skipped_as_dvc_skips_it(producer, s3_server, real_dvc, capsys, argv, kind):  # noqa: F811
+    """A `.dvc` file in a folder `.gitignore` excludes is one DVC never reads:
+    force-added, never pushed; untracked, with no data anywhere; or committed
+    and then edited. Push names it as skipped, uploads and commits nothing for
+    it, and verifies the rest.
+
+    Mutations: filter removed -> plain-forced fails with "no S3 version ID
+    recorded ... DVC reported nothing to upload", folder-target-forced hands
+    dvc the ignored file ("is git-ignored"), plain-untracked fails with "not
+    provably on S3 ... not in the local cache"; filter removed from push's
+    commit list -> plain-modified-forced blocks, and from the list after the
+    commit -> json-modified-forced lists it; warning deleted -> every
+    non-JSON case misses the `skipped` line."""
+    _, _, puts = s3_server
+    vendor = producer / "data" / "ext" / "vendor"
+    vendor.mkdir(parents=True)
+    if kind in ("forced", "modified-forced"):
+        (vendor / "z.csv").write_text("z\n")
+        real_dvc(["add", "-q", "data/ext/vendor/z.csv"], cwd=producer, check=True)  # before the ignore: dvc add refuses an ignored target
+        (producer / "data" / "ext" / ".gitignore").write_text("vendor\n")
+        _git(["add", "-f", "data/ext/.gitignore", "data/ext/vendor/z.csv.dvc"], cwd=producer)
+        name = "data/ext/vendor/z.csv.dvc"
+    else:
+        (producer / "data" / "ext" / ".gitignore").write_text("vendor\n")
+        _git(["add", "data/ext/.gitignore"], cwd=producer)
+        name = "data/ext/vendor/gone.csv.dvc"
+    _git(["commit", "-q", "-m", "a folder .gitignore excludes"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    if kind == "untracked":
+        (producer / name).write_text("outs:\n- md5: " + "f" * 32 + "\n  size: 1\n  hash: md5\n  path: gone.csv\n")
+    if kind == "modified-forced":
+        doc = yaml.safe_load((producer / name).read_text())
+        doc["outs"][0]["desc"] = "edited"
+        (producer / name).write_text(yaml.safe_dump(doc, sort_keys=False))
+    before = (producer / name).read_text()
+    puts.clear()
+
+    rc = cli.main(argv)
+    captured = capsys.readouterr()
+    err = " ".join(captured.err.split())
+    assert rc == 0, err
+    if argv[0] == "--json":  # the list after the commit leaves the skipped pointer out too
+        assert json.loads(captured.out.strip().splitlines()[-1])["uncommitted_pointers"] == []
+    else:
+        assert f"skipped {name}: DVC never pushes or pulls it, because .gitignore rules exclude it" in err
+        assert "✓ 3 file(s) verified" in err
+    assert not any("/ext/" in p for p in puts)
+    assert (producer / name).read_text() == before
+    assert "data/ext" not in _git(["show", "--name-only", "--format=", "HEAD"], cwd=producer)
+    status = [s.strip() for s in _git(["status", "--porcelain"], cwd=producer).split("\n") if s.strip()]
+    assert status == ([f"M {name}"] if kind == "modified-forced" else [])
