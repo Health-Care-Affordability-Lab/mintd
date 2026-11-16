@@ -4,7 +4,8 @@ Slice 4: `import_product` — catalog lookup → path resolution → `dvc import
 Slice 5: lifts the `--rev` without `--path` restriction by resolving
 `data_products.primary` via `ProducerView.at(repo, rev)` (the producer's
 metadata.json at the pinned commit).
-`bump_import` — on a `drift` consumer finding from `check_project`, re-import
+`bump_import` — on a `drift` consumer finding from `check_project` (or a
+`schema_too_old` one whose producer HEAD reads), re-import
 the output path the import's `.dvc` records (`data_products.primary` only when
 it records none) at the producer's HEAD SHA via `ProducerView.at_head`, and
 overwrite that `.dvc` file with the new pin.
@@ -14,11 +15,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -30,7 +32,7 @@ from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
-from .check import CheckFinding, check_project, consumer_walk_failure
+from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
 from .imports import DataDependency, NotAnImportError
 from .producer import (
@@ -1163,9 +1165,11 @@ def bump_import(
       that could be the product's namespace.
     - `BumpBlocked(name, finding)` — the producer is broken at the pin
       (`pin_missing` / `metadata_missing` / `metadata_invalid`) or the
-      warning is non-actionable (`unreachable` / `schema_too_old` /
-      `drift_unknown`). Carries the original finding so the call site can
-      render the producer-side reason.
+      warning is non-actionable (`unreachable` / `drift_unknown`). Carries
+      the original finding so the call site can render the producer-side
+      reason. A `schema_too_old` pin moves to HEAD when HEAD reads; when
+      HEAD is too old as well this raises with the pin's finding, and when
+      HEAD cannot be read, with a `drift_unknown` one.
     - `PrimaryRemovedAtHead` — HEAD's `data_products.primary` is `None`
       and the import records no output path of its own.
     """
@@ -1190,13 +1194,33 @@ def bump_import(
         raise BumpBlocked(name, finding)
     if finding.kind == "up_to_date":
         return BumpResult(changed=False, old_pin=dep.contract_pin, new_pin=None, dvc_path=None)
-    if finding.kind != "drift":
-        # unreachable / schema_too_old / pin_missing / metadata_missing /
-        # metadata_invalid / invalid_manifest / catalog_unresolved — all non-actionable.
-        raise BumpBlocked(name, finding)
-
     factory = producer_view_factory or ProducerView.at_head
-    head_view, head_sha = factory(dep.producer_repo)
+    if finding.kind == "schema_too_old":
+        # `check` judges the schema at the pin and never reads HEAD, so HEAD
+        # is first read here. Moving off the old pin is the fix when HEAD reads.
+        try:
+            head_view, head_sha = factory(dep.producer_repo)
+        except ProducerError as err:
+            # Check stops at an old-schema pin and never reads HEAD, so only
+            # re-running this bump can tell when HEAD is readable again. Built
+            # as argv and joined by shlex, so a --path with a space stays one.
+            retry = shlex.join(["mintd", "data", "import", name, "--bump", *(["--path", path] if path else [])])
+            blocked = (
+                finding
+                if err.reason == ProducerError.Reason.SCHEMA_TOO_OLD
+                else replace(
+                    _head_unreadable_finding(source=dvc_source, pin=dep.contract_pin, err=err),
+                    hint=f"your pin {dep.contract_pin[:7]} is intact; once the producer's HEAD "
+                    f"is readable, re-run: {retry}",
+                )
+            )
+            raise BumpBlocked(name, blocked) from err
+    elif finding.kind == "drift":
+        head_view, head_sha = factory(dep.producer_repo)
+    else:
+        # unreachable / pin_missing / metadata_missing / metadata_invalid /
+        # invalid_manifest / catalog_unresolved — all non-actionable.
+        raise BumpBlocked(name, finding)
     # D-C2: bump the path this import RECORDS, not the producer's primary.
     # Re-importing the primary over a non-primary row put `final/` on disk
     # with the old `.dvc` orphaned beside a new one. The primary fallback

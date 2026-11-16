@@ -132,7 +132,7 @@ def test_producer_view_at_raises_schema_too_old(tmp_path: Path) -> None:
         ProducerView.at(REPO, PIN, fetcher=fetcher, cache_dir=tmp_path)
 
     assert ei.value.reason == ProducerError.Reason.SCHEMA_TOO_OLD
-    assert "1.1" in ei.value.detail
+    assert ei.value.detail == "1.1"
 
 
 def test_producer_view_try_at_returns_error_object_on_failure(tmp_path: Path) -> None:
