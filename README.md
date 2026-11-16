@@ -59,9 +59,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
 ```
 
-Both scripts install `uv` if missing, run `uv tool install
+Both scripts install `uv` if missing, run `uv tool install --python 3.13
 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
-(isolated venv, `mintd` on PATH), then layer `cffi + reflink` into the
+(isolated venv on the newest Python CI tests, `mintd` on PATH), then layer `cffi + reflink` into the
 tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
 to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 
@@ -73,7 +73,7 @@ to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
 # irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
-uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
+uv tool install --python 3.13 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
 ```
 
 Or `pipx install git+…` / `pip install --user git+…` if you prefer.

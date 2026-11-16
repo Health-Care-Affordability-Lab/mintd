@@ -41,7 +41,11 @@ else
 fi
 
 echo "Installing mintd..."
-uv tool install --force --reinstall --refresh "$INSTALL_SPEC"
+# Pin Python to the newest version CI tests (.github/workflows/test.yml).
+# Unpinned, uv uses the first Python it finds or downloads the newest, which
+# can outrun wheels for dvc's compiled deps (pygit2 had none for 3.15 at
+# first, and its source build needs libgit2).
+uv tool install --force --reinstall --refresh --python 3.13 "$INSTALL_SPEC"
 
 # Locate the tool's Python interpreter
 TOOL_PYTHON="$HOME/.local/share/uv/tools/mintd/bin/python"
