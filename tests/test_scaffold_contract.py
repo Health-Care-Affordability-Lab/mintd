@@ -122,6 +122,16 @@ def test_c1_helper_rejects_phantom_mintd_out() -> None:
     }
     assert check_stage_outs(phantom, []), "phantom mintd-tool out must fail C1"
 
+    # The mapping form an uncached out takes is checked too, not skipped.
+    phantom_mapping = {
+        "schema": {
+            "cmd": "mintd data schema generate --project-dir ..",
+            "wdir": "code",
+            "outs": [{"../data/phantom.json": {"cache": False}}],
+        }
+    }
+    assert check_stage_outs(phantom_mapping, []), "phantom mapping-form out must fail C1"
+
     good = {
         "schema": {
             "cmd": "mintd data schema generate --project-dir ..",

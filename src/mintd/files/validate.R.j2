@@ -145,10 +145,9 @@ main <- function() {
 
   final_files <- find_data_files(FINAL_DIR, extensions = c("csv", "json", "xlsx", "xls", "rds"))
   if (length(final_files) > 0) {
-    combined_schema <- list(
-      generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
-      files = list()
-    )
+    # No timestamp: git keeps this file, and a rerun on unchanged data must
+    # leave it unchanged.
+    combined_schema <- list(files = list())
 
     for (data_file in final_files) {
       tryCatch({

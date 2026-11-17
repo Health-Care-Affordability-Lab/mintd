@@ -99,7 +99,10 @@ def check_stage_outs(stages: dict, script_texts: list[str]) -> list[str]:
         cmd = str(stage.get("cmd", "")).strip()
         wdir = str(stage.get("wdir", "."))
         outs = stage.get("outs") or []
-        file_outs = [str(o) for o in outs if not str(o).endswith("/")]
+        # An out is a path, or a one-key mapping of a path to its options
+        # (`- ../schemas/v1/schema.json: {cache: false}`).
+        paths = [next(iter(o)) if isinstance(o, dict) else str(o) for o in outs]
+        file_outs = [p for p in paths if not p.endswith("/")]
 
         if cmd.startswith("mintd"):
             verbs = mintd_verb_path(cmd)

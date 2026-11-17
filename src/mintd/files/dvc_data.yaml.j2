@@ -78,7 +78,10 @@ stages:
       - ../data/intermediate/
     outs:
       - ../data/final/
-{% if language != "stata" %}      - ../schemas/v1/schema.json
+{% if language != "stata" %}
+      # cache: false: git, not DVC, keeps the column schema, so the catalog can read it.
+      - ../schemas/v1/schema.json:
+          cache: false
 {% endif %}
 {% if language == "stata" %}
   schema:
@@ -87,5 +90,7 @@ stages:
     deps:
       - ../data/final/
     outs:
-      - ../schemas/v1/schema.json
+      # cache: false: git, not DVC, keeps the column schema, so the catalog can read it.
+      - ../schemas/v1/schema.json:
+          cache: false
 {% endif %}

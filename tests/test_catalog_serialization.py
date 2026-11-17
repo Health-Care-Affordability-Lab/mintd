@@ -17,6 +17,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from mintd.model import CATALOG_EXCLUDED_PATHS, Metadata
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -32,12 +35,64 @@ def test_catalog_entry_excludes_mint_internal_paths():
 
 
 def test_catalog_entry_includes_everything_else():
-    """Every top-level field on Metadata except CATALOG_EXCLUDED_PATHS shows up."""
-    m = Metadata.from_json_file(MINIMAL)
+    """Every top-level field on Metadata except CATALOG_EXCLUDED_PATHS shows up,
+    under the key the file uses (its alias, where it has one)."""
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["schema"] = {"location": "schemas/v1/schema.json"}
+    m = Metadata.model_validate(data)
     dumped = m.to_catalog_entry().model_dump()
-    expected = set(Metadata.model_fields.keys()) - CATALOG_EXCLUDED_PATHS
+    expected = {f.alias or n for n, f in Metadata.model_fields.items()} - CATALOG_EXCLUDED_PATHS
     for field in expected:
         assert field in dumped, f"{field} should be in CatalogEntry but missing"
+
+
+def test_catalog_entry_names_where_the_schema_is_committed():
+    """A product's `schema` key reaches its catalog entry and the file publish
+    writes, under that name, with the keys the catalog site reads.
+
+    Mutations: drop `serialize_by_alias`, or SchemaRef's `extra="allow"` -> red.
+    """
+    ref = {"location": "schemas/v1/schema.json", "version": "1.0.0"}
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["schema"] = ref
+    m = Metadata.model_validate(data)
+
+    assert m.to_catalog_entry().model_dump()["schema"] == ref
+    written = json.loads(m.model_dump_json())  # what publish writes back to metadata.json
+    assert written["schema"] == ref
+    assert "schema_" not in written
+
+
+def test_metadata_without_a_schema_gains_no_schema_key():
+    """A product with no `schema` dumps exactly as before: no key, never
+    `"schema": null`. A `schema` that names no location is invalid.
+
+    Mutations: drop `exclude_if`, or make `location` optional -> red.
+    """
+    m = Metadata.from_json_file(MINIMAL)
+    assert "schema" not in json.loads(m.model_dump_json())
+    assert "schema" not in json.loads(m.model_dump_json(by_alias=True, exclude_none=False))
+    assert "schema" not in m.to_catalog_entry().model_dump()
+
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["schema"] = {}
+    with pytest.raises(ValidationError) as ei:
+        Metadata.model_validate(data)
+    assert ("schema", "location") in [e["loc"] for e in ei.value.errors()]
+
+
+@pytest.mark.parametrize("location", ["--output=/tmp/x", "/etc/passwd", "../outside.json", "a/../../b", "a\\b", ""])
+def test_schema_location_must_be_a_path_inside_the_repo(location: str) -> None:
+    """Catalog builders hand `schema.location` to git, so it must be a path
+    inside the repo, never an option, an absolute path or one that climbs out.
+
+    Mutation: drop the location validator -> red.
+    """
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["schema"] = {"location": location}
+    with pytest.raises(ValidationError) as ei:
+        Metadata.model_validate(data)
+    assert ("schema", "location") in [e["loc"] for e in ei.value.errors()]
 
 
 def test_catalog_entry_includes_storage_when_populated():

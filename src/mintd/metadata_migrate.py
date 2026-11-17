@@ -15,7 +15,8 @@ The migration rules:
   (legacy meta-meta tracking)
 - Carry top-level ``storage`` through, deriving ``bucket``/``prefix`` from
   ``storage.dvc.remote_url`` when the v1 bucket is empty
-- Drop top-level ``schema`` (location is conventional, not stored)
+- Drop top-level ``schema`` (a v1 schema file is a DVC-cached output git may
+  not hold; add the v2 key once the file is committed)
 - Drop top-level ``lifecycle``
 - Default ``status.last_published_version`` to ``""`` when absent
 - Default ``data_products`` to ``{"primary": None, "outputs": []}`` when absent

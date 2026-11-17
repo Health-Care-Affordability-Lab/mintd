@@ -19,12 +19,17 @@ from mintd._templates import (
     render_template,
     validate_project_name,
 )
+from mintd._producer_git_ops import GitArchiveFetcher
 from mintd._templates.scaffolds import dispatch
 from mintd.init import init_project
 from mintd.model import Metadata
 from mintd.publish import _resolve_version
+from mintd.schema_ops import parse_published_schema
 
 from tests._fakes.init_ops import _FakeInitOps
+from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)
+from tests._harness.git import _git
+from tests.scaffold_contract import is_ignored
 
 
 # --- engine + name validation ---------------------------------------------
@@ -203,13 +208,111 @@ def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
     assert "#  fetch:" in raw_text, "commented fetch block must be present"
 
     # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
-    # schema output into validate. Either way the DAG stays acyclic.
+    # schema output into validate. Either way the DAG stays acyclic, and the
+    # out is uncached so git keeps the file for the catalog.
+    schema_out = {"../schemas/v1/schema.json": {"cache": False}}
     if language == "stata":
-        assert stages["schema"]["outs"] == ["../schemas/v1/schema.json"]
-        assert "../schemas/v1/schema.json" not in validate.get("outs", [])
+        assert stages["schema"]["outs"] == [schema_out]
+        assert schema_out not in validate.get("outs", [])
     else:
         assert "schema" not in stages
-        assert "../schemas/v1/schema.json" in validate["outs"]
+        assert schema_out in validate["outs"]
+
+
+def test_python_scaffold_schema_types_and_order_match_the_cli_writer(tmp_path: Path) -> None:
+    """The Python scaffold's generator names column types as the Frictionless
+    writer does (`string`, `number`, `datetime`) on any pandas, and lists files
+    by their relative path's characters, the same order on every OS.
+
+    Mutations: test text columns only as `object` (pandas 3 reads them as
+    `str`), drop the datetime branch, or sort the Path objects themselves ->
+    red (the last on Windows).
+    """
+    import importlib.util
+
+    render_scaffold(project_type="data", name="demo", language="python", target_dir=tmp_path)
+    spec = importlib.util.spec_from_file_location("_scaffold_mintd_utils", tmp_path / "code" / "_mintd_utils.py")
+    assert spec and spec.loader
+    utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(utils)
+    final = tmp_path / "final"
+    final.mkdir()
+    (final / "a.csv").write_text("n,x,label\n1,1.5,alpha\n2,2.5,beta\n", encoding="utf-8")
+    (final / "B.csv").write_text("n\n1\n", encoding="utf-8")
+
+    schema = utils.generate_data_schema(final / "a.csv")
+
+    assert [(f["name"], f["type"]) for f in schema["schema"]["fields"]] == [
+        ("n", "integer"), ("x", "number"), ("label", "string")
+    ]
+    assert [p.name for p in utils.find_data_files(final, [".csv"])] == ["B.csv", "a.csv"]
+    # pandas reads a date-named JSON column as datetime64[...]
+    (final / "events.json").write_text('[{"id": 1, "date": "2024-01-02"}]', encoding="utf-8")
+    events = utils.generate_data_schema(final / "events.json")
+    assert [(f["name"], f["type"]) for f in events["schema"]["fields"]] == [("id", "integer"), ("date", "datetime")]
+
+
+def test_r_scaffold_schema_types_each_column_by_position(tmp_path: Path) -> None:
+    """The R generator keeps the data's own column names, so they can repeat;
+    each column is typed by its position, not looked up by a name another
+    column shares.
+
+    Mutation: look columns up by name (`df[[col_name]]`) -> red. Needs R; the
+    text guard covers CI.
+    """
+    if not _r_ready():
+        pytest.skip("Rscript with R6, readr and jsonlite is not installed")
+    render_scaffold(project_type="data", name="demo", language="r", target_dir=tmp_path)
+    data = tmp_path / "dup.csv"
+    data.write_text("x,x\n1,hello\n2,world\n", encoding="utf-8")
+    script = (
+        f'source({json.dumps((tmp_path / "code" / "_mintd_utils.R").as_posix())}); '
+        f's <- generate_data_schema({json.dumps(data.as_posix())}); '
+        'cat(vapply(s$schema$fields, function(f) paste(f$name, f$type), ""), sep = "\\n")'
+    )
+    run = subprocess.run(["Rscript", "-e", script], capture_output=True, text=True, cwd=tmp_path / "code")
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.split("\n")[:2] == ["x integer", "x string"]
+
+
+@pytest.mark.parametrize("obj", ["table(c('06510', '06511', '06510'))", "matrix(1:4, ncol = 2)", "c(a = 1, b = 2)"])
+def test_r_scaffold_schema_refuses_an_rds_that_is_not_a_table(tmp_path: Path, obj: str) -> None:
+    """An .rds holding a table(), matrix or named vector is not a data frame:
+    its element names are values (zip codes, IDs) and a matrix has one cell
+    per "column". The generator refuses it, so validate warns and leaves the
+    file out of the committed schema.
+
+    Mutation: drop the data-frame check -> red. Needs R; the text guard
+    covers CI.
+    """
+    if not _r_ready():
+        pytest.skip("Rscript with R6, readr and jsonlite is not installed")
+    render_scaffold(project_type="data", name="demo", language="r", target_dir=tmp_path)
+    data = tmp_path / "obj.rds"
+    script = (
+        f'source({json.dumps((tmp_path / "code" / "_mintd_utils.R").as_posix())}); '
+        f'saveRDS({obj}, {json.dumps(data.as_posix())}); '
+        f'generate_data_schema({json.dumps(data.as_posix())})'
+    )
+    run = subprocess.run(["Rscript", "-e", script], capture_output=True, text=True, cwd=tmp_path / "code")
+    assert run.returncode != 0
+    assert "does not hold a data frame" in run.stderr
+
+
+@pytest.mark.parametrize("project_type", ["data", "project", "code", "enclave"])
+def test_metadata_names_a_schema_only_for_a_data_scaffold(tmp_path: Path, project_type: str) -> None:
+    """A data scaffold's metadata.json names where its column schema is
+    committed; other project types have no schema and get no key, not `null`.
+
+    Mutations: drop the key, write it for every project type, or drop
+    `exclude_if` -> red.
+    """
+    render_scaffold(project_type=project_type, name="demo", language="python", target_dir=tmp_path)  # type: ignore[arg-type]
+    doc = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    if project_type == "data":
+        assert doc["schema"] == {"location": "schemas/v1/schema.json"}
+    else:
+        assert "schema" not in doc
 
 
 @pytest.mark.parametrize("language", ["python", "r", "stata"])
@@ -298,10 +401,17 @@ def _run_validate(root: Path, language: str) -> list[subprocess.CompletedProcess
     return [subprocess.run(c, cwd=code, capture_output=True, text=True) for c in cmds]
 
 
-def _schema_columns(root: Path) -> list[list[str]]:
-    doc = json.loads((root / "schemas" / "v1" / "schema.json").read_text(encoding="utf-8"))
-    # Python and R write `variables`; `mintd data schema generate` writes Frictionless `schema.fields`.
-    return [[c["name"] for c in f.get("variables") or f["schema"]["fields"]] for f in doc["files"]]
+def _committed_columns(raw: bytes) -> list[list[str]]:
+    """The column names as the registry's reader sees them, after checking the
+    committed file holds no values, counts, paths or timestamps."""
+    doc = json.loads(raw)
+    assert set(doc) <= {"generator", "schema_standard", "files"}, sorted(doc)
+    for f in doc["files"]:
+        assert set(f) <= {"filename", "path", "columns", "schema"}, sorted(f)
+        assert set(f["schema"]) <= {"$schema", "fields", "missingValues"}, sorted(f["schema"])
+        for c in f["schema"]["fields"]:
+            assert set(c) <= {"name", "type", "title", "description", "categories"}, sorted(c)
+    return [[c["name"] for c in t["fields"]] for t in parse_published_schema(raw)]
 
 
 @pytest.mark.parametrize("language", ["python", "r", "stata"])
@@ -314,8 +424,9 @@ def test_validate_step_schema_describes_the_checked_data(tmp_path: Path, languag
     guard below covers them there.
 
     Mutations: report back into `FINAL_DIR`, delete the copy, copy through
-    `df.to_csv` instead of the bytes, report into `logs/`, or drop the report
-    -> red.
+    `df.to_csv` instead of the bytes, report into `logs/`, drop the report, or
+    put back the `variables` shape, a row count, a statistic, a path or a
+    timestamp in the schema -> red.
     """
     root = _scaffold(tmp_path, language)
     intermediate = root / "data" / "intermediate"
@@ -336,7 +447,7 @@ def test_validate_step_schema_describes_the_checked_data(tmp_path: Path, languag
     final = root / "data" / "final"
     assert sorted(p.name for p in final.iterdir()) == [seed.name]
     assert (final / seed.name).read_bytes() == seed.read_bytes()
-    assert _schema_columns(root) == [["zip", "amount"]]
+    assert _committed_columns((root / "schemas" / "v1" / "schema.json").read_bytes()) == [["zip", "amount"]]
     assert (root / "data" / f"validation_report.{'txt' if language == 'stata' else 'json'}").is_file()
     subprocess.run(["git", "init", "-q", str(root)], check=True)
     status = subprocess.run(
@@ -345,6 +456,53 @@ def test_validate_step_schema_describes_the_checked_data(tmp_path: Path, languag
     ).stdout
     assert status == "", f"the run left files git would commit: {status}"
 
+
+def test_fresh_data_scaffold_commits_its_schema_where_the_catalog_entry_points(
+    tmp_path: Path, real_dvc  # noqa: F811
+) -> None:
+    """After `dvc repro`, a fresh data scaffold's column schema is a file git
+    keeps (not ignored, not in DVC's cache), its catalog entry names where it
+    is, and the file at that path in the commit lists the data's columns. A
+    forced rerun on unchanged data leaves it unchanged.
+
+    Mutations: drop `cache: false`, drop the scaffold's `schema` key or
+    `serialize_by_alias`, exclude `schema` from the catalog, write the old
+    `variables` shape, put back a row count or statistic, or put back the
+    `generated_at` timestamp -> red.
+    """
+    root = _scaffold(tmp_path, "python")
+    # The scaffold's `python` may lack pandas, and CI's Windows job does not
+    # activate the venv: run the stages with this interpreter.
+    dvc_vars = root / "dvc_vars.yaml"
+    dvc_vars.write_text(
+        dvc_vars.read_text(encoding="utf-8").replace("python_cmd: python", f"python_cmd: '\"{sys.executable}\"'"),
+        encoding="utf-8",
+    )
+    _git(["init", "-q", "-b", "main"], cwd=root)
+    real_dvc(["init", "-q"], cwd=root, check=True)
+    (root / "data" / "raw" / "claims.csv").write_bytes(_SEED_CSV)
+
+    run = real_dvc(["repro", "-q"], cwd=root)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+    schema = "schemas/v1/schema.json"
+    assert not is_ignored(root, schema)
+    lock = yaml.safe_load((root / "dvc.lock").read_text(encoding="utf-8"))
+    [md5] = [o["md5"] for o in lock["stages"]["validate"]["outs"] if o["path"] == f"../{schema}"]
+    assert not (root / ".dvc" / "cache" / "files" / "md5" / md5[:2] / md5[2:]).exists()
+
+    _git(["add", "-A"], cwd=root)
+    _git(["commit", "-q", "--no-verify", "-m", "first"], cwd=root)
+    sha = _git(["rev-parse", "HEAD"], cwd=root).strip()
+    location = Metadata.from_json_file(root / "metadata.json").to_catalog_entry().model_dump()["schema"]["location"]
+    assert location == schema
+    raw = GitArchiveFetcher().fetch_path_at(str(root), sha, location)
+    assert _committed_columns(raw) == [["zip", "amount"]]
+
+    rerun = real_dvc(["repro", "-f", "-q"], cwd=root)
+    assert rerun.returncode == 0, rerun.stdout + rerun.stderr
+    assert _git(["status", "--porcelain", "--", "schemas"], cwd=root) == ""
+    assert not is_ignored(root, schema)
 
 @pytest.mark.parametrize("language", ["python", "r"])
 def test_validate_step_without_data_writes_no_schema(tmp_path: Path, language: str) -> None:
@@ -400,7 +558,8 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
 
     Mutations: delete the copy, drop R's checked copy or its `copy.mode =
     FALSE`, put the report back in `FINAL_DIR`, drop `$new`, restore the
-    one-argument `log()`, or restore the `"*."` glob -> red.
+    one-argument `log()`, restore the `"*."` glob, or put back a row count,
+    path, timestamp or the `variables` list in the schema -> red.
     """
     render_scaffold(project_type="data", name="demo", language=language, target_dir=tmp_path)
     code = tmp_path / "code"
@@ -425,6 +584,15 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
         assert "paste0(...)" in utils
         assert 'pattern <- paste0("\\\\.", ext, "$")' in utils
         assert 'paste0("*.", ext)' not in utils
+        # The committed schema records names and types only, under the data's
+        # own column names, in a locale-independent file order.
+        assert "fields <- c(fields, list(list(name = col_name, type = var_type)))" in utils
+        assert "col_data <- df[[i]]" in utils  # by position: names can repeat or be blank
+        assert 'stop(basename(data_path), " does not hold a data frame")' in utils
+        assert "schema = list(fields = fields)" in utils
+        assert "read.csv(data_path, stringsAsFactors = FALSE, check.names = FALSE)" in utils
+        assert 'return(sort(files, method = "radix"))' in utils
+        assert not re.search(r"\b(observations|missing_count|unique_values|filepath|generated_at|variables)\b", utils + text)
 
 
 @pytest.mark.parametrize("language", ["python", "r", "stata"])

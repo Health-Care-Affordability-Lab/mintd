@@ -14,7 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .catalog import CatalogEntry
 
@@ -138,13 +138,31 @@ class Status(BaseModel):
     last_published_version: Annotated[str, Owner.PIPELINE]
 
 
+class SchemaRef(BaseModel):
+    """Where a data product's column schema is committed, relative to the repo
+    root. Other keys the catalog site reads (`standard`, `version`) pass through."""
+
+    model_config = ConfigDict(extra="allow")
+
+    location: Annotated[str, Owner.MINTD]
+
+    @field_validator("location")
+    @classmethod
+    def _a_path_inside_the_repo(cls, v: str) -> str:
+        # Catalog builders hand this to git, so it must be a path inside the
+        # repo and never read as an option (`--output=...`).
+        if not v or v.startswith(("-", "/")) or "\\" in v or "\x00" in v or ".." in v.split("/"):
+            raise ValueError("must be a path inside the repo, such as schemas/v1/schema.json")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Metadata (top-level)
 # ---------------------------------------------------------------------------
 
 
 class Metadata(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", serialize_by_alias=True)
 
     schema_version: Annotated[Literal["2.0"], Owner.MINTD]
     mint: Annotated[Mint, Owner.MINTD]
@@ -157,6 +175,13 @@ class Metadata(BaseModel):
     data_products: Annotated[DataProducts, Owner.PIPELINE] = Field(default_factory=DataProducts)
     repository: Annotated[Repository, Owner.MINTD]
     status: Annotated[Status, Owner.PIPELINE]
+    # BaseModel owns the name `schema`, hence the alias. serialize_by_alias
+    # because publish and to_catalog_entry() dump without by_alias; exclude_if
+    # so a product without a schema dumps exactly as before, with no
+    # `"schema": null`.
+    schema_: Annotated[SchemaRef | None, Owner.MINTD] = Field(
+        default=None, alias="schema", exclude_if=lambda v: v is None
+    )
 
     @classmethod
     def from_json_file(cls, path: Path) -> "Metadata":

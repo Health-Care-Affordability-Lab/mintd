@@ -151,7 +151,9 @@ def main():
         FINAL_DIR, extensions=[".csv", ".json", ".xlsx", ".xls"]
     )
     if final_files:
-        combined_schema = {"generated_at": datetime.now().isoformat(), "files": []}
+        # No timestamp: git keeps this file, and a rerun on unchanged data must
+        # leave it unchanged.
+        combined_schema = {"files": []}
         for data_file in final_files:
             try:
                 file_schema = generate_data_schema(data_file)

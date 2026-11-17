@@ -259,6 +259,9 @@ def _render_metadata_json(context: dict[str, object]) -> str:
             "last_published_version": "",
         },
     }
+    if project_type == "data":
+        # The column schema the pipeline in dvc.yaml writes, uncached, so git keeps it.
+        data["schema"] = {"location": "schemas/v1/schema.json"}
     return (
         Metadata.model_validate(data).model_dump_json(
             by_alias=True, exclude_none=False, indent=2

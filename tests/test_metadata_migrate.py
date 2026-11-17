@@ -31,6 +31,9 @@ def test_migrate_real_world_v1_sample() -> None:
     v2, _report = migrate_v1_to_v2(v1)
     metadata = Metadata.model_validate(v2)
     assert metadata.schema_version == "2.0"
+    # The v1 `schema` block is dropped, not carried into the v2 key: the file
+    # it names may be a DVC-cached output git does not hold.
+    assert "schema" in v1 and metadata.schema_ is None
     assert metadata.project.name == v1["project"]["name"]
     assert metadata.metadata.description == v1["project"]["description"]
 
@@ -275,7 +278,12 @@ def test_migrated_matches_init_output(tmp_path: Path) -> None:
     apply_metadata_migration(tmp_path)
     migrated_output = (tmp_path / "metadata.json").read_text(encoding="utf-8")
 
-    assert migrated_output == init_output
+    # init names the data scaffold's committed schema; migration never does
+    # (see _DROP_TOPLEVEL), so compare against init's output without it.
+    init = Metadata.model_validate_json(init_output)
+    assert init.schema_ is not None and init.schema_.location == "schemas/v1/schema.json"
+    init.schema_ = None
+    assert migrated_output == init.model_dump_json(by_alias=True, exclude_none=False, indent=2) + "\n"
 
 
 def test_apply_validation_failure_surfaces_field_path(tmp_path: Path) -> None:
