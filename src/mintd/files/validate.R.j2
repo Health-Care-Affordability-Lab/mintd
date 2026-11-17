@@ -73,7 +73,7 @@ validate_dataset <- function(df, dataset_name, logger) {
 
 main <- function() {
   # Initialize logging (validates directory and creates log file)
-  logger <- ParameterAwareLogger("validate")
+  logger <- ParameterAwareLogger$new("validate")
   logger$log("Starting data validation for {{ project_name }}...")
 
   # Ensure data directories exist (using global paths from _mintd_utils.R)

@@ -51,7 +51,7 @@ parse_and_clean <- function(df, logger) {
 }
 
 main <- function() {
-  logger <- ParameterAwareLogger("ingest")
+  logger <- ParameterAwareLogger$new("ingest")
   logger$log("Starting data ingestion for {{ project_name }}...")
 
   # Ensure pipeline directories exist (raw is read-only here; do NOT write it).

@@ -29,7 +29,7 @@ fetch_raw_data <- function(logger) {
 }
 
 main <- function() {
-  logger <- ParameterAwareLogger("fetch")
+  logger <- ParameterAwareLogger$new("fetch")
   logger$log("Starting data fetch for {{ project_name }}...")
   if (!dir.exists(RAW_DIR)) dir.create(RAW_DIR, recursive = TRUE)
   fetch_raw_data(logger)

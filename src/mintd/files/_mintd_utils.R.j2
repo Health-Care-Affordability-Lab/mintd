@@ -168,9 +168,10 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
     },
 
     #' Log a message
-    #' @param message Message to log
+    #' @param ... Message parts, pasted together
     #' @param level Log level (info, warning, error)
-    log = function(message, level = "info") {
+    log = function(..., level = "info") {
+      message <- paste0(...)
       timestamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
       log_line <- paste0("[", timestamp, "] ", toupper(level), ": ", message, "\n")
 
@@ -303,7 +304,7 @@ find_data_files <- function(directory, extensions = NULL) {
 
   files <- character(0)
   for (ext in extensions) {
-    pattern <- paste0("*.", ext)
+    pattern <- paste0("\\.", ext, "$")
     found <- list.files(directory, pattern = pattern, recursive = TRUE, full.names = TRUE)
     files <- c(files, found)
   }
