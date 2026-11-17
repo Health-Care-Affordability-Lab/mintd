@@ -90,7 +90,18 @@ program define main
     local total_files = 0
 
     if `file_count' == 0 {
-        log_message "No .dta files found in INTERMEDIATE_DIR. Run: dvc repro ingest"
+        * Stop, so dvc repro fails here and says what to do, instead of
+        * writing a report that says PASSED for zero files. run_stata.sh
+        * prints ../logs/.msg_validate, since batch Stata's output goes to its log.
+        local no_data "no .dta files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro"
+        log_message "`no_data'"
+        capture mkdir "../logs"
+        tempname msg_handle
+        file open `msg_handle' using "../logs/.msg_validate", write text replace
+        file write `msg_handle' "`no_data'" _n
+        file close `msg_handle'
+        display as error "`no_data'"
+        exit 459
     }
     else {
         log_message "Found `file_count' .dta files to validate"

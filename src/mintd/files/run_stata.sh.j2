@@ -23,8 +23,10 @@ shift
 cd "$(dirname "$0")" || exit 1
 
 rc_file="../logs/.rc_${stage}"
+# A stage can leave one line saying why it stopped; it is printed on failure.
+msg_file="../logs/.msg_${stage}"
 mkdir -p ../logs
-rm -f "${rc_file}"
+rm -f "${rc_file}" "${msg_file}"
 
 "$@" -b do _mintd_run.do "${stage}"
 stata_status=$?
@@ -47,6 +49,9 @@ case "${rc}" in
     *)
         # Never exit with ${rc} itself: exit statuses are mod 256, so e.g.
         # rc 256 would wrap around to 0 and report success.
+        if [ -f "${msg_file}" ]; then
+            cat "${msg_file}" >&2
+        fi
         echo "ERROR: ${stage}.do failed with Stata return code r(${rc})." >&2
         exit 1
         ;;

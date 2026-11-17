@@ -319,8 +319,8 @@ def test_metadata_names_a_schema_only_for_a_data_scaffold(tmp_path: Path, projec
 def test_validate_stubs_no_stale_clean_reference(
     tmp_path: Path, language: str
 ) -> None:
-    """Rendered validate scripts must point users at `dvc repro ingest`, not the
-    demoted clean stage."""
+    """Rendered validate scripts' no-data stop points users at `data/raw/` and
+    `dvc repro`, not the demoted clean stage."""
     render_scaffold(
         project_type="data", name="foo", language=language, target_dir=tmp_path
     )
@@ -331,8 +331,8 @@ def test_validate_stubs_no_stale_clean_reference(
     assert "Run clean." not in validate_script, (
         f"validate.{ext} must not reference the demoted clean stage"
     )
-    assert "dvc repro ingest" in validate_script, (
-        f"validate.{ext} empty-dir message must point to `dvc repro ingest`"
+    assert _NO_DATA[language] in validate_script, (
+        f"validate.{ext} no-data message must name the format and say to put files in data/raw/ and run dvc repro"
     )
 
 
@@ -504,23 +504,38 @@ def test_fresh_data_scaffold_commits_its_schema_where_the_catalog_entry_points(
     assert _git(["status", "--porcelain", "--", "schemas"], cwd=root) == ""
     assert not is_ignored(root, schema)
 
-@pytest.mark.parametrize("language", ["python", "r"])
-def test_validate_step_without_data_writes_no_schema(tmp_path: Path, language: str) -> None:
-    """With nothing in `data/intermediate/`, validate writes no schema (so
-    `dvc repro` stops on the missing out) and its log says why, rather than
-    writing a schema that describes the report.
+# The no-data stop names the format each validate step reads.
+_NO_DATA = {
+    "python": "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro",
+    "r": "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro",
+    "stata": "no .dta files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro",
+}
 
-    Mutations: report back into `FINAL_DIR`, or reword the log line -> red.
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_validate_step_without_data_stops_and_names_the_next_step(tmp_path: Path, language: str) -> None:
+    """With nothing in `data/intermediate/`, validate stops non-zero, and the
+    one line `dvc repro` shows says what to do next. It writes no schema and
+    no report (so nothing says PASSED for zero files), and leaves nothing git
+    would commit.
+
+    Mutations: remove the stop in any language, or Stata's message relay in
+    run_stata.sh, or the `logs/.msg_*` ignore line -> red.
     """
     root = _scaffold(tmp_path, language)
 
-    runs = _run_validate(root, language)
+    validate = _run_validate(root, language)[0]
 
-    for r in runs:
-        assert r.returncode == 0, f"{r.args}: {r.stdout}\n{r.stderr}"
+    assert validate.returncode != 0, f"{validate.stdout}\n{validate.stderr}"
+    assert _NO_DATA[language] in validate.stderr, validate.stderr
     assert not (root / "schemas" / "v1" / "schema.json").exists()
-    log = next((root / "logs").glob("validate_*.log")).read_text(encoding="utf-8")
-    assert "No data files found in FINAL_DIR" in log
+    assert not list((root / "data").glob("validation_report.*"))
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--", "data", "logs"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert status == "", f"the run left files git would commit: {status}"
 
 
 @pytest.mark.parametrize("language", ["python", "r"])
@@ -558,8 +573,10 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
 
     Mutations: delete the copy, drop R's checked copy or its `copy.mode =
     FALSE`, put the report back in `FINAL_DIR`, drop `$new`, restore the
-    one-argument `log()`, restore the `"*."` glob, or put back a row count,
-    path, timestamp or the `variables` list in the schema -> red.
+    one-argument `log()`, restore the `"*."` glob, put back a row count,
+    path, timestamp or the `variables` list in the schema, or remove the
+    empty-data stop, Stata's message file or the wrapper's relay of it, or
+    the `logs/.msg_*` ignore line -> red.
     """
     render_scaffold(project_type="data", name="demo", language=language, target_dir=tmp_path)
     code = tmp_path / "code"
@@ -575,6 +592,19 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
     assert not [ln for ln in lines if "FINAL_DIR" in ln and "validation_report" in ln]
     assert [ln for ln in lines if report in ln], f"no line names {report}"
     assert all("DATA_DIR" in ln for ln in lines if report in ln)
+
+    # With no data, validate stops with the one message that names the next step.
+    assert _NO_DATA[language] in text
+    if language == "r":
+        assert "stop(no_data, call. = FALSE)" in text
+    else:
+        assert 'file open `msg_handle\' using "../logs/.msg_validate"' in text
+        assert re.search(r"display as error \"`no_data'\"\n\s*exit 459\n", text)
+        wrapper = (code / "run_stata.sh").read_text(encoding="utf-8")
+        assert 'msg_file="../logs/.msg_${stage}"' in wrapper
+        assert 'cat "${msg_file}" >&2' in wrapper
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        assert is_ignored(tmp_path, "logs/.msg_validate")
 
     if language == "r":
         stale = [p.name for p in code.glob("*.R") if re.search(r"\bParameterAwareLogger\(", p.read_text(encoding="utf-8"))]

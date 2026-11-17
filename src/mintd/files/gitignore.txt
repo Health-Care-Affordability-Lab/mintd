@@ -178,6 +178,7 @@ Thumbs.db
 
 # Stata batch return-code sentinels (written by run_stata.sh/_mintd_run.do)
 logs/.rc_*
+logs/.msg_*
 
 # -----------------------------------------------------------------------------
 # FILES THAT SHOULD BE COMMITTED (do NOT add to gitignore):
