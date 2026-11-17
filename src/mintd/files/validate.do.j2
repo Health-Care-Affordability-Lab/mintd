@@ -104,6 +104,8 @@ program define main
             }
             local total_rows = `total_rows' + r(rows)
             local ++total_files
+            * The checked file ships unchanged as the product's data
+            copy "$INTERMEDIATE_DIR/`file'" "$FINAL_DIR/`file'", replace
         }
 
         * Summary
@@ -117,7 +119,7 @@ program define main
 
     * Create validation report (simple text format for Stata)
     tempname report_handle
-    file open `report_handle' using "$FINAL_DIR/validation_report.txt", write replace
+    file open `report_handle' using "$DATA_DIR/validation_report.txt", write replace
 
     if `all_valid' {
         file write `report_handle' "Status: PASSED" _n
@@ -130,7 +132,7 @@ program define main
     file write `report_handle' "Total rows: `total_rows'" _n
 
     file close `report_handle'
-    log_message "Validation report saved to: $FINAL_DIR/validation_report.txt"
+    log_message "Validation report saved to: $DATA_DIR/validation_report.txt"
 
     log_message "Data validation completed successfully."
     close_logger

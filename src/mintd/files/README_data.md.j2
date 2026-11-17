@@ -79,13 +79,13 @@ The pipeline is a DVC DAG defined in `dvc.yaml`:
 
 {% if language == "python" %}
 1. **Ingest**: `code/ingest.py` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
-2. **Validate**: `code/validate.py` - runs quality checks on `data/intermediate/`, writes `data/final/` and the schema
+2. **Validate**: `code/validate.py` - runs quality checks on `data/intermediate/`, copies the checked files unchanged to `data/final/`, writes its report to `data/validation_report.json`, and derives `schemas/v1/schema.json` from `data/final/`
 {% elif language == "r" %}
 1. **Ingest**: `code/ingest.R` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
-2. **Validate**: `code/validate.R` - runs quality checks on `data/intermediate/`, writes `data/final/` and the schema
+2. **Validate**: `code/validate.R` - runs quality checks on `data/intermediate/`, copies the checked files unchanged to `data/final/`, writes its report to `data/validation_report.json`, and derives `schemas/v1/schema.json` from `data/final/`
 {% elif language == "stata" %}
 1. **Ingest**: `code/ingest.do` - reads immutable `data/raw/`, parses and normalizes it, writes `data/intermediate/`
-2. **Validate**: `code/validate.do` - runs quality checks on `data/intermediate/`, writes `data/final/`
+2. **Validate**: `code/validate.do` - runs quality checks on `data/intermediate/`, copies the checked files unchanged to `data/final/`, and writes its report to `data/validation_report.txt`
 3. **Schema**: `mintd data schema generate` - derives `schemas/v1/schema.json` from `data/final/` (runs as the `schema` stage)
 {% endif %}
 
