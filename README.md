@@ -111,7 +111,7 @@ Point `mintd` at your lab's registry and your S3 storage:
 ```bash
 mintd config setup            # interactive walkthrough
 mintd config show             # see what got written
-mintd config validate         # schema + AWS profile + S3 head_bucket check
+mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 head_bucket check
 ```
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
@@ -183,7 +183,10 @@ mintd registry register
 
 # Cut a versioned release. Tags, pushes, and updates the catalog
 # entry. Shows a preview and asks before doing anything destructive.
-mintd publish 0.1.0
+# With no version it bumps the patch. A new product starts at the release
+# number of the mintd that scaffolded it, so its first release is the next
+# patch after that; an explicit version lower than the current one is refused.
+mintd publish
 ```
 
 ## Example: consume someone else's dataset
