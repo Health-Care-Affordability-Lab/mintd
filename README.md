@@ -155,7 +155,7 @@ dvc repro
 # lists elsewhere goes to `mintd data add` or .gitignore before you commit.
 # The exception is schemas/v1/schema.json: it lists column names and types,
 # not data, and git keeps it so the lab catalog can show them. Commit it once
-# you have checked it holds only names (a file without a header row puts its first row there).
+# you have checked its column names are real ones, not a first row of data.
 # First time only: create the GitHub repository named in metadata.json
 # (repository.github_url), `git remote add origin <that url>`, and push
 # with `git push -u origin main`.

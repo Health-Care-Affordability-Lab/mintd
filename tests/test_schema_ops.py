@@ -15,8 +15,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from mintd import cli
 from mintd.schema_ops import (
     SUPPORTED_EXTENSIONS,
+    ColumnNamesLookLikeData,
     SchemaExtraNotInstalled,
     extract_stata_metadata,
     find_project_root,
@@ -104,22 +106,63 @@ def test_generate_schema_file_lists_files_in_the_same_order_on_every_os(tmp_path
     assert [f["filename"] for f in json.loads(out.read_text())["files"]] == ["B.csv", "a.csv"]
 
 
-@pytest.mark.parametrize(("name", "content"), [
-    ("claims.csv", "06510,12.5\n06511,3.0\n"),  # a CSV without its header row
-    ("people.json", '{"10001": {"age": 3}, "10002": {"age": 5}}'),  # an object keyed by IDs
+@pytest.mark.parametrize(("name", "content", "rule"), [
+    ("claims.csv", "06510,12.5\n06511,3.0\n", "have numeric names"),  # a CSV without its header row
+    ("people.json", '{"10001": {"age": 3}, "10002": {"age": 5}}', "have numeric names"),  # keyed by IDs
+    ("flags.csv", "M,CT\nM,NY\n", "match their own first-row value"),
+    ("ingested.csv", "new_york,ct\nNew York,NY\n", "match their own first-row value"),  # headers renamed by ingest
 ])
-def test_generate_schema_file_refuses_column_names_that_look_like_data(tmp_path: Path, name: str, content: str) -> None:
+def test_generate_schema_file_refuses_column_names_that_look_like_data(
+    tmp_path: Path, name: str, content: str, rule: str
+) -> None:
     """The output is committed: names with a digit and no letter, or equal to
-    a first-row value, are refused and nothing is written. Mutation: drop the
-    check -> red."""
+    their own column's first value, are refused and nothing is written.
+    Mutation: drop the check, or either half of it -> red."""
     data_dir = tmp_path / "final"
     data_dir.mkdir()
     (data_dir / name).write_text(content, encoding="utf-8")
     out = tmp_path / "schema.json"
 
-    with pytest.raises(ValueError, match="add a header row"):
+    with pytest.raises(ColumnNamesLookLikeData, match=rule):
         generate_schema_file(data_dir, out)
     assert not out.exists()
+
+
+@pytest.mark.parametrize("content", [
+    "origin,CT,NY\nCT,0,5\n", "payer,medicare,medicaid\nmedicare,1,0\n",
+    "category,total\ntotal,100\n", "N,mean,flag\n10,1.5,N\n",
+])
+def test_generate_schema_file_accepts_a_name_equal_to_another_columns_first_value(
+    tmp_path: Path, content: str
+) -> None:
+    """Each name is compared with its own column's first value only.
+    Mutation: compare with any first-row value -> red."""
+    data_dir = tmp_path / "final"
+    data_dir.mkdir()
+    (data_dir / "x.csv").write_text(content, encoding="utf-8")
+    out = tmp_path / "schema.json"
+
+    generate_schema_file(data_dir, out)
+
+    fields = json.loads(out.read_text())["files"][0]["schema"]["fields"]
+    assert [f["name"] for f in fields] == content.split("\n")[0].split(",")
+
+
+def test_schema_generate_cli_refuses_numeric_names_unless_allowed(tmp_path: Path, capsys) -> None:
+    """The refusal names its own fix, with no generic format hint after it;
+    `--allow-numeric-column-names` (committed in dvc.yaml's cmd) lets real
+    numeric names through. Mutations: drop the flag's wiring, or let the
+    generic ValueError handler catch the refusal -> red."""
+    (tmp_path / "final").mkdir()
+    (tmp_path / "final" / "x.csv").write_text("fips,2019,2020\n09001,1,2\n", encoding="utf-8")
+    argv = ["data", "schema", "generate", "--project-dir", str(tmp_path), "--data-dir", str(tmp_path / "final")]
+
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "columns 2, 3 have numeric names" in err and "--allow-numeric-column-names" in err, err
+    assert "hint" not in err
+    assert cli.main([*argv, "--allow-numeric-column-names"]) == 0
+    assert (tmp_path / "schemas" / "v1" / "schema.json").is_file()
 
 
 # ---------------- combined output across formats ----------------

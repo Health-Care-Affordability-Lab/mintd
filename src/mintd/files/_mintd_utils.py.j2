@@ -207,28 +207,54 @@ class ParameterAwareLogger:
             self.logger.removeHandler(handler)
 
 
-def refuse_data_as_column_names(data_path: Path, df) -> None:
-    """Stop if a column name has a digit and no letter (01234, 2024-01-02) or
-    equals a first-row value: the file was read without its header row, and
-    the committed, published schema would carry its first row."""
-    first_row = {str(v).strip() for v in df.iloc[0].dropna()} if len(df) else set()
-    bad = [
-        str(i)
-        for i, col in enumerate(map(str, df.columns), start=1)
-        if col.strip() in first_row
-        or (any(c.isdigit() for c in col) and not any(c.isalpha() for c in col))
+def _as_header(value) -> str:
+    """A value as ingest names a column: lowercase, `_` for spaces and `-`."""
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def refuse_data_as_column_names(data_path: Path, df, allow_numeric: bool) -> None:
+    """Stop if a column name has a digit and no letter (01234, 2024-01-02),
+    unless allow_numeric, or equals its own column's first value as a header:
+    the file was read without its header row, and the committed, published
+    schema would carry its first row. The message gives positions, never names."""
+    names = [str(c).strip() for c in df.columns]
+    numeric = [
+        i
+        for i, n in enumerate(names, 1)
+        if any(map(str.isdigit, n)) and not any(map(str.isalpha, n))
     ]
-    if bad:
+    repeated = []
+    if len(df):  # each name against its own column's first value only
+        row = df.iloc[0]
+        repeated = [
+            i
+            for i, (n, v, ok) in enumerate(zip(names, row, row.notna()), 1)
+            if ok and _as_header(n) == _as_header(v)
+        ]
+    problems = []
+    if numeric and not allow_numeric:
+        problems.append(
+            f"columns {', '.join(map(str, numeric))} have numeric names, as a file "
+            "without a header row would: add a header row, rename them (2019 to "
+            "y2019), or set ALLOW_NUMERIC_COLUMN_NAMES = True in validate.py if "
+            "they are real names"
+        )
+    if repeated:
+        problems.append(
+            f"columns {', '.join(map(str, repeated))} match their own first-row "
+            "value, as a file without a header row would: add a header row or "
+            "rename them"
+        )
+    if problems:
         # SystemExit, not an exception: validate skips a file it can't read
         # with a warning, but this one must stop the run.
-        sys.exit(
-            f"{data_path.name}: column names look like data (columns {', '.join(bad)}): "
-            "add a header row or rename them, then rerun"
-        )
+        sys.exit("\n".join(f"{data_path.name}: {p}" for p in problems))
 
 
 def generate_data_schema(
-    data_path: Path, output_path: Optional[Path] = None
+    data_path: Path,
+    output_path: Optional[Path] = None,
+    allow_numeric_column_names: bool = False,
 ) -> Dict[str, Any]:
     """Describe a data file's columns for its schema.
 
@@ -255,7 +281,7 @@ def generate_data_schema(
             df = pd.read_excel(data_path)
         else:
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
-        refuse_data_as_column_names(data_path, df)
+        refuse_data_as_column_names(data_path, df, allow_numeric_column_names)
 
         fields = []
         for col in df.columns:

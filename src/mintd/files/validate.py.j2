@@ -22,6 +22,11 @@ from _mintd_utils import (
     find_data_files,
 )
 
+# The schema step refuses column names with a digit and no letter, since a file
+# without a header row has its first row there. Set True if yours are real
+# names (2019, 09001); the choice is committed with this file.
+ALLOW_NUMERIC_COLUMN_NAMES = False
+
 
 def validate_dataset(df, dataset_name, logger):
     """Run validation checks on a dataset.
@@ -100,13 +105,15 @@ def main():
     # The report describes this run, not the product, so it stays out of
     # FINAL_DIR (the product's data) and its schema.
     report_file = DATA_DIR / "validation_report.json"
+    # A run that stops (no data, a refused schema) must leave no report, not
+    # an earlier run's: this run writes its own last.
+    report_file.unlink(missing_ok=True)
 
     if not intermediate_files:
         # Stop, so `dvc repro` fails here and says what to do, instead of
-        # writing a report and schema that describe nothing, or keeping an old report.
+        # writing a report and schema that describe nothing.
         no_data = "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro"
         logger.log(no_data)
-        report_file.unlink(missing_ok=True)
         sys.exit(no_data)
     else:
         logger.log(f"Found {len(intermediate_files)} CSV files to validate")
@@ -140,10 +147,6 @@ def main():
             "datasets": all_results,
         }
 
-    with open(report_file, "w") as f:
-        json.dump(validation_report, f, indent=2)
-    logger.log(f"Validation report saved to: {report_file}")
-
     # Generate schema from final data files
     logger.log("Generating data schema...")
     schema_dir = Path("../schemas/v1")
@@ -159,7 +162,9 @@ def main():
         combined_schema = {"files": []}
         for data_file in final_files:
             try:
-                file_schema = generate_data_schema(data_file)
+                file_schema = generate_data_schema(
+                    data_file, allow_numeric_column_names=ALLOW_NUMERIC_COLUMN_NAMES
+                )
                 combined_schema["files"].append(file_schema)
                 logger.log(f"  Generated schema for: {data_file.name}")
             except Exception as e:
@@ -172,6 +177,10 @@ def main():
         logger.log(f"Schema saved to: {schema_file}")
     else:
         logger.log("No data files found in FINAL_DIR for schema generation")
+
+    with open(report_file, "w") as f:
+        json.dump(validation_report, f, indent=2)
+    logger.log(f"Validation report saved to: {report_file}")
 
     logger.log("Data validation completed successfully.")
     logger.close()
