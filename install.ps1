@@ -32,7 +32,8 @@ if ($WithSchema) {
 }
 
 Write-Host "Installing mintd..."
-uv tool install --force --reinstall --refresh $InstallSpec
+# Pin Python to the newest version CI tests (see install.sh).
+uv tool install --force --reinstall --refresh --python 3.13 $InstallSpec
 if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
 
 # Locate the tool's Python interpreter
