@@ -8,6 +8,6 @@ outs:
 deps:
   - path: outputs/cms_based/
     repo:
-      url: https://github.com/example-org/provider-xw
+      url: https://github.com/example-org/demo-xw
       rev: main
       rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc

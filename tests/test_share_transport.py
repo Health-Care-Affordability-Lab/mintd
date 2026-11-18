@@ -47,7 +47,7 @@ class _UploadWrapsClientError:
         self.fail_times = fail_times
         self.calls = 0
 
-    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):  # noqa: N803
+    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):
         self.calls += 1
         if self.calls > self.fail_times:
             if Callback is not None:
@@ -69,7 +69,7 @@ class _SpyUploadClient:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):  # noqa: N803
+    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):
         self.calls.append(
             {"filename": filename, "bucket": bucket, "key": key, "extra_args": ExtraArgs}
         )
@@ -317,13 +317,13 @@ class _WriteThenRaiseClient:
     def __init__(self, exc: BaseException) -> None:
         self.exc = exc
 
-    def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+    def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
         Path(Filename).write_bytes(b"partial-bytes")
         raise self.exc
 
 
 class _GoodClient:
-    def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+    def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
         Path(Filename).write_bytes(b"good-bytes")
 
 
@@ -385,7 +385,7 @@ def test_download_default_tmp_name_is_collision_proof(tmp_path: Path) -> None:
     seen: list[str] = []
 
     class _C:
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             seen.append(Path(Filename).name)
             Path(Filename).write_bytes(b"x")
 
@@ -404,7 +404,7 @@ def test_download_sends_checksum_mode_enabled(tmp_path: Path) -> None:
     captured: dict = {}
 
     class _C:
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             captured["extra"] = ExtraArgs
             Path(Filename).write_bytes(b"x")
 
@@ -694,7 +694,7 @@ def test_download_does_not_follow_symlink_at_tmp_path(tmp_path: Path) -> None:
     tmp.symlink_to(victim)  # attacker plants a symlink at the tmp path
 
     class _C:
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             Path(Filename).write_bytes(b"downloaded")
 
     download_object(_C(), "b", "k", dest, progress=lambda _n: None, tmp_suffix=".tmp")
