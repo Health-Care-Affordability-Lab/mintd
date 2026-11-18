@@ -12,7 +12,7 @@ import pytest
 
 from mintd._producer_git_ops import FetchError, GitArchiveFetcher
 
-REPO = "https://github.com/example-org/provider_xw"
+REPO = "https://github.com/example-org/demo_xw"
 PIN = "a" * 40
 
 

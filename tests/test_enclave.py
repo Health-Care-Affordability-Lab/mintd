@@ -110,7 +110,7 @@ def test_save_reordered_transferred_raises_append_only_violation(tmp_path):
 
 def test_apply_pin_bump_returns_new_manifest_with_updated_pin():
     m = EnclaveManifest.load(FIXTURE)
-    bumped = m.apply_pin_bump(repo="provider-xw", new_pin="NEW_PIN")
+    bumped = m.apply_pin_bump(repo="demo-xw", new_pin="NEW_PIN")
     assert bumped.approved_products[0].pin == "NEW_PIN"
     assert m.approved_products[0].pin != "NEW_PIN"
 

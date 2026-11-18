@@ -115,15 +115,15 @@ def _git_repo(path: Path) -> None:
     _git(["commit", "-q", "-m", "project"], cwd=path)
 
 
-def _register_provider_xw(
+def _register_demo_xw(
     client: InMemoryCatalogClient,
     primary: str = "outputs/main.parquet",
     *,
-    github_url: str = "https://github.com/example-org/provider-xw",
+    github_url: str = "https://github.com/example-org/demo-xw",
 ) -> Metadata:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
     data["repository"]["github_url"] = github_url
     data["data_products"]["primary"] = primary
     metadata = Metadata.model_validate(data)
@@ -379,10 +379,10 @@ def test_data_import_writes_dvc_file(
     patched_clients,
 ) -> None:
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     rc = cli.main(
         [
-            "data", "import", "provider-xw",
+            "data", "import", "demo-xw",
             "--dest-root", str(tmp_path),
         ]
     )
@@ -398,9 +398,9 @@ def test_cli_data_import_threads_dvc_args(
     """`--dvc-arg` lands on every recorded `dvc_ops.import_(extra_args=...)`
     call on the non-bump path."""
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     rc = cli.main([
-        "data", "import", "provider-xw",
+        "data", "import", "demo-xw",
         "--dest-root", str(tmp_path),
         "--dvc-arg=--verbose",
     ])
@@ -417,9 +417,9 @@ def test_data_import_repeated_path_imports_each(
     Asserted on the dvc CALLS, not on `args.import_path`: a parser-only
     assertion green-lights a signature that mishandles a list."""
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     rc = cli.main([
-        "data", "import", "provider-xw",
+        "data", "import", "demo-xw",
         "--dest-root", str(tmp_path),
         "--path", "outputs/a.csv",
         "--path", "outputs/b.csv",
@@ -436,8 +436,8 @@ def test_data_import_plain_import_still_imports_the_primary(
     `_resolve_paths`, or a plain import loops zero times and exits 0 having
     written nothing."""
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
-    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    _register_demo_xw(client)
+    rc = cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
     assert rc == 0
     assert [c.path for c in dvc_ops.calls] == ["outputs/main.parquet"]
 
@@ -453,12 +453,12 @@ def test_data_import_all_with_no_outputs_exits_one(
     entry.
     """
     client, dvc_ops = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.outputs = []
     client.update(metadata)
 
     rc = cli.main([
-        "data", "import", "provider-xw", "--all", "--dest-root", str(tmp_path),
+        "data", "import", "demo-xw", "--all", "--dest-root", str(tmp_path),
     ])
 
     assert rc == 1
@@ -472,9 +472,9 @@ def test_data_import_jobs_reaches_the_dvc_argv(
 ) -> None:
     """`--jobs` rides `extra_args` as `-j <n>` (no DvcOps protocol change)."""
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     rc = cli.main([
-        "data", "import", "provider-xw",
+        "data", "import", "demo-xw",
         "--dest-root", str(tmp_path),
         "--dvc-arg=--verbose",
         "--jobs", "4",
@@ -575,7 +575,7 @@ def test_data_import_timeout_reaches_the_dvc_ops_factory(
     """`--timeout` overrides `timeouts.transfer` on the config the dvc-ops
     factory receives — the same `_timeouts_for` seam `data clone` uses."""
     _client, dvc_ops = patched_clients
-    _register_provider_xw(_client)
+    _register_demo_xw(_client)
     seen: list[Any] = []
 
     def capturing(cfg: Any, reporter: Any = None, **_: Any) -> Any:
@@ -584,7 +584,7 @@ def test_data_import_timeout_reaches_the_dvc_ops_factory(
 
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", capturing)
     rc = cli.main([
-        "data", "import", "provider-xw",
+        "data", "import", "demo-xw",
         "--dest-root", str(tmp_path),
         "--timeout", "5",
     ])
@@ -622,7 +622,7 @@ def test_data_import_bump_rejects_more_than_one_path(
     wins defect D-A killed; argparse misuse exits 64."""
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "data", "import", "provider-xw", "--bump",
+            "data", "import", "demo-xw", "--bump",
             "--path", "a", "--path", "b",
         ])
     assert exc.value.code == 64
@@ -653,7 +653,7 @@ def test_data_import_bump_up_to_date_prints_message(
         "mintd.cli.bump_import",
         lambda *a, **kw: BumpResult(changed=False, old_pin="abc1234def", new_pin=None, dvc_path=None),
     )
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
     assert "up to date" in msg
@@ -675,7 +675,7 @@ def test_data_import_bump_drift_prints_path(
             changed=True, old_pin="old1234567", new_pin="new7654321", dvc_path=new_dvc
         ),
     )
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
     assert "bumped" in msg
@@ -697,10 +697,10 @@ def test_data_import_bump_unreachable_exits_two_with_hint(
     )
 
     def raises(*args: Any, **kwargs: Any) -> Any:
-        raise BumpBlocked("provider-xw", finding)
+        raise BumpBlocked("demo-xw", finding)
 
     monkeypatch.setattr("mintd.cli.bump_import", raises)
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
     err = capsys.readouterr().err
     assert rc == 2
     assert "retry" in err
@@ -720,10 +720,10 @@ def test_data_import_bump_pin_missing_exits_one(
     )
 
     def raises(*args: Any, **kwargs: Any) -> Any:
-        raise BumpBlocked("provider-xw", finding)
+        raise BumpBlocked("demo-xw", finding)
 
     monkeypatch.setattr("mintd.cli.bump_import", raises)
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
     err = capsys.readouterr().err
     assert rc == 1
     assert "retry" not in err
@@ -741,16 +741,16 @@ def test_bump_blocked_catalog_unresolved_prefers_the_findings_own_hint(
     finding = CheckFinding(
         severity="error",
         section="consumer",
-        message="cannot read the catalog to resolve producer URL for provider-xw: fatal: unable to access",
+        message="cannot read the catalog to resolve producer URL for demo-xw: fatal: unable to access",
         kind="catalog_unresolved",
         hint="check your network and `registry_url`; if both are fine, delete the local registry cache",
     )
 
     def raises(*args: Any, **kwargs: Any) -> Any:
-        raise BumpBlocked("provider-xw", finding)
+        raise BumpBlocked("demo-xw", finding)
 
     monkeypatch.setattr("mintd.cli.bump_import", raises)
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
 
     err = capsys.readouterr().err
     assert rc == 1
@@ -765,7 +765,7 @@ def test_data_import_bump_with_rev_exits_64(
 ) -> None:
     """argparse misuse: --bump + --rev. Exit 64 per the spec."""
     with pytest.raises(SystemExit) as exc:
-        cli.main(["data", "import", "provider-xw", "--bump", "--rev", "abc123"])
+        cli.main(["data", "import", "demo-xw", "--bump", "--rev", "abc123"])
     assert exc.value.code == 64
 
 
@@ -781,7 +781,7 @@ def test_enclave_bump_up_to_date_prints_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **kw: None)
-    rc = cli.main(["enclave", "bump", "provider-xw"])
+    rc = cli.main(["enclave", "bump", "demo-xw"])
     out = capsys.readouterr().out
     assert rc == 0
     assert "up to date" in out
@@ -795,7 +795,7 @@ def test_enclave_bump_drift_rewrites_manifest(
 ) -> None:
     manifest = tmp_path / "enclave_manifest.yaml"
     monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **kw: manifest)
-    rc = cli.main(["enclave", "bump", "provider-xw", "--manifest", str(manifest)])
+    rc = cli.main(["enclave", "bump", "demo-xw", "--manifest", str(manifest)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "bumped:" in out
@@ -827,12 +827,12 @@ def test_registry_update_prints_diff(
     patched_clients,
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client, primary="outputs/old.parquet")
+    _register_demo_xw(client, primary="outputs/old.parquet")
     # Build a slightly different metadata.json to update with
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
+    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
     data["data_products"]["primary"] = "outputs/new.parquet"
     (tmp_path / "metadata.json").write_text(json.dumps(data))
     rc = cli.main(["registry", "update", str(tmp_path)])
@@ -1074,7 +1074,7 @@ def test_data_list_catalog_empty(patched_clients, capsys):
 
 def test_data_list_catalog_populated(patched_clients, capsys):
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     
     # Register second
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
@@ -1086,7 +1086,7 @@ def test_data_list_catalog_populated(patched_clients, capsys):
     
     cli.main(["data", "list"])
     out, _ = capsys.readouterr()
-    assert "provider-xw" in out
+    assert "demo-xw" in out
     assert "other-project" in out
 
 def test_data_list_imported_empty(patched_clients, capsys, tmp_path, monkeypatch):
@@ -1100,7 +1100,7 @@ def test_data_list_imported_populated(patched_clients, capsys, tmp_path, monkeyp
     _stage_dvc_import(tmp_path)
     cli.main(["data", "list", "--imported"])
     out, _ = capsys.readouterr()
-    assert "provider-xw" in out
+    assert "demo-xw" in out
     assert "4f7c2a1" in out
 
 def test_data_list_imported_with_type_exits_64(patched_clients, capsys):
@@ -1274,14 +1274,14 @@ def test_data_pull_and_clone_exit_2_when_boto3_is_missing(
     `data_pull`'s `except Exception` swallows `None.try_fast_pull`.
     """
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg, **_: None)
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".dvc").mkdir()
 
     argv = (
         ["data", "pull", "--path", str(tmp_path)] if verb == "pull"
-        else ["data", "clone", "provider-xw"]
+        else ["data", "clone", "demo-xw"]
     )
     rc = cli.main([*json_flag, *argv])
 
@@ -1348,7 +1348,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     )
 
     rc = cli.main([
-        "data", "clone", "provider-xw",
+        "data", "clone", "demo-xw",
         "--dest", "/tmp/x",
         "--rev", "v1.2",
         "--primary",
@@ -1356,7 +1356,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     ])
 
     assert rc == 0
-    assert received["name"] == "provider-xw"
+    assert received["name"] == "demo-xw"
     assert received["dest"] == Path("/tmp/x")
     assert received["rev"] == "v1.2"
     assert received["primary_only"] is True
@@ -1364,7 +1364,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     captured = capsys.readouterr()
     # Slice 25: success line is chatter → stderr; result payload → stdout.
     # Slice 38b: success line now names the product, rev, and remote bucket.
-    assert "cloned provider-xw" in captured.err
+    assert "cloned demo-xw" in captured.err
     assert "abc1234" in captured.err
     assert "s3://my-bucket" in captured.err
 
@@ -1386,7 +1386,7 @@ def test_cli_data_clone_threads_dvc_args(
     monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
 
     rc = cli.main([
-        "data", "clone", "provider-xw",
+        "data", "clone", "demo-xw",
         "--dest", "/tmp/x",
         "--dvc-arg=--verbose",
         "--dvc-arg=-v",
@@ -1412,7 +1412,7 @@ def test_cli_data_clone_threads_repeated_paths(
     monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
 
     rc = cli.main([
-        "data", "clone", "provider-xw",
+        "data", "clone", "demo-xw",
         "--path", "data/final/",
         "--path", "data/intermediate/defs_30min.parquet",
     ])
@@ -1430,7 +1430,7 @@ def test_cli_data_clone_path_and_primary_exits_64(
     """argparse mutex: --path and --primary conflict → exit 64."""
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "data", "clone", "provider-xw",
+            "data", "clone", "demo-xw",
             "--path", "data/final/",
             "--primary",
         ])
@@ -1463,14 +1463,14 @@ def test_cli_data_clone_unknown_path_reports_tracked_outputs(
     def _raise(*a, **kw):
         from mintd.data import UnknownProductPath
         raise UnknownProductPath(
-            "catalog entry 'provider-xw' has no tracked output 'data/nope.csv'; "
+            "catalog entry 'demo-xw' has no tracked output 'data/nope.csv'; "
             "tracked outputs: data/final (primary)"
         )
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
     monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
 
-    rc = cli.main(["data", "clone", "provider-xw", "--path", "data/nope.csv"])
+    rc = cli.main(["data", "clone", "demo-xw", "--path", "data/nope.csv"])
     assert rc == 1
     # Reporter wraps at console width, which can split asserted phrases
     # across lines (first seen on the Windows CI runner) — compare against
@@ -1488,17 +1488,17 @@ def test_cli_data_clone_returns_one_on_catalog_not_found(
 ) -> None:
     def _raise(*a, **kw):
         from mintd.catalog import CatalogNotFound
-        raise CatalogNotFound("provider-xw")
+        raise CatalogNotFound("demo-xw")
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _raise)
     monkeypatch.setattr(
         "mintd.cli._resolve_git_ops", lambda cfg, **_: object()
     )
 
-    rc = cli.main(["data", "clone", "provider-xw"])
+    rc = cli.main(["data", "clone", "demo-xw"])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "provider-xw" in err
+    assert "demo-xw" in err
 
 
 def test_cli_data_clone_returns_one_on_producer_error(
@@ -1520,7 +1520,7 @@ def test_cli_data_clone_returns_one_on_producer_error(
         "mintd.cli._resolve_git_ops", lambda cfg, **_: object()
     )
 
-    rc = cli.main(["data", "clone", "provider-xw"])
+    rc = cli.main(["data", "clone", "demo-xw"])
     assert rc == 1
     err = capsys.readouterr().err
     assert "boom" in err
@@ -1535,7 +1535,7 @@ def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
     assert "downloaded:" in out
     assert "transferred:" in out
     assert out.count("(none)") == 2
-    assert "provider-xw" in out
+    assert "demo-xw" in out
 
 def test_enclave_list_filtered_by_repo(patched_clients, capsys, tmp_path):
     manifest_path = tmp_path / "enclave_manifest.yaml"
@@ -1543,7 +1543,7 @@ def test_enclave_list_filtered_by_repo(patched_clients, capsys, tmp_path):
     content = """
 enclave_name: test-enclave
 approved_products:
-  - repo: provider-xw
+  - repo: demo-xw
     registry_entry: entry1
     pin: 4f7c2a1
     source_path: path1
@@ -1555,9 +1555,9 @@ downloaded: []
 transferred: []
 """
     manifest_path.write_text(content)
-    cli.main(["enclave", "list", "provider-xw", "--manifest", str(manifest_path)])
+    cli.main(["enclave", "list", "demo-xw", "--manifest", str(manifest_path)])
     out, _ = capsys.readouterr()
-    assert "provider-xw" in out
+    assert "demo-xw" in out
     assert "other-provider" not in out
 
 def test_enclave_list_missing_manifest_exits_one(patched_clients, capsys, tmp_path):
@@ -1578,12 +1578,12 @@ def test_enclave_add_subscribes(
     tmp_path: Path,
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
 
     rc = cli.main(
         [
-            "enclave", "add", "provider-xw",
+            "enclave", "add", "demo-xw",
             "--pin", "deadbeefcafe1234567890abcdef0123456789ab",
             "--manifest", str(manifest),
         ]
@@ -1592,12 +1592,12 @@ def test_enclave_add_subscribes(
     out = capsys.readouterr().out
     assert rc == 0
     assert "subscribed:" in out
-    assert "provider-xw" in out
+    assert "demo-xw" in out
 
     from mintd.enclave import EnclaveManifest
     loaded = EnclaveManifest.load(manifest)
     assert len(loaded.approved_products) == 1
-    assert loaded.approved_products[0].repo == "provider-xw"
+    assert loaded.approved_products[0].repo == "demo-xw"
 
 
 def test_enclave_add_duplicate_exits_one(
@@ -1606,12 +1606,12 @@ def test_enclave_add_duplicate_exits_one(
     tmp_path: Path,
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
 
     cli.main(
         [
-            "enclave", "add", "provider-xw",
+            "enclave", "add", "demo-xw",
             "--pin", "a" * 40,
             "--manifest", str(manifest),
         ]
@@ -1619,7 +1619,7 @@ def test_enclave_add_duplicate_exits_one(
     capsys.readouterr()  # discard first-add output
     rc = cli.main(
         [
-            "enclave", "add", "provider-xw",
+            "enclave", "add", "demo-xw",
             "--pin", "b" * 40,
             "--manifest", str(manifest),
         ]
@@ -1637,7 +1637,7 @@ def test_enclave_add_source_path_and_all_exits_64(
     with pytest.raises(SystemExit) as exc:
         cli.main(
             [
-                "enclave", "add", "provider-xw",
+                "enclave", "add", "demo-xw",
                 "--pin", "a" * 40,
                 "--source-path", "outputs/x",
                 "--all",
@@ -1690,24 +1690,24 @@ def test_enclave_remove_subscribes(
 ) -> None:
     """Happy path: subscribe via enclave_add, then remove the subscription."""
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
 
     cli.main([
-        "enclave", "add", "provider-xw",
+        "enclave", "add", "demo-xw",
         "--pin", "a" * 40,
         "--manifest", str(manifest),
     ])
     capsys.readouterr()  # discard add output
 
     rc = cli.main([
-        "enclave", "remove", "provider-xw",
+        "enclave", "remove", "demo-xw",
         "--manifest", str(manifest),
     ])
 
     out = capsys.readouterr().out
     assert rc == 0
-    assert "removed: provider-xw" in out
+    assert "removed: demo-xw" in out
 
     from mintd.enclave import EnclaveManifest
     loaded = EnclaveManifest.load(manifest)
@@ -1743,26 +1743,26 @@ def test_enclave_pull_happy_path(
     from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
 
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(
         enclave_name="test",
         approved_products=[
             ApprovedProduct(
-                repo="provider-xw", registry_entry="e", pin="a" * 40,
+                repo="demo-xw", registry_entry="e", pin="a" * 40,
                 source_path="outputs/main.parquet",
             ),
         ],
     ).save(manifest)
 
     fake_item = DownloadedItem(
-        repo="provider-xw",
+        repo="demo-xw",
         output="outputs/main.parquet",
         contract_pin="a" * 40,
         artifact_pin="f" * 32,
         fetch_strategy="dvc-import",
         downloaded_at=datetime.now(),
-        local_path="downloads/provider-xw/fffffff-2026-05-20",
+        local_path="downloads/demo-xw/fffffff-2026-05-20",
     )
 
     def fake_pull(*args: Any, **kwargs: Any) -> tuple[Path, list[DownloadedItem]]:
@@ -1772,13 +1772,13 @@ def test_enclave_pull_happy_path(
 
     monkeypatch.chdir(tmp_path)
     rc = cli.main([
-        "enclave", "pull", "provider-xw",
+        "enclave", "pull", "demo-xw",
         "--manifest", str(manifest),
     ])
 
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
-    assert "provider-xw" in msg
+    assert "demo-xw" in msg
     assert "aaaaaaa" in msg
     assert "1 output(s)" in msg
 
@@ -1834,10 +1834,10 @@ def test_enclave_pull_text_mode_drops_nothing_to_pull_when_files_are_missing(
         enclave_name="test",
         downloaded=[
             DownloadedItem(
-                repo="provider-xw", output="outputs/main.parquet",
+                repo="demo-xw", output="outputs/main.parquet",
                 contract_pin="a" * 40, artifact_pin="f" * 32,
                 fetch_strategy="dvc-import", downloaded_at=datetime.now(),
-                local_path="downloads/provider-xw/fffffff-2026-05-20",
+                local_path="downloads/demo-xw/fffffff-2026-05-20",
             ),
         ],
     ).save(manifest)
@@ -1874,10 +1874,10 @@ def test_enclave_pull_json_fresh_clone_reports_missing(
         enclave_name="test",
         downloaded=[
             DownloadedItem(
-                repo="provider-xw", output="outputs/main.parquet",
+                repo="demo-xw", output="outputs/main.parquet",
                 contract_pin="a" * 40, artifact_pin="f" * 32,
                 fetch_strategy="dvc-import", downloaded_at=datetime.now(),
-                local_path="downloads/provider-xw/fffffff-2026-05-20",
+                local_path="downloads/demo-xw/fffffff-2026-05-20",
             ),
         ],
     ).save(manifest)
@@ -1890,7 +1890,7 @@ def test_enclave_pull_json_fresh_clone_reports_missing(
     payload = json.loads(capsys.readouterr().out)
     assert payload["pulled"] == []
     assert [(m["repo"], m["output"]) for m in payload["missing"]] == [
-        ("provider-xw", "outputs/main.parquet")
+        ("demo-xw", "outputs/main.parquet")
     ]
 
 
@@ -2134,7 +2134,7 @@ def test_cli_publish_dry_run_renders_diff(
     patched_git_ops,
 ) -> None:
     client, _ = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
@@ -2195,7 +2195,7 @@ def test_cli_publish_full_flow_calls_each_op(
     patched_git_ops,
 ) -> None:
     client, dvc_ops = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     # Ensure it's publish-valid
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
@@ -2785,7 +2785,7 @@ def test_cli_publish_yes_flag_skips_prompt(
 ) -> None:
     """Slice 32: --yes bypasses the interactive preview prompt."""
     client, _ = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
@@ -2812,7 +2812,7 @@ def test_cli_publish_non_tty_without_yes_errors(
 ) -> None:
     """Slice 32: non-TTY without --yes exits 1 with an actionable hint."""
     client, _ = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
@@ -2834,7 +2834,7 @@ def test_cli_publish_non_tty_without_yes_errors(
 # ---------------------------------------------------------------------------
 
 
-def _register_with_storage(client: InMemoryCatalogClient, name: str = "provider-xw") -> None:
+def _register_with_storage(client: InMemoryCatalogClient, name: str = "demo-xw") -> None:
     """Register an entry with a versioned storage block so `data ls` reaches
     the S3 listing path."""
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
@@ -2872,10 +2872,10 @@ def test_cli_data_import_single_output_shows_status(
     tmp_path: Path, patched_clients, recording_reporter
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client)
-    cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    _register_demo_xw(client)
+    cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
     statuses = [e[1] for e in recording_reporter.events_of("status")]
-    assert any("Importing provider-xw" in s for s in statuses)
+    assert any("Importing demo-xw" in s for s in statuses)
 
 
 def test_cli_data_import_all_updates_status_per_output(
@@ -2905,7 +2905,7 @@ def test_cli_data_import_bump_catches_dvc_op_error(
 ) -> None:
     from mintd._dvc_ops import DvcOpError
     monkeypatch.setattr("mintd.cli.bump_import", _raises(DvcOpError("boom")))
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
     assert rc == 1
     errs = recording_reporter.events_of("error")
     assert errs and errs[0][2]  # has a hint
@@ -2945,18 +2945,18 @@ def test_cli_data_ls_shows_status_during_listing(
     monkeypatch.setattr(
         "mintd.cli._resolve_s3_listing_ops", lambda cfg: (lambda **k: fake_result)
     )
-    cli.main(["data", "ls", "provider-xw"])
+    cli.main(["data", "ls", "demo-xw"])
     statuses = [e[1] for e in recording_reporter.events_of("status")]
-    assert any("Listing provider-xw on S3" in s for s in statuses)
+    assert any("Listing demo-xw on S3" in s for s in statuses)
 
 
 def test_cli_enclave_bump_shows_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
 ) -> None:
     monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **k: None)
-    cli.main(["enclave", "bump", "provider-xw", "--manifest", str(tmp_path / "m.yaml")])
+    cli.main(["enclave", "bump", "demo-xw", "--manifest", str(tmp_path / "m.yaml")])
     assert any(
-        "Bumping provider-xw" in e[1] for e in recording_reporter.events_of("status")
+        "Bumping demo-xw" in e[1] for e in recording_reporter.events_of("status")
     )
 
 
@@ -3046,10 +3046,10 @@ def test_cli_enclave_bump_force_producer_error_is_clean(
     from mintd.producer import ProducerError
     monkeypatch.setattr(
         "mintd.cli.enclave_bump",
-        _raises(ProducerError.unreachable("provider-xw", "a" * 40)),
+        _raises(ProducerError.unreachable("demo-xw", "a" * 40)),
     )
     rc = cli.main(
-        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
     )
     assert rc == 1
     errs = recording_reporter.events_of("error")
@@ -3067,10 +3067,10 @@ def test_cli_enclave_bump_force_catalog_not_found_is_clean(
     from mintd.catalog import CatalogNotFound
     monkeypatch.setattr(
         "mintd.cli.enclave_bump",
-        _raises(CatalogNotFound("provider-xw not in registry")),
+        _raises(CatalogNotFound("demo-xw not in registry")),
     )
     rc = cli.main(
-        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
     )
     assert rc == 1
     errs = recording_reporter.events_of("error")
@@ -3086,10 +3086,10 @@ def test_cli_enclave_bump_force_missing_repo_url_is_clean(
     force path; the handler must render it cleanly, not as a traceback."""
     monkeypatch.setattr(
         "mintd.cli.enclave_bump",
-        _raises(ValueError("catalog entry 'provider-xw' has no repository.github_url")),
+        _raises(ValueError("catalog entry 'demo-xw' has no repository.github_url")),
     )
     rc = cli.main(
-        ["enclave", "bump", "provider-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
+        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
     )
     assert rc == 1
     errs = recording_reporter.events_of("error")
@@ -3106,7 +3106,7 @@ def test_cli_enclave_bump_malformed_manifest_points_at_manifest(
     not misattribute it to the producer/catalog, and not traceback."""
     m_path = tmp_path / "m.yaml"
     m_path.write_text("enclave_name: test\napproved_products: notalist\n")
-    rc = cli.main(["enclave", "bump", "provider-xw", "--manifest", str(m_path)])
+    rc = cli.main(["enclave", "bump", "demo-xw", "--manifest", str(m_path)])
     assert rc == 1
     hint = recording_reporter.events_of("error")[0][2] or ""
     assert "manifest" in hint.lower()
@@ -3136,7 +3136,7 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     append to one list — all four handlers must still thread the reporter."""
     captured: list = []
     client = InMemoryCatalogClient()
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     fake_dvc = _FakeDvcOps()
     monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
     monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: client)
@@ -3155,7 +3155,7 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     monkeypatch.chdir(tmp_path)  # before `data push`: it commits from the cwd's project
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
-    cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
     cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
 
     assert len(captured) == 4
@@ -3331,16 +3331,16 @@ def test_cli_data_import_success_shows_provenance_and_size(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     dvc = tmp_path / "final.parquet.dvc"
     _write_import_dvc(
-        dvc, url="https://github.com/example-org/provider-xw", rev="abc1234def0", size=4096, nfiles=2
+        dvc, url="https://github.com/example-org/demo-xw", rev="abc1234def0", size=4096, nfiles=2
     )
     monkeypatch.setattr("mintd.cli.import_product", lambda *a, **k: [dvc])
-    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    rc = cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
-    assert "imported provider-xw" in msg
+    assert "imported demo-xw" in msg
     assert "abc1234" in msg
     assert "2 file(s)" in msg
     assert "4 KB" in msg
@@ -3353,13 +3353,13 @@ def test_cli_data_import_json_mode_no_checkmark_on_stdout(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     dvc = tmp_path / "final.parquet.dvc"
     _write_import_dvc(
-        dvc, url="https://github.com/example-org/provider-xw", rev="abc1234def0", size=4096, nfiles=2
+        dvc, url="https://github.com/example-org/demo-xw", rev="abc1234def0", size=4096, nfiles=2
     )
     monkeypatch.setattr("mintd.cli.import_product", lambda *a, **k: [dvc])
-    rc = cli.main(["--json", "data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    rc = cli.main(["--json", "data", "import", "demo-xw", "--dest-root", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "✓" not in out
@@ -3372,17 +3372,17 @@ def test_cli_registry_update_success_names_changed_fields(
     tmp_path: Path, patched_clients, recording_reporter
 ) -> None:
     client, _ = patched_clients
-    _register_provider_xw(client, primary="outputs/old.parquet")
+    _register_demo_xw(client, primary="outputs/old.parquet")
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
+    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
     data["data_products"]["primary"] = "outputs/new.parquet"
     (tmp_path / "metadata.json").write_text(json.dumps(data))
     rc = cli.main(["registry", "update", str(tmp_path)])
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
-    assert "updated provider-xw" in msg
+    assert "updated demo-xw" in msg
     assert "field(s)" in msg
     assert "primary" in msg
 
@@ -3448,7 +3448,7 @@ def test_cli_publish_success_echoes_tag_and_pr(
     patched_git_ops,
 ) -> None:
     client, dvc_ops = patched_clients
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
@@ -3463,7 +3463,7 @@ def test_cli_publish_success_echoes_tag_and_pr(
 
     assert rc == 0
     msg = recording_reporter.events_of("success")[-1][1]
-    assert "published provider-xw" in msg
+    assert "published demo-xw" in msg
     assert "tag v" in msg
     assert "PR" in msg
 
@@ -3585,7 +3585,7 @@ def test_cli_data_clone_pull_errors_exit_nonzero_no_success_line(
         )
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
-    rc = cli.main(["data", "clone", "provider-xw"])
+    rc = cli.main(["data", "clone", "demo-xw"])
     assert rc == 1
     assert recording_reporter.events_of("success") == []
     errors = recording_reporter.events_of("error")
@@ -3612,7 +3612,7 @@ def test_cli_data_clone_pull_errors_json_mode_includes_errors(
         )
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
-    rc = cli.main(["data", "clone", "provider-xw"])
+    rc = cli.main(["data", "clone", "demo-xw"])
     assert rc == 1
     payloads = recording_reporter.events_of("result")
     assert payloads and payloads[-1][1]["errors"] == 1
@@ -3629,11 +3629,11 @@ def test_cli_data_clone_zero_pull_errors_keeps_success_line(
         return CloneResult(dest=Path("/tmp/sentinel"), rev=None, remote_bucket=None)
 
     monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
-    rc = cli.main(["data", "clone", "provider-xw"])
+    rc = cli.main(["data", "clone", "demo-xw"])
     assert rc == 0
     assert recording_reporter.events_of("error") == []
     assert any(
-        "cloned provider-xw" in msg
+        "cloned demo-xw" in msg
         for _, msg in recording_reporter.events_of("success")
     )
 
@@ -3642,7 +3642,7 @@ def test_cli_data_clone_zero_pull_errors_keeps_success_line(
 
 
 def _publishable_project(tmp_path: Path, client) -> None:
-    metadata = _register_provider_xw(client)
+    metadata = _register_demo_xw(client)
     metadata.data_products.primary = "data/final/"
     (tmp_path / "metadata.json").write_text(metadata.model_dump_json(indent=2))
     _init_git_in(tmp_path)
@@ -3671,8 +3671,8 @@ def test_cli_publish_registry_branch_exists_exits_one_with_hint(
 
     def _raise(*a: Any, **kw: Any) -> None:
         raise RegistryBranchExists(
-            ["git", "push"], "! [rejected] update/provider-xw (fetch first)",
-            "update/provider-xw",
+            ["git", "push"], "! [rejected] update/demo-xw (fetch first)",
+            "update/demo-xw",
         )
 
     monkeypatch.setattr(client, "update", _raise)
@@ -3684,7 +3684,7 @@ def test_cli_publish_registry_branch_exists_exits_one_with_hint(
     assert len(errs) == 1
     _, msg, hint = errs[0]
     assert hint is not None
-    assert "update/provider-xw" in hint
+    assert "update/demo-xw" in hint
     assert "tag v" in hint
     # The retry advice must be runnable. The failing run already made the tag
     # and pushed it, so the rerun adopts it; telling the user to delete it
@@ -3780,7 +3780,7 @@ def test_cli_publish_success_names_reused_pr(
     monkeypatch.setattr(
         client, "update",
         lambda *a, **kw: UpdateResult(
-            name="provider-xw",
+            name="demo-xw",
             changes=[FieldChange(field_path="mint.version", before="0.1.0", after="0.1.1")],
             dry_run=False,
             pr_number=42,
@@ -3879,7 +3879,7 @@ def test_registry_register_with_enclave_manifest_reaches_client_register(
     stage_enclave_manifest(tmp_path)
     _git_repo(tmp_path)  # register needs the project committed
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     registered: list[str] = []
     real_register = client.register
 
@@ -3905,7 +3905,7 @@ def test_plain_check_resolves_a_catalog_client(
     shutil.copy(MINIMAL, tmp_path / "metadata.json")
     stage_enclave_manifest(tmp_path)
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
 
     rc = cli.main(["check", str(tmp_path)])
 
@@ -4155,7 +4155,7 @@ def test_enclave_pull_refusal_hint_survives_spaces_and_carries_every_flag(
     monkeypatch.chdir(tmp_path)
 
     rc = cli.main([
-        "enclave", "pull", "provider-xw",
+        "enclave", "pull", "demo-xw",
         "--manifest", str(enclave / "audit.yaml"), "--force",
     ])
 
@@ -4169,7 +4169,7 @@ def test_enclave_pull_refusal_hint_survives_spaces_and_carries_every_flag(
     assert shlex.split(cd_part) == ["cd", str(enclave)]
     # and every flag the user gave is carried into the retry
     assert shlex.split(retry_part) == [
-        "mintd", "enclave", "pull", "provider-xw",
+        "mintd", "enclave", "pull", "demo-xw",
         "--manifest", "audit.yaml", "--force",
     ]
 
@@ -4240,17 +4240,17 @@ def test_enclave_add_second_path_warns_pin_was_inherited(
     split across lines.
     """
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
 
     cli.main([
-        "enclave", "add", "provider-xw", "--pin", "a" * 40,
+        "enclave", "add", "demo-xw", "--pin", "a" * 40,
         "--source-path", "data/final/a", "--manifest", str(manifest),
     ])
     capsys.readouterr()  # discard first-add output
 
     rc = cli.main([
-        "enclave", "add", "provider-xw",
+        "enclave", "add", "demo-xw",
         "--source-path", "data/final/b", "--manifest", str(manifest),
     ])
 
@@ -4258,7 +4258,7 @@ def test_enclave_add_second_path_warns_pin_was_inherited(
     assert rc == 0
     assert "inherited" in err
     assert "bump" in err
-    assert "provider-xw" in err
+    assert "demo-xw" in err
     # The md5 drift rule reports a path published after the pin as drift, so
     # bare `bump` moves the pin; the advisory must not send users through
     # `--force`, which skips every guard (M17).
@@ -4301,15 +4301,15 @@ def test_enclave_list_distinguishes_all_from_primary(
     manifest.write_text("""
 enclave_name: test-enclave
 approved_products:
-  - repo: provider-xw
+  - repo: demo-xw
     registry_entry: e
     pin: 4f7c2a1
     source_path: data/final/a
-  - repo: provider-xw
+  - repo: demo-xw
     registry_entry: e
     pin: 4f7c2a1
     all: true
-  - repo: provider-xw
+  - repo: demo-xw
     registry_entry: e
     pin: 4f7c2a1
 downloaded: []
@@ -4329,16 +4329,16 @@ def test_enclave_remove_ambiguous_exits_one_without_traceback(
 ) -> None:
     """D2: refuse rather than wipe subscriptions the user did not name."""
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
-    cli.main(["enclave", "add", "provider-xw", "--pin", "a" * 40,
+    cli.main(["enclave", "add", "demo-xw", "--pin", "a" * 40,
               "--source-path", "data/final/a", "--manifest", str(manifest)])
-    cli.main(["enclave", "add", "provider-xw",
+    cli.main(["enclave", "add", "demo-xw",
               "--source-path", "data/final/b", "--manifest", str(manifest)])
     capsys.readouterr()
     before = manifest.read_bytes()
 
-    rc = cli.main(["enclave", "remove", "provider-xw", "--manifest", str(manifest)])
+    rc = cli.main(["enclave", "remove", "demo-xw", "--manifest", str(manifest)])
 
     err = capsys.readouterr().err
     assert rc == 1
@@ -4354,7 +4354,7 @@ def test_enclave_remove_primary_and_source_path_exits_64(
     """argparse mutex: the three remove selectors conflict → exit 64."""
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            "enclave", "remove", "provider-xw",
+            "enclave", "remove", "demo-xw",
             "--source-path", "data/final/a", "--primary",
             "--manifest", str(tmp_path / "enclave_manifest.yaml"),
         ])
@@ -4378,18 +4378,18 @@ def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
     from mintd.enclave import ApprovedProduct, EnclaveManifest
 
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     manifest = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(
         enclave_name="test",
         approved_products=[
-            ApprovedProduct(repo="provider-xw", registry_entry="x", pin="",
+            ApprovedProduct(repo="demo-xw", registry_entry="x", pin="",
                             source_path="data/final/a"),
         ],
     ).save(manifest)
 
     rc = cli.main([
-        "enclave", "add", "provider-xw", "--pin", "b" * 40,
+        "enclave", "add", "demo-xw", "--pin", "b" * 40,
         "--source-path", "data/final/b", "--manifest", str(manifest),
     ])
 
@@ -4409,7 +4409,7 @@ def test_render_findings_distinguishes_rows_by_message_not_field_path(
     findings = [
         CheckFinding(severity="info", section="consumer",
                      message=f"up to date ({label})", source=source,
-                     field_path="approved_products[provider-xw]",
+                     field_path="approved_products[demo-xw]",
                      kind="up_to_date")
         for label in ("data/final/a", "data/final/b", "<primary>")
     ]
@@ -4437,10 +4437,10 @@ def test_data_import_escaping_path_is_reported_not_raised(
     Mutation: drop the `except UnknownProductPath` arm -> this reddens.
     """
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
 
     rc = cli.main(
-        ["data", "import", "provider-xw", "--path", "/etc", "--dest-root", str(tmp_path)]
+        ["data", "import", "demo-xw", "--path", "/etc", "--dest-root", str(tmp_path)]
     )
 
     assert rc == 1
@@ -4467,14 +4467,14 @@ def test_data_import_escaping_full_name_is_contained(
     """
     client, dvc_ops = patched_clients
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
+    data["project"]["name"] = "demo-xw"
     data["project"]["full_name"] = "../../../../elsewhere"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
     data["data_products"]["primary"] = "outputs/main.parquet"
     client.register(Metadata.model_validate(data))
 
     rc = cli.main(
-        ["data", "import", "provider-xw", "--dest-root", str(tmp_path / "imports")]
+        ["data", "import", "demo-xw", "--dest-root", str(tmp_path / "imports")]
     )
 
     assert rc == 1
@@ -4496,14 +4496,14 @@ def test_data_import_bump_renders_an_unreachable_registry(
     Mutation: drop the `except GitOpError` arm -> this reddens.
     """
     client, _ = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
 
     def _unreachable(*a: object, **k: object):
         raise GitOpError(["git", "fetch"], "Could not resolve host: github.com")
 
     monkeypatch.setattr(client, "fetch", _unreachable)
 
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
 
     assert rc == 1
     err = capsys.readouterr().err
@@ -4540,7 +4540,7 @@ _AMBIGUOUS_DVC = """\
 deps:
 - path: outputs/main.parquet
   repo:
-    url: https://github.com/example-org/provider-xw
+    url: https://github.com/example-org/demo-xw
     rev_lock: {sha}
 outs:
 - path: {out}
@@ -4562,13 +4562,13 @@ def test_data_import_duplicate_pointer_reports_instead_of_tracebacking(
     `except` chain -> this reddens.
     """
     client, _dvc_ops = patched_clients
-    _register_provider_xw(client)
-    ns = tmp_path / "data_provider-xw"
+    _register_demo_xw(client)
+    ns = tmp_path / "data_demo-xw"
     ns.mkdir()
     (ns / "main.parquet.dvc").write_text(_AMBIGUOUS_DVC.format(sha="a" * 40, out="main.parquet"))
     (ns / "legacy.dvc").write_text(_AMBIGUOUS_DVC.format(sha="b" * 40, out="legacy"))
 
-    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    rc = cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
 
     assert rc == 1
     err = " ".join(capsys.readouterr().err.split())
@@ -4592,13 +4592,13 @@ def test_data_import_reads_the_producer_only_when_nothing_landed(
     or delete the `except FetchError` arm -> `landed-nothing` reddens.
     """
     client, dvc_ops = patched_clients
-    _register_provider_xw(client, github_url=str(tmp_path / "gone.git"))
+    _register_demo_xw(client, github_url=str(tmp_path / "gone.git"))
     if not lands:
         dvc_ops.import_lands_nothing = {"outputs/main.parquet"}
     root = tmp_path / "imports"
-    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(root)])
+    rc = cli.main(["data", "import", "demo-xw", "--dest-root", str(root)])
     err = " ".join(capsys.readouterr().err.split())
-    pointer = root / "data_provider-xw" / "outputs" / "main.parquet.dvc"
+    pointer = root / "data_demo-xw" / "outputs" / "main.parquet.dvc"
     if lands:
         assert rc == 0, err
         assert pointer.is_file()
@@ -4814,7 +4814,7 @@ def test_data_import_renders_every_reachable_exception(
     matching case reddens.
     """
     client, dvc_ops = patched_clients
-    _register_provider_xw(client)
+    _register_demo_xw(client)
     exc_type = getattr(cli, exc_name, None) or getattr(builtins, exc_name)
 
     def _raise(**_: Any) -> Path:
@@ -4822,7 +4822,7 @@ def test_data_import_renders_every_reachable_exception(
 
     monkeypatch.setattr(dvc_ops, "import_", _raise)
 
-    rc = cli.main(["data", "import", "provider-xw", "--dest-root", str(tmp_path)])
+    rc = cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
 
     assert rc == 1
     err = " ".join(capsys.readouterr().err.split())
@@ -4849,15 +4849,15 @@ def test_a_corrupt_registry_entry_is_an_error_not_a_traceback(
 
     client, _ = patched_clients
     monkeypatch.setattr(client, "fetch", lambda name: (_ for _ in ()).throw(
-        CatalogEntryInvalid("catalog entry is unreadable (/r/provider-xw.yaml): boom")
+        CatalogEntryInvalid("catalog entry is unreadable (/r/demo-xw.yaml): boom")
     ))
 
-    rc = cli.main(["data", "import", "provider-xw", "--bump"])
+    rc = cli.main(["data", "import", "demo-xw", "--bump"])
 
     assert rc == 1
     msg = recording_reporter.events_of("error")[-1][1]
     assert "unreadable" in msg
-    assert "provider-xw.yaml" in msg
+    assert "demo-xw.yaml" in msg
 
 
 def test_check_reports_an_undeliverable_output_with_its_repair(

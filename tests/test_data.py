@@ -41,7 +41,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 STANDALONE_IMPORT = FIXTURES / "dvc_files" / "standalone_import.dvc"
 
-REPO_URL = "https://github.com/example-org/provider-xw"
+REPO_URL = "https://github.com/example-org/demo-xw"
 PIN_SHA = "4f7c2a1abcd1234567890abcdef0123456789abc"  # matches fixture
 HEAD_SHA = "b" * 40
 

@@ -27,10 +27,13 @@ jobs:
           MINOR: ${{ contains(github.event.pull_request.labels.*.name, 'minor') }}
         run: |
           set -euo pipefail
-          if git tag --points-at "$SHA" | grep -qx 'v[0-9]*\.[0-9]*\.[0-9]*'; then
+          # Only plain vX.Y.Z tags count: the list glob also matches hotfix tags
+          # such as v0.4.0.post1, whose "0.post1" patch is not a number.
+          if git tag --points-at "$SHA" | grep -qxE 'v[0-9]+\.[0-9]+\.[0-9]+'; then
             echo "$SHA is already tagged"; exit 0
           fi
-          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          last=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                   | { grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' || true; } | head -n1)
           if [ -z "$last" ]; then
             next=v0.1.0
           else
