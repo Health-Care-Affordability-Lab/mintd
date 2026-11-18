@@ -398,7 +398,7 @@ def test_migrate_handles_explicit_null_output_fields() -> None:
 # object the tool had held in memory seconds earlier.
 
 
-_V1_REMOTE_URL = "s3://cooper-globus/lab/data_cms-pps-weights/"
+_V1_REMOTE_URL = "s3://cooper-globus/lab/data_demo-weights/"
 
 
 def _v1_with_storage(**storage_overrides) -> dict:
@@ -413,8 +413,8 @@ def _write_dvc_remote(project: Path, url: str = _V1_REMOTE_URL) -> None:
     dvc.mkdir(parents=True, exist_ok=True)
     (dvc / "config").write_text(
         "[core]\n"
-        "    remote = data_cms-pps-weights\n"
-        "['remote \"data_cms-pps-weights\"']\n"
+        "    remote = data_demo-weights\n"
+        "['remote \"data_demo-weights\"']\n"
         f"    url = {url}\n"
         "    endpointurl = https://s3.wasabisys.com\n",
         encoding="utf-8",
@@ -425,7 +425,7 @@ def test_migrate_carries_the_storage_block(tmp_path: Path) -> None:
     v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     v2, _report = migrate_v1_to_v2(v1)
     assert v2["storage"]["provider"] == "s3"
-    assert v2["storage"]["dvc"]["remote_name"] == "data_cms-pps-weights"
+    assert v2["storage"]["dvc"]["remote_name"] == "data_demo-weights"
     Metadata.model_validate(v2)
 
 
@@ -462,12 +462,12 @@ def test_bucket_and_prefix_are_derived_from_the_v1_remote_url() -> None:
     remote_url, so deriving the bucket alone lands the project in url_mismatch."""
     v1 = json.loads(FIXTURE.read_text(encoding="utf-8"))
     assert v1["storage"]["bucket"] == ""
-    assert v1["storage"]["prefix"] != "lab/data_cms-pps-weights/"
+    assert v1["storage"]["prefix"] != "lab/data_demo-weights/"
 
     v2, report = migrate_v1_to_v2(v1)
 
     assert v2["storage"]["bucket"] == "cooper-globus"
-    assert v2["storage"]["prefix"] == "lab/data_cms-pps-weights/"
+    assert v2["storage"]["prefix"] == "lab/data_demo-weights/"
     assert "storage.bucket (derived from storage.dvc.remote_url)" in report.defaulted
     assert "storage.prefix (derived from storage.dvc.remote_url)" in report.defaulted
 
@@ -484,7 +484,7 @@ def test_storage_carried_untouched_when_remote_url_is_unusable(remote_url) -> No
     The non-string cases are the messy-v1 shapes: a truthy non-string reaches
     urlparse and raises AttributeError, which no CLI handler maps, so
     `mintd update metadata` would exit on a raw traceback."""
-    dvc = {"remote_name": "data_cms-pps-weights"}
+    dvc = {"remote_name": "data_demo-weights"}
     if remote_url is not None:
         dvc["remote_url"] = remote_url
     v1 = _v1_with_storage(bucket="", prefix="lab/keep-me/", dvc=dvc)

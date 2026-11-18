@@ -354,7 +354,7 @@ def _check_repository_identity(meta: Metadata, metadata_path: Path) -> list[Chec
     `_require_repo_url` (data.py) raises on it, so `mintd data clone`
     against such a catalog entry exits 1. Presence only -- the derived
     `{org}/{full_name}` shape is a scaffold default a human may legitimately
-    override (the lab's `skills` entry really lives at `hcal-agent-skills`).
+    override (e.g. a catalog entry whose repo name differs from its catalog name).
     """
     if meta.repository.github_url.strip():
         return []
