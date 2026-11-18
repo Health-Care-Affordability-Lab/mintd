@@ -1,9 +1,9 @@
 """`mintd data push` with a real dvc subprocess against an S3 server.
 
-S3 is moto's server app behind a small WSGI layer that refuses
-ListObjectVersions with 403, as the lab's `mintd` key is refused, and counts
-PUTs. dvc runs for real, so these tests see what dvc does to the remote and
-to the pointer files, which the fakes elsewhere only describe.
+S3 is `tests/_harness/s3.py`'s server, which refuses ListObjectVersions with
+403, as the lab's `mintd` key is refused, and records PUTs. dvc runs for real,
+so these tests see what dvc does to the remote and to the pointer files, which
+the fakes elsewhere only describe.
 """
 
 from __future__ import annotations
@@ -11,54 +11,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-import threading
-import urllib.request
 from pathlib import Path
-from urllib.parse import parse_qs
 
-import boto3
 import pytest
 import yaml
 
 from mintd import cli
 from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)
 from tests._harness.git import _git
-
-BUCKET = "journey-bucket"
-
-
-@pytest.fixture
-def s3_server():
-    from moto.moto_server.werkzeug_app import DomainDispatcherApplication, create_backend_app
-    from werkzeug.serving import make_server
-
-    app = DomainDispatcherApplication(create_backend_app)
-    puts: list[str] = []
-
-    def guarded(environ, start_response):
-        method, query = environ["REQUEST_METHOD"], parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
-        if method == "GET" and "versions" in query:
-            start_response("403 Forbidden", [("Content-Type", "application/xml")])
-            return [b'<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>no</Message></Error>']
-        if method == "PUT" and environ.get("PATH_INFO", "/").strip("/").count("/") >= 1:
-            puts.append(environ["PATH_INFO"])
-        return app(environ, start_response)
-
-    server = make_server("127.0.0.1", 0, guarded, threaded=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    endpoint = f"http://127.0.0.1:{server.server_port}"
-    s3 = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1",
-                      aws_access_key_id="test", aws_secret_access_key="test")
-    # moto's backends are process-wide: start each test from an empty server.
-    urllib.request.urlopen(urllib.request.Request(f"{endpoint}/moto-api/reset", method="POST")).close()
-    s3.create_bucket(Bucket=BUCKET)
-    s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
-    puts.clear()
-    try:
-        yield endpoint, s3, puts
-    finally:
-        server.shutdown()
+from tests._harness.s3 import BUCKET
 
 
 @pytest.fixture
@@ -67,7 +28,7 @@ def producer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_serve
     `data/raw/` (two files) tracked by `data/raw.dvc`, and stage `build`
     (wdir `code`) writing `data/final/a.csv`; committed and pushed to a bare
     upstream, no data pushed yet."""
-    endpoint, s3, puts = s3_server
+    endpoint = s3_server.endpoint
     for k, v in {"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
                  "AWS_DEFAULT_REGION": "us-east-1"}.items():
         monkeypatch.setenv(k, v)
@@ -150,7 +111,7 @@ def _out(capsys) -> str:
 
 
 def test_push_pins_verifies_commits_and_an_import_lands_everything(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
-    _, _, puts = s3_server
+    puts = s3_server.puts
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     err = _out(capsys)
     assert "✓ 3 file(s) verified on s3://journey-bucket/lab/a" in err
@@ -175,7 +136,7 @@ def _drop_ids(proj: Path) -> None:
 
 
 def test_a_rewrite_that_drops_the_ids_costs_no_upload(producer, s3_server, real_dvc, tmp_path, capsys):  # noqa: F811
-    _, _, puts = s3_server
+    puts = s3_server.puts
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     capsys.readouterr()
     first = _ids(producer)
@@ -198,7 +159,7 @@ def test_a_folder_stage_dvc_commit_f_rewrote_costs_no_upload(producer, s3_server
     out back as `md5: <tree>.dir`, with no files list and no IDs. mintd
     re-attaches every file from S3 as the files list DVC writes after a push,
     so nothing is uploaded again and DVC still sees the stage as up to date."""
-    _, _, puts = s3_server
+    puts = s3_server.puts
     write = ("import pathlib; p=pathlib.Path('../data/out'); p.mkdir(parents=True, exist_ok=True); "
              "[(p/n).write_text(n) for n in ('a.csv', 'b.csv', 'c.csv')]")
     doc = yaml.safe_load((producer / "dvc.yaml").read_text())
@@ -243,7 +204,7 @@ def test_a_moved_remote_is_reuploaded_despite_a_stale_dvc_site_cache(
     list, undone here from git). `mintd data push` strips the stale IDs; with
     that site cache DVC would still upload nothing, since no md5 changed, so
     mintd's push runs with a fresh one, uploads to B and verifies."""
-    endpoint, _, puts = s3_server
+    endpoint, puts = s3_server.endpoint, s3_server.puts
     assert cli.main(["data", "push"]) == 0, _out(capsys)
     capsys.readouterr()
     _remote(producer, real_dvc, endpoint, "lab/b")
@@ -265,7 +226,7 @@ def test_a_moved_remote_is_reuploaded_despite_a_stale_dvc_site_cache(
 @pytest.mark.skipif(os.name == "nt", reason="the scope census is platform-independent")
 def test_push_false_and_cache_false_outs_are_outside_what_push_checks(producer, s3_server, real_dvc, capsys):  # noqa: F811
     """mintd's scope is DVC's own: what a real `dvc push` uploads."""
-    _, _, puts = s3_server
+    puts = s3_server.puts
     write = "import pathlib; [pathlib.Path(n).write_text(n) for n in ('../data/keep.csv', '../data/tmp.csv')]"
     doc = yaml.safe_load((producer / "dvc.yaml").read_text())
     doc["stages"]["side"] = {"wdir": "code", "cmd": f'"{sys.executable}" -c "{write}"', "outs": [
@@ -285,7 +246,7 @@ def test_a_file_sent_in_parts_is_proven_reattached_and_imported(producer, s3_ser
     """A file of 100 MiB or more goes up in 50 MiB parts, so its ETag isn't its
     md5. mintd proves it by recomputing that ETag from the cache, both after
     the first push and when a rewrite loses the ID, which costs no upload."""
-    _, s3, puts = s3_server
+    s3, puts = s3_server.client, s3_server.puts
     big = os.urandom(100 * 2**20 + 7)
     (producer / "data" / "big.bin").write_bytes(big)
     real_dvc(["add", "-q", "data/big.bin"], cwd=producer, check=True)
@@ -341,7 +302,7 @@ def test_a_pointer_gitignore_excludes_is_skipped_as_dvc_skips_it(producer, s3_se
     commit list -> plain-modified-forced blocks, and from the list after the
     commit -> json-modified-forced lists it; warning deleted -> every
     non-JSON case misses the `skipped` line."""
-    _, _, puts = s3_server
+    puts = s3_server.puts
     vendor = producer / "data" / "ext" / "vendor"
     vendor.mkdir(parents=True)
     if kind in ("forced", "modified-forced"):

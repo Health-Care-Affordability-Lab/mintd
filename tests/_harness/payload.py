@@ -28,10 +28,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 
-def _configure_remote(repo, remote: Path) -> None:
-    remote.mkdir(parents=True, exist_ok=True)
+def _configure_remote(repo, remote: Path | Mapping[str, str]) -> None:
+    """A path is a local-directory remote; a mapping is the remote's own dvc
+    config, e.g. an S3 `url` with its `endpointurl` and `version_aware`."""
+    if isinstance(remote, Path):
+        remote.mkdir(parents=True, exist_ok=True)
+        remote = {"url": str(remote)}
     with repo.config.edit() as conf:
-        conf["remote"]["storage"] = {"url": str(remote)}
+        conf["remote"]["storage"] = dict(remote)
         conf["core"]["remote"] = "storage"
 
 
@@ -52,10 +56,10 @@ def _write_out(work: Path, rel: str, body: bytes | Mapping[str, bytes]) -> Path:
 
 def publish_payload(
     work: Path,
-    remote: Path,
+    remote: Path | Mapping[str, str],
     outs: Mapping[str, bytes | Mapping[str, bytes]],
 ) -> None:
-    """`dvc add` each out and push to a local-directory remote.
+    """`dvc add` each out and push to `remote`.
 
     PRECONDITION: `work` is already a git worktree. Against a plain directory
     `Repo.init` raises `InitError("… not tracked by any supported SCM tool")`.
@@ -84,7 +88,7 @@ def publish_payload(
 
 def publish_pipeline_payload(
     work: Path,
-    remote: Path,
+    remote: Path | Mapping[str, str],
     dvc_yaml: str,
     *,
     seed: Mapping[str, bytes | Mapping[str, bytes]] | None = None,

@@ -22,6 +22,7 @@ from tests._harness.git import _git
 from tests._harness.consumer import consumer_project  # noqa: F401
 from tests._harness.dvc import real_dvc  # noqa: F401
 from tests._harness.producer import local_producer  # noqa: F401
+from tests._harness.s3 import s3_server  # noqa: F401
 from tests._harness.synthetic import synthetic_project  # noqa: F401
 
 
