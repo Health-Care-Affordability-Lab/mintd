@@ -209,8 +209,9 @@ def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
 
     # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
     # schema output into validate. Either way the DAG stays acyclic, and the
-    # out is uncached so git keeps the file for the catalog.
-    schema_out = {"../schemas/v1/schema.json": {"cache": False}}
+    # out is uncached so git keeps the file for the catalog, and persistent so
+    # a failed run doesn't delete the committed file.
+    schema_out = {"../schemas/v1/schema.json": {"cache": False, "persist": True}}
     if language == "stata":
         assert stages["schema"]["outs"] == [schema_out]
         assert schema_out not in validate.get("outs", [])
@@ -463,9 +464,10 @@ def test_fresh_data_scaffold_commits_its_schema_where_the_catalog_entry_points(
     """After `dvc repro`, a fresh data scaffold's column schema is a file git
     keeps (not ignored, not in DVC's cache), its catalog entry names where it
     is, and the file at that path in the commit lists the data's columns. A
-    forced rerun on unchanged data leaves it unchanged.
+    forced rerun on unchanged data leaves it unchanged, and a run that stops
+    for lack of data leaves it in place, so `git add -A` stages no deletion.
 
-    Mutations: drop `cache: false`, drop the scaffold's `schema` key or
+    Mutations: drop `cache: false` or `persist: true`, drop the scaffold's `schema` key or
     `serialize_by_alias`, exclude `schema` from the catalog, write the old
     `variables` shape, put back a row count or statistic, or put back the
     `generated_at` timestamp -> red.
@@ -504,6 +506,11 @@ def test_fresh_data_scaffold_commits_its_schema_where_the_catalog_entry_points(
     assert _git(["status", "--porcelain", "--", "schemas"], cwd=root) == ""
     assert not is_ignored(root, schema)
 
+    (root / "data" / "raw" / "claims.csv").unlink()
+    no_data = real_dvc(["repro", "-q"], cwd=root)
+    assert no_data.returncode != 0, no_data.stdout + no_data.stderr
+    assert _git(["status", "--porcelain", "--", "schemas"], cwd=root) == ""
+
 # The no-data stop names the format each validate step reads.
 _NO_DATA = {
     "python": "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro",
@@ -516,13 +523,15 @@ _NO_DATA = {
 def test_validate_step_without_data_stops_and_names_the_next_step(tmp_path: Path, language: str) -> None:
     """With nothing in `data/intermediate/`, validate stops non-zero, and the
     one line `dvc repro` shows says what to do next. It writes no schema and
-    no report (so nothing says PASSED for zero files), and leaves nothing git
-    would commit.
+    removes an earlier run's report (so nothing says PASSED for zero files),
+    and leaves nothing git would commit.
 
-    Mutations: remove the stop in any language, or Stata's message relay in
-    run_stata.sh, or the `logs/.msg_*` ignore line -> red.
+    Mutations: remove the stop or the old report's removal in any language,
+    or Stata's message relay in run_stata.sh, or the `logs/.msg_*` ignore
+    line -> red.
     """
     root = _scaffold(tmp_path, language)
+    (root / "data" / f"validation_report.{'txt' if language == 'stata' else 'json'}").write_text("Status: PASSED\n")
 
     validate = _run_validate(root, language)[0]
 
@@ -536,6 +545,35 @@ def test_validate_step_without_data_stops_and_names_the_next_step(tmp_path: Path
         capture_output=True, text=True, check=True,
     ).stdout
     assert status == "", f"the run left files git would commit: {status}"
+
+
+# Without a header row, pandas and R take the first data row as column names.
+_HEADERLESS = {
+    "numbers": b"06510,12.5\n06511,3.0\n",
+    "dates": b"2024-01-02,alpha\n2024-02-03,beta\n",
+    "first-row-value": b"M,CT\nM,NY\n",
+}
+
+
+@pytest.mark.parametrize("csv", _HEADERLESS.values(), ids=_HEADERLESS.keys())
+@pytest.mark.parametrize("language", ["python", "r"])
+def test_validate_step_refuses_column_names_that_look_like_data(tmp_path: Path, language: str, csv: bytes) -> None:
+    """A CSV without a header row would put its first row into the committed
+    schema, so validate stops, says to add a header row, and writes none.
+
+    Mutation: drop the check from either generator -> red. The R cells need
+    R; the text guard covers CI.
+    """
+    root = _scaffold(tmp_path, language)
+    intermediate = root / "data" / "intermediate"
+    intermediate.mkdir(parents=True, exist_ok=True)
+    (intermediate / "claims.csv").write_bytes(csv)
+
+    validate = _run_validate(root, language)[0]
+
+    assert validate.returncode != 0, validate.stdout + validate.stderr
+    assert "add a header row" in validate.stderr, validate.stderr
+    assert not (root / "schemas" / "v1" / "schema.json").exists()
 
 
 @pytest.mark.parametrize("language", ["python", "r"])
@@ -574,9 +612,10 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
     Mutations: delete the copy, drop R's checked copy or its `copy.mode =
     FALSE`, put the report back in `FINAL_DIR`, drop `$new`, restore the
     one-argument `log()`, restore the `"*."` glob, put back a row count,
-    path, timestamp or the `variables` list in the schema, or remove the
-    empty-data stop, Stata's message file or the wrapper's relay of it, or
-    the `logs/.msg_*` ignore line -> red.
+    path, timestamp or the `variables` list in the schema, drop the check on
+    column names that look like data, or remove the empty-data stop, its
+    removal of the old report, Stata's message file or the wrapper's relay of
+    it, or the `logs/.msg_*` ignore line -> red.
     """
     render_scaffold(project_type="data", name="demo", language=language, target_dir=tmp_path)
     code = tmp_path / "code"
@@ -597,7 +636,9 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
     assert _NO_DATA[language] in text
     if language == "r":
         assert "stop(no_data, call. = FALSE)" in text
+        assert re.search(r"unlink\(report_file\)\n\s*stop\(no_data", text)
     else:
+        assert 'capture erase "$DATA_DIR/validation_report.txt"' in text
         assert 'file open `msg_handle\' using "../logs/.msg_validate"' in text
         assert re.search(r"display as error \"`no_data'\"\n\s*exit 459\n", text)
         wrapper = (code / "run_stata.sh").read_text(encoding="utf-8")
@@ -619,6 +660,7 @@ def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, languag
         assert "fields <- c(fields, list(list(name = col_name, type = var_type)))" in utils
         assert "col_data <- df[[i]]" in utils  # by position: names can repeat or be blank
         assert 'stop(basename(data_path), " does not hold a data frame")' in utils
+        assert "refuse_data_as_column_names(data_path, df)" in utils  # a headerless file stops validate
         assert "schema = list(fields = fields)" in utils
         assert "read.csv(data_path, stringsAsFactors = FALSE, check.names = FALSE)" in utils
         assert 'return(sort(files, method = "radix"))' in utils

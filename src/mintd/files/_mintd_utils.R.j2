@@ -197,6 +197,23 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
   )
 )
 
+#' Stop if a column name has a digit and no letter (01234, 2024-01-02) or
+#' equals a first-row value: the file was read without its header row, and
+#' the committed, published schema would carry its first row.
+refuse_data_as_column_names <- function(data_path, df) {
+  col_names <- trimws(names(df))
+  first_row <- trimws(vapply(df, function(col) as.character(col[1])[1], ""))
+  bad <- which(col_names %in% first_row[!is.na(first_row)] |
+    (grepl("[0-9]", col_names) & !grepl("[[:alpha:]]", col_names)))
+  if (length(bad) > 0) {
+    # quit, not stop: validate skips a file it can't read with a warning, but
+    # this one must stop the run.
+    message(basename(data_path), ": column names look like data (columns ", paste(bad, collapse = ", "),
+            "): add a header row or rename them, then rerun")
+    quit(save = "no", status = 1)
+  }
+}
+
 #' Describe a data file's columns for its schema
 #'
 #' The result is committed to git and shown in the lab catalog, so it records
@@ -235,6 +252,7 @@ generate_data_schema <- function(data_path, output_path = NULL) {
     if (!is.data.frame(df)) {
       stop(basename(data_path), " does not hold a data frame")
     }
+    refuse_data_as_column_names(data_path, df)
 
     fields <- list()
     # By position: the names are the data's own, so they can repeat or be blank.

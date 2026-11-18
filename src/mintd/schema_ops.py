@@ -180,6 +180,24 @@ def infer_table_schema(
     }
 
 
+def _refuse_data_as_column_names(file_path: Path, df: Any) -> None:
+    """Raise if a column name has a digit and no letter (01234, 2024-01-02) or
+    equals a first-row value: the file was read without its header row, and
+    the committed output would carry its first row. The scaffold's Python and
+    R generators apply the same rule."""
+    first_row = {str(v).strip() for v in df.iloc[0].dropna()} if len(df) else set()
+    bad = [
+        str(i)
+        for i, col in enumerate(map(str, df.columns), start=1)
+        if col.strip() in first_row or (any(c.isdigit() for c in col) and not any(c.isalpha() for c in col))
+    ]
+    if bad:
+        raise ValueError(
+            f"{file_path.name}: column names look like data (columns {', '.join(bad)}): "
+            "add a header row or rename them, then rerun"
+        )
+
+
 def generate_schema_file(
     data_dir: Path,
     output_path: Path,
@@ -195,6 +213,7 @@ def generate_schema_file(
         SchemaExtraNotInstalled: pandas (and/or pyarrow for parquet) missing.
         FileNotFoundError: no supported data files in ``data_dir``.
         RuntimeError: all candidate files failed to process.
+        ValueError: a file's column names look like data.
     """
     _lazy_pandas()  # fail fast before scanning the directory
 
@@ -218,14 +237,18 @@ def generate_schema_file(
         try:
             df = _read_dataframe(data_file)
             schema = infer_table_schema(data_file, _dataframe=df)
-            files_schemas.append({
-                "filename": data_file.name,
-                "path": data_file.relative_to(data_dir).as_posix(),
-                "columns": len(df.columns),
-                "schema": schema,
-            })
         except Exception as e:
             failures.append((data_file.name, str(e)))
+            continue
+        # Outside the try: an unreadable file is skipped, but one whose names
+        # look like data stops the run.
+        _refuse_data_as_column_names(data_file, df)
+        files_schemas.append({
+            "filename": data_file.name,
+            "path": data_file.relative_to(data_dir).as_posix(),
+            "columns": len(df.columns),
+            "schema": schema,
+        })
 
     if not files_schemas:
         joined = "; ".join(f"{n}: {e}" for n, e in failures)

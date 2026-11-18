@@ -89,12 +89,16 @@ main <- function() {
 
   # Validate all CSV files in INTERMEDIATE_DIR
   intermediate_files <- list.files(INTERMEDIATE_DIR, pattern = "\\.csv$", full.names = TRUE)
+  # The report describes this run, not the product, so it stays out of
+  # FINAL_DIR (the product's data) and its schema.
+  report_file <- file.path(DATA_DIR, "validation_report.json")
 
   if (length(intermediate_files) == 0) {
     # Stop, so `dvc repro` fails here and says what to do, instead of
-    # writing a report and schema that describe nothing.
+    # writing a report and schema that describe nothing, or keeping an old report.
     no_data <- "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro"
     logger$log(no_data)
+    unlink(report_file)
     stop(no_data, call. = FALSE)
   } else {
     logger$log("Found ", length(intermediate_files), " CSV files to validate")
@@ -134,9 +138,6 @@ main <- function() {
     )
   }
 
-  # The report describes this run, not the product, so it stays out of
-  # FINAL_DIR (the product's data) and its schema.
-  report_file <- file.path(DATA_DIR, "validation_report.json")
   write_json(validation_report, report_file, pretty = TRUE, auto_unbox = TRUE)
   logger$log("Validation report saved to: ", report_file)
 

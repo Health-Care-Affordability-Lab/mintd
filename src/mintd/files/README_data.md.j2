@@ -89,6 +89,8 @@ The pipeline is a DVC DAG defined in `dvc.yaml`:
 3. **Schema**: `mintd data schema generate` - derives `schemas/v1/schema.json` (column names and types, committed to git for the lab catalog) from `data/final/` (runs as the `schema` stage)
 {% endif %}
 
+Before you commit `schemas/v1/`, check its schema holds only column names: a data file without a header row puts its first row there, and the pipeline refuses only names that are numbers, dates or a value from that row.
+
 Data cleaning lives inside `ingest` (see its `parse_and_clean` helper). When it
 grows, promote it to its own `clean` stage between `ingest` and `validate` in
 `dvc.yaml`, keeping the `deps`/`outs` chain connected.

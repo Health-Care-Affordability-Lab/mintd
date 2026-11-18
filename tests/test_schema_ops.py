@@ -104,6 +104,24 @@ def test_generate_schema_file_lists_files_in_the_same_order_on_every_os(tmp_path
     assert [f["filename"] for f in json.loads(out.read_text())["files"]] == ["B.csv", "a.csv"]
 
 
+@pytest.mark.parametrize(("name", "content"), [
+    ("claims.csv", "06510,12.5\n06511,3.0\n"),  # a CSV without its header row
+    ("people.json", '{"10001": {"age": 3}, "10002": {"age": 5}}'),  # an object keyed by IDs
+])
+def test_generate_schema_file_refuses_column_names_that_look_like_data(tmp_path: Path, name: str, content: str) -> None:
+    """The output is committed: names with a digit and no letter, or equal to
+    a first-row value, are refused and nothing is written. Mutation: drop the
+    check -> red."""
+    data_dir = tmp_path / "final"
+    data_dir.mkdir()
+    (data_dir / name).write_text(content, encoding="utf-8")
+    out = tmp_path / "schema.json"
+
+    with pytest.raises(ValueError, match="add a header row"):
+        generate_schema_file(data_dir, out)
+    assert not out.exists()
+
+
 # ---------------- combined output across formats ----------------
 
 def test_generate_schema_file_emits_combined_file_across_formats(tmp_path: Path) -> None:

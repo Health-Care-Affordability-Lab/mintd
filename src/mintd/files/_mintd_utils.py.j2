@@ -207,6 +207,26 @@ class ParameterAwareLogger:
             self.logger.removeHandler(handler)
 
 
+def refuse_data_as_column_names(data_path: Path, df) -> None:
+    """Stop if a column name has a digit and no letter (01234, 2024-01-02) or
+    equals a first-row value: the file was read without its header row, and
+    the committed, published schema would carry its first row."""
+    first_row = {str(v).strip() for v in df.iloc[0].dropna()} if len(df) else set()
+    bad = [
+        str(i)
+        for i, col in enumerate(map(str, df.columns), start=1)
+        if col.strip() in first_row
+        or (any(c.isdigit() for c in col) and not any(c.isalpha() for c in col))
+    ]
+    if bad:
+        # SystemExit, not an exception: validate skips a file it can't read
+        # with a warning, but this one must stop the run.
+        sys.exit(
+            f"{data_path.name}: column names look like data (columns {', '.join(bad)}): "
+            "add a header row or rename them, then rerun"
+        )
+
+
 def generate_data_schema(
     data_path: Path, output_path: Optional[Path] = None
 ) -> Dict[str, Any]:
@@ -235,6 +255,7 @@ def generate_data_schema(
             df = pd.read_excel(data_path)
         else:
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
+        refuse_data_as_column_names(data_path, df)
 
         fields = []
         for col in df.columns:

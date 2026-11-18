@@ -97,12 +97,16 @@ def main():
 
     # Validate all CSV files in INTERMEDIATE_DIR
     intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
+    # The report describes this run, not the product, so it stays out of
+    # FINAL_DIR (the product's data) and its schema.
+    report_file = DATA_DIR / "validation_report.json"
 
     if not intermediate_files:
         # Stop, so `dvc repro` fails here and says what to do, instead of
-        # writing a report and schema that describe nothing.
+        # writing a report and schema that describe nothing, or keeping an old report.
         no_data = "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro"
         logger.log(no_data)
+        report_file.unlink(missing_ok=True)
         sys.exit(no_data)
     else:
         logger.log(f"Found {len(intermediate_files)} CSV files to validate")
@@ -136,9 +140,6 @@ def main():
             "datasets": all_results,
         }
 
-    # The report describes this run, not the product, so it stays out of
-    # FINAL_DIR (the product's data) and its schema.
-    report_file = DATA_DIR / "validation_report.json"
     with open(report_file, "w") as f:
         json.dump(validation_report, f, indent=2)
     logger.log(f"Validation report saved to: {report_file}")
