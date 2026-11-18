@@ -28,13 +28,14 @@ jobs:
           # matching the windows-test job. Without this the POSIX matrix
           # falls back to 0.0.1 and --version diverges from Windows CI.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python }}
+          activate-environment: true
       - name: Install
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        # --locked fails the job when uv.lock is out of date with pyproject.toml,
+        # so CI tests exactly the dependency set the lock records.
+        run: uv sync --locked --extra dev
       - name: Configure git identity
         run: |
           git config --global user.email "ci@example.com"
@@ -54,14 +55,24 @@ jobs:
         # 30 makes data/code/project types prompt interactively — CI
         # is non-TTY and would error with InitNonInteractive. Enclave
         # skips the prompt entirely.
+        # The binary comes from the built wheel, installed with no extras into
+        # its own tool dir as a user's install would be, not from the dev env:
+        # a file missing from the wheel or a top-level import of an extra
+        # fails here.
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/uv-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/uv-bin
         run: |
-          mintd --version
-          mintd --help
-          mintd init --help
-          mintd check --help
-          mintd publish --help
-          mintd data --help
-          mintd init enclave ci-smoke --path "${{ runner.temp }}"
+          uv build --wheel
+          uv tool install dist/*.whl
+          mintd="$UV_TOOL_BIN_DIR/mintd"
+          "$mintd" --version
+          "$mintd" --help
+          "$mintd" init --help
+          "$mintd" check --help
+          "$mintd" publish --help
+          "$mintd" data --help
+          "$mintd" init enclave ci-smoke --path "${{ runner.temp }}"
   windows-test:
     # REQUIRED since the canary first went fully green (fsync fix #5 +
     # test-portability #7): a red windows-test now means a real regression.
@@ -83,18 +94,18 @@ jobs:
           # Full history + tags so a future git-derived version
           # (e.g. setuptools-scm) resolves on the runner.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python }}
+          activate-environment: true
       - name: Create venv and install
         # $PSNativeCommandUseErrorActionPreference makes pwsh fail the step on
         # ANY native command's non-zero exit, not just the last one — without
         # it a mid-step failure is swallowed and the step reports green.
+        # --locked fails the job when uv.lock is out of date with pyproject.toml.
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          python -m venv .venv
-          .venv\Scripts\python.exe -m pip install --upgrade pip
-          .venv\Scripts\python.exe -m pip install -e ".[dev]"
+          uv sync --locked --extra dev
       - name: Configure git identity
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
@@ -109,15 +120,22 @@ jobs:
       - name: Test
         run: .venv\Scripts\pytest.exe -q -n auto
       - name: Smoke install
-        # Mirrors the POSIX smoke step: confirms the installed mintd
-        # console-script launches on Windows. Enclave init is used because
+        # Mirrors the POSIX smoke step: confirms the mintd console-script,
+        # installed from the built wheel with no extras into its own tool dir,
+        # launches on Windows. Enclave init is used because
         # data/code/project types prompt interactively and CI is non-TTY.
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}\uv-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}\uv-bin
         run: |
           $PSNativeCommandUseErrorActionPreference = $true
-          .venv\Scripts\mintd.exe --version
-          .venv\Scripts\mintd.exe --help
-          .venv\Scripts\mintd.exe init --help
-          .venv\Scripts\mintd.exe check --help
-          .venv\Scripts\mintd.exe publish --help
-          .venv\Scripts\mintd.exe data --help
-          .venv\Scripts\mintd.exe init enclave ci-smoke --path "${{ runner.temp }}"
+          uv build --wheel
+          uv tool install (Get-Item dist\*.whl).FullName
+          $mintd = Join-Path $env:UV_TOOL_BIN_DIR mintd.exe
+          & $mintd --version
+          & $mintd --help
+          & $mintd init --help
+          & $mintd check --help
+          & $mintd publish --help
+          & $mintd data --help
+          & $mintd init enclave ci-smoke --path "${{ runner.temp }}"
