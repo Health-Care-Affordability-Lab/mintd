@@ -106,8 +106,8 @@ max-statements = 183
 banned-module-level-imports = ["pandas", "pyarrow"]
 
 # TID251 makes each risky ability a lint gate instead of a docstring claim:
-# spawning a process, reaching S3, deleting or moving files, and opening a
-# network connection. A module that does one of these is listed in
+# spawning a process, reaching S3, deleting, moving or copying files, and
+# opening a network connection. A module that does one of these is listed in
 # per-file-ignores below, so the list is the review surface and the repair
 # backlog. CI also runs TID251 with --ignore-noqa, so only that list exempts.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
@@ -118,13 +118,20 @@ banned-module-level-imports = ["pandas", "pyarrow"]
 "os.remove" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
 "os.unlink" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
 "os.rmdir" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.removedirs" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.truncate" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
 "shutil.move" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
 "os.rename" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
 "os.replace" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"os.renames" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"shutil.copyfile" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"shutil.copytree" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
 "urllib.request" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
 "requests" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
 "httpx" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
 "socket" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"urllib3" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"http.client" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
 
 # Every entry is an exemption that tests/test_substrate_rules.py pins, so the
 # map can only shrink. The codes after the first block are today's offenders.
