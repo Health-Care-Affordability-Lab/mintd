@@ -73,7 +73,7 @@ validate_dataset <- function(df, dataset_name, logger) {
 
 main <- function() {
   # Initialize logging (validates directory and creates log file)
-  logger <- ParameterAwareLogger("validate")
+  logger <- ParameterAwareLogger$new("validate")
   logger$log("Starting data validation for {{ project_name }}...")
 
   # Ensure data directories exist (using global paths from _mintd_utils.R)
@@ -104,6 +104,16 @@ main <- function() {
       results <- validate_dataset(df, basename(data_file), logger)
       all_results <- c(all_results, list(results))
       all_valid <- all_valid && results$passed
+      # The checked file ships unchanged as the product's data; a readr
+      # round-trip could change its values (leading zeros, precision).
+      # file.copy returns FALSE instead of failing, so check it. copy.mode = FALSE:
+      # after `dvc repro ingest`, DVC can leave the intermediate files read-only,
+      # and a copied mode would stop a hand rerun from overwriting this copy.
+      # (After a full `dvc repro`, data/final/ is itself read-only; rerun
+      # through `dvc repro`.)
+      if (!file.copy(data_file, file.path(FINAL_DIR, basename(data_file)), overwrite = TRUE, copy.mode = FALSE)) {
+        stop("Could not copy ", data_file, " to ", FINAL_DIR)
+      }
     }
 
     # Summary
@@ -121,8 +131,9 @@ main <- function() {
     )
   }
 
-  # Save validation report to FINAL_DIR
-  report_file <- file.path(FINAL_DIR, "validation_report.json")
+  # The report describes this run, not the product, so it stays out of
+  # FINAL_DIR (the product's data) and its schema.
+  report_file <- file.path(DATA_DIR, "validation_report.json")
   write_json(validation_report, report_file, pretty = TRUE, auto_unbox = TRUE)
   logger$log("Validation report saved to: ", report_file)
 

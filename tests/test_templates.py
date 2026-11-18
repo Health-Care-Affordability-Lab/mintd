@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from mintd._templates import (
     InitNameInvalid,
@@ -16,8 +20,11 @@ from mintd._templates import (
     validate_project_name,
 )
 from mintd._templates.scaffolds import dispatch
+from mintd.init import init_project
 from mintd.model import Metadata
 from mintd.publish import _resolve_version
+
+from tests._fakes.init_ops import _FakeInitOps
 
 
 # --- engine + name validation ---------------------------------------------
@@ -248,6 +255,192 @@ def test_data_scaffold_has_no_clean_stub_reference(
         f"{language}: rendered files still reference the deleted clean stub: "
         f"{offenders}"
     )
+
+
+# --- the validate step ships the data, and the schema describes it --------
+
+# Leading zeros make a rewrite of the copied file visible.
+_SEED_CSV = b"zip,amount\n01234,1.5\n02345,\n"
+_STATA = next(filter(None, map(shutil.which, ("stata-mp", "stata-se", "stata"))), None)
+
+
+def _r_ready() -> bool:
+    """Rscript plus the packages validate.R loads; a runner can have one without the other."""
+    if shutil.which("Rscript") is None:
+        return False
+    probe = 'quit(status = as.integer(!all(vapply(c("R6","readr","jsonlite"), requireNamespace, logical(1), quietly = TRUE))))'
+    return subprocess.run(["Rscript", "-e", probe], capture_output=True).returncode == 0
+
+
+def _scaffold(tmp_path: Path, language: str) -> Path:
+    """`mintd init data`'s own code path, without its git and dvc subprocesses."""
+    return init_project(
+        project_type="data", name="demo", target_dir=tmp_path, language=language, ops=_FakeInitOps()  # type: ignore[arg-type]
+    )[0]
+
+
+def _run_validate(root: Path, language: str) -> list[subprocess.CompletedProcess[str]]:
+    """Run the scaffold's validate step from `code/` (its `wdir`); Stata also runs its `schema` stage."""
+    code = root / "code"
+    if language == "python":
+        cmds = [[sys.executable, "validate.py"]]
+    elif language == "r":
+        if not _r_ready():
+            pytest.skip("Rscript with R6, readr and jsonlite is not installed")
+        cmds = [["Rscript", "validate.R"]]
+    else:
+        if _STATA is None:
+            pytest.skip("Stata is not installed")
+        cmds = [
+            ["sh", "run_stata.sh", "validate", _STATA],
+            [sys.executable, "-m", "mintd", "data", "schema", "generate", "--project-dir", ".."],
+        ]
+    return [subprocess.run(c, cwd=code, capture_output=True, text=True) for c in cmds]
+
+
+def _schema_columns(root: Path) -> list[list[str]]:
+    doc = json.loads((root / "schemas" / "v1" / "schema.json").read_text(encoding="utf-8"))
+    # Python and R write `variables`; `mintd data schema generate` writes Frictionless `schema.fields`.
+    return [[c["name"] for c in f.get("variables") or f["schema"]["fields"]] for f in doc["files"]]
+
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_validate_step_schema_describes_the_checked_data(tmp_path: Path, language: str) -> None:
+    """A fresh data scaffold's validate step ships the file it checked to
+    `data/final/` unchanged, and the schema describes that file's columns,
+    not the validation report. The report lands where git ignores it.
+
+    The R and Stata cells need their runtimes and skip in CI; the template
+    guard below covers them there.
+
+    Mutations: report back into `FINAL_DIR`, delete the copy, copy through
+    `df.to_csv` instead of the bytes, report into `logs/`, or drop the report
+    -> red.
+    """
+    root = _scaffold(tmp_path, language)
+    intermediate = root / "data" / "intermediate"
+    intermediate.mkdir(parents=True, exist_ok=True)
+    if language == "stata":
+        import pandas as pd
+
+        seed = intermediate / "claims.dta"
+        pd.DataFrame({"zip": ["01234", "02345"], "amount": [1.5, None]}).to_stata(seed, write_index=False)
+    else:
+        seed = intermediate / "claims.csv"
+        seed.write_bytes(_SEED_CSV)
+
+    runs = _run_validate(root, language)
+
+    for r in runs:
+        assert r.returncode == 0, f"{r.args}: {r.stdout}\n{r.stderr}"
+    final = root / "data" / "final"
+    assert sorted(p.name for p in final.iterdir()) == [seed.name]
+    assert (final / seed.name).read_bytes() == seed.read_bytes()
+    assert _schema_columns(root) == [["zip", "amount"]]
+    assert (root / "data" / f"validation_report.{'txt' if language == 'stata' else 'json'}").is_file()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all", "--", "data", "logs"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    assert status == "", f"the run left files git would commit: {status}"
+
+
+@pytest.mark.parametrize("language", ["python", "r"])
+def test_validate_step_without_data_writes_no_schema(tmp_path: Path, language: str) -> None:
+    """With nothing in `data/intermediate/`, validate writes no schema (so
+    `dvc repro` stops on the missing out) and its log says why, rather than
+    writing a schema that describes the report.
+
+    Mutations: report back into `FINAL_DIR`, or reword the log line -> red.
+    """
+    root = _scaffold(tmp_path, language)
+
+    runs = _run_validate(root, language)
+
+    for r in runs:
+        assert r.returncode == 0, f"{r.args}: {r.stdout}\n{r.stderr}"
+    assert not (root / "schemas" / "v1" / "schema.json").exists()
+    log = next((root / "logs").glob("validate_*.log")).read_text(encoding="utf-8")
+    assert "No data files found in FINAL_DIR" in log
+
+
+@pytest.mark.parametrize("language", ["python", "r"])
+def test_validate_step_reruns_over_a_read_only_input(tmp_path: Path, language: str) -> None:
+    """After `dvc repro ingest` (or a pull of `data/intermediate/`), DVC can
+    leave the intermediate files read-only. The copy into `data/final/`
+    carries the bytes, not that mode, so a second run of validate by hand can
+    overwrite its own copy. After a full `dvc repro`, `data/final/` is itself
+    a read-only link, and reruns go through `dvc repro`, which removes outs
+    first.
+
+    Mutation: copy with the file's mode (`shutil.copy2`, or R's default
+    `copy.mode = TRUE`) -> red.
+    """
+    root = _scaffold(tmp_path, language)
+    intermediate = root / "data" / "intermediate"
+    intermediate.mkdir(parents=True, exist_ok=True)
+    seed = intermediate / "claims.csv"
+    seed.write_bytes(_SEED_CSV)
+    seed.chmod(0o444)
+
+    for attempt in (1, 2):
+        for r in _run_validate(root, language):
+            assert r.returncode == 0, f"run {attempt}, {r.args}: {r.stdout}\n{r.stderr}"
+    assert (root / "data" / "final" / seed.name).read_bytes() == _SEED_CSV
+
+
+@pytest.mark.parametrize("language", ["r", "stata"])
+def test_validate_template_ships_the_data_not_the_report(tmp_path: Path, language: str) -> None:
+    """CI has neither R nor Stata, so the rendered scripts are checked as
+    text: validate copies what it checked into `FINAL_DIR`, a failed R copy
+    stops the step, and the report goes under `DATA_DIR`, never `FINAL_DIR`.
+    For R also: the logger is built with `$new`, `log()` pastes its parts,
+    and file extensions are matched with a regex, not a glob.
+
+    Mutations: delete the copy, drop R's checked copy or its `copy.mode =
+    FALSE`, put the report back in `FINAL_DIR`, drop `$new`, restore the
+    one-argument `log()`, or restore the `"*."` glob -> red.
+    """
+    render_scaffold(project_type="data", name="demo", language=language, target_dir=tmp_path)
+    code = tmp_path / "code"
+    ext, report = ("R", "validation_report.json") if language == "r" else ("do", "validation_report.txt")
+    text = (code / f"validate.{ext}").read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    if language == "r":
+        assert "if (!file.copy(data_file, file.path(FINAL_DIR, basename(data_file)), overwrite = TRUE, copy.mode = FALSE)) {" in text
+        assert 'stop("Could not copy "' in text
+    else:
+        assert 'copy "$INTERMEDIATE_DIR/`file\'" "$FINAL_DIR/`file\'", replace' in text
+    assert not [ln for ln in lines if "FINAL_DIR" in ln and "validation_report" in ln]
+    assert [ln for ln in lines if report in ln], f"no line names {report}"
+    assert all("DATA_DIR" in ln for ln in lines if report in ln)
+
+    if language == "r":
+        stale = [p.name for p in code.glob("*.R") if re.search(r"\bParameterAwareLogger\(", p.read_text(encoding="utf-8"))]
+        assert not stale, f"logger called without $new in: {stale}"
+        utils = (code / "_mintd_utils.R").read_text(encoding="utf-8")
+        assert 'log = function(..., level = "info")' in utils
+        assert "paste0(...)" in utils
+        assert 'pattern <- paste0("\\\\.", ext, "$")' in utils
+        assert 'paste0("*.", ext)' not in utils
+
+
+@pytest.mark.parametrize("language", ["python", "r", "stata"])
+def test_readme_names_the_stage_that_writes_the_schema(tmp_path: Path, language: str) -> None:
+    """The README names `schemas/v1/schema.json` once, on the line for the
+    stage whose `outs` write it in `dvc.yaml`.
+
+    Mutation: drop the schema path from the Python Validate line, or move
+    Stata's mention off its Schema line -> red.
+    """
+    render_scaffold(project_type="data", name="demo", language=language, target_dir=tmp_path)
+    stages = yaml.safe_load((tmp_path / "dvc.yaml").read_text(encoding="utf-8"))["stages"]
+    writer = next(n for n, s in stages.items() if "schemas/v1/schema.json" in str(s.get("outs")))
+    lines = [ln for ln in (tmp_path / "README.md").read_text(encoding="utf-8").splitlines() if "schemas/v1/schema.json" in ln]
+    assert len(lines) == 1, lines
+    assert f"**{writer.title()}**" in lines[0]
 
 
 def test_run_all_do_fails_loud_on_missing_config(tmp_path: Path) -> None:
