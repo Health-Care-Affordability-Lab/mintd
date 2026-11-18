@@ -215,7 +215,7 @@ class ProducerView:
 
         peeked = _peek_schema_version(raw)
         if peeked is not None and peeked != "2.0":
-            raise ProducerError.schema_too_old(repo, pin, detail=f"schema_version={peeked}")
+            raise ProducerError.schema_too_old(repo, pin, detail=peeked)
 
         try:
             meta = Metadata.model_validate_json(raw)
