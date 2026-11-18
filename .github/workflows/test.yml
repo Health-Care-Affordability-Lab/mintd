@@ -6,6 +6,8 @@ on:
     branches: [main]
 jobs:
   test:
+    # Named without the image, so an image bump never renames a required check.
+    name: test (${{ matrix.name }}, ${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
@@ -16,9 +18,9 @@ jobs:
         # systems run the newest, which install.sh and install.ps1 pin
         # (`--python`): move the pin when this moves.
         include:
-          - {os: ubuntu-26.04, python: "3.11"}
-          - {os: ubuntu-26.04, python: "3.13"}
-          - {os: macos-26, python: "3.13"}
+          - {name: ubuntu, os: ubuntu-26.04, python: "3.11"}
+          - {name: ubuntu, os: ubuntu-26.04, python: "3.13"}
+          - {name: macos, os: macos-26, python: "3.13"}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0

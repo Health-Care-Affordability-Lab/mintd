@@ -529,7 +529,7 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
     # exactly ONE spelling, so appending `print(...)  #noqa: T201` to
     # `src/mintd/_console.py` left BOTH `ruff check src` and this ratchet green.
     # `ruff format` does normalize the unspaced form, but nothing gates it: CI
-    # runs only `ruff check src tests` (.github/workflows/test.yml:46, :119) and
+    # runs only `ruff check src tests` (.github/workflows/test.yml:48, :121) and
     # there is no pre-commit config at the repo root, so a deliberate evasion
     # never passes through the formatter.
     pattern = re.compile(r"#\s*noqa", re.IGNORECASE)
