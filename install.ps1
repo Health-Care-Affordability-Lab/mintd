@@ -12,12 +12,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = "https://git@github.com/Health-Care-Affordability-Lab/mintd.git"
+# The uv to install when none is found, and the oldest accepted without a
+# warning. Bump it together with UV_VERSION in install.sh (see there).
+$UvVersion = "0.13.9"
 
 # Ensure uv is installed
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Write-Host "Installing uv..."
-    irm https://astral.sh/uv/install.ps1 | iex
+    Write-Host "Installing uv $UvVersion..."
+    irm "https://astral.sh/uv/$UvVersion/install.ps1" | iex
     $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
+} elseif ((uv --version) -match '(\d+\.\d+\.\d+)' -and [version]$Matches[1] -lt [version]$UvVersion) {
+    Write-Warning "uv $($Matches[1]) is older than $UvVersion; upgrade it with 'uv self update'."
 }
 
 $GitUrl = "git+$Repo"
