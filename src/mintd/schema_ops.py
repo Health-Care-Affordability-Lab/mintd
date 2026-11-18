@@ -180,10 +180,48 @@ def infer_table_schema(
     }
 
 
+class ColumnNamesLookLikeData(ValueError):
+    """A file's column names look like a row of its data."""
+
+
+def _as_header(value: Any) -> str:
+    """A value as the scaffold's ingest names a column: lowercase, ``_`` for spaces and ``-``."""
+    return str(value).strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _refuse_data_as_column_names(file_path: Path, df: Any, allow_numeric: bool) -> None:
+    """Raise if a column name has a digit and no letter (01234, 2024-01-02),
+    unless ``allow_numeric``, or equals its own column's first value as a
+    header: the file was read without its header row, and the committed output
+    would carry its first row. The message gives positions, never names. The
+    scaffold's Python and R generators apply the same rule."""
+    names = [str(c).strip() for c in df.columns]
+    numeric = [i for i, n in enumerate(names, 1) if any(map(str.isdigit, n)) and not any(map(str.isalpha, n))]
+    repeated: list[int] = []
+    if len(df):  # each name against its own column's first value only
+        row = df.iloc[0]
+        repeated = [i for i, (n, v, ok) in enumerate(zip(names, row, row.notna(), strict=True), 1) if ok and _as_header(n) == _as_header(v)]
+    problems: list[str] = []
+    if numeric and not allow_numeric:
+        problems.append(
+            f"columns {', '.join(map(str, numeric))} have numeric names, as a file without a header row would: "
+            "add a header row, rename them (2019 to y2019), or pass --allow-numeric-column-names "
+            "(in dvc.yaml's schema cmd) if they are real names"
+        )
+    if repeated:
+        problems.append(
+            f"columns {', '.join(map(str, repeated))} match their own first-row value, as a file without "
+            "a header row would: add a header row or rename them"
+        )
+    if problems:
+        raise ColumnNamesLookLikeData("\n".join(f"{file_path.name}: {p}" for p in problems))
+
+
 def generate_schema_file(
     data_dir: Path,
     output_path: Path,
     recursive: bool = True,
+    allow_numeric_column_names: bool = False,
 ) -> None:
     """Walk ``data_dir`` for supported files; write one combined JSON.
 
@@ -195,6 +233,7 @@ def generate_schema_file(
         SchemaExtraNotInstalled: pandas (and/or pyarrow for parquet) missing.
         FileNotFoundError: no supported data files in ``data_dir``.
         RuntimeError: all candidate files failed to process.
+        ColumnNamesLookLikeData: a file's column names look like data.
     """
     _lazy_pandas()  # fail fast before scanning the directory
 
@@ -218,14 +257,18 @@ def generate_schema_file(
         try:
             df = _read_dataframe(data_file)
             schema = infer_table_schema(data_file, _dataframe=df)
-            files_schemas.append({
-                "filename": data_file.name,
-                "path": data_file.relative_to(data_dir).as_posix(),
-                "columns": len(df.columns),
-                "schema": schema,
-            })
         except Exception as e:
             failures.append((data_file.name, str(e)))
+            continue
+        # Outside the try: an unreadable file is skipped, but one whose names
+        # look like data stops the run.
+        _refuse_data_as_column_names(data_file, df, allow_numeric_column_names)
+        files_schemas.append({
+            "filename": data_file.name,
+            "path": data_file.relative_to(data_dir).as_posix(),
+            "columns": len(df.columns),
+            "schema": schema,
+        })
 
     if not files_schemas:
         joined = "; ".join(f"{n}: {e}" for n, e in failures)

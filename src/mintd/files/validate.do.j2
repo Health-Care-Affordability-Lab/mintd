@@ -100,6 +100,8 @@ program define main
         file open `msg_handle' using "../logs/.msg_validate", write text replace
         file write `msg_handle' "`no_data'" _n
         file close `msg_handle'
+        * An earlier run's report would still say PASSED.
+        capture erase "$DATA_DIR/validation_report.txt"
         display as error "`no_data'"
         exit 459
     }

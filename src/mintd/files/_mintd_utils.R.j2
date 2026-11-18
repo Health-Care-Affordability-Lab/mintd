@@ -197,6 +197,32 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
   )
 )
 
+#' Stop if a column name has a digit and no letter (01234, 2024-01-02), unless
+#' allow_numeric, or equals its own column's first value as a header (as ingest
+#' names columns: lowercase, `_` for spaces and `-`): the file was read without
+#' its header row, and the committed, published schema would carry its first
+#' row. The message gives positions, never names.
+refuse_data_as_column_names <- function(data_path, df, allow_numeric) {
+  col_names <- trimws(names(df))
+  first_row <- trimws(vapply(df, function(col) as.character(col[1])[1], ""))
+  numeric <- which(!allow_numeric & grepl("[0-9]", col_names) & !grepl("[[:alpha:]]", col_names))
+  as_header <- function(x) gsub("[ -]", "_", tolower(x))
+  repeated <- which(!is.na(first_row) & as_header(col_names) == as_header(first_row))  # own column only
+  problems <- c(
+    if (length(numeric) > 0) paste0("columns ", paste(numeric, collapse = ", "), " have numeric names, as a file ",
+      "without a header row would: add a header row, rename them (2019 to y2019), or set ",
+      "ALLOW_NUMERIC_COLUMN_NAMES <- TRUE in validate.R if they are real names"),
+    if (length(repeated) > 0) paste0("columns ", paste(repeated, collapse = ", "), " match their own first-row ",
+      "value, as a file without a header row would: add a header row or rename them")
+  )
+  if (length(problems) > 0) {
+    # quit, not stop: validate skips a file it can't read with a warning, but
+    # this one must stop the run.
+    message(paste0(basename(data_path), ": ", problems, collapse = "\n"))
+    quit(save = "no", status = 1)
+  }
+}
+
 #' Describe a data file's columns for its schema
 #'
 #' The result is committed to git and shown in the lab catalog, so it records
@@ -207,7 +233,7 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
 #' @param output_path Optional path to save schema JSON
 #' @return List with the file name and its table schema's fields
 #' @export
-generate_data_schema <- function(data_path, output_path = NULL) {
+generate_data_schema <- function(data_path, output_path = NULL, allow_numeric_column_names = FALSE) {
   tryCatch({
     # Read data based on file extension
     ext <- tolower(tools::file_ext(data_path))
@@ -235,6 +261,7 @@ generate_data_schema <- function(data_path, output_path = NULL) {
     if (!is.data.frame(df)) {
       stop(basename(data_path), " does not hold a data frame")
     }
+    refuse_data_as_column_names(data_path, df, allow_numeric_column_names)
 
     fields <- list()
     # By position: the names are the data's own, so they can repeat or be blank.

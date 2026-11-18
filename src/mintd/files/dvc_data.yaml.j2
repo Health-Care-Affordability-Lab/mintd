@@ -80,8 +80,10 @@ stages:
       - ../data/final/
 {% if language != "stata" %}
       # cache: false: git, not DVC, keeps the column schema, so the catalog can read it.
+      # persist: true: a run that stops (no data, say) leaves the committed file in place.
       - ../schemas/v1/schema.json:
           cache: false
+          persist: true
 {% endif %}
 {% if language == "stata" %}
   schema:
@@ -91,6 +93,8 @@ stages:
       - ../data/final/
     outs:
       # cache: false: git, not DVC, keeps the column schema, so the catalog can read it.
+      # persist: true: a run that stops (no data, say) leaves the committed file in place.
       - ../schemas/v1/schema.json:
           cache: false
+          persist: true
 {% endif %}

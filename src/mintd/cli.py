@@ -276,6 +276,28 @@ def main(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _add_schema_parser(subs: Any) -> None:
+    """Wire ``data schema generate``. Split out of ``_build_parser``, which is
+    at the statement cap."""
+    p_schema = subs.add_parser("schema", help="Schema operations")
+    p_schema_sub = p_schema.add_subparsers(dest="schema_command")
+    p_schema_gen = p_schema_sub.add_parser(
+        "generate",
+        help="Generate Frictionless table schemas for data files (requires [schema] extra)",
+    )
+    p_schema_gen.add_argument("--project-dir", type=Path, default=None)
+    p_schema_gen.add_argument("--data-dir", type=Path, default=None)
+    p_schema_gen.add_argument("--output", type=Path, default=None)
+    p_schema_gen.add_argument(
+        "--recursive", action=argparse.BooleanOptionalAction, default=True,
+    )
+    p_schema_gen.add_argument(
+        "--allow-numeric-column-names", action="store_true",
+        help="accept column names with digits and no letters (2019, 09001); put it in dvc.yaml's cmd to commit it",
+    )
+    p_schema_gen.set_defaults(_handler=_handle_data_schema_generate)
+
+
 def _add_cache_parser(subs: Any) -> None:
     """Wire the ``cache push/pull/ls`` subparsers. Split out of ``_build_parser``
     so the naming-discipline grep test can scope to exactly the cache surface's
@@ -513,19 +535,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_remove.add_argument("name")
     p_remove.set_defaults(_handler=_handle_data_remove)
 
-    p_schema = p_data_sub.add_parser("schema", help="Schema operations")
-    p_schema_sub = p_schema.add_subparsers(dest="schema_command")
-    p_schema_gen = p_schema_sub.add_parser(
-        "generate",
-        help="Generate Frictionless table schemas for data files (requires [schema] extra)",
-    )
-    p_schema_gen.add_argument("--project-dir", type=Path, default=None)
-    p_schema_gen.add_argument("--data-dir", type=Path, default=None)
-    p_schema_gen.add_argument("--output", type=Path, default=None)
-    p_schema_gen.add_argument(
-        "--recursive", action=argparse.BooleanOptionalAction, default=True,
-    )
-    p_schema_gen.set_defaults(_handler=_handle_data_schema_generate)
+    _add_schema_parser(p_data_sub)
 
     p_data_list = p_data_sub.add_parser("list", help="List catalog entries or local imports")
     p_data_list.add_argument("--imported", action="store_true")
@@ -1607,6 +1617,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
+        ColumnNamesLookLikeData,
         SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
@@ -1627,7 +1638,10 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
 
     try:
         with reporter.status("Generating schema..."):
-            generate_schema_file(data_dir, output, recursive=args.recursive)
+            generate_schema_file(
+                data_dir, output, recursive=args.recursive,
+                allow_numeric_column_names=args.allow_numeric_column_names,
+            )
     except SchemaExtraNotInstalled:
         reporter.error(
             "schema generation requires the [schema] extra",
@@ -1639,6 +1653,9 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
         return 1
     except FileNotFoundError as e:
         reporter.error(str(e), hint=f"add supported data files under {data_dir} or pass --data-dir")
+        return 1
+    except ColumnNamesLookLikeData as e:
+        reporter.error(str(e))  # it names its own fix
         return 1
     except (ValueError, RuntimeError) as e:
         reporter.error(str(e), hint="check file format support (.dta, .csv, .json, .parquet) and integrity")
