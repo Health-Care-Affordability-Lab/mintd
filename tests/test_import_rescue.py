@@ -490,7 +490,7 @@ def test_fresh_clone_uses_producer_pointer_files(producer_bucket, tmp_path):
 
 
 def test_no_hash_source_anywhere_actionable_error(producer_bucket, tmp_path):
-    s3, bucket = producer_bucket  # noqa: F841 — bucket exists but no manifest
+    s3, bucket = producer_bucket  # bucket exists but no manifest
     producer = tmp_path / "producer"
     sha = _git_repo(producer, {".dvc/config": PRODUCER_CONFIG})  # no pointer file
     consumer = tmp_path / "consumer"
@@ -511,7 +511,7 @@ def test_no_hash_source_anywhere_actionable_error(producer_bucket, tmp_path):
 
 
 def test_unreachable_producer_maps_to_actionable_hint(producer_bucket, tmp_path):
-    s3, bucket = producer_bucket  # noqa: F841
+    s3, bucket = producer_bucket
     producer = tmp_path / "producer"
     _git_repo(producer, {".dvc/config": PRODUCER_CONFIG})
     consumer = tmp_path / "consumer"

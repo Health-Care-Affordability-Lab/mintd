@@ -159,7 +159,7 @@ def test_cache_push_partial_failure_exit_1(
         def __getattr__(self, n):
             return getattr(self._real, n)
 
-        def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):  # noqa: N803
+        def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):
             if "boom" in key:
                 try:
                     raise ClientError(

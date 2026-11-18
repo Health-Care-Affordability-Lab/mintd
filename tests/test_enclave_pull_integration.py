@@ -67,7 +67,7 @@ class _Client:
     def __init__(self, repo_url: str) -> None:
         self._repo_url = repo_url
 
-    def fetch(self, name):  # noqa: ANN001 - structural CatalogClient stand-in
+    def fetch(self, name):  # structural CatalogClient stand-in
         repo_url = self._repo_url
 
         class _Entry:

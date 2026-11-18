@@ -54,7 +54,7 @@ from ._registry_git_ops import (
 from ._fast_sync_ops import FastSyncOps, S3AccessDenied, gitignored_pointers
 from ._push_verify import PushRefused
 from ._push_verify import judge as judge_push
-from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps  # noqa: F401
+from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
