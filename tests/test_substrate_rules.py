@@ -473,16 +473,19 @@ LINT_CAPS = {"mccabe": {"max-complexity": 39}, "pylint": {"max-branches": 41, "m
 BANNED_API = {
     "subprocess",
     "boto3", "botocore",
-    "shutil.rmtree", "os.remove", "os.unlink", "os.rmdir",
-    "shutil.move", "os.rename", "os.replace",
-    "urllib.request", "requests", "httpx", "socket",
+    "shutil.rmtree", "os.remove", "os.unlink", "os.rmdir", "os.removedirs", "os.truncate",
+    "shutil.move", "os.rename", "os.replace", "os.renames",
+    "shutil.copyfile", "shutil.copytree",
+    "urllib.request", "requests", "httpx", "socket", "urllib3", "http.client",
 }
 BANNED_MODULE_LEVEL_IMPORTS = ["pandas", "pyarrow"]
-#: per-line ``noqa`` comments under `src/`. A count, not a location list: the point is
+#: ``noqa`` comments under `src/`, per-line and file-level (``# ruff: noqa``,
+#: ``# flake8: noqa``). A count, not a location list: the point is
 #: that adding one is a visible edit, and pinning line numbers would redden on
 #: every unrelated insertion.
 SRC_NOQA_COUNT = 4
-#: ``# type: ignore`` comments under `src/`, the same idea for mypy.
+#: ``# type: ignore``, inline ``# mypy:`` config such as ``ignore-errors``, and
+#: ``@no_type_check`` under `src/`, the same idea for mypy.
 SRC_TYPE_IGNORE_COUNT = 23
 
 
@@ -532,7 +535,8 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
     # runs only `ruff check src tests` (.github/workflows/test.yml:38, :97) and
     # there is no pre-commit config at the repo root, so a deliberate evasion
     # never passes through the formatter.
-    pattern = re.compile(r"#\s*noqa", re.IGNORECASE)
+    # A file-level `# ruff: noqa: BLE001` exempts the whole file, so it counts too.
+    pattern = re.compile(r"#\s*(?:(?:ruff|flake8)\s*:\s*)?noqa", re.IGNORECASE)
     noqa = sum(
         len(pattern.findall(line))
         for path in (REPO_ROOT / "src").rglob("*.py")
@@ -540,37 +544,39 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
     )
     assert noqa == SRC_NOQA_COUNT, (
         f"{noqa} noqa comments under src/, pinned at {SRC_NOQA_COUNT}. "
-        "A noqa is a per-line lint exemption and is the cheapest way to "
+        "A noqa is a lint exemption and is the cheapest way to "
         "escape this ratchet."
     )
 
 
-#: The banned names each module uses. A per-file-ignore exempts a module from
-#: every TID251 ban at once, so without this a module listed for one boto3
-#: import could also start spawning processes or deleting files.
-TID251_NAMES_USED: dict[str, list[str]] = {
-    "src/mintd/_atomic.py": ["os.replace"],
-    "src/mintd/_aws_credentials.py": ["os.replace"],
-    "src/mintd/_fast_sync_ops.py": ["boto3", "botocore", "subprocess"],
-    "src/mintd/_init_ops.py": ["subprocess"],
-    "src/mintd/_producer_git_ops.py": ["subprocess"],
-    "src/mintd/_registry_git_ops.py": ["subprocess"],
-    "src/mintd/_s3_listing_ops.py": ["botocore"],
-    "src/mintd/_share_ops.py": ["boto3", "botocore"],
-    "src/mintd/_subprocess.py": ["subprocess"],
-    "src/mintd/cli.py": ["boto3"],
-    "src/mintd/config_ops.py": ["boto3", "botocore"],
-    "src/mintd/data.py": ["shutil.rmtree"],
-    "src/mintd/enclave.py": ["shutil.move", "shutil.rmtree"],
-    "src/mintd/init.py": ["shutil.rmtree"],
-    "src/mintd/pending_registrations.py": ["os.replace", "os.unlink"],
-    "src/mintd/producer.py": ["os.replace"],
+#: How many times each module uses each banned name. A per-file-ignore exempts a
+#: module from every TID251 ban at once, so without this a module listed for one
+#: boto3 import could also start spawning processes or deleting files, and one
+#: listed for a single `shutil.rmtree` could add a second.
+TID251_NAMES_USED: dict[str, dict[str, int]] = {
+    "src/mintd/_atomic.py": {"os.replace": 1},
+    "src/mintd/_aws_credentials.py": {"os.replace": 1},
+    "src/mintd/_fast_sync_ops.py": {"boto3": 1, "botocore": 2, "subprocess": 1},
+    "src/mintd/_init_ops.py": {"subprocess": 1},
+    "src/mintd/_producer_git_ops.py": {"subprocess": 1},
+    "src/mintd/_registry_git_ops.py": {"subprocess": 1},
+    "src/mintd/_s3_listing_ops.py": {"botocore": 1},
+    "src/mintd/_share_ops.py": {"boto3": 2, "botocore": 2},
+    "src/mintd/_subprocess.py": {"subprocess": 1},
+    "src/mintd/cli.py": {"boto3": 4},
+    "src/mintd/config_ops.py": {"boto3": 1, "botocore": 1},
+    "src/mintd/data.py": {"shutil.rmtree": 2},
+    "src/mintd/enclave.py": {"shutil.copytree": 1, "shutil.move": 2, "shutil.rmtree": 5},
+    "src/mintd/init.py": {"shutil.rmtree": 1},
+    "src/mintd/pending_registrations.py": {"os.replace": 1, "os.unlink": 1},
+    "src/mintd/producer.py": {"os.replace": 1},
 }
 
 
 def test_each_tid251_exemption_covers_only_the_names_it_uses() -> None:
-    """Mutation that must redden this: ``import subprocess`` in
-    ``src/mintd/_share_ops.py``, which per-file-ignores exempts for boto3."""
+    """Mutations that must redden this: ``import subprocess`` in
+    ``src/mintd/_share_ops.py``, which per-file-ignores exempts for boto3, or a
+    second ``shutil.rmtree(p)`` in ``src/mintd/init.py``."""
     out = subprocess.run(
         [
             sys.executable, "-m", "ruff", "check", "src", "--select", "TID251", "--ignore-noqa",
@@ -578,19 +584,40 @@ def test_each_tid251_exemption_covers_only_the_names_it_uses() -> None:
         ],
         cwd=REPO_ROOT, capture_output=True, text=True, check=True,
     ).stdout
-    used: dict[str, set[str]] = collections.defaultdict(set)
+    used: dict[str, collections.Counter[str]] = collections.defaultdict(collections.Counter)
     for finding in json.loads(out):
         module = Path(finding["filename"]).resolve().relative_to(REPO_ROOT).as_posix()
-        used[module].add(re.search(r"`([^`]+)`", finding["message"]).group(1))
-    assert {module: sorted(names) for module, names in used.items()} == TID251_NAMES_USED
+        used[module][re.search(r"`([^`]+)`", finding["message"]).group(1)] += 1
+    assert {module: dict(sorted(names.items())) for module, names in used.items()} == TID251_NAMES_USED
     assert set(TID251_NAMES_USED) == {f for f, codes in PER_FILE_IGNORES.items() if "TID251" in codes} - {"tests/**"}
+
+
+def test_lint_and_type_config_is_only_what_this_file_pins() -> None:
+    """The tables pinned above are not the only way to switch a check off.
+    Mutations that must redden this: ``extend-exclude = ["src/mintd/cli.py"]``
+    under ``[tool.ruff]``, a ``src/mintd/ruff.toml``, a tracked ``src/`` file
+    listed in ``.gitignore``, or any ``[tool.mypy]`` table."""
+    tool = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"]
+    assert sorted(tool["ruff"]) == ["line-length", "lint"]
+    # No mypy config at all, so no `[[tool.mypy.overrides]] ignore_errors = true`.
+    assert "mypy" not in tool
+
+    def run(*cmd: str) -> list[str]:
+        return subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout.splitlines()
+
+    # pyproject.toml is the only ruff or mypy config, and no `.ignore` file hides
+    # a file from ruff.
+    configs = {"pyproject.toml", "ruff.toml", ".ruff.toml", "mypy.ini", ".mypy.ini", "setup.cfg", ".ignore"}
+    assert [f for f in run("git", "ls-files") if Path(f).name in configs] == ["pyproject.toml"]
+    # Ruff can skip a tracked file that .gitignore lists, so none may be listed.
+    assert run("git", "ls-files", "--cached", "--ignored", "--exclude-standard", "--", "src", "tests") == []
 
 
 def test_src_type_ignore_comments_shrink_only() -> None:
     """A ``# type: ignore`` silences mypy on its line, so adding one is an
-    exemption like a ``noqa``. Mutation that must redden this: add one anywhere
-    under ``src/``."""
-    pattern = re.compile(r"#\s*type:\s*ignore")
+    exemption like a ``noqa``. Mutation that must redden this: add one, a
+    ``# mypy: ignore-errors`` or a ``@no_type_check`` anywhere under ``src/``."""
+    pattern = re.compile(r"#\s*type:\s*ignore|#\s*mypy:|\bno_type_check\b")
     count = sum(
         len(pattern.findall(path.read_text(encoding="utf-8"))) for path in (REPO_ROOT / "src").rglob("*.py")
     )
@@ -600,7 +627,10 @@ def test_src_type_ignore_comments_shrink_only() -> None:
 
 
 # Calls that delete, move or write a file, per module and kind. ruff's banned-api
-# sees `os.remove(p)` but not `p.unlink()`, so this scan covers the method forms.
+# sees `os.remove(p)` but not `p.unlink()`, so this scan covers the method forms,
+# and each `rmtree(p)` after `from shutil import rmtree`, which banned-api reports
+# only at the import. `.delete(` counts on any receiver: src/ has none today, and
+# an S3-chain check would miss `obj = bucket.Object(k); obj.delete()`.
 # `.replace(` is not counted: without types it can't be told from `str.replace`.
 # A new site, or a site in a new module, needs this literal edited in review.
 SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
@@ -620,37 +650,50 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
 }
 
 _FILE_EFFECT_METHODS = frozenset(
-    {"unlink", "rmdir", "rename", "write_text", "write_bytes", "delete_object", "delete_objects"}
+    {"unlink", "rmdir", "rename", "write_text", "write_bytes", "delete_object", "delete_objects",
+     "delete_bucket", "put_object", "delete"}
 )
-_WRITE_MODE = re.compile(r"^[rwaxbt+]{1,3}(:\w*)?$")
+_WRITE_MODE = re.compile(r"^[rwaxbt+]{1,3}([:|]\w*)?$")
 _WRITE_FLAGS = frozenset({"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC"})
 
 
-def _opens_for_writing(call: ast.Call) -> bool:
+def _opens_for_writing(call: ast.Call, modules: set[str]) -> bool:
     """``open``/``Path.open``/``tarfile.open`` with a w, a, x or + mode, or
-    ``os.open`` with a write flag."""
-    args = [*call.args, *(kw.value for kw in call.keywords if kw.arg == "mode")]
-    if any(
-        isinstance(a, ast.Constant) and isinstance(a.value, str) and _WRITE_MODE.match(a.value)
-        and set(a.value) & set("wax+")
-        for a in args
-    ):
-        return True
-    return any(isinstance(n, ast.Attribute) and n.attr in _WRITE_FLAGS for a in call.args for n in ast.walk(a))
+    ``os.open`` with a write flag. A mode that isn't a literal counts as a write."""
+    func = call.func
+    # open(p, mode) and <module>.open(p, mode) take the path first; path.open(mode) doesn't.
+    at = 0 if isinstance(func, ast.Attribute) and getattr(func.value, "id", None) not in modules else 1
+    mode = next((kw.value for kw in call.keywords if kw.arg in {"mode", "flags", None}), None)
+    if mode is None and len(call.args) > at:
+        mode = call.args[at]
+    if mode is None:
+        return False
+    if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+        return bool(_WRITE_MODE.match(mode.value) and set(mode.value) & set("wax+"))
+    flags = {n.attr for n in ast.walk(mode) if isinstance(n, ast.Attribute) and n.attr.startswith("O_")}
+    return not flags or bool(flags & _WRITE_FLAGS)
 
 
 def _scan_file_effect_sites() -> dict[str, dict[str, int]]:
     sites: dict[str, dict[str, int]] = {}
     for path in sorted((REPO_ROOT / "src").rglob("*.py")):
         counts: collections.Counter[str] = collections.Counter()
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imports = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+        modules = {a.asname or a.name.split(".")[0] for n in imports if isinstance(n, ast.Import) for a in n.names}
+        imported = {
+            a.asname or a.name: f"{n.module}.{a.name}" for n in imports if isinstance(n, ast.ImportFrom) for a in n.names
+        }
+        for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             if isinstance(func, ast.Attribute) and func.attr in _FILE_EFFECT_METHODS:
                 counts[func.attr] += 1
+            if isinstance(func, ast.Name) and imported.get(func.id) in BANNED_API:
+                counts[imported[func.id]] += 1
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name == "open" and _opens_for_writing(node):
+            if name == "open" and _opens_for_writing(node, modules):
                 counts["open-for-write"] += 1
         if counts:
             sites[path.relative_to(REPO_ROOT).as_posix()] = dict(sorted(counts.items()))
@@ -659,7 +702,8 @@ def _scan_file_effect_sites() -> dict[str, dict[str, int]]:
 
 def test_src_file_effect_sites_shrink_only() -> None:
     """Mutations that must redden this: add ``p.unlink()`` to any module, or
-    ``open(p, "w")`` to one not listed."""
+    ``open(p, "w")``, ``open(p, mode)`` or ``rmtree(p)`` after
+    ``from shutil import rmtree`` to one not listed."""
     scanned = _scan_file_effect_sites()
     assert scanned == SRC_FILE_EFFECT_SITES, (
         "delete/move/write call sites moved; a new one needs a reviewed edit of "
