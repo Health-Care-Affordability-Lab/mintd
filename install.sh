@@ -8,6 +8,17 @@
 #   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/<branch>/install.sh | bash -s -- --branch <branch>
 set -euo pipefail
 
+# The uv this script installs when none is found, and the oldest it accepts
+# without a warning. To bump: set it to the newest release
+# (`gh api repos/astral-sh/uv/releases/latest --jq .tag_name`) here and in
+# install.ps1; tests/test_install_scripts.py checks the two match.
+UV_VERSION="0.13.9"
+
+# True when version $1 is older than version $2.
+version_lt() {
+    [[ "$1" != "$2" && "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
+}
+
 REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git"
 BRANCH=""
 WITH_SCHEMA=0
@@ -22,9 +33,14 @@ done
 
 # Ensure uv is installed
 if ! command -v uv &>/dev/null; then
-    echo "Installing uv..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
+    echo "Installing uv ${UV_VERSION}..."
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
     export PATH="$HOME/.local/bin:$PATH"
+else
+    UV_HAVE="$(uv --version | awk '{print $2}')"
+    if version_lt "$UV_HAVE" "$UV_VERSION"; then
+        echo "Warning: uv ${UV_HAVE} is older than ${UV_VERSION}; upgrade it with 'uv self update'." >&2
+    fi
 fi
 
 GIT_URL="git+${REPO}"
