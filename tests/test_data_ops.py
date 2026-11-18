@@ -358,7 +358,7 @@ def test_data_pull_fast_sync_handles_pipeline_only_project(
     materializes them. SLICE-42: because every stage out is fast-syncable
     there are NO uncovered outs, so the catch-all dvc pull is skipped — it must
     NOT re-pull (targets=None) what fast-sync already cached. This is the
-    regression behind the data_mergerbuild hang."""
+    regression behind a large pipeline-only product's hang."""
     import shutil
     fixture = Path("tests/fixtures/pipeline_project")
     shutil.copytree(fixture, tmp_path / "project")
@@ -415,8 +415,8 @@ def test_data_pull_fast_sync_handles_mixed_project(
 def test_out_aggregate_bytes_sums_files_for_files_format() -> None:
     """Files-format dir-outs: top-level out.size is the manifest size,
     not the aggregate. Aggregate must sum per-file sizes — otherwise the
-    progress bar undershoots actual bytes-on-the-wire (mergerbuild
-    bug, ~60 GB pulled but bar showed a small fraction)."""
+    progress bar undershoots actual bytes-on-the-wire (seen on a large
+    product: ~60 GB pulled but bar showed a small fraction)."""
     out = DvcOut(
         target="data/big",
         path="data/big",
@@ -533,7 +533,7 @@ def test_data_pull_total_bytes_counts_denormalized_targets(
 def test_data_pull_skips_catch_all_when_no_dvc_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """data_mergerbuild regression: a stages-less dvc.yaml (vars/docs only),
+    """Regression from a large product with a stages-less dvc.yaml (vars/docs only),
     NO dvc.lock, and version-aware .dvc files handled by fast-sync. The
     catch-all must be skipped entirely — never dvc pull(targets=None) — so the
     248 already-fast-synced outs aren't re-pulled (the multi-GB hang)."""

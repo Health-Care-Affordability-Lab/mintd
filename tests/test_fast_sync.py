@@ -99,7 +99,7 @@ def _write_dvc_file_import(
 ) -> Path:
     """Write a .dvc file matching the shape `dvc import` produces:
     ``frozen: true`` + ``deps[].repo.{url, rev_lock}`` + dir-suffixed md5.
-    Mirrors the lab's `data/imports/<product>/final.dvc` shape (cms-ipps).
+    Mirrors the lab's `data/imports/<product>/final.dvc` shape.
     """
     body = (
         "frozen: true\n"
@@ -207,7 +207,7 @@ def test_parse_dvc_outs_extracts_version_id_from_cloud(tmp_path: Path) -> None:
 # ---------- slice 29: dvc-import detection ---------------------------
 
 def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None:
-    """Real lab shape (cms-ipps `data/imports/cms-impactfiles/final.dvc`):
+    """Real lab shape (a project's `data/imports/<product>/final.dvc`):
     frozen + deps[].repo + dir-suffixed md5. Detection is at the file
     level — every out parsed from the file inherits is_import=True."""
     p = _write_dvc_file_import(tmp_path, "imported", "deadbeef.dir")
@@ -280,7 +280,7 @@ def test_parse_s3_url_strips_trailing_slash() -> None:
     """Lab's .dvc/config writes URLs with a trailing slash
     (``s3://bucket/lab/data_x/``). Without stripping, every downstream
     key gets a double slash and S3 returns 404 — surfaced during
-    slice-27 path-based smoke against cms-ipps-reimbursement."""
+    slice-27 path-based smoke against a lab data product."""
     assert parse_s3_url("s3://b/lab/data_x/") == ("b", "lab/data_x")
     assert parse_s3_url("s3://b/") == ("b", "")
 
