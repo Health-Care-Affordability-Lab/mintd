@@ -16,16 +16,33 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
-from tests._harness.expect import assert_landed_match_pointers, result, s3_state
+from tests._harness.expect import assert_landed_match_pointers, md5, result, s3_state
 from tests._harness.git import _git
 
 
-def _keys(product, *outs: str) -> dict[str, int]:
-    """`{S3 key under the product's prefix: size}` for each file of `outs`."""
-    return {f"{out}/{name}": len(body) for out in outs for name, body in product.outs[out].items()}
+def _published(product, *outs: str) -> dict[str, bytes]:
+    """`{S3 key under the product's prefix: bytes}` for each file of `outs`."""
+    return {f"{out}/{name}": body for out in outs for name, body in product.outs[out].items()}
+
+
+def _changed(project: Path) -> set[str]:
+    """The paths `git status` reports, untracked files listed one by one."""
+    status = _git(["status", "--porcelain", "--untracked-files=all"], cwd=project)
+    return {line[3:] for line in status.splitlines()}
+
+
+def _tree(project: Path) -> set[str]:
+    """Every file and folder outside .git and .dvc, empty folders included,
+    which `git status` cannot see."""
+    return {
+        p.relative_to(project).as_posix() for p in project.rglob("*")
+        if not {".git", ".dvc"} & set(p.relative_to(project).parts)
+    }
 
 
 @pytest.mark.parametrize(("flags", "outs"), [
@@ -36,19 +53,21 @@ def test_import_lands_what_was_asked_and_downloads_each_object_once(
     product, fresh_project, mintd, s3_server, flags, outs,
 ) -> None:
     project = fresh_project()
+    root = f"data/imports/data_{product.name}"
 
     run = mintd("data", "import", product.name, *flags, cwd=project)
 
     assert run.returncode == 0, run.stderr
+    published = _published(product, *outs)
     landed = assert_landed_match_pointers(project)
-    wanted = _keys(product, *outs)
-    assert sorted(landed) == sorted(f"data/imports/data_{product.name}/{key}" for key in wanted)
-    assert result(run.stdout)["file_count"] == len(wanted)
+    assert landed == {f"{root}/{key}": md5(body) for key, body in published.items()}, "landed bytes are the producer's"
+    assert result(run.stdout)["file_count"] == len(published)
     s3 = s3_state(s3_server, product.prefix)
     # Bytes, not GET counts: a large object downloads in ranged GETs.
-    assert set(s3.gets) == set(wanted), "nothing besides what was asked downloads"
-    assert s3.bytes_served == wanted, "no byte downloads twice"
+    assert set(s3.gets) == set(published), "nothing besides what was asked downloads"
+    assert s3.bytes_served == {key: len(body) for key, body in published.items()}, "no byte downloads twice"
     assert mintd("check", cwd=project).returncode == 0
+    assert _changed(project) == {f"{root}/{out}.dvc" for out in outs} | {f"{root}/data/.gitignore"}
 
 
 def _drop_files_list(product) -> None:
@@ -67,6 +86,7 @@ def test_tick_only_when_files_landed(product, fresh_project, mintd, deliverable)
     if not deliverable:
         _drop_files_list(product)
     project = fresh_project()
+    before = _tree(project)
 
     run = mintd("data", "import", product.name, cwd=project, json=False)
 
@@ -75,6 +95,7 @@ def test_tick_only_when_files_landed(product, fresh_project, mintd, deliverable)
         assert "✓ imported" in run.stderr
         assert_landed_match_pointers(project)
     else:
-        assert "✓" not in run.stderr
+        assert "✓" not in run.stdout + run.stderr
         assert run.returncode != 0
-        assert _git(["status", "--porcelain", "--untracked-files=all"], cwd=project) == ""
+        assert _changed(project) == set()
+        assert _tree(project) == before, "a failed import leaves no folder behind"

@@ -2,9 +2,9 @@
 
 moto's server app behind a small WSGI layer that refuses ListObjectVersions
 with 403, as the lab's `mintd` key is refused, and records every object PUT
-and every object GET with the bytes it served. A story reads those records to
-prove what a command uploaded or downloaded, which the command's own output
-can only claim.
+and every successful object GET with the bytes it served. A story reads those
+records to prove what a command uploaded or downloaded, which the command's
+own output can only claim.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class S3Server:
     client: Any
     #: the path (`/<bucket>/<key>`) of each object PUT, in order
     puts: list[str]
-    #: `(path, bytes served)` of each object GET, in order
+    #: `(path, bytes served)` of each object GET that succeeded, in order
     gets: list[tuple[str, int]]
 
 
@@ -50,12 +50,19 @@ def s3_server():
         if method == "PUT" and is_object:
             puts.append(path)
         if method == "GET" and is_object:
-            response = app(environ, start_response)
+            status: list[str] = []
+
+            def recording(code, headers, exc_info=None):
+                status.append(code)
+                return start_response(code, headers, exc_info)
+
+            response = app(environ, recording)
             try:
                 body = b"".join(response)
             finally:
                 getattr(response, "close", lambda: None)()
-            gets.append((path, len(body)))
+            if status[0].startswith("2"):  # a 404 or an injected 500 served no object
+                gets.append((path, len(body)))
             return [body]
         return app(environ, start_response)
 

@@ -22,25 +22,25 @@ def result(stdout: str) -> dict:
     return json.loads(stdout)
 
 
-def _md5(data: bytes) -> str:
+def md5(data: bytes) -> str:
     return hashlib.md5(data, usedforsecurity=False).hexdigest()
 
 
 def _files_of(project: Path, root: Path, out: dict) -> dict[str, str]:
     """`{path under project: md5}` for each file one pointer out names."""
     base = root.relative_to(project).as_posix()
-    md5 = out["md5"]
-    if not md5.endswith(".dir"):
-        return {base: md5}
+    recorded = out["md5"]
+    if not recorded.endswith(".dir"):
+        return {base: recorded}
     entries = out.get("files")
     if entries is None:
         # The tree's manifest, from the project's cache. Its own md5 is the
         # pointer's, so a manifest that does not match the pointer fails here.
         # Read here rather than through mintd's reader: the check shares no
         # code with what it checks.
-        h = md5.removesuffix(".dir")
+        h = recorded.removesuffix(".dir")
         manifest = (project / ".dvc" / "cache" / "files" / "md5" / h[:2] / f"{h[2:]}.dir").read_bytes()
-        assert _md5(manifest) == h, f"{root}: cached manifest does not hash to {md5}"
+        assert md5(manifest) == h, f"{root}: cached manifest does not hash to {recorded}"
         entries = json.loads(manifest)
     return {f"{base}/{e['relpath']}": e["md5"] for e in entries}
 
@@ -59,7 +59,7 @@ def assert_landed_match_pointers(project: Path) -> dict[str, str]:
             expected.update(_files_of(project, root, out))
             for f in [root] if root.is_file() else root.rglob("*"):
                 if f.is_file():
-                    landed[f.relative_to(project).as_posix()] = _md5(f.read_bytes())
+                    landed[f.relative_to(project).as_posix()] = md5(f.read_bytes())
     assert landed == expected, f"landed files differ from their pointers: {landed} != {expected}"
     assert landed, f"no file landed in {project}"
     return landed
