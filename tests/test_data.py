@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import shutil
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +21,7 @@ import pytest
 
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import CheckFinding, check_project
+from mintd.cli import _render_bump_blocked
 from mintd.data import (
     AmbiguousImport,
     BumpBlocked,
@@ -909,31 +911,145 @@ def test_bump_blocks_when_the_producer_head_is_unreachable(tmp_path: Path) -> No
     assert fake.calls == []
 
 
-def test_bump_schema_too_old_raises_bump_blocked(tmp_path: Path) -> None:
+def _check_then_bump(
+    tmp_path: Path,
+    cache: Path,
+    fake: _FakeDvcOps,
+    head_store: dict[str, tuple[bytes, str]],
+    *,
+    recorded_path: str | None = None,
+) -> tuple[StaticFetcher, list[CheckFinding], Any]:
+    """A project pinned at a schema-1.0 producer commit: run the real check,
+    then hand its findings to `bump_import`. Both resolve through the real
+    `ProducerView` against a `StaticFetcher`, the only double."""
     dvc_path = _stage_project(tmp_path)
+    if recorded_path is not None:
+        text = dvc_path.read_text(encoding="utf-8")
+        dvc_path.write_text(text.replace("path: outputs/cms_based/", f"path: {recorded_path}"), encoding="utf-8")
+    fetcher = StaticFetcher(
+        {(REPO_URL, PIN_SHA): _producer_bytes(schema_version="1.0")}, head_store=head_store
+    )
+    findings = check_project(
+        tmp_path,
+        upgrades=True,
+        producer_view_factory=partial(ProducerView.try_at, fetcher=fetcher, cache_dir=cache),
+        fetcher=fetcher,
+    )
+    bump = partial(
+        bump_import,
+        InMemoryCatalogClient(),
+        fake,
+        project_path=tmp_path,
+        name="cms_based",
+        producer_view_factory=partial(ProducerView.at_head, fetcher=fetcher, cache_dir=cache),
+        check_findings=findings,
+    )
+    return fetcher, findings, bump
+
+
+def test_bump_moves_a_pin_whose_schema_is_too_old_to_a_head_that_reads(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """`check` judges the schema at the pin and stops there; `--bump` reads
+    HEAD through the same `at_head` the drift path uses and re-pins to it.
+
+    Mutations: restore the old "anything but drift is blocked" gate, or call
+    `ProducerView.at_head` directly instead of the injected factory -> red.
+    Put the doubled `schema_version=` label back in `ProducerView.at` -> red.
+    """
     fake = _FakeDvcOps()
-    client = InMemoryCatalogClient()
-    finding = CheckFinding(
-        severity="warning",
-        section="consumer",
-        message=(
-            f"producer at pin {PIN_SHA[:7]} uses schema_version 1.5 (expected 2.0)"
-        ),
-        source=dvc_path,
-        kind="schema_too_old",
+    fetcher, findings, bump = _check_then_bump(
+        tmp_path,
+        tmp_path_factory.mktemp("producer-cache"),
+        fake,
+        {REPO_URL: (_producer_bytes(), HEAD_SHA)},
+    )
+    [finding] = [f for f in findings if f.section == "consumer"]
+    assert finding.kind == "schema_too_old"
+    assert finding.message == f"producer at pin {PIN_SHA[:7]} uses schema_version 1.0 (expected 2.0)"
+
+    result = bump()
+
+    assert result.changed is True
+    assert result.old_pin == PIN_SHA
+    assert result.new_pin == HEAD_SHA
+    assert [(c.rev, c.path) for c in fake.calls] == [(HEAD_SHA, "outputs/cms_based/")]
+    # Read once, by bump, through the injected `at_head`; check never reads it.
+    assert fetcher.head_calls == [REPO_URL]
+
+
+@pytest.mark.parametrize(
+    ("head", "kind", "hint"),
+    [
+        ("too-old", "schema_too_old", "ask the producer to update their metadata schema to 2.0"),
+        ("unreachable", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import cms_based --bump\n"),
+        ("invalid", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import cms_based --bump\n"),
+    ],
+    ids=["head-too-old", "head-unreadable", "head-invalid"],
+)
+def test_bump_refuses_to_leave_a_pin_whose_schema_is_too_old_when_head_does_not_read(
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    capsys: pytest.CaptureFixture[str],
+    head: str,
+    kind: str,
+    hint: str,
+) -> None:
+    """A HEAD that is too old as well keeps the producer-side hint. A HEAD that
+    cannot be read (offline, unreachable) or reads as schema 2.0 but fails
+    validation is not evidence the producer is behind, so the hint says the
+    pin is intact instead, and names `--bump` to retry, since check stops at
+    the old pin and never reads HEAD.
+
+    Mutations: always block with the pin's finding, or always with
+    `drift_unknown` -> one side red; drop the try/except so the HEAD read's
+    `ProducerError` escapes -> every case red; delete the CLI's
+    `schema_too_old` hint arm -> `head-too-old` red; block with a finding
+    built from HEAD's error instead of the pin's own -> `head-too-old` red;
+    keep check's own retry hint -> the unreadable cases red.
+    """
+    fake = _FakeDvcOps()
+    head_bytes = {
+        "too-old": _producer_bytes(schema_version="1.0"),
+        "unreachable": None,
+        "invalid": b'{"schema_version": "2.0"}',  # passes the schema peek, fails validation
+    }[head]
+    head_store = {REPO_URL: (head_bytes, HEAD_SHA)} if head_bytes is not None else {}
+    _, findings, bump = _check_then_bump(tmp_path, tmp_path_factory.mktemp("producer-cache"), fake, head_store)
+
+    with pytest.raises(BumpBlocked) as ei:
+        bump()
+
+    assert ei.value.finding.kind == kind
+    if kind == "schema_too_old":  # the pin's own finding, naming the pin, not HEAD
+        assert ei.value.finding is next(f for f in findings if f.section == "consumer")
+    assert fake.calls == []
+    assert _render_bump_blocked(ei.value) == 2
+    assert hint in capsys.readouterr().err
+
+
+def test_bump_retry_hint_names_the_path_it_was_given_shell_quoted(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The unreadable-HEAD hint ends with the command to re-run. It carries the
+    `--path` the bump was selected by, built as argv and shell-quoted, so a
+    path with a space copies back as one argument.
+
+    Mutations: drop the `--path` arm, or concatenate instead of `shlex.join`
+    -> red.
+    """
+    fake = _FakeDvcOps()
+    _, _, bump = _check_then_bump(
+        tmp_path, tmp_path_factory.mktemp("producer-cache"), fake, {}, recorded_path="outputs/cms based/"
     )
 
     with pytest.raises(BumpBlocked) as ei:
-        bump_import(
-            client,
-            fake,
-            project_path=tmp_path,
-            name="cms_based",
-            check_findings=[finding],
-        )
+        bump(path="outputs/cms based/")
 
-    assert ei.value.finding is finding
+    assert ei.value.finding.kind == "drift_unknown"
     assert fake.calls == []
+    assert _render_bump_blocked(ei.value) == 2
+    assert "re-run: mintd data import cms_based --bump --path 'outputs/cms based/'\n" in capsys.readouterr().err
 
 
 def test_bump_metadata_invalid_raises_bump_blocked(tmp_path: Path) -> None:
@@ -1085,9 +1201,12 @@ def test_bump_default_uses_producer_view_at_head(
 # ---------------------------------------------------------------------------
 
 
-def _producer_bytes(*, primary: str | None = "outputs/main.parquet") -> bytes:
+def _producer_bytes(
+    *, primary: str | None = "outputs/main.parquet", schema_version: str = "2.0"
+) -> bytes:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
     data["data_products"]["primary"] = primary
+    data["schema_version"] = schema_version
     return json.dumps(data).encode()
 
 

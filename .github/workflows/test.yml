@@ -14,7 +14,8 @@ jobs:
         # shell scripts have .ps1 siblings and POSIX-shaped tests are
         # abstracted. Tracked in the project_windows_support_followup note.
         # Ubuntu covers the oldest and newest supported Python; the other
-        # systems run the newest, which a fresh `uv tool install` picks.
+        # systems run the newest, which install.sh and install.ps1 pin
+        # (`--python`): move the pin when this moves.
         include:
           - {os: ubuntu-latest, python: "3.11"}
           - {os: ubuntu-latest, python: "3.13"}

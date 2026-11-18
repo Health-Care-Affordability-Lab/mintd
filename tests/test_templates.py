@@ -31,6 +31,8 @@ from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)
 from tests._harness.git import _git
 from tests.scaffold_contract import is_ignored
 
+from tests._fakes.init_ops import _FakeInitOps
+
 
 # --- engine + name validation ---------------------------------------------
 

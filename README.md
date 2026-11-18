@@ -59,9 +59,9 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
 ```
 
-Both scripts install `uv` if missing, run `uv tool install
+Both scripts install `uv` if missing, run `uv tool install --python 3.13
 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
-(isolated venv, `mintd` on PATH), then layer `cffi + reflink` into the
+(isolated venv on the newest Python CI tests, `mintd` on PATH), then layer `cffi + reflink` into the
 tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
 to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 
@@ -73,7 +73,7 @@ to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
 curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
 # irm https://astral.sh/uv/install.ps1 | iex       # Windows
 
-uv tool install git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
+uv tool install --python 3.13 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
 ```
 
 Or `pipx install git+…` / `pip install --user git+…` if you prefer.
@@ -111,7 +111,7 @@ Point `mintd` at your lab's registry and your S3 storage:
 ```bash
 mintd config setup            # interactive walkthrough
 mintd config show             # see what got written
-mintd config validate         # schema + AWS profile + S3 head_bucket check
+mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 head_bucket check
 ```
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
@@ -185,7 +185,10 @@ mintd registry register
 
 # Cut a versioned release. Tags, pushes, and updates the catalog
 # entry. Shows a preview and asks before doing anything destructive.
-mintd publish 0.1.0
+# With no version it bumps the patch. A new product starts at the release
+# number of the mintd that scaffolded it, so its first release is the next
+# patch after that; an explicit version lower than the current one is refused.
+mintd publish
 ```
 
 ## Example: consume someone else's dataset
