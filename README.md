@@ -120,14 +120,15 @@ The config lives at `~/.config/mintd/config.yaml`. Knobs include
 
 ```yaml
 timeouts:
-  fast: 30        # metadata queries (dvc status, git ls-remote)
-  transfer: null  # unbounded; set to e.g. 7200 for a 2h cap on dvc pull / git clone
+  fast: 30        # quick calls (dvc init, the registry's git queries)
+  transfer: null  # unbounded; set to e.g. 7200 for a 2h cap on dvc add / pull / git clone
 ```
 
-`fast` caps local metadata and registry queries; `transfer` caps the
-network-heavy ones (DVC push/pull, git clone) and is `null` — disabled — by
-default. Per-command, `--timeout 600` opts into a 10-minute wall clock and
-`--timeout 0` disables it. `NO_COLOR` in the environment turns off all color.
+`fast` caps quick calls such as `dvc init` and the registry's git queries;
+`transfer` caps DVC add, status, import, push, pull and checkout, and git clone,
+and is `null` — disabled — by default. Per-command, `--timeout 600` opts into a
+10-minute wall clock and `--timeout 0` disables it. `NO_COLOR` in the environment
+turns off all color.
 
 If you have a v1 mintd config kicking around:
 
