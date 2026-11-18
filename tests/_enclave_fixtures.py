@@ -2,7 +2,7 @@
 
 Promoted out of `tests/test_check.py` (slice-8 walker tests) so the check,
 publish and CLI suites all stage the same manifest and seed the same catalog
-entry. A second hand-rolled `InMemoryCatalogClient` holding `provider-xw` is
+entry. A second hand-rolled `InMemoryCatalogClient` holding `demo-xw` is
 the thing this module exists to prevent.
 """
 
@@ -27,12 +27,12 @@ def stage_enclave_manifest(tmp_path: Path) -> Path:
     return dest
 
 
-def client_with_provider_xw() -> InMemoryCatalogClient:
+def client_with_demo_xw() -> InMemoryCatalogClient:
     """A catalog client holding the one repo the minimal manifest approves."""
     client = InMemoryCatalogClient()
     data = json.loads(MINIMAL_METADATA.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
+    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
     client.register(Metadata.model_validate(data))
     return client

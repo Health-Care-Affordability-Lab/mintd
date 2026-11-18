@@ -20,7 +20,7 @@ from tests._dvc_fixtures import (
     stage_undeliverable_primary,
     write_pointer,
 )
-from tests._enclave_fixtures import client_with_provider_xw, stage_enclave_manifest
+from tests._enclave_fixtures import client_with_demo_xw, stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
@@ -698,7 +698,7 @@ def test_prepare_publish_passes_the_catalog_client_to_check(tmp_path, monkeypatc
         project_path=proj,
         version="0.1.1",
         dry_run=True,
-        client=client_with_provider_xw(),
+        client=client_with_demo_xw(),
         git_ops=_FakeRegistryGitOps(),
     )
 
@@ -712,7 +712,7 @@ def test_publish_full_flow_with_enclave_manifest_reaches_the_tag(tmp_path, monke
 
     monkeypatch.setattr("mintd.publish.check_project", real_check_project)
     proj = _seed_enclave_consumer(tmp_path)
-    client = client_with_provider_xw()
+    client = client_with_demo_xw()
     # Step 5 updates this project's own catalog entry; register it first.
     client.register(Metadata.from_json_file(proj / "metadata.json"))
 

@@ -26,7 +26,7 @@ from tests._fakes.producer import ErroringFetcher, StaticFetcher
 FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
-REPO = "https://github.com/example-org/provider_xw"
+REPO = "https://github.com/example-org/demo_xw"
 PIN = "a" * 40
 
 
@@ -334,7 +334,7 @@ def test_try_at_resolves_the_empty_pin_to_head(local_producer, tmp_path) -> None
 
 
 def _catalog_for(url: str):
-    """A catalog whose `provider-xw` entry points at `url`."""
+    """A catalog whose `demo-xw` entry points at `url`."""
     import json
 
     from mintd.catalog import InMemoryCatalogClient
@@ -342,8 +342,8 @@ def _catalog_for(url: str):
 
     fixtures = Path(__file__).parent / "fixtures"
     data = json.loads((fixtures / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
     data["repository"]["github_url"] = url
     client = InMemoryCatalogClient()
     client.register(Metadata.model_validate(data))
@@ -372,8 +372,8 @@ def test_an_empty_manifest_pin_is_refused_not_resolved_to_head(
         "schema_version: '2.0'\n"
         "enclave_name: probe\n"
         "approved_products:\n"
-        "  - repo: provider-xw\n"
-        "    registry_entry: catalog/data/provider-xw.yaml\n"
+        "  - repo: demo-xw\n"
+        "    registry_entry: catalog/data/demo-xw.yaml\n"
         "    pin: ''\n"
         "    source_path: data/final/\n"
         "downloaded: []\n"

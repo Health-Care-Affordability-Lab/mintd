@@ -196,12 +196,12 @@ def _view_with_primary(
             )
         }
     )
-    return ProducerView(repo="example-org/provider-xw", pin=pin, metadata=meta)
+    return ProducerView(repo="example-org/demo-xw", pin=pin, metadata=meta)
 
 
 #: The repo string `_view_with_primary` bakes in — pointer reads key on the
 #: VIEW's repo, so the fetcher stores must use this, not the `.dvc`'s URL.
-_VIEW_REPO = "example-org/provider-xw"
+_VIEW_REPO = "example-org/demo-xw"
 #: `deps[0].path` in `standalone_import.dvc`, and its pointer-file name.
 _OUT = "outputs/cms_based/"
 _OUT_PTR = "outputs/cms_based.dvc"
@@ -244,7 +244,7 @@ def test_consumer_section_summarizes_each_dep_without_upgrades(tmp_path: Path):
     
     # Modify the second fixture's repo URL to prevent deduplication
     another_dvc = tmp_path / "data" / "imports" / "another_import.dvc"
-    another_dvc.write_text(another_dvc.read_text(encoding="utf-8").replace("provider-xw", "other"))
+    another_dvc.write_text(another_dvc.read_text(encoding="utf-8").replace("demo-xw", "other"))
 
     findings = check_project(tmp_path)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -457,8 +457,8 @@ def test_upgrades_walk_continues_after_one_error(tmp_path: Path):
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "dep2.dvc")
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "dep3.dvc")
     
-    (tmp_path / "data" / "imports" / "dep2.dvc").write_text((tmp_path / "data" / "imports" / "dep2.dvc").read_text(encoding="utf-8").replace("provider-xw", "other2"))
-    (tmp_path / "data" / "imports" / "dep3.dvc").write_text((tmp_path / "data" / "imports" / "dep3.dvc").read_text(encoding="utf-8").replace("provider-xw", "other3"))
+    (tmp_path / "data" / "imports" / "dep2.dvc").write_text((tmp_path / "data" / "imports" / "dep2.dvc").read_text(encoding="utf-8").replace("demo-xw", "other2"))
+    (tmp_path / "data" / "imports" / "dep3.dvc").write_text((tmp_path / "data" / "imports" / "dep3.dvc").read_text(encoding="utf-8").replace("demo-xw", "other3"))
     
     def factory(repo: str, pin: str):
         if repo == "https://github.com/example-org/other2" and pin != "":
@@ -537,7 +537,7 @@ def test_finding_source_field_round_trips(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 from tests._enclave_fixtures import (  # noqa: E402
-    client_with_provider_xw as _client_with_provider_xw,
+    client_with_demo_xw as _client_with_demo_xw,
     stage_enclave_manifest as _stage_enclave_manifest,
 )
 
@@ -545,7 +545,7 @@ from tests._enclave_fixtures import (  # noqa: E402
 def test_consumer_section_walks_enclave_manifest_approved_products(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = _stage_enclave_manifest(tmp_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -553,14 +553,14 @@ def test_consumer_section_walks_enclave_manifest_approved_products(tmp_path: Pat
     assert len(consumer_findings) == 1
     f = consumer_findings[0]
     assert f.source == manifest_path
-    assert f.field_path == "approved_products[provider-xw]"
+    assert f.field_path == "approved_products[demo-xw]"
 
 
 def test_consumer_section_walks_both_dvc_files_and_enclave_manifest(tmp_path: Path):
     _write_metadata(tmp_path)
     _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
     manifest_path = _stage_enclave_manifest(tmp_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -570,13 +570,13 @@ def test_consumer_section_walks_both_dvc_files_and_enclave_manifest(tmp_path: Pa
     assert len(dvc_findings) == 1
     assert dvc_findings[0].field_path is None
     assert len(manifest_findings) == 1
-    assert manifest_findings[0].field_path == "approved_products[provider-xw]"
+    assert manifest_findings[0].field_path == "approved_products[demo-xw]"
 
 
 def test_consumer_section_handles_invalid_enclave_manifest(tmp_path: Path):
     _write_metadata(tmp_path)
     (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -592,7 +592,7 @@ def test_consumer_section_empty_approved_products_emits_nothing(tmp_path: Path):
         "schema_version: '2.0'\nenclave_name: my_workspace\napproved_products: []\n"
         "downloaded: []\ntransferred: []\n"
     )
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -649,7 +649,7 @@ def test_consumer_manifest_error_findings_assign_correct_kinds(
 ):
     _write_metadata(tmp_path)
     _stage_enclave_manifest(tmp_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
     factory = _factory_returning(result)
 
     findings = check_project(
@@ -662,13 +662,13 @@ def test_consumer_manifest_error_findings_assign_correct_kinds(
     assert f.kind == expected_kind
     assert f.severity == expected_severity
     assert f.source == tmp_path / "enclave_manifest.yaml"
-    assert f.field_path == "approved_products[provider-xw]"
+    assert f.field_path == "approved_products[demo-xw]"
 
 
 def test_consumer_manifest_invalid_finding_has_invalid_manifest_kind(tmp_path: Path):
     _write_metadata(tmp_path)
     (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     consumer_findings = [f for f in findings if f.section == "consumer"]
@@ -715,7 +715,7 @@ def test_unreachable_registry_becomes_a_finding_not_an_exception(tmp_path: Path,
     f = consumer_findings[0]
     assert f.kind == "catalog_unresolved"
     assert f.severity == "error"
-    assert "provider-xw" in f.message
+    assert "demo-xw" in f.message
     # Reports what git said rather than asserting a cause: the same exception
     # covers an unreachable registry and a corrupt local cache.
     assert "does not exist" in f.message
@@ -903,10 +903,10 @@ def test_consumer_summary_distinguishes_all_from_primary(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40, all=True),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40, all=True),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40),
     ]).save(manifest_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     findings = check_project(tmp_path, client=client)
     messages = [f.message for f in findings if f.source == manifest_path]
@@ -925,11 +925,11 @@ def test_consumer_walk_resolves_each_producer_view_once(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40,
                         source_path="data/final/b"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="a" * 40),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40),
     ]).save(manifest_path)
 
     calls: list[tuple[str, str]] = []
@@ -939,7 +939,7 @@ def test_consumer_walk_resolves_each_producer_view_once(tmp_path: Path):
         calls.append((repo_url, pin))
         return real(repo_url, pin)
 
-    check_project(tmp_path, upgrades=True, client=_client_with_provider_xw(),
+    check_project(tmp_path, upgrades=True, client=_client_with_demo_xw(),
                   producer_view_factory=counting_factory)
 
     assert len(calls) == len(set(calls)), f"resolved the same view twice: {calls}"
@@ -1411,7 +1411,7 @@ def test_dvc_yaml_is_fetched_once_per_repo_and_rev(tmp_path: Path):
 
     _write_metadata(tmp_path)
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path=f"data/final/{leaf}")
         for leaf in ("a", "b", "c")
     ]).save(tmp_path / "enclave_manifest.yaml")
@@ -1428,7 +1428,7 @@ def test_dvc_yaml_is_fetched_once_per_repo_and_rev(tmp_path: Path):
 
     fetcher = StaticFetcher({}, path_store=store)
     check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=_factory_by_pin({
             _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
             "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
@@ -1462,7 +1462,7 @@ def test_lock_stage_dep_resolves_via_primary_fallback(tmp_path: Path):
         "    deps:\n"
         "    - path: cms_based\n"
         "      repo:\n"
-        "        url: https://github.com/example-org/provider-xw\n"
+        "        url: https://github.com/example-org/demo-xw\n"
         f"        rev_lock: {_PIN}\n"
         "    outs: []\n",
         encoding="utf-8",
@@ -1498,7 +1498,7 @@ def test_all_outputs_row_ignores_a_member_with_no_pointer(tmp_path: Path):
 
     _write_metadata(tmp_path)
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN, all=True),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
     ]).save(tmp_path / "enclave_manifest.yaml")
 
     meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
@@ -1517,7 +1517,7 @@ def test_all_outputs_row_ignores_a_member_with_no_pointer(tmp_path: Path):
     })
 
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         # `docs/` has no pointer at either rev; `data/final/` really moved.
         fetcher=_fetcher_serving({
@@ -1548,7 +1548,7 @@ def test_all_outputs_row_reaches_the_comparator_from_the_manifest(tmp_path: Path
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN, all=True),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
     ]).save(manifest_path)
 
     meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
@@ -1575,7 +1575,7 @@ def test_all_outputs_row_reaches_the_comparator_from_the_manifest(tmp_path: Path
     })
 
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory, fetcher=fetcher,
     )
     consumer = [f for f in findings if f.section == "consumer"]
@@ -1698,12 +1698,12 @@ def test_a_subpath_row_no_longer_blocks_its_drifting_sibling(tmp_path: Path) -> 
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path=p)
         for p in ("outputs/cms_based/", "outputs/cms_based/b.csv")
     ]).save(manifest_path)
 
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
     findings = check_project(
         tmp_path, upgrades=True, client=client,
         producer_view_factory=_factory_by_pin({
@@ -1726,7 +1726,7 @@ def test_a_subpath_row_no_longer_blocks_its_drifting_sibling(tmp_path: Path) -> 
         return _view_with_primary("outputs/cms_based/", pin=_HEAD), _HEAD
 
     enclave_bump(
-        client, manifest_path=manifest_path, name="provider-xw",
+        client, manifest_path=manifest_path, name="demo-xw",
         producer_view_factory=factory, check_findings=findings,
     )
 
@@ -1739,7 +1739,7 @@ def _subscribe(tmp_path: Path, source_path: str):
 
     _write_metadata(tmp_path)
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path=source_path),
     ]).save(tmp_path / "enclave_manifest.yaml")
     return _factory_by_pin({
@@ -1775,7 +1775,7 @@ def test_path_inside_a_tracked_out_is_answered_by_that_out(
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
@@ -1804,7 +1804,7 @@ def test_path_inside_a_dir_out_falls_back_to_the_directory_hash(
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _pointer_doc("a" * 32 + ".dir"),
@@ -1821,7 +1821,7 @@ def test_path_removed_from_a_tracked_out_is_not_a_silent_up_to_date(tmp_path: Pa
     bump has no target for it."""
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
@@ -1872,7 +1872,7 @@ def _directory_over_lock_outs(tmp_path: Path, head_lock: bytes, *, all_outputs=F
 
         _write_metadata(tmp_path)
         EnclaveManifest(enclave_name="e", approved_products=[
-            ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN, all=True),
+            ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
         ]).save(tmp_path / "enclave_manifest.yaml")
         factory = _factory_by_pin({
             _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
@@ -1881,7 +1881,7 @@ def _directory_over_lock_outs(tmp_path: Path, head_lock: bytes, *, all_outputs=F
     else:
         factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
@@ -1946,7 +1946,7 @@ def test_exact_and_enclosing_still_win_over_beneath(tmp_path: Path, winner: str)
         return _scaffold_lock_outs((winner, "d" * 32 + ".dir"), (_A, beneath_md5))
     factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
@@ -2013,7 +2013,7 @@ def test_subdirectory_of_a_files_format_out_is_answered_by_the_entries_beneath_i
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/sub/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
@@ -2053,7 +2053,7 @@ def test_a_dropped_stage_never_feeds_the_beneath_digest(tmp_path: Path):
     ).encode()
     factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): two_stage_yaml("code"),
@@ -2080,13 +2080,13 @@ def test_enclave_rows_carry_their_own_subscription_label(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/b"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN),
     ]).save(manifest_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     pin_view = _view_with_primary("outputs/cms_based/", pin=_PIN)
     head_view = _view_with_primary("outputs/cms_based/", pin=_HEAD)
@@ -2108,7 +2108,7 @@ def test_enclave_rows_carry_their_own_subscription_label(tmp_path: Path):
     consumer = [f for f in findings if f.section == "consumer"]
 
     assert len(consumer) == 3
-    assert {f.field_path for f in consumer} == {"approved_products[provider-xw]"}
+    assert {f.field_path for f in consumer} == {"approved_products[demo-xw]"}
     assert [f.message for f in consumer] == [
         "up to date (data/final/a)",
         "up to date (data/final/b)",
@@ -2126,12 +2126,12 @@ def test_enclave_head_unreachable_is_labelled_and_not_up_to_date(tmp_path: Path)
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/b"),
     ]).save(manifest_path)
-    client = _client_with_provider_xw()
+    client = _client_with_demo_xw()
 
     def factory(repo: str, pin: str):
         if pin == "":
@@ -2147,7 +2147,7 @@ def test_enclave_head_unreachable_is_labelled_and_not_up_to_date(tmp_path: Path)
     assert {f.kind for f in consumer} == {"drift_unknown"}
     # `enclave_bump` finds its rows by `source` AND `field_path`; get either
     # wrong and the offline bump raises ImportNotFound instead of blocking.
-    assert {f.field_path for f in consumer} == {"approved_products[provider-xw]"}
+    assert {f.field_path for f in consumer} == {"approved_products[demo-xw]"}
     assert all(f.hint and _PIN[:7] in f.hint for f in consumer)
     assert [f.message for f in consumer] == [
         "cannot determine drift (data/final/a): cannot read the producer's "
@@ -2160,7 +2160,7 @@ def test_enclave_head_unreachable_is_labelled_and_not_up_to_date(tmp_path: Path)
     # and the only binding on the `source=` the enclave arm passes: offline,
     # `enclave bump` must block rather than silently no-op.
     with pytest.raises(BumpBlocked) as ei:
-        enclave_bump(client, manifest_path=manifest_path, name="provider-xw",
+        enclave_bump(client, manifest_path=manifest_path, name="demo-xw",
                      check_findings=findings)
     assert ei.value.finding.kind == "drift_unknown"
 
@@ -2174,18 +2174,18 @@ def test_enclave_error_findings_are_labelled_too(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/b"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN),
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN),
     ]).save(manifest_path)
 
     def factory(repo: str, pin: str):
         return ProducerError.unreachable(repo, pin, "network down")
 
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory, fetcher=_fetcher_serving({}),
     )
     consumer = [f for f in findings if f.section == "consumer"]
@@ -2207,9 +2207,9 @@ def test_enclave_empty_pin_findings_are_labelled_too(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="",
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="",
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin="",
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="",
                         source_path="data/final/b"),
     ]).save(manifest_path)
 
@@ -2217,15 +2217,15 @@ def test_enclave_empty_pin_findings_are_labelled_too(tmp_path: Path):
         return ProducerError.unreachable(repo, pin, "network down")
 
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_provider_xw(),
+        tmp_path, upgrades=True, client=_client_with_demo_xw(),
         producer_view_factory=factory, fetcher=_fetcher_serving({}),
     )
     consumer = [f for f in findings if f.section == "consumer"]
 
     assert {f.kind for f in consumer} == {"pin_missing"}
     assert [f.message for f in consumer] == [
-        "approved product 'provider-xw' has an empty pin (data/final/a)",
-        "approved product 'provider-xw' has an empty pin (data/final/b)",
+        "approved product 'demo-xw' has an empty pin (data/final/a)",
+        "approved product 'demo-xw' has an empty pin (data/final/b)",
     ]
 
 
@@ -2238,9 +2238,9 @@ def test_enclave_catalog_client_none_findings_are_labelled_too(tmp_path: Path):
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/b"),
     ]).save(manifest_path)
 
@@ -2250,9 +2250,9 @@ def test_enclave_catalog_client_none_findings_are_labelled_too(tmp_path: Path):
     assert {f.kind for f in consumer} == {"catalog_unresolved"}
     assert [f.message for f in consumer] == [
         "catalog client not provided; cannot resolve producer URL for"
-        " provider-xw (data/final/a)",
+        " demo-xw (data/final/a)",
         "catalog client not provided; cannot resolve producer URL for"
-        " provider-xw (data/final/b)",
+        " demo-xw (data/final/b)",
     ]
 
 
@@ -2265,9 +2265,9 @@ def test_enclave_catalog_resolve_failure_findings_are_labelled_too(tmp_path: Pat
     _write_metadata(tmp_path)
     manifest_path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="provider-xw", registry_entry="e", pin=_PIN,
+        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
                         source_path="data/final/b"),
     ]).save(manifest_path)
 
@@ -2342,15 +2342,15 @@ def test_plain_check_refuses_an_empty_manifest_pin(tmp_path: Path, pin_yaml: str
         encoding="utf-8",
     )
 
-    findings = check_project(tmp_path, client=_client_with_provider_xw())  # no --upgrades
+    findings = check_project(tmp_path, client=_client_with_demo_xw())  # no --upgrades
     consumer = [f for f in findings if f.section == "consumer"]
 
     assert [f.kind for f in consumer] == ["pin_missing"]
     assert consumer[0].severity == "error"
-    assert consumer[0].field_path == "approved_products[provider-xw]"
+    assert consumer[0].field_path == "approved_products[demo-xw]"
     # Names the row's own repo, so the hint is copy-pasteable rather than a
     # shape to fill in. Mutation: drop the `hint=` -> this reddens.
-    assert consumer[0].hint and "mintd enclave add provider-xw" in consumer[0].hint
+    assert consumer[0].hint and "mintd enclave add demo-xw" in consumer[0].hint
 
 
 # ---------------------------------------------------------------------------
@@ -2886,7 +2886,7 @@ def test_check_reports_a_conflicted_import_pointer_without_a_traceback(tmp_path:
     """
     stage_dvc_project(tmp_path)
     write_pointer(tmp_path, "data/final", is_dir=True, version_id="v-1")
-    d = tmp_path / "data" / "imports" / "provider-xw"
+    d = tmp_path / "data" / "imports" / "demo-xw"
     d.mkdir(parents=True)
     (d / "final.dvc").write_text("<<<<<<< HEAD\nouts: []\n=======\ndeps: []\n>>>>>>> theirs\n", encoding="utf-8")
 
@@ -2933,7 +2933,7 @@ def test_check_does_not_swallow_a_consumer_walk_failure_it_cannot_attribute(tmp_
     """
     stage_dvc_project(tmp_path)
     write_pointer(tmp_path, "data/final", is_dir=True, version_id="v-1")
-    d = tmp_path / "data" / "imports" / "provider-xw"
+    d = tmp_path / "data" / "imports" / "demo-xw"
     d.mkdir(parents=True)
     (d / "final.dvc").write_text(
         "outs:\n- path: final\n  md5: " + "c" * 32 + "\n  size: 1\n"
