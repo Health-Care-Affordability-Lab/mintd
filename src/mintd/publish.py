@@ -462,12 +462,14 @@ def _apply_publish(
             pushed=True,
             tagged=True,
             recovery_hint=(
-                f"DVC artifacts are pushed and tag {tag_name} exists locally, but "
-                "neither it nor the bump commit reached origin, so the catalog was "
-                "left alone — nothing advertises the new version yet.\n"
-                "Check that `git remote -v` shows an origin you can write to, and that "
-                "your branch is not behind it (`git pull --rebase`), then rerun "
-                f"`mintd publish {preview.new_version}` (idempotent)."
+                f"DVC artifacts are pushed and tag {tag_name} exists locally, but the "
+                "push sends the bump commit and the tag together or not at all, so "
+                "origin has neither and the catalog was left alone — nothing "
+                "advertises the new version yet.\n"
+                "Check that `git remote -v` shows an origin you can write to. If your "
+                "branch is behind it, run `git pull --rebase`.\n"
+                f"Then delete the local tag, which a rebase leaves on the old commit: "
+                f"`git tag -d {tag_name}`, and rerun `mintd publish {preview.new_version}`."
             ),
         ) from exc
 
