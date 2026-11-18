@@ -46,13 +46,13 @@ APPROVED_PATH = "outputs/cms_based/"
 
 
 def _catalog_pointing_at(url: str) -> InMemoryCatalogClient:
-    """A catalog whose `provider-xw` entry resolves to `url` — the manifest
+    """A catalog whose `demo-xw` entry resolves to `url` — the manifest
     fixture approves that repo by name, so this is what makes the enclave arm
     reach a producer instead of a 404."""
     client = InMemoryCatalogClient()
     data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "provider-xw"
-    data["project"]["full_name"] = "data_provider-xw"
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
     data["repository"]["github_url"] = url
     client.register(Metadata.model_validate(data))
     return client
@@ -1162,7 +1162,7 @@ def test_enclave_manifest_consumer_variant_loads(
     findings = check_project(proj, upgrades=True, client=client, producer_view_factory=at)
 
     consumer = [f for f in findings if f.section == "consumer"]
-    assert [f.field_path for f in consumer] == ["approved_products[provider-xw]"]
+    assert [f.field_path for f in consumer] == ["approved_products[demo-xw]"]
     assert consumer[0].kind == "drift", consumer[0].message
     assert APPROVED_PATH in consumer[0].message
     assert "producer's HEAD differs from your pin" in consumer[0].message
@@ -1589,8 +1589,8 @@ def test_wdir_relative_lock_from_real_dvc_drives_check(
 
 
 _POINTERS = (
-    "code/b/sub/x.dvc", "code/k/drop.dvc", "code/k/keep.dvc", "data/drop.dvc", "data/ext/vendor/deep/w.dvc",
-    "data/ext/vendor/z.dvc", "data/keep.dvc", "data/lib/b.dvc", "data/transfers/in/partner/l.dvc",
+    "code/b/sub/x.dvc", "code/k/drop.dvc", "code/k/keep.dvc", "data/drop.dvc", "data/ext/in/demo/l.dvc",
+    "data/ext/vendor/deep/w.dvc", "data/ext/vendor/z.dvc", "data/keep.dvc", "data/lib/b.dvc",
 )
 
 
@@ -1613,7 +1613,7 @@ def test_discover_all_outs_reads_the_pointers_dvc_reads(tmp_path: Path, real_dvc
     scaffold = (Path(mintd.__file__).parent / "files" / "gitignore.txt").read_text()
     ignores = {
         "journey": {"data/ext/.gitignore": "vendor\n"},
-        "scaffold-nested": {".gitignore": scaffold, "data/transfers/in/.gitignore": "partner\n"},
+        "scaffold-nested": {".gitignore": scaffold, "data/ext/in/.gitignore": "demo\n"},
         # git reads code/k/keep.dvc here; DVC (dulwich 1.2.21) reads none of the three
         "negation": {"code/.gitignore": "k/*\n!k/keep.dvc\nb\n!b/sub/\n!b/sub/*.dvc\n"},
         "file-rule": {".gitignore": "drop.dvc\n"},

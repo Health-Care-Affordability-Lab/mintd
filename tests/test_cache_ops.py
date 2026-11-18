@@ -900,7 +900,7 @@ class _FailingUploadClient(_CountingClient):
     """Fails ``upload_file`` for keys containing ``boom`` (mapped like real
     boto3 to S3UploadFailedError wrapping a ClientError)."""
 
-    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):  # noqa: N803
+    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):
         if "boom" in key:
             from boto3.exceptions import S3UploadFailedError
             from botocore.exceptions import ClientError
@@ -1762,10 +1762,10 @@ class _LifecycleStub:
         self.lifecycle_error = lifecycle_error
         self.put_called = False
 
-    def get_bucket_versioning(self, Bucket):  # noqa: N803
+    def get_bucket_versioning(self, Bucket):
         return {"Status": self.versioning} if self.versioning else {}
 
-    def get_bucket_lifecycle_configuration(self, Bucket):  # noqa: N803
+    def get_bucket_lifecycle_configuration(self, Bucket):
         if self.lifecycle_error is not None:
             raise self.lifecycle_error
         return {"Rules": self.rules or []}
@@ -2141,7 +2141,7 @@ class _VanishBeforeUploadClient(_CountingClient):
         super().__init__(real)
         self.victim = victim_key_fragment
 
-    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):  # noqa: N803
+    def upload_file(self, filename, bucket, key, ExtraArgs=None, Callback=None):
         if self.victim in key:
             os.unlink(filename)  # producer removed it between hash and transfer
         return super().upload_file(filename, bucket, key, ExtraArgs=ExtraArgs, Callback=Callback)

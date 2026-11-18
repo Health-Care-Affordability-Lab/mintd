@@ -19,7 +19,7 @@ def test_from_dvc_file_parses_standalone_import() -> None:
     dep = DataDependency.from_dvc_file(FIXTURES / "standalone_import.dvc")
 
     assert dep.kind == "dvc_file"
-    assert dep.producer_repo == "https://github.com/example-org/provider-xw"
+    assert dep.producer_repo == "https://github.com/example-org/demo-xw"
     assert dep.contract_pin == "4f7c2a1abcd1234567890abcdef0123456789abc"
     assert dep.output_path == "outputs/cms_based/"
     assert dep.local_path == "cms_based"
@@ -93,7 +93,7 @@ def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
         "    deps:\n"
         "      - path: cms_based\n"
         "        repo:\n"
-        "          url: https://github.com/example-org/provider-xw\n"
+        "          url: https://github.com/example-org/demo-xw\n"
         "          rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc\n",
     )
 
@@ -160,12 +160,12 @@ def test_two_imports_sharing_a_basename_are_both_kept(tmp_path: Path) -> None:
             "deps:\n"
             f"  - path: {producer_path}\n"
             "    repo:\n"
-            "      url: https://github.com/example-org/provider-xw\n"
+            "      url: https://github.com/example-org/demo-xw\n"
             "      rev: main\n"
             "      rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc\n"
         )
 
-    ns = tmp_path / "data" / "imports" / "data_provider_xw"
+    ns = tmp_path / "data" / "imports" / "data_demo_xw"
     _write(ns / "data" / "final.dvc", _import_dvc("data/final/"))
     _write(ns / "archive" / "final.dvc", _import_dvc("archive/final/"))
 
@@ -178,8 +178,8 @@ def test_two_imports_sharing_a_basename_are_both_kept(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "repo_block",
     [
-        {"url": "https://github.com/example-org/provider-xw", "rev_lock": None},
-        {"url": "https://github.com/example-org/provider-xw"},
+        {"url": "https://github.com/example-org/demo-xw", "rev_lock": None},
+        {"url": "https://github.com/example-org/demo-xw"},
     ],
     ids=["null", "absent"],
 )
@@ -270,7 +270,7 @@ def test_an_unquoted_numeric_rev_lock_is_refused_not_guessed(
         "deps:\n"
         "- path: outputs/cms_based/\n"
         "  repo:\n"
-        "    url: https://github.com/example-org/provider-xw\n"
+        "    url: https://github.com/example-org/demo-xw\n"
         f"    rev_lock: {written}\n",
     )
     _write(
@@ -282,7 +282,7 @@ def test_an_unquoted_numeric_rev_lock_is_refused_not_guessed(
         "    deps:\n"
         "    - path: staging/\n"
         "      repo:\n"
-        "        url: https://github.com/example-org/provider-xw\n"
+        "        url: https://github.com/example-org/demo-xw\n"
         f"        rev_lock: {written}\n",
     )
 

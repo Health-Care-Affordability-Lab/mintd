@@ -409,7 +409,7 @@ def test_every_parsed_git_spawn_actually_passes_git_env(
     monkeypatch.setattr(_subprocess, "run_streaming", record)
 
     ops = SubprocessRegistryGitOps()
-    # noqa B017: each spawn path wraps the sentinel differently (FileNotFoundError
+    # B017: each spawn path wraps the sentinel differently (FileNotFoundError
     # raw, GitOpError from the registry seam, FetchError from the producer seam).
     # The assertion is on the recorded env, not on the exception type.
     with pytest.raises(Exception):  # noqa: B017

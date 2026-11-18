@@ -81,26 +81,91 @@ line-length = 120
 mintd = "mintd.cli:main"
 
 [tool.ruff.lint]
-select = ["E", "F", "T201", "B", "TID251"]
+select = [
+    "E", "F", "T201", "B",
+    "TID251", "TID253",                    # banned APIs; pandas/pyarrow only inside functions
+    "BLE001", "S110", "S112",              # no swallowed exceptions
+    "PGH004", "RUF100",                    # a noqa names its code and is still needed
+    "C901", "PLR0912", "PLR0915",          # complexity caps, set below
+    "DTZ005", "DTZ011",                    # no naive local times
+    "S602", "S604", "S605",                # no shell=True or os.system
+    "T100", "ERA001", "ANN001",            # no breakpoints, commented-out code or unannotated arguments
+]
 ignore = ["E501"]  # line length is not enforced: `ruff format` is not run in CI
 
-# TID251 makes the process-spawning boundary a lint gate instead of a docstring
-# claim. `_dvc_ops.py:3` and `_registry_git_ops.py:1` both assert they are the
-# only module that shells out; the per-file-ignores below are the modules that
-# actually do, so the list is the repair backlog and the rule stops a sixth.
+# Today's largest function sets each cap (publish.py, cli.py). Lower them as
+# functions split; tests/test_substrate_rules.py stops them going up.
+[tool.ruff.lint.mccabe]
+max-complexity = 39
+
+[tool.ruff.lint.pylint]
+max-branches = 41
+max-statements = 183
+
+[tool.ruff.lint.flake8-tidy-imports]
+banned-module-level-imports = ["pandas", "pyarrow"]
+
+# TID251 makes each risky ability a lint gate instead of a docstring claim:
+# spawning a process, reaching S3, deleting, moving or copying files, and
+# opening a network connection. A module that does one of these is listed in
+# per-file-ignores below, so the list is the review surface and the repair
+# backlog. CI also runs TID251 with --ignore-noqa, so only that list exempts.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "subprocess" = { msg = "spawn through mintd._subprocess.run_streaming; see per-file-ignores for the sanctioned seams" }
+"boto3" = { msg = "reach S3 through mintd._fast_sync_ops._create_s3_client; see per-file-ignores for the modules that may" }
+"botocore" = { msg = "reach S3 through mintd._fast_sync_ops._create_s3_client; see per-file-ignores for the modules that may" }
+"shutil.rmtree" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.remove" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.unlink" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.rmdir" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.removedirs" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"os.truncate" = { msg = "deleting files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"shutil.move" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"os.rename" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"os.replace" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"os.renames" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
+"shutil.copyfile" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"shutil.copytree" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
+"urllib.request" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"requests" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"httpx" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"socket" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"urllib3" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"http.client" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
 
+# Every entry is an exemption that tests/test_substrate_rules.py pins, so the
+# map can only shrink. The codes after the first block are today's offenders.
 [tool.ruff.lint.per-file-ignores]
-"src/mintd/cli.py" = ["T201"]
-"src/mintd/config_ops.py" = ["T201"]
 "src/mintd/files/**" = ["T201", "E501", "F401", "F811"]
-"tests/**" = ["T201", "E501", "TID251"]  # tests drive the real CLI; the boundary is a src/ concern
-# sanctioned process seams
-"src/mintd/_subprocess.py" = ["TID251"]
-"src/mintd/_registry_git_ops.py" = ["TID251"]
-# pending repair: these spawn directly, which is why the "sole seam" docstrings
-# are false. Route through _subprocess.run_streaming and delete the entry.
-"src/mintd/_init_ops.py" = ["TID251"]          # 11 spawn sites
-"src/mintd/_fast_sync_ops.py" = ["TID251"]     # 1 (dvc --version probe)
-"src/mintd/_producer_git_ops.py" = ["TID251"]  # 1 spawn + 4 type references
+# tests drive the real CLI; these rules guard src/
+"tests/**" = ["T201", "E501", "TID251", "TID253", "ANN001", "DTZ005", "ERA001"]
+# sanctioned seams
+"src/mintd/_subprocess.py" = ["TID251", "ANN001"]  # process
+"src/mintd/_registry_git_ops.py" = ["TID251"]      # process
+"src/mintd/_atomic.py" = ["TID251"]                # move
+# pending repair. TID251: spawn (_init_ops 11 sites, _fast_sync_ops 1 dvc --version
+# probe, _producer_git_ops 1 + 4 type references), S3 imports, deletes and moves
+# outside a seam. The "sole seam" docstrings in _dvc_ops.py and _registry_git_ops.py
+# stay false until these are routed through a seam and the entry is deleted.
+"src/mintd/_init_ops.py" = ["TID251"]
+"src/mintd/_fast_sync_ops.py" = ["TID251", "BLE001", "S110"]
+"src/mintd/_producer_git_ops.py" = ["TID251"]
+"src/mintd/_aws_credentials.py" = ["TID251"]
+"src/mintd/_s3_listing_ops.py" = ["TID251"]
+"src/mintd/_share_ops.py" = ["TID251"]
+"src/mintd/cli.py" = ["T201", "TID251", "BLE001", "S110", "ANN001"]
+"src/mintd/config_ops.py" = ["T201", "TID251", "BLE001", "ANN001"]
+"src/mintd/data.py" = ["TID251", "BLE001"]
+"src/mintd/enclave.py" = ["TID251", "DTZ005", "DTZ011"]
+"src/mintd/init.py" = ["TID251"]
+"src/mintd/pending_registrations.py" = ["TID251"]
+"src/mintd/producer.py" = ["TID251"]
+"src/mintd/_cache_ops.py" = ["BLE001"]
+"src/mintd/_import_rescue_ops.py" = ["BLE001"]
+"src/mintd/_push_verify.py" = ["BLE001", "S112"]
+"src/mintd/_templates/_render.py" = ["BLE001"]
+"src/mintd/check.py" = ["BLE001"]
+"src/mintd/data_ops.py" = ["BLE001"]
+"src/mintd/schema_ops.py" = ["BLE001"]
+"src/mintd/model.py" = ["ERA001"]
+"src/mintd/publish.py" = ["ANN001"]

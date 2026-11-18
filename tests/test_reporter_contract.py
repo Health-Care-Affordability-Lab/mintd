@@ -96,7 +96,7 @@ def probe(request, monkeypatch):
 
 @pytest.mark.parametrize("token", MARKUPISH)
 def test_error_text_reaches_the_user_verbatim(probe, token):
-    probe.reporter.error(f"cannot resolve {token} for provider-xw")
+    probe.reporter.error(f"cannot resolve {token} for demo-xw")
     assert any(token in line for line in probe.shown("error"))
 
 
@@ -119,7 +119,7 @@ def test_status_label_reaches_the_user_verbatim(probe, token):
     Text.from_markup unconditionally and ignores the console's markup setting,
     so silencing markup on the Console is not sufficient here."""
     with probe.reporter.status("start"):
-        probe.reporter.update_status(f"Fetching provider-xw {token}... (1/2)")
+        probe.reporter.update_status(f"Fetching demo-xw {token}... (1/2)")
         assert token in probe.shown_status()
 
 
@@ -137,7 +137,7 @@ def test_subprocess_passthrough_keeps_the_status_base_verbatim(probe, token):
     this one; review found it.
     """
     with probe.reporter.status("start"):
-        probe.reporter.update_status(f"Fetching provider-xw {token}...")
+        probe.reporter.update_status(f"Fetching demo-xw {token}...")
         probe.reporter.passthrough_stderr("Updating files:  40%\rUpdating files:  80%\r")
         assert token in probe.shown_status()
 
@@ -149,7 +149,7 @@ def test_status_label_survives_a_progress_block(probe, token):
     markup fix and invisible to the first version of the ratchet, which
     scanned `.update` calls only."""
     with probe.reporter.status("start"):
-        probe.reporter.update_status(f"Fetching provider-xw {token}...")
+        probe.reporter.update_status(f"Fetching demo-xw {token}...")
         with probe.reporter.progress(100, desc="Pulling something") as advance:
             advance(10)
         assert token in probe.shown_status()
