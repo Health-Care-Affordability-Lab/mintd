@@ -210,14 +210,18 @@ class ParameterAwareLogger:
 def generate_data_schema(
     data_path: Path, output_path: Optional[Path] = None
 ) -> Dict[str, Any]:
-    """Generate JSON schema from data file.
+    """Describe a data file's columns for its schema.
+
+    The result is committed to git and shown in the lab catalog, so it records
+    only each column's name and type, never values, counts or paths. It is the
+    shape `mintd data schema generate` writes.
 
     Args:
         data_path: Path to data file (CSV, JSON, etc.)
         output_path: Optional path to save schema JSON
 
     Returns:
-        Dict containing schema information
+        Dict with the file name and its table schema's fields
     """
     import pandas as pd
 
@@ -232,62 +236,27 @@ def generate_data_schema(
         else:
             raise ValueError(f"Unsupported file format: {data_path.suffix}")
 
-        # Generate schema
-        schema = {
-            "filename": data_path.name,
-            "filepath": str(data_path),
-            "observations": len(df),
-            "columns": len(df.columns),
-            "variables": [],
-        }
-
+        fields = []
         for col in df.columns:
             # Basic type detection
             dtype = str(df[col].dtype)
             if dtype.startswith("int"):
                 var_type = "integer"
             elif dtype.startswith("float"):
-                var_type = "numeric"
-            elif dtype == "object":
+                var_type = "number"
+            # pandas 3 reads text columns as "str", older pandas as "object".
+            elif dtype == "object" or dtype.startswith("str"):
                 var_type = "string"
             elif dtype.startswith("bool"):
                 var_type = "boolean"
+            elif dtype.startswith("datetime"):
+                var_type = "datetime"
             else:
                 var_type = dtype
 
-            # Generate basic label from column name
-            label = col.replace("_", " ").replace("-", " ").title()
+            fields.append({"name": col, "type": var_type})
 
-            variable_info = {
-                "name": col,
-                "type": var_type,
-                "label": label,
-                "missing_count": int(df[col].isna().sum()),
-                "unique_values": int(df[col].nunique())
-                if df[col].dtype == "object"
-                else None,
-            }
-
-            # Add numeric statistics for numeric columns
-            if var_type in ["integer", "numeric"]:
-                variable_info.update(
-                    {
-                        "min": float(df[col].min())
-                        if not pd.isna(df[col].min())
-                        else None,
-                        "max": float(df[col].max())
-                        if not pd.isna(df[col].max())
-                        else None,
-                        "mean": float(df[col].mean())
-                        if not pd.isna(df[col].mean())
-                        else None,
-                        "std": float(df[col].std())
-                        if not pd.isna(df[col].std())
-                        else None,
-                    }
-                )
-
-            schema["variables"].append(variable_info)
+        schema = {"filename": data_path.name, "schema": {"fields": fields}}
 
         # Save schema if output path provided
         if output_path:
@@ -318,4 +287,6 @@ def find_data_files(directory: Path, extensions: List[str] = None) -> List[Path]
     for ext in extensions:
         data_files.extend(directory.glob(f"**/*{ext}"))
 
-    return sorted(data_files)
+    # By the relative path's characters, so the committed schema lists files
+    # in the same order on every OS.
+    return sorted(data_files, key=lambda p: p.relative_to(directory).as_posix())

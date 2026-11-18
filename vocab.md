@@ -43,7 +43,7 @@ Why: the catalog is canonical for identity and the producer-at-pin for pipeline 
 
 ### `Metadata` ([src/mintd/model.py](src/mintd/model.py))
 
-The typed Pydantic representation of a project's `metadata.json`. `Metadata` is **one class**, not a discriminated union by `project.type`: every field is shared across the four types (`data`, `code`, `project`, `enclave`), `schema_version` must be `"2.0"`, `storage` is optional and `data_products` defaults to empty. The top level is `extra="allow"`, so unknown top-level keys parse; sub-models silently drop unknown keys. `project.type` still changes behaviour: only `data` must declare `data_products.primary`, and the catalog files each entry under `catalog/<type>/`.
+The typed Pydantic representation of a project's `metadata.json`. `Metadata` is **one class**, not a discriminated union by `project.type`: every field is shared across the four types (`data`, `code`, `project`, `enclave`), `schema_version` must be `"2.0"`, `storage` is optional and `data_products` defaults to empty. The optional `schema` key (`SchemaRef`, attribute `schema_`) names where the product's column schema is committed: `location` is a repo-relative path, and other keys (`standard`, `version`) pass through. `mintd init data` writes `schemas/v1/schema.json`, which `dvc.yaml` keeps `cache: false` so git holds it. Every dump writes the key as `schema` (`serialize_by_alias`), and leaves it out, never `null`, when it is unset. The top level is `extra="allow"`, so unknown top-level keys parse; sub-models silently drop unknown keys. `project.type` still changes behaviour: only `data` must declare `data_products.primary`, and the catalog files each entry under `catalog/<type>/`.
 
 Reading has no single seam. `Metadata.from_json_file(path)` is used only by publish; `check`, the registry verbs and `ProducerView` call `model_validate_json` on bytes they read themselves, and some sites read the file as a plain dict. Writers emit `model_dump_json(by_alias=True, exclude_none=False, indent=2)`, except publish, which merges that dump onto the raw file before writing.
 
@@ -54,7 +54,7 @@ Why publish merges: because sub-models drop unknown keys, writing the bare dump 
 Names the **role expected to write** a given field, attached to every `Metadata` field as `Annotated[T, Owner.X]`:
 
 - `USER`: humans edit it (`metadata.*`, `ownership.*`, `access_control.*`, `governance.*`, `repository.mirror`, `status.state`).
-- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.*`, `storage.*` and the rest of `repository.*`.
+- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.*`, `storage.*`, `schema_.location` and the rest of `repository.*`.
 - `PIPELINE`: `data_products.*` and `status.last_updated` / `last_published_version`. Publish writes the status fields and each `outputs[].last_published`; nothing derives `outputs[].path` or `primary` from DVC, so those are edited by hand.
 - `REGISTRY`: reserved; no field uses it.
 
@@ -97,7 +97,7 @@ Why: `metadata.json` holds a human's claim about outputs and DVC holds the truth
 
 ### Catalog projection (`CATALOG_EXCLUDED_PATHS` / `CatalogEntry`)
 
-The catalog entry is `Metadata.model_dump(mode="json")` with the top-level keys in `CATALOG_EXCLUDED_PATHS` (`schema_version`, `mint`) removed. Everything else ships, including `storage`, `data_products`, `ownership`, `governance`, `status`, and any unknown top-level key (a strict-xfail test pins that leak). There is no per-field filter. `CatalogEntry` is a Pydantic model with `extra="allow"` and no declared fields; `to_catalog_entry()` builds it on write and `_catalog_serializer.deserialize()` builds it from registry YAML on read. Properties `name`, `project_type`, `description`, `repo_url` return `''` when a key is missing.
+The catalog entry is `Metadata.model_dump(mode="json")` with the top-level keys in `CATALOG_EXCLUDED_PATHS` (`schema_version`, `mint`) removed. Everything else ships, including `storage`, `data_products`, `ownership`, `governance`, `status`, `schema` (where the column schema is committed), and any unknown top-level key (a strict-xfail test pins that leak). There is no per-field filter. `CatalogEntry` is a Pydantic model with `extra="allow"` and no declared fields; `to_catalog_entry()` builds it on write and `_catalog_serializer.deserialize()` builds it from registry YAML on read. Properties `name`, `project_type`, `description`, `repo_url` return `''` when a key is missing.
 
 Why: the excluded fields describe the `metadata.json` file itself, not the project. Deriving the shape from `Metadata` instead of a hand-defined class keeps the model and the catalog from drifting apart.
 

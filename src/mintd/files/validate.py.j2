@@ -5,6 +5,7 @@ NOTE: This script runs from the code/ directory. Data paths use ../data/
 
 import json
 import shutil
+import sys
 from pathlib import Path
 from datetime import datetime
 import pandas as pd
@@ -98,10 +99,11 @@ def main():
     intermediate_files = list(INTERMEDIATE_DIR.glob("*.csv"))
 
     if not intermediate_files:
-        logger.log(
-            "No CSV files found in INTERMEDIATE_DIR. Run `dvc repro ingest` first."
-        )
-        validation_report = {"status": "no_files", "datasets": []}
+        # Stop, so `dvc repro` fails here and says what to do, instead of
+        # writing a report and schema that describe nothing.
+        no_data = "no CSV files in data/intermediate/: put .csv source files in data/raw/ and run dvc repro"
+        logger.log(no_data)
+        sys.exit(no_data)
     else:
         logger.log(f"Found {len(intermediate_files)} CSV files to validate")
 
@@ -151,7 +153,9 @@ def main():
         FINAL_DIR, extensions=[".csv", ".json", ".xlsx", ".xls"]
     )
     if final_files:
-        combined_schema = {"generated_at": datetime.now().isoformat(), "files": []}
+        # No timestamp: git keeps this file, and a rerun on unchanged data must
+        # leave it unchanged.
+        combined_schema = {"files": []}
         for data_file in final_files:
             try:
                 file_schema = generate_data_schema(data_file)

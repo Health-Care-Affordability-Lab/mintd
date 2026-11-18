@@ -81,8 +81,27 @@ def test_generate_schema_file_supports_format(tmp_path: Path, writer, ext: str) 
     assert len(payload["files"]) == 1
     file_entry = payload["files"][0]
     assert file_entry["filename"] == f"x{ext}"
-    assert file_entry["observations"] == 3
+    # Committed and shown in the catalog: no row count (a value).
+    assert set(file_entry) == {"filename", "path", "columns", "schema"}
     assert file_entry["columns"] == 2
+
+
+def test_generate_schema_file_lists_files_in_the_same_order_on_every_os(tmp_path: Path) -> None:
+    """The output is committed, so its file order must not depend on the OS:
+    files sort by their relative path's characters (`B` before `a`), not by
+    the platform's path comparison, which is case-insensitive on Windows.
+
+    Mutation: sort the Path objects themselves -> red on Windows.
+    """
+    data_dir = tmp_path / "final"
+    data_dir.mkdir()
+    _write_csv(data_dir / "a.csv")
+    _write_csv(data_dir / "B.csv")
+    out = tmp_path / "schema.json"
+
+    generate_schema_file(data_dir, out)
+
+    assert [f["filename"] for f in json.loads(out.read_text())["files"]] == ["B.csv", "a.csv"]
 
 
 # ---------------- combined output across formats ----------------
@@ -306,7 +325,7 @@ def test_parse_published_schema_round_trips_generate_schema_file(tmp_path: Path)
 
     assert {t["filename"] for t in tables} == {"first.csv", "second.csv"}
     first = next(t for t in tables if t["filename"] == "first.csv")
-    assert first["observations"] == 5
+    assert first["observations"] is None  # the writer no longer records row counts
     assert [f["name"] for f in first["fields"]] == ["a", "b"]
     assert all(set(f) == {"name", "type", "description", "required"} for f in first["fields"])
 

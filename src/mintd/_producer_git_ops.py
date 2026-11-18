@@ -147,6 +147,7 @@ class GitArchiveFetcher:
             "--remote",
             repo,
             pin,
+            "--",  # `path` is a path, never an option such as --output
             path,
         ]
         result = _run(

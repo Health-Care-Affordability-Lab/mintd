@@ -197,11 +197,15 @@ ParameterAwareLogger <- R6Class("ParameterAwareLogger",
   )
 )
 
-#' Generate data schema from file
+#' Describe a data file's columns for its schema
+#'
+#' The result is committed to git and shown in the lab catalog, so it records
+#' only each column's name and type, never values, counts or paths. It is the
+#' shape `mintd data schema generate` writes.
 #'
 #' @param data_path Path to data file
 #' @param output_path Optional path to save schema JSON
-#' @return List containing schema information
+#' @return List with the file name and its table schema's fields
 #' @export
 generate_data_schema <- function(data_path, output_path = NULL) {
   tryCatch({
@@ -209,7 +213,8 @@ generate_data_schema <- function(data_path, output_path = NULL) {
     ext <- tolower(tools::file_ext(data_path))
 
     if (ext == "csv") {
-      df <- read.csv(data_path, stringsAsFactors = FALSE)
+      # check.names = FALSE: publish the data's own column names, not R-safe rewrites.
+      df <- read.csv(data_path, stringsAsFactors = FALSE, check.names = FALSE)
     } else if (ext == "json") {
       df <- jsonlite::fromJSON(data_path)
       if (!is.data.frame(df)) {
@@ -224,24 +229,24 @@ generate_data_schema <- function(data_path, output_path = NULL) {
     } else {
       stop("Unsupported file format: ", ext)
     }
+    # Every reader must hand back a table: the loop below names fields after
+    # its columns, and anything else (a matrix, a named vector, a table())
+    # would publish cells or values as column names.
+    if (!is.data.frame(df)) {
+      stop(basename(data_path), " does not hold a data frame")
+    }
 
-    # Generate schema
-    schema <- list(
-      filename = basename(data_path),
-      filepath = normalizePath(data_path),
-      observations = nrow(df),
-      columns = ncol(df),
-      variables = list()
-    )
-
-    for (col_name in colnames(df)) {
-      col_data <- df[[col_name]]
+    fields <- list()
+    # By position: the names are the data's own, so they can repeat or be blank.
+    for (i in seq_along(df)) {
+      col_name <- names(df)[i]
+      col_data <- df[[i]]
 
       # Basic type detection
       if (is.integer(col_data)) {
         var_type <- "integer"
       } else if (is.numeric(col_data)) {
-        var_type <- "numeric"
+        var_type <- "number"
       } else if (is.character(col_data)) {
         var_type <- "string"
       } else if (is.logical(col_data)) {
@@ -254,29 +259,10 @@ generate_data_schema <- function(data_path, output_path = NULL) {
         var_type <- typeof(col_data)
       }
 
-      # Generate basic label from column name
-      label <- tools::toTitleCase(gsub("[._-]", " ", col_name))
-
-      variable_info <- list(
-        name = col_name,
-        type = var_type,
-        label = label,
-        missing_count = sum(is.na(col_data)),
-        unique_values = if (is.character(col_data)) length(unique(col_data)) else NULL
-      )
-
-      # Add numeric statistics for numeric columns
-      if (var_type %in% c("integer", "numeric")) {
-        variable_info <- c(variable_info, list(
-          min = if (all(is.na(col_data))) NULL else min(col_data, na.rm = TRUE),
-          max = if (all(is.na(col_data))) NULL else max(col_data, na.rm = TRUE),
-          mean = if (all(is.na(col_data))) NULL else mean(col_data, na.rm = TRUE),
-          sd = if (all(is.na(col_data))) NULL else sd(col_data, na.rm = TRUE)
-        ))
-      }
-
-      schema$variables <- c(schema$variables, list(variable_info))
+      fields <- c(fields, list(list(name = col_name, type = var_type)))
     }
+
+    schema <- list(filename = basename(data_path), schema = list(fields = fields))
 
     # Save schema if output path provided
     if (!is.null(output_path)) {
@@ -309,5 +295,6 @@ find_data_files <- function(directory, extensions = NULL) {
     files <- c(files, found)
   }
 
-  return(sort(files))
+  # radix: the same order in every locale, so the committed schema does not change.
+  return(sort(files, method = "radix"))
 }

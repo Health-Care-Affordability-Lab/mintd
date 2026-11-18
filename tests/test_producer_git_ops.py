@@ -114,6 +114,7 @@ def test_git_archive_argv_includes_format_tar(monkeypatch: pytest.MonkeyPatch) -
         "--remote",
         REPO,
         PIN,
+        "--",
         "metadata.json",
     ]
 
@@ -514,8 +515,33 @@ def test_fetch_path_at_argv_uses_given_path(monkeypatch: pytest.MonkeyPatch) -> 
         "--remote",
         REPO,
         PIN,
+        "--",
         SCHEMA_PATH,
     ]
+
+
+def test_fetch_path_at_never_reads_the_path_as_an_option(tmp_path: Path) -> None:
+    """A path that looks like an option reaches git after `--`, so git treats it
+    as a path. Without that, `--output=<file>` makes `git archive` overwrite a
+    file on the machine that fetches (a catalog builder reads paths from
+    metadata it does not own).
+
+    Mutation: drop the `--` from the archive argv -> red.
+    """
+    from tests._harness.git import _git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q"], cwd=repo)
+    (repo / "a.txt").write_text("a")
+    _git(["add", "a.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "a"], cwd=repo)
+    victim = tmp_path / "victim"
+
+    with pytest.raises(FetchError):
+        GitArchiveFetcher().fetch_path_at(str(repo), "HEAD", f"--output={victim}")
+
+    assert not victim.exists()
 
 
 def test_fetch_path_at_missing_path_maps_to_path_missing(

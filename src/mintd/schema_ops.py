@@ -187,6 +187,10 @@ def generate_schema_file(
 ) -> None:
     """Walk ``data_dir`` for supported files; write one combined JSON.
 
+    The output is committed to git and read by the lab catalog, so it records
+    column names, types, Stata variable labels (``title``) and value labels
+    (``categories``), never row counts or values.
+
     Raises:
         SchemaExtraNotInstalled: pandas (and/or pyarrow for parquet) missing.
         FileNotFoundError: no supported data files in ``data_dir``.
@@ -198,7 +202,9 @@ def generate_schema_file(
     for ext in SUPPORTED_EXTENSIONS:
         pattern = f"**/*{ext}" if recursive else f"*{ext}"
         data_files.extend(data_dir.glob(pattern))
-    data_files = sorted(data_files)
+    # By the relative path's characters, so the committed output lists files in
+    # the same order on every OS.
+    data_files = sorted(data_files, key=lambda p: p.relative_to(data_dir).as_posix())
 
     if not data_files:
         raise FileNotFoundError(
@@ -215,7 +221,6 @@ def generate_schema_file(
             files_schemas.append({
                 "filename": data_file.name,
                 "path": data_file.relative_to(data_dir).as_posix(),
-                "observations": len(df),
                 "columns": len(df.columns),
                 "schema": schema,
             })
@@ -300,7 +305,8 @@ def parse_published_schema(raw: bytes) -> list[Table]:
     published `schema.json` may take:
 
     - mintd wrapper: ``{generator, schema_standard, files: [{filename,
-      observations, columns, schema: {fields: [...]}}]}`` — one table per file.
+      columns, schema: {fields: [...]}}]}`` — one table per file (older files
+      also carry ``observations``, which is still read).
     - bare frictionless table schema: ``{fields: [...]}`` — a single table.
     - JSON Schema: ``{properties: {...}, required: [...]}`` — a single table.
 
