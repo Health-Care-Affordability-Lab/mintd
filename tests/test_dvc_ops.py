@@ -23,7 +23,7 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
     fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/provider-xw",
+        repo_url="https://github.com/example-org/demo-xw",
         path="outputs/cms_based/",
         dest=dest,
         rev="abc123",
@@ -32,7 +32,7 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call.repo_url == "https://github.com/example-org/provider-xw"
+    assert call.repo_url == "https://github.com/example-org/demo-xw"
     assert call.path == "outputs/cms_based/"
     assert call.dest == dest
     assert call.rev == "abc123"
@@ -45,7 +45,7 @@ def test_fake_writes_parseable_stub(tmp_path: Path) -> None:
 
     produced = fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/provider-xw",
+        repo_url="https://github.com/example-org/demo-xw",
         path="outputs/cms_based/",
         dest=dest,
     )
@@ -54,7 +54,7 @@ def test_fake_writes_parseable_stub(tmp_path: Path) -> None:
     assert produced.exists()
 
     dep = DataDependency.from_dvc_file(produced)
-    assert dep.producer_repo == "https://github.com/example-org/provider-xw"
+    assert dep.producer_repo == "https://github.com/example-org/demo-xw"
     assert dep.output_path == "outputs/cms_based/"
     assert dep.local_path == "cms_based"
 

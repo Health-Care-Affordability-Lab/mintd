@@ -34,7 +34,7 @@ MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
 def _register(
     client: InMemoryCatalogClient,
-    name: str = "provider-xw",
+    name: str = "demo-xw",
     mutate: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
@@ -98,14 +98,14 @@ def test_clone_and_pull_product_happy_path(
 
     dest = clone_and_pull_product(
         client, dvc, git, _fast(),
-        name="provider-xw",
+        name="demo-xw",
     )
 
-    assert dest.dest == (tmp_path / "data_provider-xw").resolve()
+    assert dest.dest == (tmp_path / "data_demo-xw").resolve()
     assert len(git.clone_calls) == 1
     assert git.clone_calls[0].shallow is False
     assert git.clone_calls[0].branch is None
-    assert git.clone_calls[0].url == "https://github.com/example-org/provider-xw"
+    assert git.clone_calls[0].url == "https://github.com/example-org/demo-xw"
     assert len(dvc.pull_calls) == 1
     # Default pulls every DISCOVERED output; --primary narrows to the primary.
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
@@ -122,7 +122,7 @@ def test_clone_and_pull_product_with_explicit_dest(
 
     dest_arg = tmp_path / "x"
     dest = clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", dest=dest_arg,
+        client, dvc, git, _fast(), name="demo-xw", dest=dest_arg,
     )
 
     assert dest.dest == dest_arg.resolve()
@@ -139,7 +139,7 @@ def test_clone_and_pull_product_with_rev(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", rev="v1.2",
+        client, dvc, git, _fast(), name="demo-xw", rev="v1.2",
     )
 
     assert git.clone_calls[0].branch == "v1.2"
@@ -157,7 +157,7 @@ def test_clone_and_pull_product_default_pulls_all_outputs(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
@@ -175,7 +175,7 @@ def test_clone_and_pull_product_with_primary_only(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", primary_only=True,
+        client, dvc, git, _fast(), name="demo-xw", primary_only=True,
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
@@ -198,7 +198,7 @@ def test_clone_and_pull_product_normalizes_windows_primary(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", primary_only=True,
+        client, dvc, git, _fast(), name="demo-xw", primary_only=True,
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet"]
@@ -208,7 +208,7 @@ def test_clone_and_pull_product_refuses_existing_nonempty_dest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    pre_existing = tmp_path / "data_provider-xw"
+    pre_existing = tmp_path / "data_demo-xw"
     pre_existing.mkdir()
     (pre_existing / "foo.txt").write_text("stale", encoding="utf-8")
 
@@ -218,7 +218,7 @@ def test_clone_and_pull_product_refuses_existing_nonempty_dest(
     with pytest.raises(ImportDestinationExists) as exc:
         clone_and_pull_product(
             client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
-            name="provider-xw",
+            name="demo-xw",
         )
     assert "non-empty" in str(exc.value)
     assert str(pre_existing.resolve()) in str(exc.value)
@@ -239,7 +239,7 @@ def test_clone_and_pull_product_raises_when_no_primary(
     with pytest.raises(MissingPrimaryDataProduct):
         clone_and_pull_product(
             client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
-            name="provider-xw", primary_only=True,
+            name="demo-xw", primary_only=True,
         )
 
 
@@ -330,11 +330,11 @@ def test_clone_and_pull_product_translates_git_failure_to_producer_error(
     with pytest.raises(ProducerError) as exc:
         clone_and_pull_product(
             client, _FakeDvcOps(), _RaisingCloneGitOps(), _fast(),
-            name="provider-xw",
+            name="demo-xw",
         )
     msg = str(exc.value)
-    assert "provider-xw" in msg or "https://github.com/example-org/provider-xw" in msg
-    assert str((tmp_path / "data_provider-xw").resolve()) in msg
+    assert "demo-xw" in msg or "https://github.com/example-org/demo-xw" in msg
+    assert str((tmp_path / "data_demo-xw").resolve()) in msg
     assert "partial clone left in place" in msg
 
 
@@ -359,10 +359,10 @@ def test_clone_and_pull_product_passes_the_clone_dest_as_cwd(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
     )
 
-    assert [c.cwd for c in dvc.pull_calls] == [tmp_path / "data_provider-xw"]
+    assert [c.cwd for c in dvc.pull_calls] == [tmp_path / "data_demo-xw"]
     assert Path.cwd() == tmp_path  # never chdir'd in the first place
 
 
@@ -392,7 +392,7 @@ def test_clone_and_pull_product_never_changes_the_process_cwd(
     with pytest.raises(DvcOpError):
         clone_and_pull_product(
             client, _DvcPullErrorOps(), git, _fast(),
-            name="provider-xw",
+            name="demo-xw",
         )
 
     assert Path.cwd() == tmp_path  # restored even on failure
@@ -426,7 +426,7 @@ def test_clone_and_pull_product_with_path_pulls_only_that_file(
     git.tracks = ("data/final/a.csv", "data/intermediate/markets/defs_30min.parquet")
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=["data/intermediate/markets/defs_30min.parquet"],
     )
 
@@ -450,7 +450,7 @@ def test_clone_and_pull_product_with_path_directory_output(
     git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
+        client, dvc, git, _fast(), name="demo-xw", paths=["data/final/"],
     )
 
     assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
@@ -470,7 +470,7 @@ def test_clone_and_pull_product_with_repeated_paths_pulls_both(
     )
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=["data/final/", "data/intermediate/markets/defs_30min.parquet"],
     )
 
@@ -495,7 +495,7 @@ def test_clone_and_pull_product_path_accepts_primary_itself(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=["outputs/main.parquet"],
     )
 
@@ -515,7 +515,7 @@ def test_clone_and_pull_product_normalizes_path_spellings(
     git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=[".\\data\\final\\"],
     )
 
@@ -535,7 +535,7 @@ def test_clone_and_pull_product_paths_plus_primary_is_usage_error(
         clone_and_pull_product(
             _AssertNotFetchedClient(),  # type: ignore[arg-type]
             dvc, git, _fast(),
-            name="provider-xw",
+            name="demo-xw",
             paths=["data/final/"],
             primary_only=True,
         )
@@ -564,7 +564,7 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw",
+            client, dvc, git, _fast(), name="demo-xw",
             paths=["data/nope.csv"],
         )
 
@@ -574,12 +574,12 @@ def test_clone_and_pull_product_unknown_path_lists_tracked_outputs(
     assert "data/intermediate/markets/defs_30min.parquet" in msg
     assert "outputs/main.parquet (primary)" in msg
     assert git.clone_calls == []
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
     assert dvc.pull_calls == []
 
     # The corrected retry just works — no leftover clone in the way.
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/"],
+        client, dvc, git, _fast(), name="demo-xw", paths=["data/final/"],
     )
     assert len(git.clone_calls) == 1
     assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
@@ -602,11 +602,11 @@ def test_clone_and_pull_product_missing_primary_fails_before_clone(
     with pytest.raises(MissingPrimaryDataProduct):
         clone_and_pull_product(
             client, _FakeDvcOps(), git, _fast(),
-            name="provider-xw", primary_only=True,
+            name="demo-xw", primary_only=True,
         )
 
     assert git.clone_calls == []
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
 
 # ---------- --rev pinned: validate against the cloned metadata.json ------
@@ -657,7 +657,7 @@ def test_clone_and_pull_product_rev_validates_against_cloned_metadata(
     git.tracks = ("data/intermediate/old_defs.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="demo-xw", rev="v1.0",
         paths=["data/intermediate/old_defs.parquet"],
     )
 
@@ -681,18 +681,18 @@ def test_clone_and_pull_product_rev_unknown_path_removes_clone(
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
+            client, dvc, git, _fast(), name="demo-xw", rev="v1.0",
             paths=["data/typo.parquet"],
         )
 
     # Message lists the rev's outputs (from the clone), not HEAD's catalog.
     assert "data/rev-only.parquet" in str(exc.value)
     assert dvc.pull_calls == []
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
     # Corrected retry works against the same (now absent) dest.
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="demo-xw", rev="v1.0",
         paths=["data/rev-only.parquet"],
     )
     assert dvc.pull_calls[0].targets == ["data/rev-only.parquet"]
@@ -711,14 +711,14 @@ def test_clone_and_pull_product_rev_falls_back_to_catalog_without_metadata(
     git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
+        client, dvc, git, _fast(), name="demo-xw", rev="v1.0",
         paths=["data/final/"],
     )
     assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
     with pytest.raises(UnknownProductPath):
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw", rev="v1.0",
+            client, dvc, git, _fast(), name="demo-xw", rev="v1.0",
             paths=["data/nope.csv"], dest=tmp_path / "other-dest",
         )
     assert not (tmp_path / "other-dest").exists()
@@ -748,7 +748,7 @@ def test_clone_primary_directory_prefix_expands_to_the_tracked_files(
     git = _NoopCloneGitOps()
     git.tracks = ("data/final/a.csv", "data/final/b.csv")
 
-    clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", primary_only=True)
+    clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw", primary_only=True)
 
     assert dvc.pull_calls[0].targets == ["data/final/a.csv", "data/final/b.csv"]
 
@@ -774,7 +774,7 @@ def test_clone_unresolvable_selector_raises_and_removes_the_clone(
     git.tracks = ("data/other.csv",)
 
     with pytest.raises(UnknownProductPath) as exc:
-        clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", **select)
+        clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw", **select)
 
     assert "data/final" in str(exc.value)
     assert "data/other.csv" in str(exc.value)
@@ -786,10 +786,10 @@ def test_clone_unresolvable_selector_raises_and_removes_the_clone(
     assert "pass --path" not in exc.value.hint
     assert len(git.clone_calls) == 1  # past the catalog pre-filter: the clone happened
     assert dvc.pull_calls == []
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
     git.tracks = ("data/final/a.csv",)  # producer fixed: the retry is not blocked
-    clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw", **select)
+    clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw", **select)
     assert dvc.pull_calls[0].targets == ["data/final/a.csv"]
 
 
@@ -820,14 +820,14 @@ def test_clone_path_accepted_by_the_catalog_but_absent_in_the_repo_fails_after_t
 
     with pytest.raises(UnknownProductPath, match="stale") as exc:
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw",
+            client, dvc, git, _fast(), name="demo-xw",
             paths=["data/final/hospital-all-owners/"],
         )
 
     assert "data/final/a.csv" in str(exc.value)
     assert len(git.clone_calls) == 1
     assert dvc.pull_calls == []
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
 
 def test_clone_path_under_a_directory_out_keeps_its_own_spelling(
@@ -853,7 +853,7 @@ def test_clone_path_under_a_directory_out_keeps_its_own_spelling(
     git.tracks = ("data/final",)  # ONE directory out
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", paths=["data/final/big.parquet"],
+        client, dvc, git, _fast(), name="demo-xw", paths=["data/final/big.parquet"],
     )
 
     assert dvc.pull_calls[0].targets == ["data/final/big.parquet"]
@@ -888,13 +888,13 @@ def test_clone_subpath_of_a_directory_out_that_never_lands_is_a_failed_target(
     reporter = RecordingReporter()
 
     result = clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=["data/final/stale/"], reporter=reporter,
     )
 
     assert dvc.pull_calls[0].targets == ["data/final/stale"]  # forwarded, as dvc allows
     assert result.pull_error_count == 1
-    assert (tmp_path / "data_provider-xw").exists()  # a pull outcome keeps the clone
+    assert (tmp_path / "data_demo-xw").exists()  # a pull outcome keeps the clone
     errors = [e for e in reporter.events if e[0] == "error"]
     assert any("data/final/stale" in e[1] and "stale" in (e[2] or "") for e in errors), errors
     # The clone is kept, so the hint must not send the user to a clone that
@@ -942,7 +942,7 @@ def test_clone_subpath_whose_own_pull_fails_is_reported_once(
         fast.raises = RuntimeError("fast-sync blew up")
 
     result = clone_and_pull_product(
-        client, dvc, git, fast, name="provider-xw",
+        client, dvc, git, fast, name="demo-xw",
         paths=["data/final/stale/"], reporter=reporter,
     )
 
@@ -973,7 +973,7 @@ def test_clone_repeated_spellings_of_one_stale_subpath_count_once(
     git.tracks = ("data/final",)
 
     result = clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw",
+        client, dvc, git, _fast(), name="demo-xw",
         paths=["data/final/stale/", "data/final/stale"],
     )
 
@@ -1004,7 +1004,7 @@ def test_clone_rev_primary_subpath_that_never_lands_blames_the_rev_not_the_produ
     reporter = RecordingReporter()
 
     result = clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", rev="v1.0", primary_only=True,
+        client, dvc, git, _fast(), name="demo-xw", rev="v1.0", primary_only=True,
         reporter=reporter,
     )
 
@@ -1030,13 +1030,13 @@ def test_clone_rev_primary_unresolvable_names_the_rev_not_a_stale_catalog(
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw", rev="v1.0", primary_only=True,
+            client, dvc, git, _fast(), name="demo-xw", rev="v1.0", primary_only=True,
         )
 
     assert "predate the primary" in str(exc.value)
     assert "stale" not in str(exc.value)
     assert "data/old.parquet" in str(exc.value)
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
 
 def test_clone_rev_path_declared_at_that_rev_but_untracked_is_a_stale_declaration(
@@ -1054,12 +1054,12 @@ def test_clone_rev_path_declared_at_that_rev_but_untracked_is_a_stale_declaratio
 
     with pytest.raises(UnknownProductPath) as exc:
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw", rev="v1.0", paths=["data/final/"],
+            client, dvc, git, _fast(), name="demo-xw", rev="v1.0", paths=["data/final/"],
         )
 
     assert "stale" in str(exc.value)
     assert "predate" not in str(exc.value)
-    assert not (tmp_path / "data_provider-xw").exists()
+    assert not (tmp_path / "data_demo-xw").exists()
 
 
 def test_clone_rejection_keeps_a_pre_existing_empty_dest(
@@ -1079,7 +1079,7 @@ def test_clone_rejection_keeps_a_pre_existing_empty_dest(
 
     with pytest.raises(UnknownProductPath):
         clone_and_pull_product(
-            client, dvc, git, _fast(), name="provider-xw", primary_only=True, dest=mine,
+            client, dvc, git, _fast(), name="demo-xw", primary_only=True, dest=mine,
         )
 
     assert mine.is_dir()
@@ -1098,7 +1098,7 @@ def test_clone_and_pull_product_no_flags_unchanged_with_paths_none(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="provider-xw", paths=None,
+        client, dvc, git, _fast(), name="demo-xw", paths=None,
     )
 
     assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
@@ -1182,7 +1182,7 @@ def test_clone_and_pull_product_forwards_reporter_to_data_pull(
 
     clone_and_pull_product(
         client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
-        name="provider-xw",
+        name="demo-xw",
         reporter=reporter,
     )
 
@@ -1212,7 +1212,7 @@ def test_clone_and_pull_product_propagates_pull_error_count(
             targets_pulled=1, total_bytes=0, elapsed_s=0.1, error_count=3,
         ),
     )
-    result = clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw")
+    result = clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw")
     assert result.pull_error_count == 3
 
 
@@ -1226,5 +1226,5 @@ def test_clone_and_pull_product_clean_pull_error_count_zero(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    result = clone_and_pull_product(client, dvc, git, _fast(), name="provider-xw")
+    result = clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw")
     assert result.pull_error_count == 0

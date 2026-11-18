@@ -33,7 +33,7 @@ MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
 def _register(
     client: InMemoryCatalogClient,
-    name: str = "provider_xw",
+    name: str = "demo_xw",
     mutate: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     data = json.loads(MINIMAL.read_text(encoding="utf-8"))
@@ -77,17 +77,17 @@ def test_import_product_uses_primary_when_no_path(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
     assert len(produced) == 1
     assert len(fake.calls) == 1
     call = fake.calls[0]
     assert call.path == "outputs/main.parquet"
-    assert call.repo_url == "https://github.com/example-org/provider_xw"
+    assert call.repo_url == "https://github.com/example-org/demo_xw"
     # Slice 38: dest is namespaced by the producer's full_name so
     # multiple imports into the same dest_root don't collide.
-    assert call.dest == tmp_path / "data_provider_xw" / "outputs" / "main.parquet"
+    assert call.dest == tmp_path / "data_demo_xw" / "outputs" / "main.parquet"
 
 
 def test_import_product_path_override(tmp_path: Path) -> None:
@@ -96,11 +96,11 @@ def test_import_product_path_override(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     import_product(
-        client, fake, "provider_xw", path="outputs/other.csv", cwd=tmp_path, dest_root=tmp_path
+        client, fake, "demo_xw", path="outputs/other.csv", cwd=tmp_path, dest_root=tmp_path
     )
 
     assert fake.calls[0].path == "outputs/other.csv"
-    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "outputs" / "other.csv"
+    assert fake.calls[0].dest == tmp_path / "data_demo_xw" / "outputs" / "other.csv"
 
 
 def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
@@ -112,7 +112,7 @@ def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", all_outputs=True, cwd=tmp_path, dest_root=tmp_path
+        client, fake, "demo_xw", all_outputs=True, cwd=tmp_path, dest_root=tmp_path
     )
 
     assert len(produced) == 3
@@ -143,7 +143,7 @@ def test_import_all_skips_an_output_nested_inside_another(tmp_path: Path) -> Non
     reporter = _RecordingReporter()
 
     produced = import_product(
-        client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+        client, fake, "demo_xw", all_outputs=True, cwd=tmp_path,
         dest_root=tmp_path, reporter=reporter,
     )
 
@@ -160,7 +160,7 @@ def test_explicit_nested_paths_collapse_the_same_way(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     import_product(
-        client, fake, "provider_xw", path=["data/final/b.csv", "data/final/"],
+        client, fake, "demo_xw", path=["data/final/b.csv", "data/final/"],
         cwd=tmp_path, dest_root=tmp_path,
     )
 
@@ -188,7 +188,7 @@ def test_a_failure_partway_through_all_names_what_landed(tmp_path: Path) -> None
 
     with pytest.raises(DvcOpError):
         import_product(
-            client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+            client, fake, "demo_xw", all_outputs=True, cwd=tmp_path,
             dest_root=tmp_path, reporter=reporter,
         )
 
@@ -229,7 +229,7 @@ def test_an_interrupted_import_still_names_what_landed(
 
     with pytest.raises(interrupt):
         import_product(
-            client, fake, "provider_xw", all_outputs=True, cwd=tmp_path,
+            client, fake, "demo_xw", all_outputs=True, cwd=tmp_path,
             dest_root=tmp_path, reporter=reporter,
         )
 
@@ -277,7 +277,7 @@ def test_import_product_rev_without_path_resolves_via_producer_view(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/from_catalog.parquet"))
     fake = _FakeDvcOps()
-    repo_url = "https://github.com/example-org/provider_xw"
+    repo_url = "https://github.com/example-org/demo_xw"
     fetcher = StaticFetcher(
         {(repo_url, "abc123"): _producer_bytes(primary="outputs/at_rev.parquet")}
     )
@@ -288,7 +288,7 @@ def test_import_product_rev_without_path_resolves_via_producer_view(
     import_product(
         client,
         fake,
-        "provider_xw",
+        "demo_xw",
         rev="abc123",
         cwd=tmp_path, dest_root=tmp_path,
         producer_view_factory=factory,
@@ -303,7 +303,7 @@ def test_import_product_propagates_producer_error(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    repo_url = "https://github.com/example-org/provider_xw"
+    repo_url = "https://github.com/example-org/demo_xw"
     fetcher = ErroringFetcher(FetchError.pin_missing(repo_url, "abc123"))
 
     def factory(r: str, p: str) -> ProducerView:
@@ -313,7 +313,7 @@ def test_import_product_propagates_producer_error(tmp_path: Path) -> None:
         import_product(
             client,
             fake,
-            "provider_xw",
+            "demo_xw",
             rev="abc123",
             cwd=tmp_path, dest_root=tmp_path,
             producer_view_factory=factory,
@@ -327,7 +327,7 @@ def test_import_product_rev_without_path_no_primary_raises(tmp_path: Path) -> No
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    repo_url = "https://github.com/example-org/provider_xw"
+    repo_url = "https://github.com/example-org/demo_xw"
     fetcher = StaticFetcher({(repo_url, "abc123"): _producer_bytes(primary=None)})
 
     def factory(r: str, p: str) -> ProducerView:
@@ -337,7 +337,7 @@ def test_import_product_rev_without_path_no_primary_raises(tmp_path: Path) -> No
         import_product(
             client,
             fake,
-            "provider_xw",
+            "demo_xw",
             rev="abc123",
             cwd=tmp_path, dest_root=tmp_path,
             producer_view_factory=factory,
@@ -358,9 +358,9 @@ def test_import_product_default_factory_is_producer_view_at(
 
     monkeypatch.setattr("mintd.data.ProducerView.at", stub)
 
-    import_product(client, fake, "provider_xw", rev="abc123", cwd=tmp_path, dest_root=tmp_path)
+    import_product(client, fake, "demo_xw", rev="abc123", cwd=tmp_path, dest_root=tmp_path)
 
-    assert captured == [("https://github.com/example-org/provider_xw", "abc123")]
+    assert captured == [("https://github.com/example-org/demo_xw", "abc123")]
     assert fake.calls[0].path == "outputs/from_stub.parquet"
 
 
@@ -375,7 +375,7 @@ def test_import_product_rev_with_path_passes_through(tmp_path: Path) -> None:
     import_product(
         client,
         fake,
-        "provider_xw",
+        "demo_xw",
         path="outputs/x.csv",
         rev="abc123",
         cwd=tmp_path, dest_root=tmp_path,
@@ -396,7 +396,7 @@ def test_import_product_missing_primary_raises(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     with pytest.raises(MissingPrimaryDataProduct):
-        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
 
 
 def test_import_product_unknown_name_raises(tmp_path: Path) -> None:
@@ -413,10 +413,10 @@ def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
-    assert produced == [tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc"]
+    assert produced == [tmp_path / "data_demo_xw" / "outputs" / "main.parquet.dvc"]
     assert produced[0].exists()
 
 
@@ -424,11 +424,11 @@ def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "data_provider_xw" / "outputs").mkdir(parents=True)
-    (tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_demo_xw" / "outputs").mkdir(parents=True)
+    (tmp_path / "data_demo_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
 
     with pytest.raises(ImportDestinationExists):
-        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert fake.calls == []
 
 
@@ -436,11 +436,11 @@ def test_import_product_force_overwrites(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    (tmp_path / "data_provider_xw" / "outputs").mkdir(parents=True)
-    (tmp_path / "data_provider_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
+    (tmp_path / "data_demo_xw" / "outputs").mkdir(parents=True)
+    (tmp_path / "data_demo_xw" / "outputs" / "main.parquet.dvc").write_text("preexisting")
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path, force=True
     )
 
     assert len(produced) == 1
@@ -455,12 +455,12 @@ def test_import_product_trailing_slash_in_path(tmp_path: Path) -> None:
     import_product(
         client,
         fake,
-        "provider_xw",
+        "demo_xw",
         path="outputs/cms_based/",
         cwd=tmp_path, dest_root=tmp_path,
     )
 
-    assert fake.calls[0].dest == tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    assert fake.calls[0].dest == tmp_path / "data_demo_xw" / "outputs" / "cms_based"
 
 
 def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None:
@@ -480,11 +480,11 @@ def test_import_product_creates_dest_parent_when_missing(tmp_path: Path) -> None
     nested_dest = tmp_path / "data" / "imports"
     assert not nested_dest.exists()
 
-    import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=nested_dest)
+    import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=nested_dest)
 
     # Both dest_root and the per-producer namespace dir get auto-created.
-    assert (nested_dest / "data_provider_xw").is_dir()
-    assert fake.calls[0].dest == nested_dest / "data_provider_xw" / "outputs" / "main.parquet"
+    assert (nested_dest / "data_demo_xw").is_dir()
+    assert fake.calls[0].dest == nested_dest / "data_demo_xw" / "outputs" / "main.parquet"
 
 
 # ---------------------------------------------------------------------------
@@ -503,13 +503,13 @@ def test_import_product_force_clears_an_existing_directory_dest(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
-    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
     dest.mkdir(parents=True)
     (dest / "stale.csv").write_text("old payload")
     (dest.parent / "cms_based.dvc").write_text("preexisting")
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path, force=True
     )
 
     assert len(fake.calls) == 1
@@ -562,7 +562,7 @@ def test_a_failed_forced_import_restores_the_payload(
             (corpse / "half.csv").write_text("truncated\n", encoding="utf-8")
             raise DvcOpError("dvc import failed (exit 1): connection reset by peer")
 
-    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
     dest.parent.mkdir(parents=True)
     # The pointer beside it is what makes this destination mintd's to move.
     (dest.parent / "cms_based.dvc").write_text("preexisting")
@@ -584,7 +584,7 @@ def test_a_failed_forced_import_restores_the_payload(
 
     with pytest.raises(DvcOpError):
         import_product(
-            client, _PartialThenFailDvcOps(), "provider_xw", cwd=tmp_path,
+            client, _PartialThenFailDvcOps(), "demo_xw", cwd=tmp_path,
             dest_root=tmp_path, force=True,
         )
 
@@ -617,7 +617,7 @@ def test_a_plain_import_leaves_a_stray_backup_alone(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
-    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
     dest.parent.mkdir(parents=True)
     # No `.dvc` and no `dest`: nothing here is mintd's to move. The stray is a
     # remnant of a killed bump against an older layout.
@@ -625,7 +625,7 @@ def test_a_plain_import_leaves_a_stray_backup_alone(tmp_path: Path) -> None:
     stray.mkdir()
     (stray / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
 
-    import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+    import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
 
     assert (stray / "irreplaceable.csv").read_text(encoding="utf-8") == "keep me\n"
 
@@ -638,7 +638,7 @@ def test_a_forced_import_refuses_a_stale_backup_instead_of_destroying_it(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
-    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
     dest.mkdir(parents=True)
     (dest / "partial.csv").write_text("half\n", encoding="utf-8")
     (dest.parent / "cms_based.dvc").write_text("preexisting")
@@ -648,7 +648,7 @@ def test_a_forced_import_refuses_a_stale_backup_instead_of_destroying_it(
 
     with pytest.raises(StaleBackupExists) as excinfo:
         import_product(
-            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
+            client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path,
             force=True,
         )
 
@@ -675,12 +675,12 @@ def test_import_product_force_never_destroys_a_stray_directory(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
-    dest = tmp_path / "data_provider_xw" / "outputs" / "cms_based"
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
     dest.mkdir(parents=True)
     (dest / "precious.csv").write_text("not mintd's to delete")
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path,
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path,
         force=True,
     )
 
@@ -721,7 +721,7 @@ def test_import_refuses_an_output_path_that_escapes_the_destination(
 
     with pytest.raises(UnknownProductPath):
         import_product(
-            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path
+            client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path
         )
 
     assert fake.calls == [], "refused before any dvc invocation"
@@ -744,7 +744,7 @@ def test_import_never_deletes_outside_the_destination_on_force(
 
     with pytest.raises(UnknownProductPath):
         import_product(
-            client, _FakeDvcOps(), "provider_xw",
+            client, _FakeDvcOps(), "demo_xw",
             cwd=project, dest_root=project / "data" / "imports", force=True,
         )
 
@@ -767,7 +767,7 @@ def _stage_legacy_import(ns: Path, *, producer_path: str, leaf: str) -> Path:
         "deps:\n"
         f"  - path: {producer_path}\n"
         "    repo:\n"
-        "      url: https://github.com/example-org/provider_xw\n"
+        "      url: https://github.com/example-org/demo_xw\n"
         "      rev: main\n"
         '      rev_lock: "' + "a" * 40 + '"\n'
     )
@@ -789,11 +789,11 @@ def test_reimport_of_a_legacy_import_is_refused_not_duplicated(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    ns = tmp_path / "data_provider_xw"
+    ns = tmp_path / "data_demo_xw"
     legacy = _stage_legacy_import(ns, producer_path="outputs/main.parquet", leaf="main.parquet")
 
     with pytest.raises(ImportDestinationExists) as ei:
-        import_product(client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path)
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
 
     assert "main.parquet.dvc" in str(ei.value)
     assert fake.calls == []
@@ -813,11 +813,11 @@ def test_force_reimport_of_a_legacy_import_rewrites_it_in_place(
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     fake = _FakeDvcOps()
-    ns = tmp_path / "data_provider_xw"
+    ns = tmp_path / "data_demo_xw"
     _stage_legacy_import(ns, producer_path="outputs/main.parquet", leaf="main.parquet")
 
     produced = import_product(
-        client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path, force=True
+        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path, force=True
     )
 
     assert [p.name for p in ns.rglob("*.dvc")] == ["main.parquet.dvc"]
@@ -861,7 +861,7 @@ def test_import_refuses_a_namespace_that_is_not_one_folder(
 
     with pytest.raises(UnknownProductPath, match="single folder name"):
         import_product(
-            client, fake, "provider_xw", cwd=tmp_path, dest_root=tmp_path / "imports"
+            client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path / "imports"
         )
 
     assert fake.calls == [], "refused before any dvc invocation"
