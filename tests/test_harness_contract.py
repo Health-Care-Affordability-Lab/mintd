@@ -1665,3 +1665,27 @@ def test_dir_manifest_md5_matches_the_tree_dvc_add_records(tmp_path: Path, real_
     entries = read_cached_dir_manifest(ws / ".dvc" / "cache", md5)
     assert entries is not None and len(entries) == 2
     assert dir_manifest_md5(entries) == md5
+
+
+def test_s3_server_records_each_object_get_and_the_bytes_it_served(s3_server) -> None:
+    """Stories prove "downloaded once" and "nothing else downloaded" from these
+    records: a HEAD and a failed GET are not downloads, and a key outside the
+    prefix is left out."""
+    from botocore.exceptions import ClientError
+
+    from tests._harness.expect import s3_state
+    from tests._harness.s3 import BUCKET
+
+    s3 = s3_server.client
+    s3.put_object(Bucket=BUCKET, Key="lab/p/a.csv", Body=b"alpha\n")
+    s3.put_object(Bucket=BUCKET, Key="lab/other/b.csv", Body=b"beta\n")
+    for key in ("lab/p/a.csv", "lab/p/a.csv", "lab/other/b.csv"):
+        s3.get_object(Bucket=BUCKET, Key=key)["Body"].read()
+    s3.head_object(Bucket=BUCKET, Key="lab/p/a.csv")
+    with pytest.raises(ClientError):
+        s3.get_object(Bucket=BUCKET, Key="lab/p/missing.csv")
+
+    state = s3_state(s3_server, "lab/p")
+    assert state.puts == {"a.csv": 1}
+    assert state.gets == {"a.csv": 2}
+    assert state.bytes_served == {"a.csv": 12}

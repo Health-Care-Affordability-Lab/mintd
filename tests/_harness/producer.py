@@ -38,7 +38,7 @@ class LocalProducer:
 
     bare: Path
     work: Path
-    remote: Path
+    remote: Path | Mapping[str, str]
 
     @property
     def url(self) -> str:
@@ -201,11 +201,12 @@ class LocalProducer:
         return self._commit_and_push(message)
 
 
-def build_local_producer(root: Path) -> LocalProducer:
-    """Bare repo + work clone, seeded with full v2 metadata on `main`."""
+def build_local_producer(root: Path, *, remote: Mapping[str, str] | None = None) -> LocalProducer:
+    """Bare repo + work clone, seeded with full v2 metadata on `main`.
+
+    The dvc remote is a local directory unless `remote` gives its config."""
     bare = root / "producer.git"
     work = root / "producer"
-    remote = root / "dvc-remote"
     _git(["init", "--bare", "-b", "main", str(bare)])
     _git(["clone", str(bare), str(work)])
     _git(["checkout", "-b", "main"], cwd=work)
@@ -228,7 +229,7 @@ def build_local_producer(root: Path) -> LocalProducer:
         "config", "-f", str(bare / "config"),
         "uploadarchive.allowUnreachable", "true",
     ])
-    return LocalProducer(bare=bare, work=work, remote=remote)
+    return LocalProducer(bare=bare, work=work, remote=root / "dvc-remote" if remote is None else remote)
 
 
 @pytest.fixture
