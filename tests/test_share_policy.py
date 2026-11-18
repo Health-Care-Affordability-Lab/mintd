@@ -459,7 +459,7 @@ def test_share_get_no_stored_checksum_warns(tmp_path: Path) -> None:
         def head_object(self, **k):
             return {"ContentLength": 4}
 
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             Path(Filename).write_bytes(b"data")
             if Callback is not None:
                 Callback(4)
@@ -486,7 +486,7 @@ def test_get_failure_path_leaves_a_pre_existing_tmp_intact(tmp_path: Path) -> No
         def head_object(self, **k):
             return {"ContentLength": 22}
 
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             Path(Filename).write_bytes(b"partial")
             raise ClientError(
                 {
@@ -520,7 +520,7 @@ def test_get_long_dest_name_is_an_error_not_a_traceback(tmp_path: Path) -> None:
         def head_object(self, **k):
             return {"ContentLength": 4}
 
-        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):  # noqa: N803
+        def download_file(self, Bucket, Key, Filename, ExtraArgs=None, Callback=None):
             Path(Filename).write_bytes(b"data")
 
     dest = tmp_path / ("a" * 230 + ".csv")

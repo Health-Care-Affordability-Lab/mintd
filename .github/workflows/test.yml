@@ -41,6 +41,8 @@ jobs:
           git config --global user.name "CI"
       - name: Lint
         run: ruff check src tests
+      - name: Lint (banned APIs, inline noqa ignored)
+        run: ruff check src --ignore-noqa --select TID251,TID253
       - name: Type-check
         run: mypy src/mintd
       - name: Test
@@ -100,6 +102,8 @@ jobs:
           git config --global user.name "CI"
       - name: Lint
         run: .venv\Scripts\ruff.exe check src tests
+      - name: Lint (banned APIs, inline noqa ignored)
+        run: .venv\Scripts\ruff.exe check src --ignore-noqa --select TID251,TID253
       - name: Type-check
         run: .venv\Scripts\mypy.exe src/mintd
       - name: Test
