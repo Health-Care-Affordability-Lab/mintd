@@ -151,7 +151,7 @@ class _FakeRegistryGitOps:
         if self.push_with_tags_raises:
             raise self.push_with_tags_raises
         self.push_with_tags_calls.append(Path(work_dir))
-        self._git(["push", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
+        self._git(["push", "--atomic", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
 
     def tag(self, work_dir: Path, name: str, message: str) -> None:
         if self.tag_raises:

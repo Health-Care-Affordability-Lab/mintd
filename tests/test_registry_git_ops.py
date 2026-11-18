@@ -35,6 +35,7 @@ from mintd._registry_git_ops import (
 from mintd.check import _git_error_summary
 
 from tests._harness.git import _git
+from tests._harness.producer import LocalProducer
 
 
 def _seed_update_branch(remote: Path, work: Path, *, with_pending: bool) -> None:
@@ -807,3 +808,36 @@ def test_remote_default_branch_asks_the_remote(tmp_path: Path) -> None:
     assert ops.remote_default_branch(repo, "origin") == "main"
     _git(["remote", "add", "gone", str(tmp_path / "missing.git")], cwd=repo)
     assert ops.remote_default_branch(repo, "gone") is None
+
+
+def test_push_with_tags_sends_the_commit_and_its_tag_or_neither(
+    tmp_path: Path, local_producer: LocalProducer,
+) -> None:
+    """A teammate pushed first, so origin refuses the branch. The tag must be
+    refused with it, or it goes public on a commit `main` never got. Then the
+    recovery publish's hint gives: rebase, delete the stale tag, tag again.
+    Mutation: drop `--atomic` -> origin lists v0.1.1 after the refused push."""
+    me = tmp_path / "me"
+    _git(["clone", "-q", local_producer.url, str(me)])
+    teammate = local_producer.commit_more("a teammate pushed first")
+    (me / "bump.txt").write_text("bump\n")
+    _git(["add", "bump.txt"], cwd=me)
+    _git(["commit", "-q", "-m", "bump"], cwd=me)
+    _git(["tag", "-a", "v0.1.1", "-m", "v0.1.1"], cwd=me)
+    ops = SubprocessRegistryGitOps()
+
+    with pytest.raises(GitOpError):
+        ops.push_with_tags(me)
+    assert local_producer.remote_tags() == []
+    assert _git(["rev-parse", "main"], cwd=local_producer.bare).strip() == teammate
+
+    # A rebase leaves the tag on the old commit: publish's tag step would
+    # call it a collision, so the stale tag has to go before the rerun.
+    _git(["pull", "-q", "--rebase"], cwd=me)
+    assert not ops.tag_points_at_head(me, "v0.1.1")
+    _git(["tag", "-d", "v0.1.1"], cwd=me)
+    _git(["tag", "-a", "v0.1.1", "-m", "v0.1.1"], cwd=me)
+    ops.push_with_tags(me)
+    assert local_producer.resolve_remote_tag("v0.1.1") == _git(
+        ["rev-parse", "main"], cwd=local_producer.bare
+    ).strip()

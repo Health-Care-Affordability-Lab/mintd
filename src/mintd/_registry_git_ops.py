@@ -354,19 +354,25 @@ class SubprocessRegistryGitOps:
             raise
 
     def push_with_tags(self, work_dir: Path) -> None:
-        """Push the current branch and the annotated tags reachable from it.
+        """Push the current branch and the annotated tags reachable from it:
+        origin takes all of them or none.
 
-        ``--follow-tags`` is the whole point: ``tag`` creates annotated
-        tags, and this sends the commit and its tag in one round trip. A
-        product cannot be advertised in the catalog at a rev the remote does
-        not have, because `publish` does this before it writes the entry.
+        ``--follow-tags`` sends the tag: ``tag`` creates annotated tags, which
+        a plain push leaves behind. A product cannot be advertised in the
+        catalog at a rev the remote does not have, because `publish` does this
+        before it writes the entry.
+
+        ``--atomic`` keeps the two together. Git updates each ref on its own,
+        so without it a branch refused as behind (a teammate pushed first)
+        still lets the tag in, public on a commit the remote branch never got.
+        A remote without atomic push support fails the push instead.
 
         Not ``push_branch``: the caller is a producer project, not the
         registry cache, and it does not know its own branch name. ``HEAD``
         resolves to the checked-out branch and creates it on the remote if
         it is not there yet.
         """
-        self._git(["push", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
+        self._git(["push", "--atomic", "--follow-tags", "origin", "HEAD"], cwd=work_dir)
 
     def tag_points_at_head(self, work_dir: Path, name: str) -> bool:
         """Is ``name`` an existing tag on the current commit?

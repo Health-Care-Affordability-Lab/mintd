@@ -1041,6 +1041,11 @@ def test_publish_does_not_update_the_catalog_when_the_push_fails(tmp_path):
     assert excinfo.value.pushed is True
     assert excinfo.value.tagged is True
     assert excinfo.value.catalog_updated is False
+    # A rebase leaves the local tag on the old commit, and a rerun would stop
+    # on it as a collision: the hint has to say to delete it first.
+    hint = excinfo.value.recovery_hint
+    for step in ("`git pull --rebase`", "`git tag -d v0.1.1`", "`mintd publish 0.1.1`"):
+        assert step in hint
 
 
 def test_republish_at_the_same_version_is_idempotent(tmp_path):
