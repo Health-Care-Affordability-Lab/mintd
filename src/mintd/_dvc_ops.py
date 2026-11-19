@@ -87,6 +87,10 @@ class DvcStatusError(DvcOpError):
     """`dvc status` exited non-zero."""
 
 
+class DvcStageListError(DvcOpError):
+    """`dvc stage list` exited non-zero: dvc can't read the ``dvc.yaml``."""
+
+
 class DvcRemoveError(DvcOpError):
     """`dvc remove` exited non-zero."""
 
@@ -248,6 +252,10 @@ def _translate_storage_key_error(
     )
 
 
+def _discard(_: str) -> None:
+    pass
+
+
 def _is_dvc_module_missing(stderr: str) -> bool:
     """`sys.executable -m dvc` exits 1 with this message when dvc isn't
     in mintd's env. We re-raise as DvcNotInstalled so users get the
@@ -332,6 +340,12 @@ class DvcOps(Protocol):
         """Run `dvc status` and return a status map."""
         ...
 
+    def stage_names(self, *, cwd: Path) -> list[str]:
+        """The stage names `dvc stage list --name-only` gives for the
+        ``dvc.yaml`` in ``cwd``: foreach and matrix stages expanded, with
+        dvc's own templating and YAML."""
+        ...
+
     def remove(self, name: str, *, cwd: Path) -> None:
         """Run `dvc remove`."""
         ...
@@ -384,6 +398,7 @@ class SubprocessDvcOps:
         wall_timeout: float | None,
         json_mode: bool = False,
         extra_env: dict[str, str] | None = None,
+        quiet: bool = False,
     ) -> "StreamResult":
         """Run one dvc command in `cwd`, and answer "is dvc even installed?"
         in one place rather than eight.
@@ -404,6 +419,8 @@ class SubprocessDvcOps:
             r = run_streaming(
                 cmd, wall_timeout=wall_timeout, reporter=self._reporter,
                 cwd=cwd, json_mode=json_mode, env=self._env(extra_env),
+                # quiet: captured for the caller to read or quote, never echoed
+                on_stdout=_discard if quiet else None, on_stderr=_discard if quiet else None,
             )
         except FileNotFoundError:
             # cwd was validated above, so this really is the binary.
@@ -605,6 +622,14 @@ class SubprocessDvcOps:
             else:
                 status_map[path] = status
         return status_map
+
+    def stage_names(self, *, cwd: Path) -> list[str]:
+        r = self._spawn([*dvc_cmd(), "stage", "list", "--name-only"], wall_timeout=self._timeouts.fast, cwd=cwd,
+                        quiet=True)
+        if r.returncode != 0:
+            why = ("".join(r.stderr_lines) or "".join(r.stdout_lines)).strip()
+            raise DvcStageListError(f"dvc stage list failed (exit {r.returncode}): {why}")
+        return [line.strip() for line in r.stdout_lines if line.strip()]
 
     def remove(self, name: str, *, cwd: Path) -> None:
         cmd = [*dvc_cmd(), "remove", name]

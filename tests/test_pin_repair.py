@@ -134,6 +134,36 @@ def test_no_id_with_the_bytes_already_at_the_key_is_reattached_not_uploaded(s3_v
     assert not plan.strip
 
 
+@pytest.mark.parametrize("pointer, key, cut", [
+    ("outs:\n- md5: {md5}\n  size: 1\n  hash: md5\n  path: a.csv\n  cloud:\n", "a.csv", "file"),
+    (f"outs:\n- md5: {{md5}}\n  size: 1\n  hash: md5\n  path: a.csv\n  cloud:\n    {R}:\n", "a.csv", "file"),
+    ("outs:\n- path: out\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: {md5}\n    size: 1\n    cloud:\n",
+     "out/a.csv", "folder"),
+], ids=["cloud", "remote", "folder-file-cloud"])
+def test_a_pointer_cut_short_at_its_cloud_key_reads_as_no_id_and_is_reattached(
+    s3_versioned, tmp_path: Path, pointer: str, key: str, cut: str,
+) -> None:
+    """A pointer cut short right after `cloud:`, or after its remote's key,
+    holds null there. That reads as no version ID, so the object at the key is
+    re-attached, rather than the read or the write raising TypeError.
+
+    Mutations: `setdefault("cloud")` in `write_repair` -> the null `cloud`
+    cases raise, red; drop the null-`cloud` arm of `_without_ids` -> the
+    rewrite fails its own check, red.
+    """
+    s3, bucket = s3_versioned
+    v = s3.put_object(Bucket=bucket, Key=f"{PREFIX}/{key}", Body=b"A")["VersionId"]
+    rel = "a.csv.dvc" if cut == "file" else "out.dvc"
+    (tmp_path / rel).write_text(pointer.format(md5=_md5(b"A")), encoding="utf-8")
+    plan = _plan(tmp_path, s3, bucket, [rel])
+    assert [(e.path, r) for e, _, r in plan.reattach] == [(key, NO_ID)]
+
+    assert write_repair(tmp_path, plan, R) == [rel]
+    (out,) = yaml.safe_load((tmp_path / rel).read_text())["outs"]
+    rec = out if cut == "file" else out["files"][0]
+    assert rec["cloud"] == {R: {"etag": _md5(b"A"), "version_id": v}}
+
+
 def test_a_stale_id_is_reattached_to_the_current_object_when_it_proves_the_file(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
     old = s3.put_object(Bucket=bucket, Key="old-prefix/a.csv", Body=b"A")["VersionId"]

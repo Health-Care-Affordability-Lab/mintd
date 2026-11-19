@@ -73,6 +73,32 @@ class _NoopCloneGitOps(_FakeRegistryGitOps):
             )
 
 
+def test_clone_stops_on_a_cut_pointer_without_pulling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cloned repo's pointer is cut right after `files:`. The pull inside
+    the clone stops on it, naming the file, and hands nothing to `dvc pull`.
+
+    Mutation: let `outs_for_target` swallow `PointerCutShort` -> the fallback
+    `dvc pull` runs, red.
+    """
+    from mintd._fast_sync_ops import PointerCutShort
+
+    class _CutCloneGitOps(_NoopCloneGitOps):
+        def clone(self, url: str, dest: Path, *, shallow: bool = True, branch: str | None = None) -> None:
+            super().clone(url, dest, shallow=shallow, branch=branch)
+            (Path(dest) / "outputs").mkdir()
+            (Path(dest) / "outputs" / "main.parquet.dvc").write_text(
+                "outs:\n- path: main.parquet\n  hash: md5\n  files:\n"
+            )
+
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    dvc = _FakeDvcOps()
+    with pytest.raises(PointerCutShort, match="main.parquet.dvc is cut short"):
+        clone_and_pull_product(client, dvc, _CutCloneGitOps(), _fast(), name="demo-xw")
+    assert dvc.pull_calls == []
+
+
 def _fast() -> _FakeFastSyncOps:
     """A FastSyncOps double that serves nothing and hands every target to the
     fallback ``dvc pull`` — which is the seam these tests observe. Before

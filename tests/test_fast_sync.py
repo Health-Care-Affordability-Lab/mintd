@@ -35,6 +35,7 @@ from mintd._fast_sync_ops import (
     is_cached,
     normalize_target,
     parse_dvc_lock_outs,
+    PointerCutShort,
     parse_dvc_outs,
     partition_pipeline_outs,
     parse_s3_url,
@@ -182,11 +183,20 @@ def test_parse_dvc_outs_files_format(tmp_path: Path) -> None:
     assert outs[0].md5 == ""
 
 
-def test_parse_dvc_outs_hash_missing_returns_empty(tmp_path: Path) -> None:
+def test_parse_dvc_outs_hash_missing_returns_empty_for_an_import(tmp_path: Path) -> None:
     f = tmp_path / "h.dvc"
-    f.write_text("outs:\n  - path: h\n    hash: md5\n")  # no md5 value, no files
+    f.write_text("deps:\n- path: s3://elsewhere/h\nouts:\n  - path: h\n    hash: md5\n")  # no md5, no files
     outs = parse_dvc_outs(f, "origin")
     assert outs == []
+
+
+def test_parse_dvc_outs_hash_missing_outside_an_import_is_cut_short(tmp_path: Path) -> None:
+    """DVC hashes every out it records, so one without a hash outside an
+    import was cut short before its `md5:`."""
+    f = tmp_path / "h.dvc"
+    f.write_text("outs:\n  - path: h\n    hash: md5\n")
+    with pytest.raises(PointerCutShort, match="h records no hash"):
+        parse_dvc_outs(f, "origin")
 
 
 def test_parse_dvc_outs_extracts_version_id_top_level(tmp_path: Path) -> None:
@@ -205,6 +215,41 @@ def test_parse_dvc_outs_extracts_version_id_from_cloud(tmp_path: Path) -> None:
 
 
 # ---------- slice 29: dvc-import detection ---------------------------
+
+@pytest.mark.parametrize("cloud", ["  cloud:\n", "  cloud:\n    origin:\n"], ids=["cloud", "remote"])
+def test_parse_dvc_outs_reads_a_cloud_key_cut_short_as_no_version_id(tmp_path: Path, cloud: str) -> None:
+    """A pointer cut short right after `cloud:`, or after its remote's key,
+    holds null there: no version ID, not a TypeError.
+
+    Mutation: iterate `cloud` without the mapping checks -> raises, red.
+    """
+    f = tmp_path / "a.csv.dvc"
+    f.write_text("outs:\n- md5: abc123\n  size: 1\n  path: a.csv\n" + cloud)
+    (out,) = parse_dvc_outs(f, "origin")
+    assert (out.path, out.md5, out.version_id) == ("a.csv", "abc123", None)
+
+
+@pytest.mark.parametrize("files", ["  files:\n", "  files:\n  -\n"], ids=["files", "entry"])
+def test_a_files_list_cut_short_is_a_pointer_cut_short(tmp_path: Path, files: str) -> None:
+    """A pointer cut short right after `files:`, or after a bare `-`, holds
+    null there. Read as an empty list, a pull landed an empty folder at exit
+    0; both parsers raise `PointerCutShort` instead.
+
+    Mutation: let a null file list through `_check_out` -> red.
+    """
+    f = tmp_path / "d.dvc"
+    f.write_text("outs:\n- path: d\n  hash: md5\n" + files)
+    with pytest.raises(PointerCutShort, match="d.dvc is cut short"):
+        parse_dvc_outs(f, "origin")
+
+    (tmp_path / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - d\n")
+    indented = "".join("    " + line for line in files.splitlines(keepends=True))
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: d\n      hash: md5\n" + indented
+    )
+    with pytest.raises(PointerCutShort, match="dvc.lock is cut short"):
+        parse_dvc_lock_outs(tmp_path, "origin")
+
 
 def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None:
     """Real lab shape (a project's `data/imports/<product>/final.dvc`):
@@ -739,7 +784,7 @@ def test_classify_targets_hash_missing_routes_to_hash_missing(tmp_path: Path) ->
     """Hash-missing .dvc (declares hash type but no md5 value) — must surface
     to caller as a separate bucket so it's never silently dropped."""
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "x.dvc").write_text("outs:\n  - path: x\n    hash: md5\n")
+    (tmp_path / "data" / "x.dvc").write_text("deps:\n- path: s3://elsewhere/x\nouts:\n  - path: x\n    hash: md5\n")
     all_outs, fallback, missing = classify_targets(tmp_path, ["data/x"], "origin")
     assert all_outs == []
     assert missing == ["data/x"]
