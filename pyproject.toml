@@ -129,12 +129,12 @@ banned-module-level-imports = ["pandas", "pyarrow"]
 "os.renames" = { msg = "move files through mintd._atomic; see per-file-ignores for the modules that may" }
 "shutil.copyfile" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
 "shutil.copytree" = { msg = "copying files is limited to the modules in per-file-ignores; add one there only with a reason" }
-"urllib.request" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
-"requests" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
-"httpx" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
-"socket" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
-"urllib3" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
-"http.client" = { msg = "mintd reaches the network only through git, dvc and boto3; a new client needs a reviewed seam" }
+"urllib.request" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
+"requests" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
+"httpx" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
+"socket" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
+"urllib3" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
+"http.client" = { msg = "mintd reaches the network only through git, dvc, boto3 and mintd._release_check; a new client needs a reviewed seam" }
 
 # Every entry is an exemption that tests/test_substrate_rules.py pins, so the
 # map can only shrink. The codes after the first block are today's offenders.
@@ -147,6 +147,7 @@ banned-module-level-imports = ["pandas", "pyarrow"]
 "src/mintd/_registry_git_ops.py" = ["TID251"]      # process
 "src/mintd/_atomic.py" = ["TID251"]                # move
 "src/mintd/_s3.py" = ["TID251", "BLE001"]          # S3; BLE001: probe_versions turns one HEAD's unexpected error into an inconclusive verdict
+"src/mintd/_release_check.py" = ["TID251", "BLE001"]  # network: where releases/latest redirects; BLE001: any lookup failure means no notice
 # pending repair. TID251: spawn (_init_ops 11 sites, _fast_sync_ops 1 dvc --version
 # probe, _producer_git_ops 1 + 4 type references), deletes and moves outside a
 # seam. The "sole seam" docstrings in _dvc_ops.py and _registry_git_ops.py

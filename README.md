@@ -80,6 +80,11 @@ mintd --version
 mintd --help
 ```
 
+`mintd --version` and bare `mintd` also say, on stderr, when a newer release
+is out, or that this version was withdrawn, with the line that updates. They
+look it up at most once a day, give up after 2 seconds, and say nothing
+offline or under `--json` or `-q`.
+
 > Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them
 > under WSL2, Git Bash, or MSYS2 — there are no `.ps1` siblings yet.
 
