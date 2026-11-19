@@ -22,7 +22,7 @@ READ_ONLY = (
     ("mintd", "data", "clone"), ("mintd", "data", "import"), ("mintd", "data", "pull"), ("mintd", "--version"),
     ("git", "clone"), ("dvc", "pull"),
 )
-#: The profile of the lab's read-only key, in the file AWS_SHARED_CREDENTIALS_FILE names.
+#: The profile of the lab's read-only key, in the files AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE name.
 READONLY_PROFILE = "mintd-live-readonly"
 #: Classifications whose paths, md5s, bytes and times a report may show.
 DETAILED = frozenset({"public", "labonly"})
@@ -76,40 +76,54 @@ class LiveMintd(Mintd):
         return super().start(*args, cwd=cwd, json=json)
 
 
-def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
-    """The read-only key, where the live tier's mintd and dvc read it.
-
-    Only from the file `AWS_SHARED_CREDENTIALS_FILE` names, which must hold a
-    `[mintd-live-readonly]` section and no `[mintd]` one (the lab's key, which
-    can write); never from `~/.aws/credentials`. The key is copied under
-    `[mintd]`, the profile mintd looks for and product remotes name, to
-    `dest/credentials` (mode 0600). A refusal names the file, never what is in it.
-    """
-    named = operator_env.get("AWS_SHARED_CREDENTIALS_FILE")
+def _named_file(operator_env: Mapping[str, str], var: str) -> tuple[Path, configparser.ConfigParser]:
+    """The AWS file `var` names, parsed. A refusal names the file, never what is in it."""
+    named = operator_env.get(var)
     if not named:
-        raise HarnessError(
-            f"the live tier runs only with the lab's read-only key: set AWS_SHARED_CREDENTIALS_FILE to the file "
-            f"holding [{READONLY_PROFILE}]"
-        )
+        raise HarnessError(f"the live tier runs only with the lab's read-only key: set {var} to its file, the one "
+                           f"holding the {READONLY_PROFILE} profile")
     src = Path(named).expanduser()
     found = configparser.ConfigParser(interpolation=None)
     try:
         read = found.read(src, encoding="utf-8")
     except configparser.Error as e:  # its message can quote a line, so only its type is shown
-        raise HarnessError(f"{src} is not a credentials file ({type(e).__name__})") from None
+        raise HarnessError(f"{src} ({var}) does not parse ({type(e).__name__})") from None
     if not read:
-        raise HarnessError(f"no credentials file at {src}")
+        raise HarnessError(f"no file at {src} ({var})")
+    return src, found
+
+
+def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
+    """The read-only key and its profile, where the live tier's mintd and dvc read them.
+
+    Only from the two files the operator names, never `~/.aws`:
+    `AWS_SHARED_CREDENTIALS_FILE` must hold a `[mintd-live-readonly]` section and
+    no `[mintd]` one (the lab's key, which can write), and `AWS_CONFIG_FILE` a
+    `[profile mintd-live-readonly]` section. The key is copied under `[mintd]`,
+    the profile mintd looks for and product remotes name, to `dest/credentials`
+    (mode 0600); the profile's `region` and `endpoint_url`, and nothing else,
+    under `[profile mintd]` to `dest/config`. Returns the credentials copy.
+    """
+    src, found = _named_file(operator_env, "AWS_SHARED_CREDENTIALS_FILE")
     if found.has_section("mintd"):
         raise HarnessError(f"{src} holds [mintd], the lab's key, which can write; give the live tier a file with only "
                            f"[{READONLY_PROFILE}]")
     if not found.has_section(READONLY_PROFILE):
         raise HarnessError(f"{src} has no [{READONLY_PROFILE}] section")
+    conf, settings = _named_file(operator_env, "AWS_CONFIG_FILE")
+    section = f"profile {READONLY_PROFILE}"
+    if not settings.has_section(section):
+        raise HarnessError(f"{conf} has no [{section}] section")
     copy = configparser.ConfigParser(interpolation=None)
     copy["mintd"] = dict(found[READONLY_PROFILE])
+    profile = configparser.ConfigParser(interpolation=None)
+    profile["profile mintd"] = {k: v for k, v in settings[section].items() if k in ("region", "endpoint_url")}
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / "credentials"
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
         copy.write(fh)
+    with (dest / "config").open("w", encoding="utf-8") as fh:
+        profile.write(fh)
     return path
 
 

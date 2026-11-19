@@ -17,6 +17,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1794,8 +1795,11 @@ def test_a_hidden_products_failure_says_counts_only(tmp_path: Path) -> None:
 
 
 def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
-    """Mutation that turns it red: accepting a file that also holds `[mintd]`."""
-    secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret")
+    """Mutations that turn it red: accepting a credentials file that also holds
+    `[mintd]`, running without `AWS_CONFIG_FILE`, or copying more of the
+    read-only profile than its region and endpoint."""
+    secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret",
+               "AKIACONFIG", "config-secret")
     good = tmp_path / "readonly"
     good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
                     encoding="utf-8")
@@ -1804,17 +1808,56 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
                     + "[mintd]\naws_access_key_id = AKIAWRITE\naws_secret_access_key = write-secret\n", encoding="utf-8")
     other = tmp_path / "other"
     other.write_text("[default]\naws_access_key_id = AKIAOTHER\naws_secret_access_key = other-secret\n", encoding="utf-8")
-    for env in ({}, {"AWS_SHARED_CREDENTIALS_FILE": ""}, {"AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
-                {"AWS_SHARED_CREDENTIALS_FILE": str(both)}, {"AWS_SHARED_CREDENTIALS_FILE": str(other)}):
+    conf = tmp_path / "readonly-config"
+    conf.write_text("[profile mintd-live-readonly]\nregion = us-east-1\nendpoint_url = https://s3.example.test\n"
+                    "output = json\naws_access_key_id = AKIACONFIG\naws_secret_access_key = config-secret\n",
+                    encoding="utf-8")
+    ok = {"AWS_SHARED_CREDENTIALS_FILE": str(good), "AWS_CONFIG_FILE": str(conf)}
+    for env in (
+        {"AWS_CONFIG_FILE": str(conf)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": ""},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(both)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(other)},
+        {"AWS_SHARED_CREDENTIALS_FILE": str(good)}, {**ok, "AWS_CONFIG_FILE": ""},
+        {**ok, "AWS_CONFIG_FILE": str(tmp_path / "missing")}, {**ok, "AWS_CONFIG_FILE": str(other)},
+    ):
         with pytest.raises(HarnessError) as refused:
             readonly_credentials(env, tmp_path / "out")
         assert not any(s in str(refused.value) for s in secrets), refused.value
-    path = readonly_credentials({"AWS_SHARED_CREDENTIALS_FILE": str(good)}, tmp_path / "out")
+    path = readonly_credentials(ok, tmp_path / "out")
     copy = configparser.ConfigParser(interpolation=None)
     copy.read(path, encoding="utf-8")
     assert copy.sections() == ["mintd"]
     assert dict(copy["mintd"]) == {"aws_access_key_id": "AKIAREADONLY", "aws_secret_access_key": "readonly-secret"}
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    profile = configparser.ConfigParser(interpolation=None)
+    profile.read(path.with_name("config"), encoding="utf-8")
+    assert profile.sections() == ["profile mintd"]
+    assert dict(profile["profile mintd"]) == {"region": "us-east-1", "endpoint_url": "https://s3.example.test"}
+    if os.name != "nt":  # Windows keeps no group or other bits; the tier runs on a Linux box
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_live_tier_failure_prints_no_frame_arguments(tmp_path: Path) -> None:
+    """A refusal, under pytest's defaults and under `--tb=long -l --full-trace`,
+    names the missing file and prints none of the operator's environment.
+    Mutations that turn it red: dropping any one of the traceback overrides in
+    `tests/live/conftest.py`'s `pytest_configure` (`auto` or `long` to short,
+    no locals, no full trace)."""
+    planted = {"AWS_ACCESS_KEY_ID": "AKIAPLANTEDWRITE", "AWS_SECRET_ACCESS_KEY": "planted-write-secret"}
+    creds = tmp_path / "readonly"
+    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
+                     encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("registry_url: https://example.invalid/registry.git\n", encoding="utf-8")
+    env = {**planted, **{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+           "MINTD_CONFIG_DIR": str(tmp_path), "AWS_SHARED_CREDENTIALS_FILE": str(creds)}  # no AWS_CONFIG_FILE
+    for i, flags in enumerate(([], ["--tb=long", "-l", "--full-trace"])):
+        got = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/live", "-x", *flags, "-p", "no:cacheprovider",
+             f"--basetemp={tmp_path / f'base{i}'}"],
+            cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
+        )
+        out = got.stdout + got.stderr
+        assert got.returncode != 0 and "set AWS_CONFIG_FILE" in out, out
+        assert not any(v in out for v in (*planted.values(), "readonly-secret")), out
 
 
 def test_the_live_tier_needs_its_own_basetemp_and_reads_the_entry_mintd_reads(tmp_path: Path) -> None:

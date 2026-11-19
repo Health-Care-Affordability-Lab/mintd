@@ -11,12 +11,15 @@ Run it only with the lab's read-only key. The tier can run clone, import and
 pull only (`tests/_harness/live.py`), but that cannot stop a PR whose own clone
 or pull code writes with the key it is given, so it refuses any key but the
 read-only one: `AWS_SHARED_CREDENTIALS_FILE` must name a file holding a
-`[mintd-live-readonly]` section and no `[mintd]` section. dvc's global and
-system config are left out, so no remote key set there reaches dvc. GitHub is
-another matter: clones use the operator's own git credentials, which can push,
-so read the PR's diff before running the tier on it.
+`[mintd-live-readonly]` section and no `[mintd]` section, and `AWS_CONFIG_FILE`
+one holding `[profile mintd-live-readonly]`, of which only `region` and
+`endpoint_url` are used. dvc's global and system config are left out, so no
+remote key set there reaches dvc. GitHub is another matter: clones use the
+operator's own git credentials, which can push, so read the PR's diff before
+running the tier on it.
 
     AWS_SHARED_CREDENTIALS_FILE=~/.aws/mintd-live-readonly-credentials \\
+    AWS_CONFIG_FILE=~/.aws/mintd-live-readonly-config \\
     MINTD_BIN=<the PR's venv>/bin/mintd MINTD_LIVE_PRODUCTS=<list file> \\
     uv run pytest tests/live -rA --basetemp=<a dedicated empty folder on the large disk> [--live-k K] [-k <check>]
 
@@ -87,6 +90,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    # A long traceback prints each frame's arguments, and -l its locals: the
+    # operator's environment among them, with any key or token it holds.
+    config.option.showlocals = config.option.fulltrace = False
+    if config.option.tbstyle in ("auto", "long"):
+        config.option.tbstyle = "short"
     if config.option.help or config.option.collectonly:
         return
     try:
@@ -133,7 +141,7 @@ def live(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactor
         "TMPDIR": str(work),
         "MINTD_CONFIG_DIR": str(copy.parent),
         "AWS_SHARED_CREDENTIALS_FILE": str(credentials),
-        "AWS_CONFIG_FILE": str(work / "aws" / "no-config"),  # no profile there can swap in another key
+        "AWS_CONFIG_FILE": str(credentials.with_name("config")),  # the read-only profile's region and endpoint only
         "GIT_TERMINAL_PROMPT": "0",
         # Empty, so no remote key in the box's dvc config can stand in for the read-only one.
         "DVC_GLOBAL_CONFIG_DIR": str(work / "dvc-global"),
