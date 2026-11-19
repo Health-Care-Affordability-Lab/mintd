@@ -89,6 +89,10 @@ BANNED_TARGETS: dict[str, int] = {
 # resolver to None to reach the exit-2 gate that replaced `data_pull`'s
 # degraded branch. A reviewed literal edit: the composition root is where a
 # `None` resolver can be injected at all, and `BANNED_TARGETS` does not move.
+# `_atomic.os.replace` 0 → 2: a Ctrl-C landing just after the push's pin repair
+# wrote a pointer, and a pointer that can't be written back after a failed
+# publish push, can only be injected at the write itself; that publish test
+# also needs `_push_verify._create_s3_client` (13 → 14) to reach the push.
 # `GitCatalogClient` 2 → 3: the README produce-flow journey runs `registry
 # register` through the real CLI with real dvc and git, and `gh` can only be
 # faked at the catalog client's constructor, as the `journey` fixture does.
@@ -100,9 +104,10 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_fast_sync_ops": 7,
     "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
+    "mintd._atomic.os.replace": 2,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 5,
-    "mintd._push_verify._create_s3_client": 13,
+    "mintd._push_verify._create_s3_client": 14,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.time.sleep": 9,
@@ -264,7 +269,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (207 sites / 48 targets), not
+    """The literals above are the *whole* census (210 sites / 49 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -275,14 +280,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (207 → 206), or drop ``patch`` (207 → 177).
+    ``monkeypatch``-receiver calls (210 → 209), or drop ``patch`` (210 → 180).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 207
+    assert sum(scanned.values()) == 210
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

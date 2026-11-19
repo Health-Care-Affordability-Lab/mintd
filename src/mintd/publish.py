@@ -267,7 +267,7 @@ def _apply_publish(
     if reporter is not None:
         reporter.update_status("Pushing data to DVC...")
     from ._fast_sync_ops import S3AccessDenied
-    from ._push_verify import PushRefused, judge, prepare, restore
+    from ._push_verify import PushRefused, judge, prepare, uploading
 
     rolled_back = "metadata.json was rolled back; nothing was committed, tagged or advertised."
     # Importers read the committed .dvc/config: a release checked against a
@@ -291,29 +291,21 @@ def _apply_publish(
     except BaseException:
         _atomic_write_json(metadata_path, original_metadata_json)
         raise
-    if prepared is not None and reporter is not None:
-        for line in prepared.report:
-            reporter.info(line)
-    try:
-        pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
-    except DvcOpError as exc:
-        _atomic_write_json(metadata_path, original_metadata_json)
-        try:  # mintd's re-pins and whatever DVC recorded before failing
-            repinned = git_ops.uncommitted_pointers(project_path) if prepared is not None else []
-        except GitOpError:
-            repinned = list(prepared.written) if prepared is not None else []
-        raise DvcPushFailed(
-            f"dvc push failed: {exc}",
-            recovery_hint=(
-                f"metadata.json was rolled back. These pointer files now record re-pinned or uploaded "
-                f"versions: {', '.join(repinned)}. Commit them, fix the DVC remote and rerun `mintd publish`."
-                if repinned else "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
-            ),
-        ) from exc
-    finally:
-        if prepared is not None:
-            restore(prepared)
-            prepared.close()
+    # A failed push leaves the pointer files as they were (``uploading``), so
+    # with metadata.json rolled back the tree is clean and the rerun can start.
+    # metadata.json goes back first, so a failed pointer write can't skip it.
+    with uploading(prepared):
+        if prepared is not None and reporter is not None:
+            for line in prepared.report:
+                reporter.info(line)
+        try:
+            pushed = dvc_ops.push(cwd=project_path, env=prepared.env if prepared is not None else None)
+        except DvcOpError as exc:
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise DvcPushFailed(
+                f"dvc push failed: {exc}",
+                recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
+            ) from exc
     changed: list[str] | None = None
     if prepared is not None:
         try:

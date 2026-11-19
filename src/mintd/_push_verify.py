@@ -3,8 +3,10 @@
 ``prepare`` runs before any upload. It refuses what it can't check, plans the
 repair of every pin in repair scope, writes it, and hands back the throwaway
 ``DVC_SITE_CACHE_DIR`` every ``dvc push`` of this command runs with, so DVC's
-md5-keyed record of what is on the remote can't be stale. ``restore`` runs
-after the uploads and puts back any pointer record DVC wasn't asked to change.
+md5-keyed record of what is on the remote can't be stale. ``uploading`` wraps
+the uploads: after them ``restore`` puts back any pointer record DVC wasn't
+asked to change; if they fail or are interrupted, every pointer file goes back
+byte for byte as it was before ``prepare`` wrote anything.
 ``judge`` then HEADs every pinned version in gate scope and proves its bytes,
 and only its verdict may print a ✓.
 """
@@ -12,10 +14,12 @@ and only its verdict may print a ✓.
 from __future__ import annotations
 
 import configparser
+import contextlib
 import hashlib
 import os
 import sqlite3
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -195,7 +199,9 @@ class Prepared:
     dvc_files: list[str]
     repair: tuple[Entry, ...]
     plan: RepairPlan
-    written: list[str]
+    #: each pointer file's bytes before this command wrote anything, for
+    #: ``uploading`` to put back if the upload fails
+    pointer_bytes: dict[str, bytes]
     snapshot: dict[str, Any]
     before: dict[tuple, tuple[str | None, str | None]]
     env: dict[str, str]
@@ -298,24 +304,95 @@ def prepare(
             f"current path and can't be re-uploaded: {abbreviate(stuck)}",
             hint="get the files (mintd data pull, or copy them in), then push",
         )
-    try:
-        written = write_repair(root, plan, name)
-    except PointerWriteError as exc:
-        raise PushRefused(str(exc)) from exc
-    snapshot: dict[str, Any] = {}
-    for rel in [*dvc_files, "dvc.lock"]:
+    pointer_bytes: dict[str, bytes] = {}
+    for rel in [*dvc_files, *_lockfiles(root)]:
         try:
-            snapshot[rel] = load_rt((root / rel).read_text(encoding="utf-8"))
-        except Exception:  # missing or unparseable: nothing to restore from
+            pointer_bytes[rel] = (root / rel).read_bytes()
+        except OSError:  # missing: nothing to put back
             continue
-    tmp = tempfile.TemporaryDirectory(prefix="mintd-dvc-site-", ignore_cleanup_errors=True)
+    try:
+        write_repair(root, plan, name)
+        snapshot: dict[str, Any] = {}
+        for rel in [*dvc_files, "dvc.lock"]:
+            try:
+                snapshot[rel] = load_rt((root / rel).read_text(encoding="utf-8"))
+            except Exception:  # missing or unparseable: nothing to restore from
+                continue
+        tmp = tempfile.TemporaryDirectory(prefix="mintd-dvc-site-", ignore_cleanup_errors=True)
+    except PointerWriteError as exc:  # write_repair has put its own writes back
+        raise PushRefused(str(exc)) from exc
+    except BaseException:  # Ctrl-C, which write_repair's own rollback doesn't catch
+        _put_back(root, pointer_bytes)
+        raise
     return Prepared(
         root=root, remote=name, bucket=bucket, prefix=prefix, s3=s3, cache=cache,
-        dvc_files=dvc_files, repair=repair, plan=plan, written=written, snapshot=snapshot,
+        dvc_files=dvc_files, repair=repair, plan=plan, pointer_bytes=pointer_bytes, snapshot=snapshot,
         selection=selection,
         before={_identity(e): (e.version_id, e.etag) for e in scope.entries},
         env={"DVC_SITE_CACHE_DIR": tmp.name}, _tmp=tmp, memo=memo,
     )
+
+
+def _lockfiles(root: Path) -> list[str]:
+    """Every ``dvc.lock`` under ``root``, nested pipelines' included: DVC
+    re-dumps each pushed stage into its own lockfile. Not inside a subrepo
+    (a folder with its own ``.dvc/``), which DVC doesn't push from here."""
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")
+                       and not os.path.isdir(os.path.join(dirpath, d, ".dvc"))]
+        if "dvc.lock" in filenames:
+            found.append((Path(dirpath) / "dvc.lock").relative_to(root).as_posix())
+    return found
+
+
+def _put_back(root: Path, pointer_bytes: dict[str, bytes]) -> None:
+    """Write each pointer file whose bytes changed back as they were, CRLF
+    included, as ``write_repair``'s own rollback does. One that can't be
+    written doesn't stop the rest; the first such error is raised after,
+    with a note naming every file not put back."""
+    from ._atomic import _atomic_write_text
+
+    first: OSError | None = None
+    failed: list[str] = []
+    for rel, raw in pointer_bytes.items():
+        path = root / rel
+        try:
+            if not path.is_file() or path.read_bytes() != raw:
+                _atomic_write_text(path, raw.decode("utf-8"), newline="")
+        except OSError as exc:
+            first = first or exc
+            failed.append(rel)
+    if first is not None:
+        first.add_note(f"pointer files not put back as they were: {', '.join(failed)}")
+        raise first
+
+
+@contextlib.contextmanager
+def uploading(prepared: Prepared | None) -> Iterator[None]:
+    """Wrap a command's ``dvc push`` calls: ``restore`` after them or, if they
+    fail or are interrupted, every pointer file back byte for byte as it was
+    before ``prepare`` wrote anything. Either way the throwaway site cache goes.
+
+    On a version-aware remote DVC re-dumps each pushed out's pointer in a
+    ``finally``, so a push that fails or is interrupted still rewrites it to
+    list only the files that reached S3, or leaves it cut short if dvc is
+    killed mid-write. ``run_streaming`` has waited for dvc to exit before any
+    exception gets here. The rerun re-attaches what reached S3 and uploads
+    the rest.
+    """
+    if prepared is None:
+        yield
+        return
+    try:
+        yield
+    except BaseException:
+        _put_back(prepared.root, prepared.pointer_bytes)
+        raise
+    else:
+        restore(prepared)
+    finally:
+        prepared.close()
 
 
 def restore(prepared: Prepared) -> list[str]:

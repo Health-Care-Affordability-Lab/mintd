@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import pytest
 from pathlib import Path
@@ -1563,21 +1564,86 @@ def test_publish_rerun_at_the_same_version_commits_the_reattached_pointers(tmp_p
     assert f"version_id: {v}" in committed
 
 
-def test_publish_after_a_failed_push_names_the_pointer_files_to_commit(tmp_path, s3_versioned, monkeypatch):
-    """The repair re-attached an ID before the push failed. The working tree
-    keeps it, so the rerun needs it committed, and the hint says which."""
-    from mintd._dvc_ops import DvcPushError
-
+def test_publish_after_a_failed_push_leaves_a_clean_tree_to_rerun(tmp_path, s3_versioned, monkeypatch):
+    """The repair re-attached an ID and DVC cut the pointer short before the
+    push failed. The pointer goes back as it was, so with metadata.json rolled
+    back the tree is clean and `mintd publish` can simply run again.
+    Mutation: drop `uploading` in `_apply_publish` -> the cut pointer stays, red."""
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
     s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
     proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    pointer = proj / "data" / "final" / "x.csv.dvc"
+    before = pointer.read_bytes()
     dvc = _FakeDvcOps()
-    dvc.push_raises = DvcPushError("dvc push exited 1")
+
+    def dvc_cuts_it_short(cwd, targets):
+        assert pointer.read_bytes() != before  # the repair wrote
+        pointer.write_bytes(pointer.read_bytes()[:20])
+        raise DvcPushError("dvc push exited 1")
+
+    dvc.on_push = dvc_cuts_it_short
     with pytest.raises(DvcPushFailed) as excinfo:
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc,
                         git_ops=_FakeRegistryGitOps())
-    assert "data/final/x.csv.dvc" in excinfo.value.recovery_hint and "Commit them" in excinfo.value.recovery_hint
+    assert excinfo.value.recovery_hint == "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
+    assert pointer.read_bytes() == before
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, check=True, capture_output=True, text=True)
+    assert status.stdout == ""
+
+
+def test_publish_rolls_metadata_back_even_when_a_pointer_cant_be_put_back(tmp_path, s3_versioned, monkeypatch):
+    """The push fails, DVC has cut three pointer files short, and both .dvc
+    files can't be written back. metadata.json is rolled back all the same, so
+    no version bump is left for a release that never pushed; dvc.lock is still
+    put back; and the error is the first write's own, noting both files.
+    Mutations: the metadata rollback after the put-back -> metadata.json keeps
+    0.1.1, red; the put-back stops at the first failure -> dvc.lock stays cut, red;
+    no note -> red; `raise first from None` -> the push failure leaves the traceback, red."""
+    s3, bucket = s3_versioned
+    monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
+    s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
+    proj = _publish_on_moto(tmp_path, s3, cloud=None, cache=True)
+    lock = proj / "dvc.lock"
+    lock.write_text("schema: '2.0'\nstages:\n  build:\n    cmd: python build.py\n    deps:\n    - path: build.py\n"
+                    "      hash: md5\n      md5: 0123456789abcdef0123456789abcdef\n      size: 10\n")
+    subprocess.run(["git", "add", "dvc.lock"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "lock"], cwd=proj, check=True)
+    metadata, locked = (proj / "metadata.json").read_bytes(), lock.read_bytes()
+    pointer = proj / "data" / "final" / "x.csv.dvc"
+    other = proj / "data" / "y.csv.dvc"
+    s3.put_object(Bucket=bucket, Key="lab/p/data/y.csv", Body=b"y\n")  # re-attached, as x is
+    other.write_text("outs:\n- md5: 009520053b00386d1173f3988c55d192\n  size: 2\n  hash: md5\n  path: y.csv\n")
+    subprocess.run(["git", "add", "data/y.csv.dvc"], cwd=proj, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "another pointer"], cwd=proj, check=True)
+    real_replace = os.replace
+    armed: list[bool] = []
+
+    def locked_pointers(src, dst):
+        if armed and str(dst).endswith(".dvc"):
+            raise PermissionError(13, "locked", str(dst))
+        real_replace(src, dst)
+
+    def dvc_fails(cwd, targets):
+        for f in (pointer, other, lock):
+            f.write_bytes(f.read_bytes()[:20])
+        armed.append(True)
+        raise DvcPushError("dvc push exited 1")
+
+    monkeypatch.setattr("mintd._atomic.os.replace", locked_pointers)
+    dvc = _FakeDvcOps()
+    dvc.on_push = dvc_fails
+    with pytest.raises(PermissionError) as excinfo:
+        publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc,
+                        git_ops=_FakeRegistryGitOps())
+    assert excinfo.value.filename.endswith("x.csv.dvc")
+    # The push failure stays in the traceback above the write's error.
+    assert isinstance(excinfo.value.__context__, DvcPushFailed) and not excinfo.value.__suppress_context__
+    assert excinfo.value.__notes__ == [
+        "pointer files not put back as they were: data/final/x.csv.dvc, data/y.csv.dvc"
+    ]
+    assert (proj / "metadata.json").read_bytes() == metadata
+    assert lock.read_bytes() == locked
 
 
 def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):

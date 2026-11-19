@@ -239,7 +239,7 @@ On a version-aware remote, `mintd data push` and `mintd publish` don't trust `dv
   - otherwise push stops, writing nothing.
 
   `write_repair` changes only `cloud.<remote>`, with one exception: a folder in the `.dir` form (what `dvc commit -f` and `dvc repro` write) with a file re-attached is rewritten as the per-file list DVC writes after a push, and only if that list hashes to the folder's tree. It re-reads each file it wrote. Every `dvc push` of the command runs with one throwaway `DVC_SITE_CACHE_DIR`.
-- **After the upload**, `restore` puts back records DVC wasn't asked to change. `judge` then proves every pin this push set, or whose record differs from HEAD's. Only its verdict prints the ✓ line and the `verify` counts. The commit carries exactly the pointer files it judged, byte for byte.
+- **After the upload**, `restore` puts back records DVC wasn't asked to change. If the upload fails or is interrupted, `uploading` instead puts every pointer file back byte for byte as it was before `prepare` wrote anything: DVC rewrites a pushed out's pointer even then, listing only the files that reached S3, and the rerun re-attaches those and uploads the rest. `judge` then proves every pin this push set, or whose record differs from HEAD's. Only its verdict prints the ✓ line and the `verify` counts. The commit carries exactly the pointer files it judged, byte for byte.
 
 `ProofMemo` (`proven-versions.sqlite` under `cache_dir`) remembers full proofs, so a later push HEADs only a sample of 16 of them.
 

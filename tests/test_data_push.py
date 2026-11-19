@@ -8,6 +8,7 @@ nothing-to-push case, and graceful degradation when dvc's count can't be parsed.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from pathlib import Path
@@ -16,9 +17,10 @@ import pytest
 import yaml
 
 from mintd import cli
-from mintd._dvc_ops import DvcPushResult, _parse_push_output
+from mintd._dvc_ops import DvcPushError, DvcPushResult, _parse_push_output
 from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
 from mintd._registry_git_ops import GitOpError, SubprocessRegistryGitOps
+from mintd._subprocess import WallTimeoutExceeded
 from mintd.data_ops import PushSummary, commit_pushed_pointers, data_push
 from tests._dvc_fixtures import (
     S3HoldsWhatThePointersSay,
@@ -1256,28 +1258,120 @@ def test_check_needs_the_pointer_list_from_git(moto_push, tmp_path, monkeypatch,
     assert "git couldn't list the pointer files" in err and "✓" not in err
 
 
-def test_check_a_failed_second_group_says_the_tree_holds_repinned_pointers(
+def test_check_a_failed_second_group_puts_the_pointer_back_and_the_rerun_reattaches(
     moto_push, tmp_path, monkeypatch, capsys,
 ) -> None:
-    from mintd._dvc_ops import DvcPushError
-
+    """The repair re-attaches x's ID, then the second group fails. The pointer
+    goes back to its bytes from before the command, and the rerun re-attaches
+    the same version and uploads nothing."""
     dvc, s3, bucket = moto_push
-    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    put = s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
     proj = _moto_producer(tmp_path, s3)
     head = _head(proj)
+    before = (proj / "data" / "x.csv.dvc").read_bytes()
     monkeypatch.chdir(proj)
     calls: list[int] = []
 
     def second_fails(cwd, targets):
         calls.append(1)
         if len(calls) == 2:
+            assert (proj / "data" / "x.csv.dvc").read_bytes() != before  # the repair wrote
             raise DvcPushError("dvc push failed (exit 1): boom")
 
     dvc.on_push = second_fails
     assert cli.main(["data", "push", "data/x.csv.dvc", "dvc.yaml:nope"]) == 1
-    err = _err(capsys)
-    assert "re-pinned pointer files (data/x.csv.dvc); re-run mintd data push" in err
+    assert "dvc push failed (exit 1): boom" in _err(capsys)
+    assert (proj / "data" / "x.csv.dvc").read_bytes() == before
     assert _head(proj) == head
+
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 0, _err(capsys)
+    assert _records_of(proj)[1]["cloud"]["storage"]["version_id"] == put["VersionId"]
+    assert len(s3.list_object_versions(Bucket=bucket, Prefix=KEY)["Versions"]) == 1, "nothing uploaded again"
+
+
+_LOCK = (
+    "schema: '2.0'\nstages:\n  build:\n    cmd: python build.py\n    deps:\n    - path: build.py\n"
+    "      hash: md5\n      md5: 0123456789abcdef0123456789abcdef\n      size: 10\n    outs:\n"
+    "    - path: data/out.csv\n      hash: md5\n      md5: fedcba9876543210fedcba9876543210\n      size: 5\n"
+)
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [DvcPushError("dvc push failed (exit 1): 1 file failed to upload"), KeyboardInterrupt(),
+     WallTimeoutExceeded(1.0)],
+    ids=["dvc-fails", "ctrl-c", "wall-timeout"],
+)
+def test_check_a_failed_or_interrupted_push_puts_every_pointer_file_back(moto_push, tmp_path, stop) -> None:
+    """DVC re-dumps pushed pointers even when the upload fails or is
+    interrupted: listing only what reached S3, or cut short if dvc is killed.
+    Every pointer file goes back byte for byte as it was before the command,
+    CRLF included: the pushed one (whose ID the repair had re-attached), an
+    unselected sibling, dvc.lock and a nested pipeline's lock. A subrepo's lock
+    is not this push's: a change made to it meanwhile stays.
+    Mutations: put back with `restore` -> red; read the bytes after
+    `write_repair` -> the re-attached ID stays, red; save only the root
+    dvc.lock, or no lock -> red; walk into the subrepo -> red."""
+    dvc, s3, bucket = moto_push
+    put = s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    proj = _moto_producer(tmp_path, s3)  # no ID in the pointer, so prepare re-attaches put's
+    x, y, lock = proj / "data" / "x.csv.dvc", proj / "data" / "y.csv.dvc", proj / "dvc.lock"
+    nested = proj / "sub" / "dvc.lock"
+    y.write_text(f"outs:\n- md5: {_bytes_md5(b'y-data')}\n  size: 6\n  hash: md5\n  path: y.csv\n")
+    lock.write_text(_LOCK)
+    nested.parent.mkdir()
+    nested.write_text(_LOCK)
+    subrepo_lock = proj / "child" / "dvc.lock"
+    (proj / "child" / ".dvc").mkdir(parents=True)
+    subrepo_lock.write_text(_LOCK)
+    files = (x, y, lock, nested)
+    for f in files:
+        f.write_bytes(f.read_bytes().replace(b"\n", b"\r\n"))
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "sibling and lock"], cwd=proj)
+    before = {f: f.read_bytes() for f in files}
+    found: list[bytes] = []
+
+    def dvc_cuts_them_short(cwd, targets):
+        found.append(x.read_bytes())
+        for f in files:
+            f.write_bytes(f.read_bytes()[:20])
+        subrepo_lock.write_text("schema: '2.0'\nstages: {}\n")  # the subrepo's own work
+        raise stop
+
+    dvc.on_push = dvc_cuts_them_short
+    with pytest.raises(type(stop)):
+        data_push(proj, targets=["data/x.csv.dvc"], dvc_ops=dvc)
+    assert put["VersionId"] in found[0].decode(), "the repair wrote before the push"
+    assert {f: f.read_bytes() for f in files} == before
+    assert subrepo_lock.read_text() == "schema: '2.0'\nstages: {}\n"
+
+
+def test_check_ctrl_c_during_the_repair_puts_the_pointer_back(moto_push, tmp_path, monkeypatch) -> None:
+    """A Ctrl-C just after the repair's first write lands (it rolls back only
+    on Exception) still leaves the pointer as it was, and nothing uploads.
+    Mutation: drop `prepare`'s put-back on BaseException -> red."""
+    dvc, s3, bucket = moto_push
+    s3.put_object(Bucket=bucket, Key=KEY, Body=b"x-data\n")
+    proj = _moto_producer(tmp_path, s3)
+    pointer = proj / "data" / "x.csv.dvc"
+    before = pointer.read_bytes()
+    real_replace = os.replace
+    landed: list[bytes] = []
+
+    def ctrl_c_after_the_first_write(src, dst):
+        real_replace(src, dst)
+        if not landed:
+            landed.append(Path(dst).read_bytes())
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("mintd._atomic.os.replace", ctrl_c_after_the_first_write)
+    with pytest.raises(KeyboardInterrupt):
+        data_push(proj, dvc_ops=dvc)
+    assert landed and landed[0] != before, "the repair's write reached the pointer"
+    assert pointer.read_bytes() == before
+    assert dvc.push_calls == []
 
 
 def test_check_a_pointer_rewritten_while_being_checked_is_not_committed(
