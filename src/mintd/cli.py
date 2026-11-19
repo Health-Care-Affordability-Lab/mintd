@@ -242,10 +242,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args._reporter.error("interrupted by user")
         return 130
     except WallTimeoutExceeded as e:
-        # Catches the fast-tier default (30s on dvc init / dvc remove /
+        # Catches the fast-tier default (30s on dvc init /
         # etc.) and any user-configured timeouts.transfer that fires from
         # handlers that don't catch the exception themselves (data pull /
-        # push / add / verify / import / publish). data clone
+        # push / add / verify / remove / import / publish). data clone
         # catches it locally for a richer message. str(e) is the full
         # sentence ("command exceeded wall timeout of Ns"), never the bare
         # seconds float.

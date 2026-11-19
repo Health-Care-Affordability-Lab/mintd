@@ -347,7 +347,7 @@ Why: the archive is the only artifact guaranteed to cross the gap, so the lander
 
 ### Config (`~/.config/mintd/config.yaml`) ([src/mintd/_config.py](src/mintd/_config.py))
 
-A frozen Pydantic `Config` (`extra="forbid"`) loaded from `$MINTD_CONFIG_DIR/config.yaml` or `~/.config/mintd/config.yaml`; a missing file means all defaults. Fields include `registry_url`, `cache_dir` (default `~/.cache/mintd`), `timeouts`, `author`, `share_user`, `storage_endpoint`, `storage_bucket_prefix`. Managed with `mintd config show | setup | validate`. **Timeout tiers** are wall-clock caps for spawned dvc/git commands: `timeouts.fast` (default 30 s) for quick calls, `timeouts.transfer` (default unbounded) for add, status, import, push, pull, checkout and git transfers.
+A frozen Pydantic `Config` (`extra="forbid"`) loaded from `$MINTD_CONFIG_DIR/config.yaml` or `~/.config/mintd/config.yaml`; a missing file means all defaults. Fields include `registry_url`, `cache_dir` (default `~/.cache/mintd`), `timeouts`, `author`, `share_user`, `storage_endpoint`, `storage_bucket_prefix`. Managed with `mintd config show | setup | validate`. **Timeout tiers** are wall-clock caps for spawned dvc/git commands: `timeouts.fast` (default 30 s) for quick calls, `timeouts.transfer` (default unbounded) for add, status, remove, import, push, pull, checkout and git transfers.
 
 The CLI loads config and passes values down. The exception is the scaffold renderer (`_templates/_render.py`), which calls `Config.load()` itself to fill template fields such as `author` and `organization`, falling back to defaults if loading fails.
 
@@ -355,7 +355,7 @@ The CLI loads config and passes values down. The exception is the scaffold rende
 
 Why checkout is a transfer: it materializes cache blobs, which can mean minutes of copying on non-reflink filesystems, longer than the 30 s fast cap allows.
 
-Why add and status are transfers: add hashes every byte and status hashes every file it has not hashed yet, so a large folder can outlast the 30 s fast cap.
+Why add, status and remove are transfers: add hashes every byte, status hashes every file it has not hashed yet, and remove copies hardlinked or symlinked files out of the cache, so on a large folder each can outlast the 30 s fast cap.
 
 ### Subprocess seams (`DvcOps`, `RegistryGitOps`, `Fetcher`, `InitOps`)
 

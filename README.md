@@ -125,7 +125,7 @@ timeouts:
 ```
 
 `fast` caps quick calls such as `dvc init` and the registry's git queries;
-`transfer` caps DVC add, status, import, push, pull and checkout, and git clone,
+`transfer` caps DVC add, status, remove, import, push, pull and checkout, and git clone,
 and is `null` — disabled — by default. Per-command, `--timeout 600` opts into a
 10-minute wall clock and `--timeout 0` disables it. `NO_COLOR` in the environment
 turns off all color.

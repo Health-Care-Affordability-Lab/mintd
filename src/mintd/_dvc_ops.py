@@ -602,7 +602,9 @@ class SubprocessDvcOps:
 
     def remove(self, name: str, *, cwd: Path) -> None:
         cmd = [*dvc_cmd(), "remove", name]
-        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
+        # transfer tier, NOT fast: without --outs, dvc remove unprotects every
+        # out, which copies hardlinked or symlinked files out of the cache.
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
             raise DvcRemoveError(
