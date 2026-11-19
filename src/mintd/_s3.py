@@ -283,8 +283,12 @@ def create_client(
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:
         endpoint_url = remote_cfg.get("endpoint")
-    # boto3's default pool is 10 connections; a 16-thread probe would wait on it.
-    config = BotoConfig(max_pool_connections=pool) if pool else None
+    # A client shared by N threads needs N pooled connections. botocore's pool
+    # never blocks: a thread past the limit opens a connection that urllib3
+    # drops once the pool already holds its maximum idle. Never below boto3's 10.
+    # ponytail: counts the caller's threads only; boto3's multipart transfer threads (up to ten per file) share this
+    # pool too. Size it at ten per thread if large-file pulls show "Connection pool is full".
+    config = BotoConfig(max_pool_connections=max(pool, 10)) if pool else None
     return session.client(
         "s3", endpoint_url=endpoint_url, region_name=remote_cfg.get("region"), config=config,
     )

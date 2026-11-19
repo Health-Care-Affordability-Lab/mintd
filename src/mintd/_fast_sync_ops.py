@@ -1748,7 +1748,7 @@ class SubprocessFastSyncOps:
         if not available():
             return _degrade_all("boto3 not importable")
 
-        s3 = _create_s3_client(remote_cfg, self._aws_profile_name)
+        s3 = _create_s3_client(remote_cfg, self._aws_profile_name, pool=jobs)
         try:
             versioning_enabled = check_bucket_versioning(s3, bucket)
         except NoCredentialsError as exc:

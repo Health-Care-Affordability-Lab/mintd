@@ -30,7 +30,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
 from ._fast_sync_ops import get_remote_config, parse_s3_url, s3_key_for_out, workspace_path_for
@@ -66,8 +66,9 @@ CACHE_LANE_TAGGING = f"{CACHE_LANE_TAG_KEY}={CACHE_LANE_TAG_VALUE}"
 # SHA256; botocore lowercases/de-prefixes it on HEAD to ``mintd-sha256``.
 CACHE_SHA256_META_KEY = "mintd-sha256"
 
-# Matches ``_create_s3_client`` and ``list_product_objects``' factory param.
-Factory = Callable[[dict[str, str], Optional[str]], Any]
+# ``_s3.create_client``'s shape: the transfer client gets ``pool=jobs`` (one
+# connection per worker thread); the one-thread listing passes none.
+Factory = Callable[..., Any]
 
 
 # ---------------------------------------------------------------------------
@@ -928,7 +929,7 @@ def cache_push(
             hint="pass files or directories in the working tree (not DVC-tracked)",
         )
 
-    s3 = factory(repo.remote_cfg, config.aws_profile_name)
+    s3 = factory(repo.remote_cfg, config.aws_profile_name, pool=jobs)
     listing = _list_or_cache_error(
         repo, sub_path=None, aws_profile_name=config.aws_profile_name, factory=factory
     )
@@ -1199,7 +1200,7 @@ def cache_pull(
             continue
         safe.append((o.key, full_key, dest, remainder, o.size))
 
-    s3 = factory(repo.remote_cfg, config.aws_profile_name)
+    s3 = factory(repo.remote_cfg, config.aws_profile_name, pool=jobs)
     start = time.monotonic()
     outcomes: list[TransferOutcome] = list(unsafe_outcomes)
     total_bytes = sum(size for (_k, _fk, _d, _r, size) in safe)
