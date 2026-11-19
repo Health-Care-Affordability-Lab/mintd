@@ -269,7 +269,7 @@ def test_no_answer_for_the_current_object_leaves_the_entry_unchanged(s3_versione
 
 # --- the proof memo -----------------------------------------------------------
 
-from mintd._fast_sync_ops import S3AccessDenied  # noqa: E402
+from mintd._s3 import S3AccessDenied  # noqa: E402
 from mintd._pin_proof import MEMO_SAMPLE, ProofMemo  # noqa: E402
 
 

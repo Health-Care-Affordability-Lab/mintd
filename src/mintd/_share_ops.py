@@ -32,20 +32,28 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 from uuid import uuid4
 
-# Reuse the guarded-import sentinels from _fast_sync_ops rather than
-# paraphrasing its try/except: these are the *same* class objects that
-# is_transient_s3_error / retry_transient classify against, so behaviour
-# cannot drift. When boto3 is absent they are all inert placeholders whose
-# ``except`` clauses never fire (see _fast_sync_ops:37-48).
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
-from mintd._fast_sync_ops import (
+
+# The S3 exception classes come from mintd._s3, the one module that imports
+# boto3: they are the *same* class objects is_transient_s3_error and
+# retry_transient classify against, so behaviour cannot drift, and inert
+# placeholders on a broken install. _s3 says why each extra class is caught:
+# FlexibleChecksumError (a checksum mismatch that is no ClientError),
+# StreamingChecksumBody (botocore's 5xx-body wrapping), S3UploadFailedError
+# (upload_file's wrapper around ClientError) and RetriesExceededError
+# (s3transfer's own exhausted retry loop).
+from mintd._s3 import (
     ClientError,
     ConnectionClosedError,
     EndpointConnectionError,
+    FlexibleChecksumError,
     NoCredentialsError,
     ReadTimeoutError,
+    RetriesExceededError,
+    S3UploadFailedError,
     SSLError,
-    _create_s3_client,
+    StreamingChecksumBody,
+    create_client as _create_s3_client,
     retry_transient,
 )
 from mintd._s3_listing_ops import _normalise_sub_path
@@ -60,57 +68,6 @@ _TRANSFER_NETWORK_ERRORS = (
     ConnectionClosedError,
     SSLError,
 )
-
-# ChecksumMode="ENABLED" makes botocore validate the response-body SHA256;
-# a genuine mismatch raises FlexibleChecksumError (a BotoCoreError, NOT a
-# ClientError) — so it needs its own mapping or it tracebacks. Guarded like
-# the sentinels above so boto3-absent installs stay importable.
-try:
-    from botocore.exceptions import FlexibleChecksumError
-except ImportError:  # boto3 absent — inert placeholder; the except clause never fires
-
-    class FlexibleChecksumError(Exception):  # type: ignore[no-redef]
-        """Placeholder when botocore is absent (mirrors _fast_sync_ops:37-48)."""
-
-# botocore 1.43.0 wraps a GetObject error body in StreamingChecksumBody when the
-# 5xx carries an x-amz-checksum-* header (httpchecksum.handle_checksum_body does
-# not check the status), and parsers._is_generic_error_response then calls
-# .strip() on it for status >= 500. A real server error therefore arrives as
-# AttributeError. Its own guard, not the boto3 block in _fast_sync_ops: if a
-# botocore release moves the class, only this workaround goes inert.
-try:
-    from botocore.httpchecksum import StreamingChecksumBody
-except ImportError:  # boto3 absent — inert placeholder; isinstance never matches
-
-    class StreamingChecksumBody:  # type: ignore[no-redef]
-        """Placeholder when botocore is absent (mirrors _fast_sync_ops:37-48)."""
-
-# boto3's high-level ``upload_file`` catches every botocore ``ClientError`` from
-# the transfer and re-raises it wrapped in ``S3UploadFailedError`` (which is NOT
-# a ``ClientError``; boto3/s3/transfer.py:456-459). We import it via the same
-# guarded pattern as the botocore sentinels above so ``upload_object`` can unwrap
-# it back to the underlying ``ClientError`` — otherwise real upload failures
-# (bad bucket, AccessDenied, SlowDown) would escape unmapped and un-retried.
-try:
-    from boto3.exceptions import S3UploadFailedError
-except ImportError:  # boto3 absent — inert placeholder; the except clause never fires
-
-    class S3UploadFailedError(Exception):  # type: ignore[no-redef]
-        """Placeholder when boto3 is absent (mirrors _fast_sync_ops:37-48)."""
-
-
-# s3transfer's download runs its OWN retry loop over the response-body stream
-# and, once exhausted, boto3 re-raises boto3.exceptions.RetriesExceededError
-# (a Boto3Error carrying .last_exception — NOT a ClientError/BotoCoreError, so
-# neither is_transient_s3_error nor the network tuple sees it). Without this it
-# would escape as a raw traceback on a real large-file download whose stream
-# read-times-out mid-transfer.
-try:
-    from boto3.exceptions import RetriesExceededError
-except ImportError:  # boto3 absent — inert placeholder; the except clause never fires
-
-    class RetriesExceededError(Exception):  # type: ignore[no-redef]
-        """Placeholder when boto3 is absent (mirrors _fast_sync_ops:37-48)."""
 
 if TYPE_CHECKING:
     from mintd._config import Config

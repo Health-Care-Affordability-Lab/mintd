@@ -13,45 +13,25 @@ import posixpath
 import random
 import shlex
 import subprocess
-import time
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
 
 import yaml
 
-try:
-    import boto3
-    from botocore.config import Config as BotoConfig
-    from botocore.exceptions import (
-        ClientError,
-        ConnectionClosedError,
-        EndpointConnectionError,
-        NoCredentialsError,
-        ProfileNotFound,
-        ReadTimeoutError,
-        SSLError,
-    )
-except ImportError:
-    boto3 = None  # type: ignore[assignment]
-    BotoConfig = None  # type: ignore[assignment,misc]
-
-    class _BotocoreMissingError(Exception):
-        """Placeholder when botocore is absent; never raised, so
-        ``isinstance`` checks against it are always False and
-        ``except`` clauses naming it never fire."""
-
-    ClientError = _BotocoreMissingError  # type: ignore[assignment,misc]
-    ConnectionClosedError = _BotocoreMissingError  # type: ignore[assignment,misc]
-    EndpointConnectionError = _BotocoreMissingError  # type: ignore[assignment,misc]
-    NoCredentialsError = _BotocoreMissingError  # type: ignore[assignment,misc]
-    ProfileNotFound = _BotocoreMissingError  # type: ignore[assignment,misc]
-    ReadTimeoutError = _BotocoreMissingError  # type: ignore[assignment,misc]
-    SSLError = _BotocoreMissingError  # type: ignore[assignment,misc]
-
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
 from mintd._dvc_invoke import dvc_cmd, dvc_env
+from mintd._s3 import (
+    _DRIFT_404_CODES,
+    ClientError,
+    NoCredentialsError,
+    available,
+    check_bucket_versioning,
+    download,
+    retry_transient,
+)
+from mintd._s3 import create_client as _create_s3_client  # tests patch it here
 from mintd.model import FastPullResult
 
 if TYPE_CHECKING:
@@ -61,27 +41,6 @@ logger = logging.getLogger(__name__)
 
 _DVC_FLOOR = (3, 66)
 _DVC_CEILING = (4, 0)  # exclusive
-# ClientError codes worth retrying. Deliberately wide: a single
-# throttle/reset among a big dir-out's per-file fetches used to demote the
-# whole out to plain `dvc pull` — the command fast-sync exists to avoid.
-_RETRYABLE_S3_ERRORS = {
-    "503", "500", "RequestTimeout", "SlowDown",
-    "Throttling", "ThrottlingException", "RequestThrottled",
-    "InternalError",
-}
-# botocore network-layer exceptions (no HTTP response to inspect) that are
-# transient by nature: endpoint unreachable, read timeout, connection
-# reset/closed, TLS hiccup. NoCredentialsError is deliberately absent —
-# retrying cannot mint credentials (see is_transient_s3_error).
-_TRANSIENT_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
-    EndpointConnectionError,
-    ReadTimeoutError,
-    ConnectionClosedError,
-    SSLError,
-)
-_RETRY_ATTEMPTS = 3
-_RETRY_BACKOFF_BASE_S = 0.5
-_RETRY_BACKOFF_CAP_S = 8.0
 _SPOT_CHECK_N = 5
 _DEFAULT_DVC_CACHE_REL = Path(".dvc/cache")
 
@@ -291,54 +250,10 @@ def _degrade_all_targets(
     )
 
 
-_T = TypeVar("_T")
 
 
-def is_transient_s3_error(exc: BaseException) -> bool:
-    """Pure classification (no I/O, no sleeps) of S3/network errors worth retrying.
-
-    Shared policy: the share/cache lanes may import this together with
-    :func:`retry_transient` instead of forking their own list.
-
-    Transient:
-      - ``ClientError`` whose code is in ``_RETRYABLE_S3_ERRORS`` (5xx,
-        RequestTimeout, SlowDown, throttling family) or whose HTTP status
-        is 429/500/503. A HEAD has no error body, so its code is the bare
-        status and only the status names a throttle;
-      - botocore network-layer errors: endpoint-connection, read-timeout,
-        connection-closed (reset), SSL.
-
-    NOT transient: ``NoCredentialsError`` — retrying cannot mint
-    credentials; callers surface it as a named degradation reason instead.
-    """
-    if isinstance(exc, NoCredentialsError):
-        return False
-    if isinstance(exc, ClientError):
-        error = exc.response.get("Error", {})
-        if str(error.get("Code", "")) in _RETRYABLE_S3_ERRORS:
-            return True
-        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-        return status in (429, 500, 503)
-    return isinstance(exc, _TRANSIENT_NETWORK_ERRORS)
 
 
-def retry_transient(fn: Callable[[], _T], *, attempts: int = _RETRY_ATTEMPTS) -> _T:
-    """Run ``fn()``; retry transient S3/network errors with capped exponential backoff.
-
-    3 attempts total, sleeping ``min(8s, 0.5s * 2**attempt)`` between tries.
-    Deliberately no config knob — this is shared retry *policy*, not a
-    tuning surface; share/cache can import it as-is.
-    Non-transient errors (see :func:`is_transient_s3_error`) and the final
-    attempt's error propagate unchanged.
-    """
-    for attempt in range(attempts):
-        try:
-            return fn()
-        except Exception as exc:
-            if attempt >= attempts - 1 or not is_transient_s3_error(exc):
-                raise
-            time.sleep(min(_RETRY_BACKOFF_CAP_S, _RETRY_BACKOFF_BASE_S * (2 ** attempt)))
-    raise AssertionError("unreachable: retry_transient loop returns or raises")
 
 
 def _extract_version_id(out_dict: dict[str, Any]) -> str | None:
@@ -1223,21 +1138,8 @@ def s3_key_for_out(prefix: str, out: DvcOut, project_path: Path) -> str:
     return s3_key_for(prefix, out.md5)
 
 
-def check_bucket_versioning(s3: Any, bucket: str) -> bool:
-    """Probe the bucket's versioning status.
-
-    Transient errors are retried (:func:`retry_transient`); an error that
-    still fails PROPAGATES instead of being read as "versioning disabled" —
-    a transient 503 on this probe used to demote every target to the
-    dvc-pull fallback with a misleading reason. Only a successful response
-    decides the boolean.
-    """
-    resp = retry_transient(lambda: s3.get_bucket_versioning(Bucket=bucket))
-    return resp.get("Status") == "Enabled"
 
 
-# ClientError codes / statuses that VERIFY the pinned object version is gone.
-_DRIFT_404_CODES = {"404", "NoSuchKey", "NoSuchVersion", "NotFound"}
 
 
 def spot_check_versions(
@@ -1307,91 +1209,12 @@ def spot_check_versions(
     return drift
 
 
-class S3AccessDenied(Exception):
-    """S3 refused a HEAD (403 / AccessDenied), or there are no AWS
-    credentials at all: no verdict about any object can be trusted."""
 
 
-@dataclass(frozen=True)
-class HeadVerdict:
-    """What one HEAD said about an object version.
-
-    ``found``: S3 returned a real version (``version_id``, ``etag`` without
-    quotes, ``size``). ``unpinned``: the object exists but its version is
-    ``null`` (versioning suspended), so nothing can pin it. ``missing``: no
-    such key or version, or a delete marker. ``inconclusive``: transient
-    errors outlasted the retries, or an error nothing maps.
-    """
-
-    kind: str  # "found" | "unpinned" | "missing" | "inconclusive"
-    version_id: str | None = None
-    etag: str | None = None
-    size: int | None = None
-    reason: str | None = None
 
 
-def _classify_head(head: Callable[[], Any]) -> HeadVerdict:
-    try:
-        resp = retry_transient(head)
-    except NoCredentialsError as exc:
-        raise S3AccessDenied("no AWS credentials were found") from exc
-    except ClientError as exc:
-        error = exc.response.get("Error", {})
-        code = str(error.get("Code", ""))
-        meta = exc.response.get("ResponseMetadata", {})
-        status = meta.get("HTTPStatusCode")
-        headers = meta.get("HTTPHeaders", {}) or {}
-        if code in ("403", "AccessDenied") or status == 403:
-            raise S3AccessDenied(str(exc)) from exc
-        if code in _DRIFT_404_CODES or status == 404:
-            return HeadVerdict("missing", reason=f"{code or status}")
-        if status == 405 and str(headers.get("x-amz-delete-marker", "")).lower() == "true":
-            return HeadVerdict("missing", reason="delete marker")
-        return HeadVerdict("inconclusive", reason=f"{code or status}: {exc}")
-    vid = resp.get("VersionId")
-    if not vid or vid == "null":
-        return HeadVerdict("unpinned", reason="no version (versioning suspended?)")
-    return HeadVerdict(
-        "found", version_id=str(vid),
-        etag=str(resp.get("ETag", "")).strip('"'), size=resp.get("ContentLength"),
-    )
 
 
-def probe_versions(
-    s3: Any, bucket: str, requests: "list[tuple[str, str | None]]", *, jobs: int = 16,
-) -> "dict[tuple[str, str | None], HeadVerdict]":
-    """HEAD each ``(key, version_id)`` in a thread pool; ``version_id=None``
-    HEADs the key's current object. Each HEAD retries transient errors.
-
-    A 403 or missing credentials raises ``S3AccessDenied`` for the whole
-    call, because a verdict about one object would then say nothing about
-    the rest. Any
-    other exception a worker raises becomes ``inconclusive`` for that
-    request alone: taken bare, one worker's exception would escape the
-    ``as_completed`` loop and lose every other outcome.
-    """
-    out: dict[tuple[str, str | None], HeadVerdict] = {}
-    if not requests:
-        return out
-
-    def _one(key: str, vid: str | None) -> HeadVerdict:
-        kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
-        if vid:
-            kwargs["VersionId"] = vid
-        return _classify_head(lambda: s3.head_object(**kwargs))
-
-    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-        futures = {ex.submit(_one, key, vid): (key, vid) for key, vid in dict.fromkeys(requests)}
-        for fut in as_completed(futures):
-            try:
-                out[futures[fut]] = fut.result()
-            except S3AccessDenied:
-                raise
-            except Exception as exc:
-                out[futures[fut]] = HeadVerdict(
-                    "inconclusive", reason=f"unexpected error: {type(exc).__name__}: {exc}"
-                )
-    return out
 
 
 def verify_download(cache_path: Path, expected_md5: str) -> VerifyResult:
@@ -1490,18 +1313,9 @@ def fetch_to_cache(
     tmp_path = cache_path.with_suffix(".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
 
-    extra_args: dict[str, str] | None = (
-        {"VersionId": version_id} if version_id else None
-    )
-
     def _attempt() -> bool:
         try:
-            kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
-            if extra_args is not None:
-                kwargs["ExtraArgs"] = extra_args
-            if progress is not None:
-                kwargs["Callback"] = progress
-            s3.download_file(Filename=str(tmp_path), **kwargs)
+            download(s3, bucket, key, tmp_path, version_id=version_id, progress=progress)
 
             vr = verify_download(tmp_path, expected_md5)
             if not vr.ok:
@@ -1843,22 +1657,6 @@ def _build_fast_pull_result(
     )
 
 
-def _create_s3_client(
-    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None,
-) -> Any:
-    try:
-        session = boto3.Session(profile_name=aws_profile_name)
-    except ProfileNotFound:
-        session = boto3.Session()
-
-    endpoint_url = remote_cfg.get("endpointurl")
-    if not endpoint_url:
-        endpoint_url = remote_cfg.get("endpoint")
-    # boto3's default pool is 10 connections; a 16-thread probe would wait on it.
-    config = BotoConfig(max_pool_connections=pool) if pool else None
-    return session.client(
-        "s3", endpoint_url=endpoint_url, region_name=remote_cfg.get("region"), config=config,
-    )
 
 
 class FastSyncOps(Protocol):
@@ -1947,7 +1745,7 @@ class SubprocessFastSyncOps:
         except ValueError as exc:
             return _degrade_all(f"non-S3 remote: {exc}")
 
-        if boto3 is None:
+        if not available():
             return _degrade_all("boto3 not importable")
 
         s3 = _create_s3_client(remote_cfg, self._aws_profile_name)

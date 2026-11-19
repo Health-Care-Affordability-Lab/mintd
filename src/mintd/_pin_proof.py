@@ -20,7 +20,6 @@ from typing import Any
 
 from ._fast_sync_ops import (
     DvcFileEntry,
-    HeadVerdict,
     cache_path_for,
     dir_manifest_md5,
     flagged_outs,
@@ -29,6 +28,7 @@ from ._fast_sync_ops import (
     stage_wdir,
     wdir_map,
 )
+from ._s3 import HeadVerdict, probe_versions
 
 _READ_CHUNK = 1 << 20
 
@@ -393,8 +393,6 @@ def plan_repair(
     4. Otherwise: unrecoverable.
     An entry S3 gave no clear answer for is left as it is.
     """
-    from ._fast_sync_ops import probe_versions
-
     pins = prove_pins(s3, bucket, [e for e in entries if e.version_id and not e.legacy_dir], cache, memo)
     keep: list[Entry] = []
     on_size: list[Entry] = []
@@ -684,8 +682,6 @@ def prove_pins(
     Every full proof is remembered. Keyed by ``(key, version_id)``.
     """
     import random
-
-    from ._fast_sync_ops import probe_versions
 
     remembered = [e for e in entries if memo is not None and memo.knows(bucket, e)]
     sample = random.sample(remembered, min(MEMO_SAMPLE, len(remembered)))

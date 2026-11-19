@@ -40,16 +40,12 @@ import yaml
 from . import imports
 from ._fast_sync_ops import (
     _DEFAULT_DVC_CACHE_REL,
-    _DRIFT_404_CODES,
     _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
-    ClientError,
     DvcFileEntry,
-    boto3,
     cache_path_for,
     ensure_dir_manifest,
     is_cached,
-    _create_s3_client,
     outs_for_target,
     outs_materialized,
     parse_remote_config_text,
@@ -57,6 +53,7 @@ from ._fast_sync_ops import (
     read_cached_dir_manifest,
     fetch_to_cache,
 )
+from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
 
 if TYPE_CHECKING:
@@ -376,7 +373,7 @@ def rescue_import_pull(
             f"producer's bucket ({dep.producer_repo}@{dep.contract_pin[:7]})"
         )
 
-    if boto3 is None:
+    if not available():
         return RescueResult(
             ok=False,
             reason="boto3 is not installed, so the producer's bucket cannot be reached",

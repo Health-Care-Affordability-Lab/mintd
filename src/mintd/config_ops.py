@@ -273,25 +273,16 @@ def validate_config(
 def _check_bucket(
     bucket: str, profile: str | None, endpoint_url: str | None = None
 ) -> ValidationStep:
-    try:
-        import boto3
-        from botocore.exceptions import (
-            ClientError,
-            EndpointConnectionError,
-            NoCredentialsError,
-        )
-    except ImportError:
+    from ._s3 import ClientError, EndpointConnectionError, NoCredentialsError, available, plain_client
+
+    if not available():
         return ValidationStep(
             name="s3",
             status="skipped",
             message="boto3 not installed",
         )
     try:
-        if profile:
-            session = boto3.Session(profile_name=profile)
-            client = session.client("s3", endpoint_url=endpoint_url)
-        else:
-            client = boto3.client("s3", endpoint_url=endpoint_url)
+        client = plain_client(profile, endpoint_url)
     except Exception as e:
         return ValidationStep(
             name="s3",

@@ -43,7 +43,7 @@ _BOUNDARY_SUFFIXES = (
 )
 
 # BANNED: internal mintd functions and module attributes stubbed out
-# wholesale (``_fast_sync_ops.boto3`` is the one attribute). 130 sites / 28
+# wholesale (``_s3.boto3`` is the one attribute). 130 sites / 28
 # targets at 70a7a9e, unmoved since. Shrink-only. The running totals for the
 # WHOLE census (banned + permitted) live in
 # ``test_the_checked_in_literal_matches_a_fresh_scan``, not here — a count
@@ -51,7 +51,7 @@ _BOUNDARY_SUFFIXES = (
 BANNED_TARGETS: dict[str, int] = {
     "mintd._config.Config.load": 1,
     "mintd._fast_sync_ops._check_dvc": 16,
-    "mintd._fast_sync_ops.boto3": 1,
+    "mintd._s3.boto3": 1,
     "mintd.check.ProducerView.try_at": 1,
     "mintd.check.check_project": 6,
     "mintd.cli.Config.load": 11,
@@ -110,7 +110,8 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd._push_verify._create_s3_client": 14,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
-    "mintd._fast_sync_ops.time.sleep": 9,
+    # The retry sleep and the boto3 guard live in mintd._s3: same sites, same totals.
+    "mintd._s3.time.sleep": 9,
     "mintd._producer_git_ops.subprocess.run": 6,
     "mintd._share_ops._create_s3_client": 2,
     "mintd._templates._render.importlib.metadata.version": 1,
@@ -192,7 +193,7 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
 
     Both string-form mechanisms count. ``monkeypatch.setattr`` supplies 114
     of the 130 banned sites and ``unittest.mock.patch`` the other 16
-    (``_fast_sync_ops._check_dvc`` 15, ``_fast_sync_ops.boto3`` 1); ``patch``
+    (``_fast_sync_ops._check_dvc`` 15, ``_s3.boto3`` 1); ``patch``
     is house style in ``test_fast_sync.py`` / ``test_config.py``, so
     scanning only ``setattr`` would leave the ratchet evadable by a one-word
     change of mechanism.
@@ -433,14 +434,13 @@ PER_FILE_IGNORES = {
     "src/mintd/_subprocess.py": ["TID251", "ANN001"],
     "src/mintd/_registry_git_ops.py": ["TID251"],
     "src/mintd/_atomic.py": ["TID251"],
+    "src/mintd/_s3.py": ["TID251", "BLE001"],
     "src/mintd/_init_ops.py": ["TID251"],
     "src/mintd/_fast_sync_ops.py": ["TID251", "BLE001", "S110"],
     "src/mintd/_producer_git_ops.py": ["TID251"],
     "src/mintd/_aws_credentials.py": ["TID251"],
-    "src/mintd/_s3_listing_ops.py": ["TID251"],
-    "src/mintd/_share_ops.py": ["TID251"],
-    "src/mintd/cli.py": ["T201", "TID251", "BLE001", "S110", "ANN001"],
-    "src/mintd/config_ops.py": ["T201", "TID251", "BLE001", "ANN001"],
+    "src/mintd/cli.py": ["T201", "BLE001", "S110", "ANN001"],
+    "src/mintd/config_ops.py": ["T201", "BLE001", "ANN001"],
     "src/mintd/data.py": ["TID251", "BLE001"],
     "src/mintd/enclave.py": ["TID251", "DTZ005", "DTZ011"],
     "src/mintd/init.py": ["TID251"],
@@ -488,7 +488,7 @@ BANNED_MODULE_LEVEL_IMPORTS = ["pandas", "pyarrow"]
 #: ``# flake8: noqa``). A count, not a location list: the point is
 #: that adding one is a visible edit, and pinning line numbers would redden on
 #: every unrelated insertion.
-SRC_NOQA_COUNT = 4
+SRC_NOQA_COUNT = 0
 #: ``# type: ignore``, inline ``# mypy:`` config such as ``ignore-errors``, and
 #: ``@no_type_check`` under `src/`, the same idea for mypy.
 SRC_TYPE_IGNORE_COUNT = 23
@@ -561,15 +561,12 @@ def test_ruff_per_file_ignores_shrink_only() -> None:
 TID251_NAMES_USED: dict[str, dict[str, int]] = {
     "src/mintd/_atomic.py": {"os.replace": 1},
     "src/mintd/_aws_credentials.py": {"os.replace": 1},
-    "src/mintd/_fast_sync_ops.py": {"boto3": 1, "botocore": 2, "subprocess": 1},
+    "src/mintd/_fast_sync_ops.py": {"subprocess": 1},
     "src/mintd/_init_ops.py": {"subprocess": 1},
     "src/mintd/_producer_git_ops.py": {"subprocess": 1},
     "src/mintd/_registry_git_ops.py": {"subprocess": 1},
-    "src/mintd/_s3_listing_ops.py": {"botocore": 1},
-    "src/mintd/_share_ops.py": {"boto3": 2, "botocore": 2},
+    "src/mintd/_s3.py": {"boto3": 3, "botocore": 4},
     "src/mintd/_subprocess.py": {"subprocess": 1},
-    "src/mintd/cli.py": {"boto3": 4},
-    "src/mintd/config_ops.py": {"boto3": 1, "botocore": 1},
     "src/mintd/data.py": {"shutil.rmtree": 2},
     "src/mintd/enclave.py": {"shutil.copytree": 1, "shutil.move": 2, "shutil.rmtree": 5},
     "src/mintd/init.py": {"shutil.rmtree": 1},
@@ -580,7 +577,7 @@ TID251_NAMES_USED: dict[str, dict[str, int]] = {
 
 def test_each_tid251_exemption_covers_only_the_names_it_uses() -> None:
     """Mutations that must redden this: ``import subprocess`` in
-    ``src/mintd/_share_ops.py``, which per-file-ignores exempts for boto3, or a
+    ``src/mintd/_s3.py``, which per-file-ignores exempts for boto3, or a
     second ``shutil.rmtree(p)`` in ``src/mintd/init.py``."""
     out = subprocess.run(
         [

@@ -1,13 +1,12 @@
 """Read-only S3 listing for `mintd data ls`.
 
-Reuses `_create_s3_client` and `parse_s3_url` from `_fast_sync_ops`.
+Its client comes from `mintd._s3`.
 Md5-keyed support is deferred for v1.
 """
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, List, Optional
-from botocore.exceptions import ClientError
-from ._fast_sync_ops import _create_s3_client
+from ._s3 import ClientError, create_client as _create_s3_client
 
 @dataclass(frozen=True)
 class S3Object:

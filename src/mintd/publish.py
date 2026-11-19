@@ -266,7 +266,7 @@ def _apply_publish(
     # a full re-upload after `dvc commit -f`, is what this stops.
     if reporter is not None:
         reporter.update_status("Pushing data to DVC...")
-    from ._fast_sync_ops import S3AccessDenied
+    from ._s3 import S3AccessDenied
     from ._push_verify import PushRefused, judge, prepare, uploading
 
     rolled_back = "metadata.json was rolled back; nothing was committed, tagged or advertised."

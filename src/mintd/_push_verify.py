@@ -26,11 +26,8 @@ from typing import Any
 
 
 from ._dvc_state import abbreviate, dvc_cache_dir
-from ._fast_sync_ops import (
-    _create_s3_client,
-    discover_all_outs,
-    parse_s3_url,
-)
+from ._fast_sync_ops import discover_all_outs, parse_s3_url
+from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
     Entry,

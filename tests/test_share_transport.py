@@ -181,7 +181,7 @@ def test_upload_wrapped_transient_error_is_retried_then_succeeds(
 ) -> None:
     # A transient SlowDown wrapped in S3UploadFailedError must still be retried
     # at the mintd level (unwrapped to a ClientError the shared policy sees).
-    monkeypatch.setattr("mintd._fast_sync_ops.time.sleep", lambda _s: None)
+    monkeypatch.setattr("mintd._s3.time.sleep", lambda _s: None)
     src = tmp_path / "f.bin"
     src.write_bytes(b"payload")
     client = _UploadWrapsClientError(
@@ -295,7 +295,7 @@ def test_missing_credentials_maps_to_transfer_error_zero_retries(tmp_path: Path)
 
 
 def test_transient_error_is_retried_then_succeeds(monkeypatch) -> None:
-    monkeypatch.setattr("mintd._fast_sync_ops.time.sleep", lambda _s: None)
+    monkeypatch.setattr("mintd._s3.time.sleep", lambda _s: None)
     calls = {"n": 0}
 
     class _C:
