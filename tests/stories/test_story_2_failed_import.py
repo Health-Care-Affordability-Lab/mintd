@@ -107,7 +107,7 @@ def test_a_failed_import_leaves_the_project_as_it_was(
 
     run = mintd("data", "import", product.name, cwd=project)
 
-    said = " ".join(run.stderr.split())  # the console wraps at 80 columns
+    said = "".join(run.stderr.split())  # the console wraps at 80 columns, mid-word too: no space or break is kept
     assert run.returncode != 0, said
     assert "error:" in said and any(n in said for n in named), said
     assert "hint:" in said, said
