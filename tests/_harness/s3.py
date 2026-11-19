@@ -29,6 +29,12 @@ class S3Server:
     puts: list[str]
     #: `(path, bytes served)` of each object GET that succeeded, in order
     gets: list[tuple[str, int]]
+    #: Set to k to stop an upload partway: once `puts` holds k paths, each
+    #: later object PUT sets `holding`, waits for `release`, then fails with
+    #: 503 and stores nothing. It is not recorded in `puts`.
+    hold_puts_after: int | None = None
+    holding: threading.Event = dataclasses.field(default_factory=threading.Event)
+    release: threading.Event = dataclasses.field(default_factory=threading.Event)
 
 
 @pytest.fixture
@@ -39,6 +45,8 @@ def s3_server():
     app = DomainDispatcherApplication(create_backend_app)
     puts: list[str] = []
     gets: list[tuple[str, int]] = []
+    recorder = S3Server("", None, puts, gets)  # endpoint and client once the server is up
+    put_lock = threading.Lock()
 
     def guarded(environ, start_response):
         method, query = environ["REQUEST_METHOD"], parse_qs(environ.get("QUERY_STRING", ""), keep_blank_values=True)
@@ -48,7 +56,15 @@ def s3_server():
             return [b'<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>no</Message></Error>']
         is_object = path.strip("/").count("/") >= 1
         if method == "PUT" and is_object:
-            puts.append(path)
+            with put_lock:
+                held = recorder.hold_puts_after is not None and len(puts) >= recorder.hold_puts_after
+                if not held:
+                    puts.append(path)
+            if held:
+                recorder.holding.set()
+                recorder.release.wait(timeout=60)
+                start_response("503 Slow Down", [("Content-Type", "application/xml")])
+                return [b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>held</Message></Error>']
         if method == "GET" and is_object:
             status: list[str] = []
 
@@ -77,7 +93,9 @@ def s3_server():
     s3.create_bucket(Bucket=BUCKET)
     s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
     puts.clear()
+    recorder.endpoint, recorder.client = endpoint, s3
     try:
-        yield S3Server(endpoint, s3, puts, gets)
+        yield recorder
     finally:
+        recorder.release.set()
         server.shutdown()

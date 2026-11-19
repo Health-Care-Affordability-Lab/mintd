@@ -144,6 +144,10 @@ def run_streaming(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
+        except KeyboardInterrupt:  # a Ctrl-C here still waits for the kill, then stops mintd
+            proc.kill()
+            proc.wait()
+            raise
 
     stall_thread = None
     if stall_timeout is not None:

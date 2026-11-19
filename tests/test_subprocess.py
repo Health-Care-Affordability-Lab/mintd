@@ -1,3 +1,7 @@
+import subprocess
+
+import pytest
+
 from mintd._subprocess import run_streaming
 
 
@@ -126,3 +130,40 @@ def test_crlf_lines_are_captured_not_emptied():
     # the behaviour the `\\r` hunt exists for.
     assert result_for("50%\r75%\r100%\n").stderr_lines == ["100%"]
     assert result_for("50%\r75%\r100%\r\n").stderr_lines == ["100%"]
+
+
+@pytest.mark.parametrize("first", [KeyboardInterrupt(), subprocess.TimeoutExpired("dvc", 1.0)],
+                         ids=["ctrl-c", "wall-timeout"])
+def test_a_second_ctrl_c_during_the_wait_still_kills_and_reaps_the_child(first):
+    """A Ctrl-C, or a wall timeout, stops the wait for dvc; then a Ctrl-C lands
+    in the kill ladder's 5 s wait after SIGTERM. The ladder must still SIGKILL
+    and reap dvc, and a KeyboardInterrupt must be what leaves `run_streaming`.
+    A push's caller puts the pointer files back once it gets the exception,
+    and a dvc still running its `finally` would rewrite them after that; and a
+    caller that catches Exception must not carry on past the user's Ctrl-C.
+
+    Mutations: catch only `subprocess.TimeoutExpired` in `_kill_ladder` -> the
+    Ctrl-C leaves before kill, red; drop the `raise` after the reap -> the
+    wall-timeout case raises WallTimeoutExceeded, red.
+    """
+    calls = []
+
+    class InterruptedInTheLadder(FakeProcess):
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+            if len(calls) == 1:
+                raise first
+            if len(calls) == 3:  # the Ctrl-C in the ladder's wait
+                raise KeyboardInterrupt
+            calls.append("reaped")
+            return -9
+
+        def terminate(self):
+            calls.append("terminate")
+
+        def kill(self):
+            calls.append("kill")
+
+    with pytest.raises(KeyboardInterrupt):
+        run_streaming(["dvc", "push"], wall_timeout=1.0, popen_factory=lambda *a, **k: InterruptedInTheLadder())
+    assert calls == [("wait", 1.0), "terminate", ("wait", 5), "kill", ("wait", None), "reaped"]

@@ -27,7 +27,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal
 from ._dvc_ops import (
     DvcOps,
     DvcPullError,
-    DvcPushError,
     DvcPushResult,
     DvcStorageKeyError,
     pull_retry_hint,
@@ -1013,36 +1012,26 @@ def data_push(
     # On a version-aware remote: refuse what can't be checked, then repair
     # the pins in this push's scope before DVC sees them (``_push_verify``).
     # Raises ``PushRefused`` before any write or upload.
-    from ._push_verify import prepare, restore
+    from ._push_verify import prepare, uploading
 
     # A target push_targets couldn't resolve reaches dvc as typed, so which
     # outs it uploads is unknown: repair (and allow changes to) every out.
     unresolved = selection is not None and any(t not in selection for g in groups if g for t in g)
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
                        aws_profile=aws_profile, memo_path=memo_path)
-    env = prepared.env if prepared is not None else None
-    start_t = time.monotonic()
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
     # raising group aborts the rest and surfaces as a non-zero exit. Deliberate
     # — push is idempotent (the re-run skips what already landed) and its
     # failure modes (credentials, remote unreachable) hit every group alike, so
-    # there is nothing for a survivor list to add.
-    try:
+    # there is nothing for a survivor list to add. A failed or interrupted
+    # push leaves every pointer file as it was before this command (``uploading``).
+    with uploading(prepared):
+        env = prepared.env if prepared is not None else None
+        start_t = time.monotonic()
         results: list[DvcPushResult] = [
             dvc_ops.push(targets=group, cwd=project_path, remote=remote, jobs=jobs, env=env)
             for group in groups
         ]
-    except DvcPushError as exc:
-        if prepared is not None and prepared.written:
-            raise DvcPushError(
-                f"{exc}\nThe working tree holds the re-pinned pointer files "
-                f"({', '.join(prepared.written)}); re-run mintd data push"
-            ) from exc
-        raise
-    finally:
-        if prepared is not None:
-            restore(prepared)
-            prepared.close()
     # Best-effort counts stay best-effort: a group dvc reported no number for
     # drops out rather than counting as zero, and the push is "up to date" only
     # when every group was.
