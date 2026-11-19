@@ -1,0 +1,52 @@
+name: stories
+# The user stories in tests/stories, run against the installed mintd. Observe
+# mode: `stories` is not a required check, so a red run reports without blocking
+# a merge. Main's stories and harness judge the PR's wheel, so a PR cannot
+# weaken the checks that run on it. A PR's own new or changed stories run here
+# only once it merges; run them locally with `uv run pytest tests/stories`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+# Read-only, whatever the repository's default token permissions become.
+permissions:
+  contents: read
+jobs:
+  stories:
+    name: stories
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history + tags so setuptools-scm derives a real version, and
+          # origin/main for the stories' worktree below.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Keep equal to test.yml, install.sh and install.ps1.
+          version: "0.13.9"
+          python-version: "3.13"
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "CI"
+      - name: Build the PR's mintd
+        # As the stories' runner builds it: the wheel and the locked
+        # dependencies, in a venv of their own.
+        run: |
+          uv export --frozen --no-dev --no-emit-project --no-hashes -q -o "$RUNNER_TEMP/locked.txt"
+          uv build --wheel -q --build-constraints "$RUNNER_TEMP/locked.txt" -o "$RUNNER_TEMP/dist"
+          uv venv -q "$RUNNER_TEMP/mintd"
+          uv pip install -q --no-deps --python "$RUNNER_TEMP/mintd" -r "$RUNNER_TEMP/locked.txt" "$RUNNER_TEMP"/dist/*.whl
+      - name: Check out main's stories
+        run: git worktree add --detach "$RUNNER_TEMP/main" origin/main
+      - name: Install main's test environment
+        working-directory: ${{ runner.temp }}/main
+        run: uv sync --locked --extra dev
+      - name: Stories
+        working-directory: ${{ runner.temp }}/main
+        env:
+          MINTD_BIN: ${{ runner.temp }}/mintd/bin/mintd
+        run: uv run --no-sync pytest tests/stories -q -rxX -m "not slow"
