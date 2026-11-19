@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests._harness.git import _git
 from tests._harness.payload import publish_payload, publish_pipeline_payload
@@ -230,6 +231,18 @@ def build_local_producer(root: Path, *, remote: Mapping[str, str] | None = None)
         "uploadarchive.allowUnreachable", "true",
     ])
     return LocalProducer(bare=bare, work=work, remote=root / "dvc-remote" if remote is None else remote)
+
+
+def register(registry: Path, meta: dict, work: Path) -> None:
+    """Merge `meta` into the scratch registry as its catalog entry, as an
+    approved registration PR would."""
+    _git(["clone", str(registry), str(work)])
+    entry = work / "catalog" / meta["project"]["type"] / f"{meta['project']['name']}.yaml"
+    entry.parent.mkdir(parents=True, exist_ok=True)  # git keeps no empty folder
+    entry.write_text(yaml.safe_dump(meta, sort_keys=False), encoding="utf-8")
+    _git(["add", "-A"], cwd=work)
+    _git(["commit", "-m", f"register {meta['project']['name']}"], cwd=work)
+    _git(["push", "origin", "main"], cwd=work)
 
 
 @pytest.fixture

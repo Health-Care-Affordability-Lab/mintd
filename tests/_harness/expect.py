@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from tests._harness.git import _git
 from tests._harness.s3 import BUCKET, S3Server
 
 
@@ -63,6 +64,31 @@ def assert_landed_match_pointers(project: Path) -> dict[str, str]:
     assert landed == expected, f"landed files differ from their pointers: {landed} != {expected}"
     assert landed, f"no file landed in {project}"
     return landed
+
+
+
+def snapshot(project: Path) -> dict[str, str]:
+    """What a failed command must leave as it was: each file's md5 and each
+    folder (an empty one too, which git cannot see) by path, plus HEAD, the
+    index and the refs. Left out: .git, read through git instead, and dvc's
+    scratch (.dvc/tmp, lock files on every run) and the objects it fetched
+    (.dvc/cache)."""
+    state: dict[str, str] = {}
+    for p in project.rglob("*"):
+        rel = p.relative_to(project)
+        if rel.parts[0] == ".git" or rel.parts[:2] in {(".dvc", "tmp"), (".dvc", "cache")}:
+            continue
+        state[rel.as_posix()] = md5(p.read_bytes()) if p.is_file() else "folder"
+    for args in (["rev-parse", "HEAD"], ["ls-files", "-s"], ["for-each-ref"]):
+        state["git " + " ".join(args)] = _git(args, cwd=project)
+    return state
+
+
+def assert_unchanged(before: dict[str, str], after: dict[str, str]) -> None:
+    """No file, folder, HEAD, index entry or ref changed, appeared or went."""
+    changed = {k: (before.get(k), after.get(k)) for k in sorted(before.keys() | after.keys())
+               if before.get(k) != after.get(k)}
+    assert not changed, f"changed, added or removed (before, after): {changed}"
 
 
 @dataclasses.dataclass
