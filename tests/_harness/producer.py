@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._harness import HarnessError
 from tests._harness.git import _git
 from tests._harness.payload import publish_payload, publish_pipeline_payload
 
@@ -123,7 +124,8 @@ class LocalProducer:
             if out.get("path") == path:
                 out["last_published"] = stamp
                 matched = True
-        assert matched, f"no output {path!r} to restamp"
+        if not matched:
+            raise HarnessError(f"no output {path!r} to restamp")
         self._write_metadata(meta)
         return self._commit_and_push(f"restamp {path}")
 
@@ -160,7 +162,8 @@ class LocalProducer:
         """
         out = _git(["ls-remote", self.url, f"refs/tags/{name}^{{}}"])
         lines = [ln for ln in out.splitlines() if ln.strip()]
-        assert lines, f"no peeled ref for tag {name!r} on {self.url}"
+        if not lines:
+            raise HarnessError(f"no peeled ref for tag {name!r} on {self.url}")
         return lines[0].split()[0]
 
     # -- payload -------------------------------------------------------------

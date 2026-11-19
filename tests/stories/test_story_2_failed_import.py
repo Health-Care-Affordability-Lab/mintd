@@ -23,6 +23,7 @@ files it did land):
 
 from __future__ import annotations
 
+import re
 import socket
 from pathlib import Path
 
@@ -133,7 +134,9 @@ def test_a_rerun_after_a_partial_transfer_lands_the_primary_flat(product, fresh_
 
     fix()
     rerun = mintd("data", "import", product.name, cwd=project)
-    if rerun.returncode != 0:  # refused: it names every file the failed import left
+    if rerun.returncode != 0:  # refused: mintd's own error names every file the failed import left
+        assert re.search(r"^error: ", rerun.stderr, re.M), rerun.stderr
+        assert "Traceback" not in rerun.stdout + rerun.stderr, rerun.stderr
         said = "".join(rerun.stderr.split())
         assert left and all(p in said for p in left), rerun.stderr
         return
