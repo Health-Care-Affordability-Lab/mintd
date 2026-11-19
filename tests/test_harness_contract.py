@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,7 @@ from mintd.imports import scan_imports
 from mintd.model import Metadata
 from mintd.producer import ProducerError, ProducerView
 from tests._fakes.dvc_ops import _FakeDvcOps
+from tests._harness import HarnessError
 from tests._harness.consumer import Import
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
@@ -1689,3 +1691,14 @@ def test_s3_server_records_each_object_get_and_the_bytes_it_served(s3_server) ->
     assert state.puts == {"a.csv": 1}
     assert state.gets == {"a.csv": 2}
     assert state.bytes_served == {"a.csv": 12}
+
+
+def test_story_2_deletes_only_on_the_emulator() -> None:
+    """Any other endpoint is refused with HarnessError, which the
+    partial-transfer case's `xfail(raises=AssertionError)` cannot report as
+    XFAIL. Mutation that turns it red: the guard back to a plain assert."""
+    from tests.stories.test_story_2_failed_import import _delete_pinned
+
+    server = SimpleNamespace(endpoint="https://s3.wasabisys.com", client=None)
+    with pytest.raises(HarnessError, match="refusing to delete on https://s3.wasabisys.com"):
+        _delete_pinned(SimpleNamespace(), server, {"b.csv"})

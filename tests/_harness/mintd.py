@@ -1,23 +1,27 @@
 """The installed mintd, run the way a researcher runs it.
 
 A story never imports mintd. It runs the binary at `$MINTD_BIN`, or, when that
-is unset, one built from a clean clone of this checkout's HEAD (uncommitted
-edits are not in it): the wheel, installed with exactly the locked dependencies
-into a throwaway venv and run by its full path. Not `uv tool install`, which
-puts a `mintd` in the user's own bin folder.
+is unset, one built from a clean clone of this checkout's HEAD: the wheel,
+installed with exactly the locked dependencies into a throwaway venv and run by
+its full path. Not `uv tool install`, which puts a `mintd` in the user's own bin
+folder. A checkout with uncommitted changes to what the wheel is built from is
+refused rather than quietly tested at HEAD.
 
-Each call gets stdin from /dev/null, a timeout that kills mintd's whole process
-group, and an explicit environment: `PATH` with mintd's bin folder first, a
-temp `HOME` holding a git identity, `TMPDIR`, `MINTD_CONFIG_DIR`, the S3 test
-keys and region, AWS credential and config paths that do not exist, and dvc's
-config and site-cache dirs. Nothing else is inherited, so real AWS credentials,
-`AWS_PROFILE` and the developer's git and dvc config are out of reach.
+Each call gets stdin from /dev/null, a timeout, and an explicit environment.
+A timeout or a Ctrl-C kills mintd's whole process group. The environment is
+`PATH` with mintd's bin folder first, a temp `HOME` holding a git identity,
+`TMPDIR`, `MINTD_CONFIG_DIR`, the S3 test keys and region, AWS credential and
+config paths that do not exist, and dvc's config and site-cache dirs. Nothing
+else is inherited, so real AWS credentials, `AWS_PROFILE` and the developer's
+git and dvc config are out of reach.
 """
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -43,15 +47,18 @@ class Mintd:
         run that shows the ✓ lines, warnings and hints JSON mode leaves out."""
         argv = [str(self.bin), *(["--json"] if json else []), *args]
         # Its own process group, so a timeout also kills the dvc and git
-        # children, which would otherwise outlive mintd and hold the run.
+        # children, which would otherwise outlive mintd and hold the run. The
+        # new session also keeps the terminal's Ctrl-C from reaching them, so
+        # an interrupt has to kill the group here too.
         with subprocess.Popen(
             argv, cwd=cwd, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, start_new_session=True,
         ) as proc:
             try:
                 out, err = proc.communicate(timeout=TIMEOUT)
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+            except BaseException:
+                with contextlib.suppress(ProcessLookupError):  # the group already exited
+                    os.killpg(proc.pid, signal.SIGKILL)
                 proc.communicate()
                 raise
         return subprocess.CompletedProcess(argv, proc.returncode, out, err)
@@ -66,8 +73,19 @@ def _uv(*args: str) -> None:
 
 @pytest.fixture(scope="session")
 def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    if os.environ.get("MINTD_BIN"):
-        return Path(os.environ["MINTD_BIN"]).resolve()
+    given = os.environ.get("MINTD_BIN")
+    if given:
+        # A bare name is looked up on PATH, as a shell would; a path is made absolute.
+        found = shutil.which(given) if os.sep not in given else given
+        if found is None:
+            pytest.fail(f"MINTD_BIN={given!r} is not on PATH")
+        return Path(found).resolve()
+    dirty = _git(["status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock"], cwd=REPO)
+    if dirty:
+        pytest.fail(
+            "the stories build mintd from HEAD, which lacks these changes:\n"
+            f"{dirty}commit them, or set MINTD_BIN to a mintd built with them"
+        )
     root = tmp_path_factory.mktemp("mintd-bin")
     src, venv, locked = root / "src", root / "venv", root / "locked.txt"
     # Built in the checkout, setuptools writes build/ and src/mintd.egg-info/
@@ -76,7 +94,7 @@ def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
     _git(["checkout", "-q", "--detach", _git(["rev-parse", "HEAD"], cwd=REPO).strip()], cwd=src)
     subprocess.run(
         ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "-q", "-o", str(locked)],
-        cwd=REPO, check=True,
+        cwd=src, check=True,
     )
     # The lock pins setuptools for the build too; setuptools-scm is not in it.
     _uv("build", "--wheel", "-q", "--build-constraints", str(locked), "-o", str(root), str(src))

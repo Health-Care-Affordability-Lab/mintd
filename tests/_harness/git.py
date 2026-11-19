@@ -19,6 +19,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from tests._harness import HarnessError
+
 #: Committer identity used by fixture repos, plus the one ambient setting that
 #: reliably breaks a fixture commit. A default, not a hardcode — `-c` flags
 #: supplied by a caller's own args come later on the argv and win.
@@ -44,9 +46,10 @@ def _git(
 ) -> str:
     """Run git, raise on non-zero, return stdout.
 
-    Raises with git's own stderr rather than `CalledProcessError`'s bare exit
-    code: `capture_output=True` swallows the message, so a fixture failure
-    otherwise reads as `returned non-zero exit status 128` with no cause.
+    Raises `HarnessError` with git's own stderr rather than
+    `CalledProcessError`'s bare exit code: `capture_output=True` swallows the
+    message, so a fixture failure otherwise reads as `returned non-zero exit
+    status 128` with no cause.
     """
     result = subprocess.run(
         ["git", *ident, *args],
@@ -56,7 +59,7 @@ def _git(
         check=False,
     )
     if result.returncode != 0:
-        raise AssertionError(
+        raise HarnessError(
             f"git {' '.join(args)} failed ({result.returncode})"
             f"{f' in {cwd}' if cwd else ''}: {result.stderr.strip() or result.stdout.strip()}"
         )
