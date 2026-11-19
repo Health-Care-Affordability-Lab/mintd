@@ -494,7 +494,9 @@ def _without_ids(doc: Any, remote: str) -> Any:
     for body in bodies:
         for out in body.get("outs") or []:
             for rec in [out, *((out.get("files") or []) if isinstance(out, dict) else [])]:
-                if isinstance(rec, dict) and isinstance(rec.get("cloud"), dict):
+                if isinstance(rec, dict) and "cloud" in rec and rec["cloud"] is None:
+                    del rec["cloud"]  # null, in a pointer cut short right after `cloud:`
+                elif isinstance(rec, dict) and isinstance(rec.get("cloud"), dict):
                     rec["cloud"].pop(remote, None)
                     if not rec["cloud"]:
                         del rec["cloud"]
@@ -602,7 +604,9 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
                     if not cloud:
                         rec.pop("cloud", None)
                 else:
-                    rec.setdefault("cloud", {})[remote] = {"etag": new.etag, "version_id": new.version_id}
+                    if not isinstance(rec.get("cloud"), dict):  # null in a pointer cut short there
+                        rec["cloud"] = {}
+                    rec["cloud"][remote] = {"etag": new.etag, "version_id": new.version_id}
             originals[pointer] = raw
             _atomic_write_text(path, dump(doc))
             if _without_ids(load12(path.read_text(encoding="utf-8")), remote) != _without_ids(meant, remote):

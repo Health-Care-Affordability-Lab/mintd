@@ -206,6 +206,19 @@ def test_parse_dvc_outs_extracts_version_id_from_cloud(tmp_path: Path) -> None:
 
 # ---------- slice 29: dvc-import detection ---------------------------
 
+@pytest.mark.parametrize("cloud", ["  cloud:\n", "  cloud:\n    origin:\n"], ids=["cloud", "remote"])
+def test_parse_dvc_outs_reads_a_cloud_key_cut_short_as_no_version_id(tmp_path: Path, cloud: str) -> None:
+    """A pointer cut short right after `cloud:`, or after its remote's key,
+    holds null there: no version ID, not a TypeError.
+
+    Mutation: iterate `cloud` without the mapping checks -> raises, red.
+    """
+    f = tmp_path / "a.csv.dvc"
+    f.write_text("outs:\n- md5: abc123\n  size: 1\n  path: a.csv\n" + cloud)
+    (out,) = parse_dvc_outs(f, "origin")
+    assert (out.path, out.md5, out.version_id) == ("a.csv", "abc123", None)
+
+
 def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None:
     """Real lab shape (a project's `data/imports/<product>/final.dvc`):
     frozen + deps[].repo + dir-suffixed md5. Detection is at the file

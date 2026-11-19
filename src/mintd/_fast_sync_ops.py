@@ -344,9 +344,10 @@ def retry_transient(fn: Callable[[], _T], *, attempts: int = _RETRY_ATTEMPTS) ->
 def _extract_version_id(out_dict: dict[str, Any]) -> str | None:
     if "version_id" in out_dict:
         return str(out_dict["version_id"])
-    if "cloud" in out_dict:
-        for cloud_info in out_dict["cloud"].values():
-            if "version_id" in cloud_info:
+    cloud = out_dict.get("cloud")
+    if isinstance(cloud, dict):  # null in a pointer cut short right after `cloud:`
+        for cloud_info in cloud.values():
+            if isinstance(cloud_info, dict) and "version_id" in cloud_info:
                 return str(cloud_info["version_id"])
     return None
 
