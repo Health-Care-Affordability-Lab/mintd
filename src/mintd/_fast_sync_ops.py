@@ -331,10 +331,16 @@ def load12(text: str) -> Any:
     """``text`` read as DVC reads ``.dvc``, ``dvc.lock`` and ``dvc.yaml``:
     YAML 1.2, with ruamel (DVC's own library), so an unquoted ``on``,
     ``no`` or ``1:30`` stays a string, where YAML 1.1 (PyYAML) reads a
-    boolean or a number. Raises ``ruamel.yaml.YAMLError``."""
-    from ruamel.yaml import YAML
+    boolean or a number. Raises ``ruamel.yaml.YAMLError``, also for a value
+    its type can't hold (``!!bool x``, ``!!int ''``, ``!!int x``, a date
+    like ``2020-02-30``, a number too long to read), on which ruamel's own
+    constructor raises KeyError, IndexError or ValueError."""
+    from ruamel.yaml import YAML, YAMLError
 
-    return YAML(typ="safe", pure=True).load(text)
+    try:
+        return YAML(typ="safe", pure=True).load(text)
+    except (LookupError, ValueError) as exc:
+        raise YAMLError(f"a value its type can't hold: {exc!r}") from exc
 
 
 def load_pointer(path: Path) -> Any:
@@ -937,7 +943,8 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
             )
             for e in payload
         ]
-    except Exception:
+    # Unreadable or a folder, bad JSON or YAML, wrong-typed fields, an infinite size, deep nesting.
+    except (OSError, ValueError, TypeError, AttributeError, OverflowError, RecursionError, MemoryError):
         return None
 
 
@@ -1053,9 +1060,9 @@ def outs_for_target(project_path: Path, target: str, remote_name: str) -> "list[
     )
     try:
         return parse_dvc_outs(dvc_path, remote_name)
-    except PointerCutShort:
-        raise
-    except Exception:
+    # Unreadable or a folder, a bad date, a `deps` that isn't a list, deep nesting. A file
+    # cut short raises PointerCutShort (check_dvc_file), which is none of these, so it stops.
+    except (OSError, ValueError, TypeError, RecursionError, MemoryError):
         return []
 
 

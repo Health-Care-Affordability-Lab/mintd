@@ -155,19 +155,31 @@ FILES_NULL = "outs:\n- path: final\n  hash: md5\n  files:\n"
      "a file entry of final is incomplete"),
     (f"outs:\n- md5: {A}\n  size: twelve\n  path: x\n", "a value of x is not in the shape dvc writes"),
     ("outs: [\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  extra: !!bool x\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  size: !!int ''\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  size: !!int x\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  size: !!float x\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  recorded: !!timestamp 2020-02-30\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  recorded: 2020-02-30\n", "it isn't valid YAML"),
+    (f"outs:\n- md5: {A}\n  path: x\n  size: {'9' * 4400}\n", "it isn't valid YAML"),
     (f"outs:\n- md5: {A}\n  path: x\n  cloud:\n    s\n", "the version block of x is incomplete"),
     (f"outs:\n- md5: {A}\n  path: x\n  cloud:\n    storage:\n      etag\n", "the version block of x is incomplete"),
     (f"outs:\n- md5: {A}\n  path: x\n  cloud:\n    storage:\n      version_id: [v]\n",
      "the version block of x is incomplete"),
 ], ids=["empty", "outs-null", "outs-empty", "out-null", "no-path", "no-hash", "md5-null", "files-null",
         "entry-null", "entry-no-md5", "entry-no-relpath", "entry-size-not-a-number", "size-not-a-number",
-        "not-yaml", "cloud-key-cut", "remote-entry-cut", "version-id-not-text"])
+        "not-yaml", "a-bool-tag-on-no-bool", "an-int-tag-on-nothing", "an-int-tag-on-a-word",
+        "a-float-tag-on-a-word", "a-tagged-date-no-calendar-has", "a-date-no-calendar-has",
+        "a-number-too-long-to-read", "cloud-key-cut", "remote-entry-cut", "version-id-not-text"])
 def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
     """Mutations, each through `_check_out` / `check_dvc_file`: let a null or
     empty `outs` through, a null out, a missing path, a missing hash, a null
     file list, an entry without its md5 or relpath, a value of the wrong
     type, or a remote's version block that isn't a mapping -> the matching
-    case reads on (or raises ValueError), red."""
+    case reads on (or raises ValueError), red. Drop LookupError from
+    `load12`'s except -> the `!!bool x` and `!!int ''` cases raise KeyError
+    and IndexError; drop ValueError -> the word, impossible-date and
+    too-long cases raise ValueError; red."""
     (tmp_path / "x.dvc").write_text(text)
     with pytest.raises(PointerCutShort) as excinfo:
         parse_dvc_outs(tmp_path / "x.dvc", REMOTE)
@@ -185,7 +197,10 @@ def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail
      "the file list of data/out is missing"),
     (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {A}\n      size: two\n",
      "a value of data/a.csv is not in the shape dvc writes"),
-], ids=["empty", "stages-null", "stage-null", "outs-null", "no-hash", "hash-null", "files-null", "size-not-a-number"])
+    (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {A}\n      size: !!float ''\n",
+     "it isn't valid YAML"),
+], ids=["empty", "stages-null", "stage-null", "outs-null", "no-hash", "hash-null", "files-null", "size-not-a-number",
+        "a-float-tag-on-nothing"])
 def test_a_dvc_lock_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
     """Mutations: `check_lock` lets a null stage or stage outs through, or
     an out with no `hash` key, or a null one -> red."""

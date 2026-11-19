@@ -6,6 +6,7 @@ itself lives in `tests/test_harness_contract.py`
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -15,7 +16,16 @@ from pathlib import Path
 import pytest
 
 from mintd._dvc_state import PointerJudgement, delivery, judge_pointers, outs_matching, push_targets
-from mintd._fast_sync_ops import EMPTY_DIR_MD5, DvcFileEntry, dir_manifest_md5, ensure_dir_manifest
+from mintd._fast_sync_ops import (
+    EMPTY_DIR_MD5,
+    DvcFileEntry,
+    PointerCutShort,
+    cache_path_for,
+    dir_manifest_md5,
+    ensure_dir_manifest,
+    outs_for_target,
+    read_cached_dir_manifest,
+)
 from tests._dvc_fixtures import REMOTE, write_dvc_config, write_pipeline, write_pointer
 
 # ---------------------------------------------------------------------------
@@ -847,3 +857,73 @@ def test_a_lock_entry_of_a_foreach_or_matrix_stage_is_checked_against_its_stage(
     assert stages_behind(tmp_path, "dvc.lock", ["build@a", "build@b"]) == ["build@b"]
     (tmp_path / "dvc.lock").write_text(lock + _A_OUT.replace("a.csv", "b.csv"))
     assert stages_behind(tmp_path, "dvc.lock", ["build@a", "build@b"]) == []
+
+
+# A DVC file that is unreadable, or breaks the parser past the cut-short checks, reads as
+# nothing, never as a traceback. One cut short stops instead (tests/test_pointer_cut_short.py).
+
+
+@pytest.mark.parametrize("text", [
+    pytest.param(None, id="OSError-a-folder"),
+    pytest.param("deps: 3\nouts:\n- md5: abc\n  path: x\n", id="TypeError"),
+    pytest.param("outs: " + "[" * 5000 + "]" * 5000 + "\n", id="RecursionError"),
+])
+def test_a_pointer_that_cannot_be_parsed_has_no_outs(tmp_path: Path, text: str | None) -> None:
+    """`outs_for_target` reads a broken `.dvc` as no outs, so the degraded pull keeps the
+    target on its fallback route instead of crashing. Each case raises the type its id
+    names inside `parse_dvc_outs` (a folder is PermissionError on Windows, still OSError).
+
+    Mutation: drop that type from `outs_for_target`'s except tuple -> its case reddens.
+    """
+    p = tmp_path / "x.dvc"
+    if text is None:
+        p.mkdir()
+    else:
+        p.write_text(text, encoding="utf-8")
+    assert outs_for_target(tmp_path, "x", "origin") == []
+
+
+def test_a_pointer_with_a_date_no_calendar_has_is_refused(tmp_path: Path) -> None:
+    """A value its type can't hold (`2001-13-01`, which ruamel reads as a date and rejects
+    with ValueError) is damage, so `outs_for_target` refuses the pointer as cut short rather
+    than read it as no outs, which would pull nothing for it at exit 0.
+
+    Mutation: drop ValueError from `load12`'s except -> it reads as no outs, red.
+    """
+    (tmp_path / "x.dvc").write_text("outs:\n- md5: abc\n  path: x\n  size: 2001-13-01\n", encoding="utf-8")
+    with pytest.raises(PointerCutShort, match="it isn't valid YAML"):
+        outs_for_target(tmp_path, "x", "origin")
+
+
+_DEEP_JSON = b"[" * 100_000 + b"]" * 100_000
+
+
+def _deep_json_recurses() -> bool:
+    """Python 3.14's json parser has no recursion limit, so this payload parses there."""
+    try:
+        json.loads(_DEEP_JSON)
+    except RecursionError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize("raw", [
+    pytest.param(b"not json", id="ValueError"),
+    pytest.param(b"[1]", id="AttributeError"),
+    pytest.param(b'[{"size": [1]}]', id="TypeError"),
+    pytest.param(b'[{"size": Infinity}]', id="OverflowError"),
+    pytest.param(_DEEP_JSON, id="RecursionError", marks=pytest.mark.skipif(
+        not _deep_json_recurses(), reason="this Python parses deep JSON without RecursionError, so the case would pin nothing")),
+    pytest.param(None, id="OSError-unreadable", marks=pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="chmod 0 stops neither Windows nor root")),
+])
+def test_a_cached_manifest_that_cannot_be_read_counts_as_absent(tmp_path: Path, raw: bytes | None) -> None:
+    """`read_cached_dir_manifest` reads a broken `.dir` manifest as absent (None), so callers
+    fetch or route it. Mutation: drop the case's type from its except tuple -> it reddens."""
+    md5 = "a" * 32
+    p = cache_path_for(tmp_path, f"{md5}.dir")
+    p.parent.mkdir(parents=True)
+    p.write_bytes(raw or b"[]")
+    if raw is None:
+        p.chmod(0)
+    assert read_cached_dir_manifest(tmp_path, md5) is None
