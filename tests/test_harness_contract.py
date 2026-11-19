@@ -11,8 +11,11 @@ walker produced — never on a double's recorded call.
 
 from __future__ import annotations
 
+import configparser
 import json
 import os
+import re
+import stat
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,9 +39,13 @@ from mintd.producer import ProducerError, ProducerView
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness import HarnessError
 from tests._harness.consumer import Import
-from tests._harness.expect import assert_landed_match_pointers, md5
+from tests._harness.expect import Mismatch, assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
+from tests._harness.live import (
+    MARKER, LiveMintd, Product, catalog_entry, check_basetemp, read_only, readonly_credentials, redact,
+    run_read_only,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
@@ -1733,3 +1740,100 @@ def test_landed_files_include_dvc_lock_outs_and_files_list_folders(tmp_path: Pat
     `cache: false` skip, the `do` lookup, or `_files_of` reading `files:` first."""
     _tracked_project(tmp_path)
     assert assert_landed_match_pointers(tmp_path) == {"data/final/a.csv": md5(b"a"), "data/raw/r.csv": md5(b"r")}
+
+
+def test_the_live_tier_runs_only_read_only_commands(tmp_path: Path) -> None:
+    """Mutation that turns it red: `read_only` returning without raising (the
+    push then reaches Popen on a binary that is not there)."""
+    live = LiveMintd(tmp_path / "no-mintd", {}, tmp_path / "config.yaml")
+    with pytest.raises(HarnessError, match="read-only"):
+        live("data", "push", cwd=tmp_path)
+    with pytest.raises(HarnessError, match="read-only"):
+        live.start("registry", "register", "x", cwd=tmp_path)
+    for argv in (["git", "push"], ["dvc", "push"], ["dvc", "gc"], ["git", "-c", "a=b", "clone"]):
+        with pytest.raises(HarnessError, match="read-only"):
+            run_read_only(argv, cwd=tmp_path, env={})  # an empty folder: a broken guard pushes nothing
+    read_only(["mintd", "data", "clone", "x"])
+    read_only(["dvc", "pull"])
+    spawns = re.compile(r"\bsubprocess\.(run|Popen|call|check_)|\bos\.system|\b_git\(")
+    for module in (Path(__file__).parent / "live").glob("*.py"):
+        assert not spawns.search(module.read_text(encoding="utf-8")), f"{module} spawns outside the read-only runners"
+
+
+def test_a_hidden_products_failure_says_counts_only(tmp_path: Path) -> None:
+    """Mutations that turn it red: `redact` returning at its top, or
+    `Product.shown` always True."""
+    _tracked_project(tmp_path)
+    (tmp_path / "data" / "final" / "a.csv").write_bytes(b"changed")
+    (tmp_path / "data" / "raw" / "r.csv").unlink()
+    with pytest.raises(Mismatch) as caught:
+        assert_landed_match_pointers(tmp_path)
+    exc = caught.value
+    named = ("data/final", "data/raw", md5(b"a"), md5(b"r"))
+    assert "data/final/a.csv" in str(exc)  # the full message names files; a hidden product's report must not
+    item = SimpleNamespace(callspec=SimpleNamespace(params={"product": "made-up"}))
+    call = SimpleNamespace(excinfo=SimpleNamespace(value=exc))
+
+    def failed() -> SimpleNamespace:
+        return SimpleNamespace(failed=True, longrepr=str(exc), sections=[("Captured stdout call", str(exc))])
+
+    for classification in ("licensed", "private", None, "something-new"):
+        report = failed()
+        redact(item, call, report, {"made-up": Product("made-up", classification, None)})
+        assert "1 missing, 1 differ" in report.longrepr, report.longrepr
+        assert not any(n in report.longrepr for n in named), report.longrepr
+        assert report.sections == []
+    public, unseen = failed(), failed()
+    redact(item, call, public, {"made-up": Product("made-up", "public", None)})
+    redact(item, call, unseen, {})  # failed before its catalog entry was read
+    assert public.longrepr == unseen.longrepr == str(exc) and public.sections and unseen.sections
+    passed = SimpleNamespace(failed=False, longrepr=None, sections=[("Captured stdout call", "data/raw/r.csv")])
+    redact(item, call, passed, {"made-up": Product("made-up", "licensed", None)})
+    assert passed.sections == []
+    assert Product("made-up", "licensed", None).line("clone", "2 files", "9 bytes") == "made-up clone: 2 files"
+
+
+def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
+    """Mutation that turns it red: accepting a file that also holds `[mintd]`."""
+    secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret")
+    good = tmp_path / "readonly"
+    good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
+                    encoding="utf-8")
+    both = tmp_path / "both"
+    both.write_text(good.read_text(encoding="utf-8")
+                    + "[mintd]\naws_access_key_id = AKIAWRITE\naws_secret_access_key = write-secret\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.write_text("[default]\naws_access_key_id = AKIAOTHER\naws_secret_access_key = other-secret\n", encoding="utf-8")
+    for env in ({}, {"AWS_SHARED_CREDENTIALS_FILE": ""}, {"AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
+                {"AWS_SHARED_CREDENTIALS_FILE": str(both)}, {"AWS_SHARED_CREDENTIALS_FILE": str(other)}):
+        with pytest.raises(HarnessError) as refused:
+            readonly_credentials(env, tmp_path / "out")
+        assert not any(s in str(refused.value) for s in secrets), refused.value
+    path = readonly_credentials({"AWS_SHARED_CREDENTIALS_FILE": str(good)}, tmp_path / "out")
+    copy = configparser.ConfigParser(interpolation=None)
+    copy.read(path, encoding="utf-8")
+    assert copy.sections() == ["mintd"]
+    assert dict(copy["mintd"]) == {"aws_access_key_id": "AKIAREADONLY", "aws_secret_access_key": "readonly-secret"}
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_the_live_tier_needs_its_own_basetemp_and_reads_the_entry_mintd_reads(tmp_path: Path) -> None:
+    """Mutations that turn it red: `check_basetemp` accepting a missing or busy
+    folder, or `catalog_entry` searching folders in another order."""
+    for given in (None, ""):
+        with pytest.raises(HarnessError, match="needs --basetemp"):
+            check_basetemp(given)
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "notes.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(HarnessError, match="did not make"):
+        check_basetemp(str(busy))
+    check_basetemp(str(tmp_path / "new"))
+    (busy / MARKER).touch()
+    check_basetemp(str(busy))
+    for kind in ("code", "data"):
+        (tmp_path / "catalog" / kind).mkdir(parents=True)
+        (tmp_path / "catalog" / kind / "made-up.yaml").write_text(f"kind: {kind}\n", encoding="utf-8")
+    assert catalog_entry(tmp_path, "made-up") == tmp_path / "catalog" / "data" / "made-up.yaml"
+    assert catalog_entry(tmp_path, "absent") is None
+
