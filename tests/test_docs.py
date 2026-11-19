@@ -14,7 +14,7 @@ from pathlib import Path
 from mintd.cli import _build_parser
 
 REPO = Path(__file__).resolve().parent.parent
-DOCS = [REPO / "README.md", REPO / "vocab.md"]
+DOCS = [REPO / "README.md", REPO / "vocab.md", REPO / "RELEASING.md"]
 
 # `notes/` followed by a path character — a citation. A bare mention of the
 # directory (as in README's conventions section) is fine.

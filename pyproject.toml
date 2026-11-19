@@ -49,7 +49,7 @@ where = ["src"]
 mintd = ["files/*.j2", "files/.Rprofile.j2", "files/*.txt"]
 
 [tool.setuptools_scm]
-# Releases are the vX.Y.Z tags .github/workflows/tag.yml puts on each PR merged
+# Versions are the vX.Y.Z tags .github/workflows/tag.yml puts on each PR merged
 # into main; a build between tags reads e.g. 0.1.4.dev2+g<shortsha>. The
 # fallback covers a build with no git history, where setuptools-scm would error.
 version_scheme = "guess-next-dev"
