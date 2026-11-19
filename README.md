@@ -195,20 +195,25 @@ mintd publish
 
 ## Example: consume someone else's dataset
 
-What each command brings:
+Two commands, for two jobs.
 
-| Command | Data | Code |
-|---|---|---|
-| `mintd data import <name>` | the primary output | none |
-| `mintd data import <name> --path <path>` | only that path, a folder or a file, declared as an output or not | only if the path is code in the producer's git |
-| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out | none |
-| `mintd data clone <name>` | every DVC-tracked output, declared or not | all of it: a full git clone of the producer's repo |
-| `mintd data clone <name> --primary` | the primary output only | all of it, as above |
+**Bring a product's data into your project** with `mintd data import`. The data
+lands under `data/imports/<full_name>/`, beside a `.dvc` file that pins the
+producer commit it came from (`--rev`; default: the producer's HEAD).
 
-An import lands under `data/imports/<full_name>/`, and its `.dvc` file pins the
-producer commit it came from (`--rev`; default: the producer's HEAD). A clone
-of a data product lands in `./data_<name>/`, and its `--path` takes only
-declared outputs.
+| Command | Brings |
+|---|---|
+| `mintd data import <name>` | the primary output |
+| `mintd data import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
+| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
+
+**Get a product's whole project, code and data, to read or work on** with
+`mintd data clone`. A data product's clone lands in `./data_<name>/`.
+
+| Command | Brings |
+|---|---|
+| `mintd data clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
+| `mintd data clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
 
 ```bash
 # See what's published in the lab catalog:
