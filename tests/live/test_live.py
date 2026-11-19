@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
 
-from tests._harness.expect import assert_landed_match_pointers
-from tests._harness.live import RESULTS, Product, run_read_only
+import pytest
+
+from tests._harness.expect import assert_landed_match_pointers, md5_file
+from tests._harness.live import RESULTS, SEEN, Product, run_read_only
 
 GRACE = 60  # seconds mintd gets to stop after Ctrl-C before its group is killed
 
 
-def _landed(product: Product, check: str, root: Path, seconds: float) -> None:
+def _line(product: Product, check: str, counts: str, details: str = "") -> str:
+    """A results line, shown by the product's classification as it stands now:
+    a clone's metadata.json can make it stricter than the catalog's."""
+    return SEEN[product.name].line(check, counts, details)
+
+
+def _landed(product: Product, check: str, root: Path, seconds: float) -> dict[str, str]:
     landed = assert_landed_match_pointers(root)
     size = sum((root / path).stat().st_size for path in landed)
-    RESULTS.append(product.line(check, f"{len(landed)} files", f"{len(landed)} md5 match, {size} bytes, {seconds:.1f} s"))
+    RESULTS.append(_line(product, check, f"{len(landed)} files", f"{len(landed)} md5 match, {size} bytes, {seconds:.1f} s"))
+    return landed
 
 
 def _at_rest(root: Path) -> dict[str, tuple[int, ...]]:
@@ -54,16 +64,33 @@ def test_a_second_pull_downloads_nothing(product, cloned, live) -> None:
     seconds = time.monotonic() - started
     assert run.returncode == 0, run.stderr
     assert _at_rest(dest) == before, "the second pull downloaded or rewrote files"
-    RESULTS.append(product.line("second pull", f"{len(before)} files unchanged", f"{seconds:.1f} s"))
+    landed = assert_landed_match_pointers(dest)  # so this check alone cannot pass on a clone that landed nothing
+    RESULTS.append(_line(product, "second pull", f"{len(landed)} files landed, {len(before)} unchanged", f"{seconds:.1f} s"))
 
 
-def test_import_lands_the_primary(product, live, fresh_project) -> None:
+def test_import_lands_the_primary(product, cloned, live, fresh_project) -> None:
+    dest, _ = cloned
     project = fresh_project()
     started = time.monotonic()
     run = live("data", "import", product.name, cwd=project)
     seconds = time.monotonic() - started
     assert run.returncode == 0, run.stderr
-    _landed(product, "import", project, seconds)
+    landed = _landed(product, "import", project, seconds)
+    # What the producer tracks for its primary, by the clone's own pointers.
+    primary = Path(json.loads((dest / "metadata.json").read_text(encoding="utf-8"))["data_products"]["primary"]).as_posix()
+
+    def inside(key: str) -> bool:  # one test for both sides, so they cannot disagree on what the primary holds
+        return key == primary or key.startswith(f"{primary}/")
+
+    tracked = {k: v for k, v in assert_landed_match_pointers(dest).items() if inside(k)}
+    imported = {k.split("/", 3)[3]: v for k, v in landed.items()}  # under data/imports/<product>/
+    differ = sum(imported.get(k) != v for k, v in tracked.items())
+    # dvc imports a folder whole, so its git-tracked files (the .gitignore dvc writes) come too: each must be the
+    # clone's own file in the primary, same md5
+    extra = sum(not (inside(k) and (dest / k).is_file() and md5_file(dest / k) == v)
+                for k, v in imported.items() if k not in tracked)
+    assert not differ and not extra, (f"the import differs from the clone's {primary}: {differ} of {len(tracked)} "
+                                      f"tracked files missing or different, {extra} other files not the clone's own there")
 
 
 def test_a_killed_clone_restarts_and_finishes(product, live, tmp_path) -> None:
@@ -72,10 +99,14 @@ def test_a_killed_clone_restarts_and_finishes(product, live, tmp_path) -> None:
     with live.start("data", "clone", product.name, "--dest", str(dest), cwd=tmp_path) as run:
         while run.proc.poll() is None and not _whole_objects(cache):
             time.sleep(0.2)
+        SEEN[product.name] = SEEN[product.name].stricter(dest)
         if run.proc.poll() is not None:
             done = run.wait()
-            raise AssertionError(f"mintd exited {done.returncode} before any object landed: nothing to interrupt "
-                                 f"(a larger product, if it succeeded)\n{done.stderr}")
+            assert done.returncode == 0, done.stderr
+            landed = assert_landed_match_pointers(dest)  # it finished: everything must be there
+            RESULTS.append(_line(product, "killed clone",
+                                 f"not interrupted: mintd finished, {len(landed)} files, before any object was seen"))
+            pytest.skip("too small to interrupt: mintd finished before any object was seen")
         cached = len(_whole_objects(cache))
         run.interrupt()
         # ponytail: Ctrl-C lets fast-sync's ThreadPoolExecutor drain its queue
@@ -84,15 +115,19 @@ def test_a_killed_clone_restarts_and_finishes(product, live, tmp_path) -> None:
             stopped = f"exit {run.wait(GRACE).returncode} on Ctrl-C"
         except subprocess.TimeoutExpired:
             stopped = f"killed: Ctrl-C did not stop it within {GRACE} s"
-    stopped += f"; {cached} objects cached at the interrupt, {len(_whole_objects(cache))} when it stopped"
+    at_stop = len(_whole_objects(cache))
+    stopped += f"; {cached} objects cached at the interrupt, {at_stop} when it stopped"
     started = time.monotonic()
     rerun = live("data", "pull", cwd=dest)  # a second clone into dest is refused; mintd's own hint is a pull
     seconds = time.monotonic() - started
     assert rerun.returncode == 0, rerun.stderr
     landed = assert_landed_match_pointers(dest)
-    RESULTS.append(product.line(
-        "killed clone", f"{len(landed)} files after the rerun ({stopped})",
-        f"{seconds:.1f} s rerun",
+    objects = len(set(landed.values()))
+    if at_stop >= objects:  # the rerun had nothing left to fetch, so no restart was checked
+        RESULTS.append(_line(product, "killed clone", f"not interrupted: all {objects} objects had landed ({stopped})"))
+        pytest.skip(f"not interrupted: all {objects} objects had landed when mintd stopped ({stopped})")
+    RESULTS.append(_line(
+        product, "killed clone", f"{len(landed)} files after the rerun ({stopped})", f"{seconds:.1f} s rerun",
     ))
 
 
@@ -108,8 +143,8 @@ def test_time_against_plain_git_clone_and_dvc_pull(product, cloned, live, tmp_pa
     assert got.returncode == 0, got.stderr
     assert_landed_match_pointers(plain)  # the baseline did the same work
     ratio = mintd_seconds / plain_seconds
-    RESULTS.append(product.line(
-        "time", "measured", f"mintd {mintd_seconds:.1f} s, plain {plain_seconds:.1f} s, ratio {ratio:.2f}",
+    RESULTS.append(_line(
+        product, "time", "measured", f"mintd {mintd_seconds:.1f} s, plain {plain_seconds:.1f} s, ratio {ratio:.2f}",
     ))
     k = request.config.getoption("--live-k")
     assert k is None or ratio <= k, f"mintd's clone took {ratio:.2f} times plain git clone + dvc pull, over k={k}"

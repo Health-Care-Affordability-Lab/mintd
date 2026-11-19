@@ -12,9 +12,12 @@ walker produced — never on a double's recorded call.
 from __future__ import annotations
 
 import configparser
+import contextlib
 import json
 import os
 import re
+import select
+import signal
 import stat
 import subprocess
 import sys
@@ -1796,13 +1799,18 @@ def test_a_hidden_products_failure_says_counts_only(tmp_path: Path) -> None:
 
 def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
     """Mutations that turn it red: accepting a credentials file that also holds
-    `[mintd]`, running without `AWS_CONFIG_FILE`, or copying more of the
-    read-only profile than its region and endpoint."""
+    `[mintd]`, or a section without both halves of a key; running without
+    `AWS_CONFIG_FILE`; copying more of the read-only section than its key, or
+    of the profile than its region and endpoint."""
     secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret",
                "AKIACONFIG", "config-secret")
     good = tmp_path / "readonly"
-    good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
-                    encoding="utf-8")
+    good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n"
+                    "credential_process = /bin/false\n", encoding="utf-8")
+    halves = tmp_path / "halves"  # boto would go on down its chain for a key
+    halves.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key =\n", encoding="utf-8")
+    keyless = tmp_path / "keyless"
+    keyless.write_text("[mintd-live-readonly]\nregion = us-east-1\n", encoding="utf-8")
     both = tmp_path / "both"
     both.write_text(good.read_text(encoding="utf-8")
                     + "[mintd]\naws_access_key_id = AKIAWRITE\naws_secret_access_key = write-secret\n", encoding="utf-8")
@@ -1817,6 +1825,7 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
         {"AWS_CONFIG_FILE": str(conf)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": ""},
         {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
         {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(both)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(other)},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(halves)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(keyless)},
         {"AWS_SHARED_CREDENTIALS_FILE": str(good)}, {**ok, "AWS_CONFIG_FILE": ""},
         {**ok, "AWS_CONFIG_FILE": str(tmp_path / "missing")}, {**ok, "AWS_CONFIG_FILE": str(other)},
     ):
@@ -1858,6 +1867,318 @@ def test_a_live_tier_failure_prints_no_frame_arguments(tmp_path: Path) -> None:
         out = got.stdout + got.stderr
         assert got.returncode != 0 and "set AWS_CONFIG_FILE" in out, out
         assert not any(v in out for v in (*planted.values(), "readonly-secret")), out
+
+
+#: A fake mintd for the live tier's own tests. It records each call's argv,
+#: environment and the key file it was given, then acts by product: see
+#: `_live_world` for what each made-up product does.
+_FAKE_MINTD = """
+import hashlib, json, os, pathlib, sys, time
+
+world = pathlib.Path(os.environ["FAKE_MINTD_WORLD"])
+args = [a for a in sys.argv[1:] if a != "--json"]
+creds = pathlib.Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent"))
+with (world / "calls.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"argv": args, "env": dict(os.environ),
+                         "creds": creds.read_text(encoding="utf-8") if creds.is_file() else None}) + "\\n")
+if args == ["--version"]:
+    sys.exit(print("mintd 0.0.0 (fake)"))
+
+
+def track(root, rel, body, *, cached=True, landed=True):
+    h = hashlib.md5(body).hexdigest()
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_name(path.name + ".dvc").write_text(f"outs:\\n- md5: {h}\\n  size: {len(body)}\\n  path: {path.name}\\n")
+    if cached:
+        obj = root / ".dvc" / "cache" / "files" / "md5" / h[:2] / h[2:]
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        obj.write_bytes(body)
+    if landed and not path.exists():
+        path.write_bytes(body)
+
+
+def track_folder(root, rel, files):
+    # A folder out with its files list, as dvc import writes it: every file of the folder, git-tracked ones too.
+    folder = root / rel
+    entries = "".join(f"  - relpath: {n}\\n    md5: {hashlib.md5(b).hexdigest()}\\n" for n, b in files.items())
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    folder.with_name(folder.name + ".dvc").write_text(f"outs:\\n- path: {folder.name}\\n  files:\\n{entries}")
+    for n, b in files.items():
+        (folder / n).parent.mkdir(parents=True, exist_ok=True)
+        (folder / n).write_bytes(b)
+
+
+def metadata(dest, name, classification, primary="data"):
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "metadata.json").write_text(json.dumps({
+        "fake": name, "governance": {"classification": classification} if classification else {},
+        "data_products": {"primary": primary}}))
+
+
+cmd, rest, here = args[1], args[2:], pathlib.Path.cwd()
+if cmd == "clone":
+    name, dest = rest[0], pathlib.Path(rest[rest.index("--dest") + 1])
+elif cmd == "import":
+    name, dest = rest[0], here
+else:
+    name, dest = json.loads((here / "metadata.json").read_text())["fake"], here
+killed = "killed" in str(dest)  # the killed-clone check's own folder
+if name == "made-up-licensed" and cmd == "clone" and not killed:  # the repo says public: licensed still wins
+    metadata(dest, name, "public")
+    sys.exit("PLANTED-STDERR: the clone failed on data/secret.csv")
+elif name == "made-up-licensed" and cmd == "clone":
+    pass  # exits 0 having landed nothing
+elif name == "made-up-public" and cmd == "clone":  # the repo says licensed, and says it before the clone fails
+    metadata(dest, name, "licensed")
+    sys.exit("PLANTED-STDERR: the clone failed on data/secret.csv")
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file") and cmd == "clone":
+    tiny = name == "made-up-tiny"  # its repo gives no classification (counts only) and writes its primary oddly
+    primary = "./data/" if tiny else "notes.md" if name == "made-up-file" else "data"
+    metadata(dest, name, None if tiny else "public", primary)
+    (dest / "notes.md").write_bytes(b"notes\\n")  # kept in git, no pointer
+    track(dest, "data/x.csv", b"x\\n", cached=False)
+    (dest / "data" / ".gitignore").write_bytes(b"/x.csv\\n")
+    if name == "made-up-wide":
+        track(dest, "raw/y.csv", b"y\\n", cached=False)
+    if name == "made-up-odd" and killed:
+        sys.exit("the clone failed after every file landed")
+elif name == "made-up-file" and cmd == "import":  # its one-file primary, kept in git
+    track(dest, f"data/imports/data_{name}/notes.md", b"notes\\n", cached=False)
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd") and cmd == "import":  # the primary whole, .gitignore too
+    root = f"data/imports/data_{name}"
+    ignore = b"other\\n" if name == "made-up-odd" else b"/x.csv\\n"
+    track_folder(dest, f"{root}/data", {"x.csv": b"x\\n", ".gitignore": ignore})
+    if name == "made-up-wide":  # more than the primary
+        track(dest, f"{root}/raw/y.csv", b"y\\n", cached=False)
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty") and cmd == "pull":
+    pass  # changes nothing
+elif name == "made-up-empty" and cmd == "clone":  # its pointer's file never lands
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n", cached=False, landed=False)
+elif name == "made-up-empty":
+    sys.exit("the import failed")
+elif name == "made-up-small" and cmd == "clone":
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n", landed=not killed)
+    if killed:  # every object has landed: wait for the Ctrl-C
+        time.sleep(300)
+elif name == "made-up-small" and cmd == "pull":  # lands what is missing, touching nothing else
+    if not (dest / "data" / "x.csv").exists():
+        (dest / "data" / "x.csv").write_bytes(b"x\\n")
+elif name == "made-up-small" and cmd == "import":  # bytes the producer never tracked
+    track(dest, "data/imports/data_made-up-small/data/x.csv", b"other\\n", cached=False)
+elif name == "made-up-held":  # says it started, through a FIFO, and holds a second one open until it dies
+    held = os.open(world / "held", os.O_WRONLY)
+    (world / "started").write_text(f"{os.getpid()}\\n")
+    time.sleep(300)
+else:
+    sys.exit("PLANTED-STDERR: mintd failed on data/secret.csv")
+"""
+
+#: What the operator's environment holds that must never reach mintd.
+_PLANTED_ENV = {
+    "AWS_ACCESS_KEY_ID": "AKIAPLANTEDWRITE", "AWS_SECRET_ACCESS_KEY": "planted-write-secret",
+    "AWS_SESSION_TOKEN": "planted-token", "AWS_PROFILE": "planted-profile", "AWS_ROLE_ARN": "planted-role",
+    "AWS_WEB_IDENTITY_TOKEN_FILE": "/planted/token", "AWS_CONTAINER_CREDENTIALS_FULL_URI": "http://planted.invalid/",
+    "AWS_ENDPOINT_URL": "https://planted.invalid", "BOTO_CONFIG": "/planted/boto",
+    "FSSPEC_S3_KEY": "AKIAPLANTEDFSSPEC", "FSSPEC_S3_SECRET": "planted-fsspec-secret",
+    "FSSPEC_CONFIG_DIR": "/planted/fsspec",
+    "DVC_GLOBAL_CONFIG_DIR": "/planted/dvc-global", "DVC_SYSTEM_CONFIG_DIR": "/planted/dvc-system",
+}
+
+
+def _live_world(tmp_path: Path, names: list[str]) -> SimpleNamespace:
+    """A registry of made-up products, the box's config, the read-only key
+    files and a fake mintd, for running `pytest tests/live` with no storage.
+
+    - made-up-licensed: licensed in the catalog, public in its repo; its clone
+      fails with a planted line after writing metadata.json, and its killed
+      clone exits 0 having landed nothing.
+    - made-up-broken: its catalog entry does not parse, quoting a planted line.
+    - made-up-public: public in the catalog, licensed in its repo; both its
+      clones fail with a planted line after writing metadata.json.
+    - made-up-tiny: public in the catalog, no classification in its repo, its
+      primary written `./data/`; one file and a .gitignore beside it, all of
+      which the import brings. Every check passes or skips (too small to
+      interrupt).
+    - made-up-wide: as tiny, but public, and its import also brings a file of
+      the clone's from outside the primary.
+    - made-up-odd: as tiny, but public; its import's .gitignore has other
+      bytes, and its killed clone exits 1 once every file has landed.
+    - made-up-file: as tiny, but public, and its primary is one file kept in
+      git, which the import brings.
+    - made-up-empty: public; its clone exits 0 with its one file missing, a
+      pull lands nothing, its import fails.
+    - made-up-small: public; one file, which the killed clone has wholly
+      cached when it is interrupted; its import lands other bytes.
+    - made-up-held: its clone says it started, then waits (the signal tests).
+    """
+    registry = tmp_path / "registry"
+    (registry / "catalog" / "data").mkdir(parents=True)
+    for name in ("made-up-licensed", "made-up-public", "made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file",
+                 "made-up-empty", "made-up-small", "made-up-held"):
+        classification = "licensed" if name == "made-up-licensed" else "public"
+        (registry / "catalog" / "data" / f"{name}.yaml").write_text(
+            f"governance: {{classification: {classification}}}\nrepository: {{github_url: https://example.invalid/{name}}}\n",
+            encoding="utf-8")
+    (registry / "catalog" / "data" / "made-up-broken.yaml").write_text(
+        'governance: {classification: public}\nrepository:\n  github_url: "PLANTED-ENTRY\n', encoding="utf-8")
+    _git(["init", "-q", "-b", "main", str(registry)])
+    _git(["add", "-A"], cwd=registry)
+    _git(["commit", "-q", "-m", "catalog"], cwd=registry)
+    (tmp_path / "config.yaml").write_text(f"registry_url: {registry}\n", encoding="utf-8")
+    creds, conf = tmp_path / "readonly", tmp_path / "readonly-config"
+    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
+                     encoding="utf-8")
+    conf.write_text("[profile mintd-live-readonly]\nregion = us-east-1\nendpoint_url = https://s3.example.test\n",
+                    encoding="utf-8")
+    world = tmp_path / "world"
+    world.mkdir()
+    (world / "mintd.py").write_text(_FAKE_MINTD, encoding="utf-8")
+    fake = world / "mintd"
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{world / "mintd.py"}" "$@"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    (tmp_path / "products.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+    kept = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "BOTO_", "FSSPEC_", "MINTD_", "DVC_"))}
+    env = {**_PLANTED_ENV, **kept,
+           "AWS_CA_BUNDLE": "/planted/ca-bundle.pem", "AWS_SHARED_CREDENTIALS_FILE": str(creds),
+           "AWS_CONFIG_FILE": str(conf), "MINTD_CONFIG_DIR": str(tmp_path), "MINTD_BIN": str(fake),
+           "MINTD_LIVE_PRODUCTS": str(tmp_path / "products.txt"), "FAKE_MINTD_WORLD": str(world)}
+    return SimpleNamespace(env=env, world=world, base=(tmp_path / "base").resolve())
+
+
+def _live_pytest(*args: str) -> list[str]:
+    return [sys.executable, "-m", "pytest", "tests/live", "-p", "no:cacheprovider", "-rA", *args]
+
+
+_ON_POSIX = pytest.mark.skipif(os.name == "nt", reason="the live tier runs on Linux and macOS: a shell-script mintd")
+
+
+@_ON_POSIX
+def test_the_live_tier_gives_mintd_only_its_copy_of_the_key_and_withholds_hidden_details(tmp_path: Path) -> None:
+    """Every mintd call sees the key copy, the shut boto and fsspec sources and
+    dvc's empty config dirs, and none of the operator's AWS, boto or fsspec
+    settings but `AWS_CA_BUNDLE`. No planted line reaches the output, a hidden
+    product's results show counts only, the key copy is gone afterwards, and
+    each check fails or skips where it should.
+
+    Mutations that turn it red: the env filter dropped, or fsspec left out of
+    it; the key, config, boto, metadata, fsspec or dvc-dir lines not set;
+    `redact` not called from `pytest_runtest_makereport`, or showing a
+    non-Mismatch failure's message; the SEEN placeholder dropped; either clone
+    not consulting the repo's metadata.json, or the shared clone consulting it
+    only after its exit check; `stricter` always taking the repo's, or keeping
+    the catalog's when the repo has none; results lines reading the catalog's
+    classification; the key-copy finalizer dropped; the second pull not
+    checking what landed; the import not compared with the clone's primary,
+    refusing the git-tracked files a folder import brings, accepting a file
+    from outside the primary or with other bytes, refusing a one-file primary
+    kept in git, or reading `./data/` as no primary at all; a killed clone that exits non-zero, or lands nothing,
+    skipping as too small, or a too-small one failing; a wholly cached one
+    passing."""
+    world = _live_world(tmp_path, ["made-up-licensed", "made-up-broken", "made-up-public", "made-up-tiny",
+                                   "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty", "made-up-small"])
+    got = subprocess.run(
+        _live_pytest("-k", "not time", f"--basetemp={world.base}"),
+        cwd=Path(__file__).parents[1], env=world.env, capture_output=True, text=True, timeout=300,
+    )
+    out = got.stdout + got.stderr
+    assert "PLANTED" not in out and not any(v in out for v in _PLANTED_ENV.values()), out
+    calls = [json.loads(line) for line in (world.world / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) > 5 and calls[0]["argv"] == ["--version"], calls
+    aws = world.base / "aws"
+    for call in calls:
+        env = call["env"]
+        assert {k for k in env if k.startswith(("AWS_", "BOTO_", "FSSPEC_"))} == {
+            "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_CA_BUNDLE", "BOTO_CONFIG", "AWS_EC2_METADATA_DISABLED",
+            "FSSPEC_CONFIG_DIR",
+        }, (call["argv"], sorted(env))
+        assert Path(env["AWS_SHARED_CREDENTIALS_FILE"]) == aws / "credentials", call["argv"]
+        assert Path(env["AWS_CONFIG_FILE"]) == aws / "config", call["argv"]
+        assert "[mintd]" in call["creds"] and "AKIAREADONLY" in call["creds"], call["argv"]
+        assert (Path(env["BOTO_CONFIG"]), env["AWS_EC2_METADATA_DISABLED"]) == (world.base / "boto", "true")
+        assert Path(env["FSSPEC_CONFIG_DIR"]) == world.base / "fsspec" and not (world.base / "fsspec").exists()
+        assert env["AWS_CA_BUNDLE"] == "/planted/ca-bundle.pem"
+        assert (Path(env["DVC_GLOBAL_CONFIG_DIR"]), Path(env["DVC_SYSTEM_CONFIG_DIR"])) == (
+            world.base / "dvc-global", world.base / "dvc-system")
+    assert (world.base / "boto").read_bytes() == b""
+    assert not (aws / "credentials").exists(), "the key copy outlived the run"
+    summary = out[out.index("short test summary info"):]
+    for outcome, check, product in (
+        ("PASSED", "test_a_second_pull_downloads_nothing", "made-up-small"),
+        ("FAILED", "test_a_second_pull_downloads_nothing", "made-up-empty"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-small"),
+        ("PASSED", "test_import_lands_the_primary", "made-up-tiny"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-wide"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-odd"),
+        ("PASSED", "test_import_lands_the_primary", "made-up-file"),
+        ("FAILED", "test_a_killed_clone_restarts_and_finishes", "made-up-licensed"),
+        ("FAILED", "test_a_killed_clone_restarts_and_finishes", "made-up-odd"),
+    ):
+        assert f"{outcome} tests/live/test_live.py::{check}[{product}]" in summary, (outcome, check, product, summary)
+    assert "too small to interrupt: mintd finished before any object was seen" in summary, summary
+    assert re.search(r"not interrupted: all 1 objects had landed when mintd stopped \(.*1 objects cached at the "
+                     r"interrupt", summary), summary
+    results = out[out.index(" live results "):out.index("short test summary info")]
+    tiny = [ln for ln in results.splitlines() if ln.startswith("made-up-tiny ")]
+    assert len(tiny) == 4 and not any(";" in ln for ln in tiny), results  # clone, second pull, import, killed
+    # The killed clone alone, with no shared clone to read the repo's metadata.json first.
+    alone = subprocess.run(
+        _live_pytest("-k", "killed and made-up-public", f"--basetemp={tmp_path / 'alone'}"),
+        cwd=Path(__file__).parents[1], env=world.env, capture_output=True, text=True, timeout=120,
+    )
+    assert "1 failed" in alone.stdout and "PLANTED" not in alone.stdout + alone.stderr, alone.stdout + alone.stderr
+
+
+@_ON_POSIX
+def test_the_live_tier_refuses_to_run_without_its_own_basetemp(tmp_path: Path) -> None:
+    """Mutation that turns it red: `pytest_configure` not calling `check_basetemp`."""
+    world = _live_world(tmp_path, ["made-up-licensed"])
+    got = subprocess.run(_live_pytest(), cwd=Path(__file__).parents[1], env=world.env, capture_output=True,
+                         text=True, timeout=120)
+    assert got.returncode == pytest.ExitCode.USAGE_ERROR and "needs --basetemp" in got.stderr, got.stdout + got.stderr
+    assert not (world.world / "calls.jsonl").exists(), "mintd ran"
+
+
+@_ON_POSIX
+@pytest.mark.parametrize("sig, nohup", [("SIGTERM", False), ("SIGHUP", False), ("SIGHUP", True)],
+                         ids=["SIGTERM", "SIGHUP", "SIGHUP-under-nohup"])
+def test_a_signal_to_the_live_tier_kills_mintd_and_deletes_the_key_copy(tmp_path: Path, sig: str, nohup: bool) -> None:
+    """mintd runs in a session of its own, which the signal never reaches.
+    Under nohup a hangup stays ignored, so the SIGTERM sent after it is what
+    ends the run. Mutations that turn it red: no handler for the signal (pytest
+    dies at once, leaving mintd running and the key copy on disk); the handler
+    installed over an inherited SIG_IGN (the hangup ends the run)."""
+    world = _live_world(tmp_path, ["made-up-held"])
+    os.mkfifo(world.world / "started")
+    os.mkfifo(world.world / "held")
+    started = os.open(world.world / "started", os.O_RDWR | os.O_NONBLOCK)
+    alive = os.open(world.world / "held", os.O_RDONLY | os.O_NONBLOCK)  # EOF once the fake mintd has died
+    hangup = signal.SIG_IGN if nohup else signal.SIG_DFL  # as nohup leaves it, or as a terminal does
+    pid = None
+    try:
+        with subprocess.Popen(
+            _live_pytest("-k", "clone_lands", f"--basetemp={world.base}"), cwd=Path(__file__).parents[1],
+            env=world.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: signal.signal(signal.SIGHUP, hangup),
+        ) as tier:
+            ready, _, _ = select.select([started], [], [], 60)
+            assert ready, "the fake mintd did not start within 60 s"
+            pid = int(os.read(started, 32))
+            tier.send_signal(getattr(signal, sig))
+            if nohup:  # pending together, the hangup's handler would run first: SIGHUP sorts before SIGTERM
+                tier.send_signal(signal.SIGTERM)
+            assert tier.wait(30) == -(signal.SIGTERM if nohup else getattr(signal, sig))
+        ready, _, _ = select.select([alive], [], [], 10)
+        assert ready, "mintd outlived the signal"
+        assert not (world.base / "aws" / "credentials").exists(), "the key copy outlived the signal"
+    finally:
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        os.close(started)
+        os.close(alive)
 
 
 def test_the_live_tier_needs_its_own_basetemp_and_reads_the_entry_mintd_reads(tmp_path: Path) -> None:

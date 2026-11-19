@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import configparser
 import dataclasses
+import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -67,13 +68,19 @@ def run_read_only(argv: Sequence[str], *, cwd: Path | None = None, env: Mapping[
     )
 
 
+#: Every mintd the live tier started, so a SIGTERM or SIGHUP can kill those still running.
+STARTED: list[Run] = []
+
+
 class LiveMintd(Mintd):
     """`Mintd` that refuses a command outside `READ_ONLY`. A call goes through
     `start`, so this one check covers both."""
 
     def start(self, *args: str, cwd: Path, json: bool = True) -> Run:
         read_only(("mintd", *args))
-        return super().start(*args, cwd=cwd, json=json)
+        run = super().start(*args, cwd=cwd, json=json)
+        STARTED.append(run)
+        return run
 
 
 def _named_file(operator_env: Mapping[str, str], var: str) -> tuple[Path, configparser.ConfigParser]:
@@ -97,9 +104,10 @@ def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
     """The read-only key and its profile, where the live tier's mintd and dvc read them.
 
     Only from the two files the operator names, never `~/.aws`:
-    `AWS_SHARED_CREDENTIALS_FILE` must hold a `[mintd-live-readonly]` section and
-    no `[mintd]` one (the lab's key, which can write), and `AWS_CONFIG_FILE` a
-    `[profile mintd-live-readonly]` section. The key is copied under `[mintd]`,
+    `AWS_SHARED_CREDENTIALS_FILE` must hold a `[mintd-live-readonly]` section with
+    both halves of a key and no `[mintd]` one (the lab's key, which can write),
+    and `AWS_CONFIG_FILE` a `[profile mintd-live-readonly]` section. The key's
+    two halves, and nothing else from the section, are copied under `[mintd]`,
     the profile mintd looks for and product remotes name, to `dest/credentials`
     (mode 0600); the profile's `region` and `endpoint_url`, and nothing else,
     under `[profile mintd]` to `dest/config`. Returns the credentials copy.
@@ -110,12 +118,15 @@ def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
                            f"[{READONLY_PROFILE}]")
     if not found.has_section(READONLY_PROFILE):
         raise HarnessError(f"{src} has no [{READONLY_PROFILE}] section")
+    key = {k: found[READONLY_PROFILE].get(k, "").strip() for k in ("aws_access_key_id", "aws_secret_access_key")}
+    if not all(key.values()):  # else boto would look for a key further along its chain
+        raise HarnessError(f"{src}'s [{READONLY_PROFILE}] section lacks aws_access_key_id or aws_secret_access_key")
     conf, settings = _named_file(operator_env, "AWS_CONFIG_FILE")
     section = f"profile {READONLY_PROFILE}"
     if not settings.has_section(section):
         raise HarnessError(f"{conf} has no [{section}] section")
     copy = configparser.ConfigParser(interpolation=None)
-    copy["mintd"] = dict(found[READONLY_PROFILE])
+    copy["mintd"] = key
     profile = configparser.ConfigParser(interpolation=None)
     profile["profile mintd"] = {k: v for k, v in settings[section].items() if k in ("region", "endpoint_url")}
     dest.mkdir(parents=True, exist_ok=True)
@@ -138,6 +149,18 @@ class Product:
         """Public and labonly products show details; any other or missing
         classification shows counts only."""
         return self.classification in DETAILED
+
+    def stricter(self, repo: Path) -> Product:
+        """This product with the stricter of its catalog classification and the
+        one in `repo`'s metadata.json, when `repo` has one (none there counts as
+        missing, so counts only)."""
+        meta = repo / "metadata.json"
+        if not meta.is_file():
+            return self
+        theirs = (json.loads(meta.read_text(encoding="utf-8")).get("governance") or {}).get("classification")
+        rank = {"public": 0, "labonly": 1}
+        return self if rank.get(self.classification, 2) >= rank.get(theirs, 2) else dataclasses.replace(
+            self, classification=theirs)
 
     def line(self, check: str, counts: str, details: str = "") -> str:
         return f"{self.name} {check}: {counts}" + (f"; {details}" if details and self.shown else "")
