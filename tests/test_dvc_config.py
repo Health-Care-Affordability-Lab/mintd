@@ -150,3 +150,90 @@ def test_a_remote_only_in_config_local_is_read_by_fast_sync(real_dvc, tmp_path: 
     root = _project(real_dvc, tmp_path, "", f"[core]\n    remote = storage\n{R}    url = s3://b/p\n    profile = lab\n")
     assert get_remote_config(root, "storage") == {"url": "s3://b/p", "profile": "lab"}
     assert _dvc_reads(real_dvc, root, "remote.storage.url") == "s3://b/p"
+
+
+# --- commit D: the two configs dvc refuses, refused by mintd too -----------------------------
+
+
+def test_an_unquoted_remote_header_stops_as_it_stops_dvc(real_dvc, tmp_path: Path) -> None:
+    """dvc's schema refuses `[remote origin]` without quotes ("extra keys not allowed"), so
+    every dvc command fails on that config. mintd stops too, naming the header and the fix,
+    where it used to read the section as the remote.
+    Mutation that must redden this: accept the unquoted header again."""
+    root = _project(real_dvc, tmp_path, "[core]\n    remote = origin\n[remote origin]\n    url = s3://b/p\n")
+    dvc = real_dvc(["status"], cwd=root)
+    assert dvc.returncode != 0 and "extra keys not allowed" in dvc.stdout + dvc.stderr
+    with pytest.raises(MintdError, match=r"an unquoted \[remote origin\] header") as raised:
+        get_remote_config(root, "origin")
+    assert raised.value.hint == 'write [remote "origin"]; dvc can\'t read this config either'
+
+
+def _consumer_of_one_import(real_dvc, tmp_path: Path) -> Path:
+    """A consumer with one real `dvc import` and no remote of its own, its data not yet pulled."""
+    import shutil
+
+    from tests._harness.git import _git
+    from tests._harness.producer import build_local_producer
+
+    producer = build_local_producer(tmp_path / "prod")
+    producer.publish({"data/final": {"a.csv": b"v1\n"}})
+    consumer = tmp_path / "consumer"
+    (consumer / "data").mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=consumer)
+    real_dvc(["init", "-q"], cwd=consumer, check=True)
+    real_dvc(["import", producer.url, "data/final", "-o", "data/final"], cwd=consumer, check=True)
+    shutil.rmtree(consumer / "data" / "final")
+    shutil.rmtree(consumer / ".dvc" / "cache", ignore_errors=True)
+    return consumer
+
+
+def test_imports_only_and_no_remote_pull_as_dvc_pulls(real_dvc, tmp_path: Path, monkeypatch, capsys) -> None:
+    """Imports fetch from their producers, so a consumer of imports alone needs no remote of
+    its own: `dvc pull` lands them, and so does `mintd data pull`, which asks for a default
+    remote only once a target needs the project's own.
+    Mutation that must redden this: require the default before looking at the targets."""
+    import shutil
+
+    from mintd import cli
+
+    consumer = _consumer_of_one_import(real_dvc, tmp_path)
+    real_dvc(["pull"], cwd=consumer, check=True)
+    assert (consumer / "data/final/a.csv").read_bytes() == b"v1\n"
+    shutil.rmtree(consumer / "data" / "final")
+    shutil.rmtree(consumer / ".dvc" / "cache", ignore_errors=True)
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    assert cli.main(["data", "pull", "--path", str(consumer)]) == 0, capsys.readouterr().err
+    assert (consumer / "data/final/a.csv").read_bytes() == b"v1\n"
+
+
+def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(real_dvc, tmp_path: Path, monkeypatch, capsys) -> None:
+    """With one remote and no `core.remote`, dvc picks none: `dvc pull` stops with "No remote
+    provided and no default remote set". `mintd data pull` stops too, before any download,
+    with a hint naming that remote, and never runs dvc (whose raw message the user would see).
+    It used to take the one remote.
+    Mutations that must redden this: take the one remote again; fall back to dvc pull."""
+    import shutil
+
+    from mintd import _dvc_ops, cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    real_dvc(["init", "-q", "--no-scm"], cwd=project, check=True)
+    real_dvc(["remote", "add", "store", str(tmp_path / "store")], cwd=project, check=True)
+    (project / "x.csv").write_text("x\n")
+    real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
+    real_dvc(["push", "-r", "store"], cwd=project, check=True)
+    (project / "x.csv").unlink()
+    shutil.rmtree(project / ".dvc" / "cache")
+    dvc = real_dvc(["pull"], cwd=project)
+    assert dvc.returncode != 0 and "no default remote" in (dvc.stdout + dvc.stderr).lower()
+
+    def no_dvc(*_a, **_k):
+        raise AssertionError("mintd ran dvc pull")
+
+    monkeypatch.setattr(_dvc_ops.SubprocessDvcOps, "pull", no_dvc)
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    assert cli.main(["data", "pull", "--path", str(project)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: no default DVC remote in .dvc/config" in err
+    assert "hint: set a default: dvc remote default store (add --local to keep it out of git)" in err

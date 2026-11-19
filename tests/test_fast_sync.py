@@ -340,12 +340,15 @@ def test_get_remote_config_quoted_section(tmp_path: Path) -> None:
     assert rc["url"] == "s3://b/p"
 
 
-def test_get_remote_config_unquoted_section(tmp_path: Path) -> None:
+def test_get_remote_config_refuses_an_unquoted_section(tmp_path: Path) -> None:
+    """dvc's schema refuses `[remote origin]` without quotes, so mintd does too (it read it)."""
+    from mintd.errors import MintdError
+
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True)
     cfg.write_text("[remote origin]\n    url = s3://b/p\n")
-    rc = get_remote_config(tmp_path, "origin")
-    assert rc["url"] == "s3://b/p"
+    with pytest.raises(MintdError, match=r"an unquoted \[remote origin\] header"):
+        get_remote_config(tmp_path, "origin")
 
 
 def test_get_remote_config_missing_raises(tmp_path: Path) -> None:
@@ -367,10 +370,13 @@ def test_parse_remote_config_text_double_quoted_section() -> None:
     assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
 
 
-def test_parse_remote_config_text_unquoted_section() -> None:
+def test_parse_remote_config_text_refuses_an_unquoted_section() -> None:
+    """As dvc refuses it (it was read as the remote)."""
     from mintd._dvc_state import parse_remote_config_text
-    text = "[remote storage]\n    url = s3://b/p\n"
-    assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
+    from mintd.errors import MintdError
+
+    with pytest.raises(MintdError, match=r"an unquoted \[remote storage\] header"):
+        parse_remote_config_text("[remote storage]\n    url = s3://b/p\n", "storage")
 
 
 def test_parse_remote_config_text_default_from_core() -> None:
@@ -383,10 +389,13 @@ def test_parse_remote_config_text_default_from_core() -> None:
     assert parse_remote_config_text(text, None)["url"] == "s3://b/p"
 
 
-def test_parse_remote_config_text_default_single_remote() -> None:
+def test_parse_remote_config_text_picks_no_default_from_a_single_remote() -> None:
+    """dvc picks no remote when no `core.remote` is set, even when there is only one (mintd
+    took the one)."""
     from mintd._dvc_state import parse_remote_config_text
-    text = "['remote \"only\"']\n    url = s3://b/p\n"
-    assert parse_remote_config_text(text, None)["url"] == "s3://b/p"
+
+    with pytest.raises(KeyError, match="no default DVC remote"):
+        parse_remote_config_text("['remote \"only\"']\n    url = s3://b/p\n", None)
 
 
 def test_parse_remote_config_text_default_ambiguous_raises() -> None:

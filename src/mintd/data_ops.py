@@ -54,6 +54,7 @@ from ._dvc_state import (
     does_not_parse,
     judge_pointers,
     push_targets,
+    require_default_remote,
     stages_behind,
     with_outputs,
 )
@@ -825,7 +826,10 @@ def data_pull(
             f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pulled; "
             "change the .gitignore, or drop this target"
         )
-    remote_name = remote or _default_dvc_remote(project_path) or "origin"
+    default_remote = remote or _default_dvc_remote(project_path)
+    # "" names no remote: a pull of imports alone reads only their producers' buckets, and
+    # dvc pull needs no remote of this project for them either. Anything else does (below).
+    remote_name = default_remote or ""
 
     # dvc.lock stage outs are discovered ONLY on pull-all. A targeted pull
     # of a bare stage-out path (e.g. `data pull data/staged`, no .dvc file)
@@ -870,6 +874,12 @@ def data_pull(
             )
         else:
             logger.info("no .dvc targets and no pipeline outs discovered")
+
+    if default_remote is None and (pipeline_outs or not all(
+        (outs := outs_for_target(project_path, t, remote_name)) and all(o.is_import for o in outs)
+        for t in targets or []
+    )):
+        require_default_remote(project_path)  # dvc pull refuses too; this says how to set one, and dvc never runs
 
     total_bytes = _compute_total_bytes(
         project_path, targets or [], pipeline_outs, remote_name,
@@ -1031,7 +1041,7 @@ def data_push(
     # ``.dvc`` paths with bare paths uploads only the last ``.dvc`` target's
     # outs at exit 0 (the ``index_from_targets`` leak ``_shape_groups``
     # documents), so the groups are never mixed.
-    effective_remote = remote or _default_dvc_remote(project_path) or "origin"
+    effective_remote = remote or require_default_remote(project_path)  # dvc push refuses with no default too
     groups: list[list[str] | None] = [None]
     selection: frozenset[str] | None = None
     if targets:

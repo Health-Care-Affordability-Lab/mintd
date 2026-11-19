@@ -50,6 +50,7 @@ from tests._fakes.reporter import RecordingReporter
 # "storage" at a worktree-layout prefix. url prefix "data_producer" + the
 # import's dep path + the file relpath is the object key the rescue fetches.
 PRODUCER_CONFIG = (
+    "[core]\n    remote = storage\n"
     "['remote \"storage\"']\n"
     "    url = s3://lab/data_producer\n"
     "    version_aware = true\n"
@@ -159,7 +160,7 @@ def _consumer(root: Path, producer_repo: str, sha: str, dir_md5: str, total: int
     the producer at ``sha``. Returns the import target path."""
     (root / ".dvc").mkdir(parents=True, exist_ok=True)
     (root / ".dvc" / "config").write_text(
-        "['remote \"origin\"']\n    url = s3://consumer/foo\n"
+        "[core]\n    remote = origin\n['remote \"origin\"']\n    url = s3://consumer/foo\n"
     )
     imp = root / "data" / "imports" / "producer"
     imp.mkdir(parents=True, exist_ok=True)

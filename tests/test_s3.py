@@ -91,7 +91,7 @@ def test_the_cache_lane_pools_one_connection_per_job(client_pools, tmp_path: Pat
 
     pools, bucket = client_pools
     (tmp_path / ".dvc").mkdir()
-    (tmp_path / ".dvc" / "config").write_text(f'[remote "origin"]\n    url = s3://{bucket}/lab/proj\n')
+    (tmp_path / ".dvc" / "config").write_text(f'[core]\n    remote = origin\n[remote "origin"]\n    url = s3://{bucket}/lab/proj\n')
     (tmp_path / "a.bin").write_bytes(b"x" * 64)
     cache_push(project_path=tmp_path, paths=["a.bin"], config=Config(), reporter=Reporter(json_mode=True), jobs=32)
     cache_pull(project_path=tmp_path, config=Config(), reporter=Reporter(json_mode=True), jobs=32)

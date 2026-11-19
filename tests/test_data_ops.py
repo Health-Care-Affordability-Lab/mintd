@@ -19,6 +19,18 @@ from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.reporter import RecordingReporter
 
 
+@pytest.fixture(autouse=True)
+def _the_project_names_its_default_remote(tmp_path: Path, request: pytest.FixtureRequest) -> None:
+    """dvc pulls and pushes a project's own data only through its default remote, and refuses
+    without one; every lab repo names one. These tests drive data_pull and data_push with
+    doubles, in that shape. A test that runs real dvc makes its own project (`dvc init`
+    refuses a folder that already holds `.dvc`)."""
+    if "real_dvc" in request.fixturenames:
+        return
+    (tmp_path / ".dvc").mkdir(exist_ok=True)
+    (tmp_path / ".dvc" / "config").write_text('[core]\n    remote = origin\n[remote "origin"]\n    url = s3://b/p\n')
+
+
 def test_data_pull_default_never_issues_a_blanket_dvc_pull(tmp_path: Path) -> None:
     """A pull-all reaches ``dvc pull`` SCOPED to what discovery found, never
     ``targets=None``.

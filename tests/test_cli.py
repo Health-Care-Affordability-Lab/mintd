@@ -33,6 +33,14 @@ from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, 
 from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
+
+def _with_default_remote(project: Path) -> None:
+    """dvc pulls and pushes a project's own data only through its default remote, and refuses
+    without one; every lab repo names one."""
+    (project / ".dvc").mkdir(exist_ok=True)
+    (project / ".dvc" / "config").write_text('[core]\n    remote = origin\n[remote "origin"]\n    url = s3://b/p\n')
+
+
 FIXTURES = Path(__file__).parent / "fixtures"
 ENCLAVE_FIXTURE = FIXTURES / "enclave_manifest_v2_minimal.yaml"
 STANDALONE_DVC = FIXTURES / "dvc_files" / "standalone_import.dvc"
@@ -141,6 +149,7 @@ def test_cli_data_pull_uses_fast_sync_resolver(
     # Slice-22: data pull now refuses to run outside a DVC project; create
     # the .dvc/ marker so the probe passes.
     (tmp_path / ".dvc").mkdir()
+    _with_default_remote(tmp_path)
     rc = cli.main(["data", "pull", "data/raw.csv", "--path", str(tmp_path)])
     assert rc == 0
     assert len(fast_fake.calls) == 1
@@ -155,6 +164,7 @@ def test_cli_data_pull_dvc_error_exits_one(
     capsys: pytest.CaptureFixture[str],
     patched_clients,
 ) -> None:
+    _with_default_remote(tmp_path)
     _, dvc_ops = patched_clients
     dvc_ops.pull_raises = DvcPullError("oops")
     _stage_tracked_out(tmp_path)
@@ -171,6 +181,7 @@ def test_cli_data_pull_wall_timeout_renders_sentence(
     """Slice D (pull-all audit, fix 5): a WallTimeoutExceeded escaping a
     handler renders as a full sentence with a config hint — never the bare
     seconds float."""
+    _with_default_remote(tmp_path)
     from mintd._subprocess import WallTimeoutExceeded
 
     _, dvc_ops = patched_clients
@@ -194,6 +205,7 @@ def test_cli_data_pull_storage_key_error_names_target_and_retry(
     """Slice D (pull-all audit, fix 6): dvc's StorageKeyError tuple crash
     surfaces as `error: ... <target> ...` plus the targeted-retry hint, not
     the opaque `('data', 'final', ...)` tuple."""
+    _with_default_remote(tmp_path)
     from mintd._dvc_ops import DvcStorageKeyError
 
     _, dvc_ops = patched_clients
@@ -224,6 +236,7 @@ def test_cli_data_pull_threads_dvc_args(
     to-end as literal pass-through; mintd does not dedupe."""
     _, dvc_ops = patched_clients
     (tmp_path / ".dvc").mkdir()
+    _with_default_remote(tmp_path)
     rc = cli.main([
         "data", "pull", "data/raw.csv",
         "--path", str(tmp_path),
@@ -245,6 +258,7 @@ def test_cli_data_push_calls_data_push(
     patched_clients,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _with_default_remote(tmp_path)
     _, dvc_ops = patched_clients
     monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push"])
@@ -260,6 +274,7 @@ def test_cli_data_push_forwards_targets(
 ) -> None:
     """End-to-end regression for the reported bug: a positional target reaches
     the fake as `["data/x.dvc"]` instead of being silently dropped."""
+    _with_default_remote(tmp_path)
     _, dvc_ops = patched_clients
     monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push", "data/x.dvc"])
@@ -275,6 +290,7 @@ def test_cli_data_push_no_targets_is_none(
 ) -> None:
     """Bare `data push` pins the `args.targets or None` conversion: no
     positionals means a full-repo push (targets is None)."""
+    _with_default_remote(tmp_path)
     _, dvc_ops = patched_clients
     monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
     rc = cli.main(["data", "push"])
@@ -1308,6 +1324,7 @@ def test_data_pull_reports_what_landed_not_what_was_requested(
     the first arm reads `pulled 0` (request shape for a pull-all) and this
     test fails on it. Observed: 1 then 0, as asserted.
     """
+    _with_default_remote(tmp_path)
     _, dvc_ops = patched_clients
     dvc_ops.workspace = tmp_path
     _stage_tracked_out(tmp_path)
@@ -2925,6 +2942,7 @@ def test_cli_data_import_bump_catches_dvc_op_error(
 def test_cli_data_push_catches_dvc_push_error_with_hint(
     patched_clients, recording_reporter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _with_default_remote(tmp_path)
     from mintd._dvc_ops import DvcPushError
     _, dvc_ops = patched_clients
     monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
@@ -3561,6 +3579,7 @@ def test_cli_data_pull_incomplete_targets_exit_nonzero_no_success_line(
     )
     monkeypatch.setattr("mintd.cli._resolve_fast_sync_ops", lambda cfg: fast_fake)
     (tmp_path / ".dvc").mkdir()
+    _with_default_remote(tmp_path)
     rc = cli.main(["data", "pull", "data/final", "--path", str(tmp_path)])
     assert rc == 1
     assert recording_reporter.events_of("success") == []
@@ -4043,6 +4062,7 @@ def test_local_data_commands_do_not_require_registry_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """All five wrap dvc and never contact the catalog."""
+    _with_default_remote(tmp_path)
     _stage_tracked_out(tmp_path)
     dvc_ops = unconfigured_machine
     monkeypatch.chdir(tmp_path)  # `data push` commits from the cwd's project
@@ -4066,6 +4086,7 @@ def test_local_data_handlers_never_build_a_catalog_client(
     """The structural twin: not merely tolerating a missing registry_url, but
     never asking for the collaborator in the first place."""
     (tmp_path / ".dvc").mkdir()
+    _with_default_remote(tmp_path)
 
     def must_not_call(*a: Any, **kw: Any) -> None:
         pytest.fail("local data handlers must not build a catalog client")
@@ -5174,6 +5195,8 @@ def test_a_missing_dvc_exits_2_with_the_install_hint(
     setattr(dvc_ops, hook, DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd."))
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".dvc").mkdir()
+    # A default remote, as lab repos name one: without it push stops before dvc runs.
+    (tmp_path / ".dvc" / "config").write_text('[core]\n    remote = origin\n[remote "origin"]\n    url = s3://b/p\n')
 
     assert cli.main(argv) == 2
     err = " ".join(capsys.readouterr().err.split())

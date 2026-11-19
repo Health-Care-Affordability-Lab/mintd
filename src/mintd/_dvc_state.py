@@ -960,9 +960,9 @@ def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
     comment and keeps ``;``; every key and section name lowercased, and ``core.remote``'s
     value too; and each
     ``remote "<name>"`` section gathered under ``conf["remote"][<name>]``. Unlike dvc,
-    ``%(name)s`` is read literally. An unquoted ``[remote <name>]`` header is read as that
-    remote, as mintd always has. A file configobj can't parse is a ``MintdError``, since
-    dvc can't read it either; ``source`` names it in the message."""
+    ``%(name)s`` is read literally. A file configobj can't parse, or one with an unquoted
+    ``[remote <name>]`` header (dvc's schema refuses it: "extra keys not allowed"), is a
+    ``MintdError``, since dvc can't read it either; ``source`` names it in the message."""
     # dvc's own reader, installed with dvc (which requires configobj >= 5.0.9). It ships no type
     # information, and the type-ignore count may only shrink, so it is imported untyped.
     configobj = importlib.import_module("configobj")
@@ -977,7 +977,13 @@ def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
         # A comma-separated value comes back as a list; dvc's schema would refuse it as a remote setting.
         keys = {k.lower(): ", ".join(v) if isinstance(v, list) else v for k, v in values.items()}
         name = section.lower()
-        named = re.fullmatch(r'\s*remote\s*"(.*)"\s*', name) or re.fullmatch(r"\s*remote\s+([^\s\"]+)\s*", name)
+        bare = re.fullmatch(r"\s*remote\s+([^\s\"]+)\s*", section, re.IGNORECASE)
+        if bare:
+            raise MintdError(
+                f"can't read {source}: an unquoted [remote {bare.group(1)}] header",
+                hint=f'write [remote "{bare.group(1)}"]; dvc can\'t read this config either',
+            )
+        named = re.fullmatch(r'\s*remote\s*"(.*)"\s*', name)
         if named:
             conf["remote"][named.group(1)] = keys
         else:
@@ -1003,20 +1009,36 @@ def read_dvc_config(root: Path, level: Literal["repo", "local"]) -> dict[str, An
 
 def default_remote_in(*confs: dict[str, Any]) -> str | None:
     """The default remote across parsed configs given highest level first, as dvc merges
-    them: the first ``core.remote`` set. Else, unlike dvc, the one remote they name between
-    them; ``None`` when there is no such single remote."""
+    them: the first ``core.remote`` set. ``None`` when none sets it: dvc then picks no
+    remote either (``dvc pull`` and ``dvc push`` stop with "No remote provided and no default
+    remote set"), even when the configs name exactly one."""
     for conf in confs:
         name = conf.get("core", {}).get("remote")
         if name:
             return str(name)
-    names = {n for conf in confs for n in conf["remote"]}
-    return names.pop() if len(names) == 1 else None
+    return None
 
 
 def default_remote_name(root: Path) -> str | None:
     """The project's default DVC remote: ``.dvc/config.local`` over ``.dvc/config``
     (:func:`default_remote_in`)."""
     return default_remote_in(read_dvc_config(root, "local"), read_dvc_config(root, "repo"))
+
+
+def require_default_remote(root: Path) -> str:
+    """The project's default remote, or the ``MintdError`` dvc's own refusal calls for, with a
+    hint that names the remote when the project has exactly one."""
+    name = default_remote_name(root)
+    if name is not None:
+        return name
+    remotes = sorted({*read_dvc_config(root, "repo")["remote"], *read_dvc_config(root, "local")["remote"]})
+    if len(remotes) == 1:
+        hint = f"set a default: dvc remote default {remotes[0]} (add --local to keep it out of git)"
+    elif remotes:
+        hint = "set a default: dvc remote default <name>"
+    else:
+        hint = "add one: dvc remote add -d <name> <url>"
+    raise MintdError("no default DVC remote in .dvc/config", hint=hint)
 
 
 def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, str]:
@@ -1028,7 +1050,7 @@ def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, st
     if remote_name is None:
         remote_name = default_remote_in(conf)
         if remote_name is None:
-            raise KeyError("no default DVC remote: config has no [core] remote and not exactly one remote section")
+            raise KeyError("no default DVC remote: config sets no [core] remote")
     if remote_name not in conf["remote"]:
         raise KeyError(f"remote {remote_name} not found in DVC config")
     return dict(conf["remote"][remote_name])

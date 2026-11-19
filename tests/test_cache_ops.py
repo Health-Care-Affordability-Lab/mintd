@@ -396,7 +396,7 @@ def test_guard_trips_on_dvc_out_tracking_whole_cache_dir(tmp_path: Path) -> None
 def _dvc_config(tmp_path: Path, url: str, *, remote: str = "origin") -> None:
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(f'[remote "{remote}"]\n    url = {url}\n')
+    cfg.write_text(f'[core]\n    remote = {remote}\n[remote "{remote}"]\n    url = {url}\n')
 
 
 @pytest.mark.parametrize("prefix", TIER_PREFIXES)
@@ -653,7 +653,7 @@ from mintd._console import Reporter  # noqa: E402
 def _project(tmp_path: Path, bucket: str, prefix: str = "lab/proj") -> Path:
     (tmp_path / ".dvc").mkdir(parents=True, exist_ok=True)
     url = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
-    (tmp_path / ".dvc" / "config").write_text(f'[remote "origin"]\n    url = {url}\n')
+    (tmp_path / ".dvc" / "config").write_text(f'[core]\n    remote = origin\n[remote "origin"]\n    url = {url}\n')
     return tmp_path
 
 
