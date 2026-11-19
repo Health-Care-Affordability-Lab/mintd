@@ -54,6 +54,7 @@ from ._dvc_state import (
     push_targets,
     stages_behind,
     with_outputs,
+    unlisted_on_disk,
 )
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
@@ -1101,6 +1102,18 @@ def data_push(
             + (f"; or push the rest by naming it, for example mintd data push {shlex.join(map(from_here, rest[:3]))}"
                if rest else "")
             + "; if dvc.lock was cut short, restore it from git",
+        )
+    # A folder pointer lists no count, so one cut at the end of an entry, or
+    # recorded before files were added, reads as a smaller folder; DVC would
+    # push the shorter list at exit 0 while the rest sits on disk.
+    unlisted = unlisted_on_disk(project_path, scope, remote=effective_remote)
+    if unlisted:
+        raise PushRefused(
+            "nothing was written or pushed: " + "; ".join(u.message() for u in unlisted),
+            hint=(unlisted[0].hint() if len(unlisted) == 1 else
+                  "record each folder again (mintd data add <folder>, or dvc commit <stage> for a stage out), "
+                  "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
+            + "; then push",
         )
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
                        aws_profile=aws_profile, memo_path=memo_path)

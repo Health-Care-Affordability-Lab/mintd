@@ -44,7 +44,8 @@ from pydantic import ValidationError
 
 # `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
-from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers, unlisted_on_disk
+from ._push_verify import pushed_lockfiles
 from ._fast_sync_ops import (
     PointerCutShort,
     check_dvc_file,
@@ -141,6 +142,7 @@ class CheckFinding:
         "data_products_output_unpinned",
         "data_products_output_missing_from_manifest",
         "dvc_state_unreadable",
+        "dvc_folder_unlisted",
         "repository_github_url_missing",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
@@ -328,6 +330,21 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                 for rel, why in unreadable
             )
             if not unreadable:
+                # A folder pointer's list read against the folder on disk:
+                # the only reference that shows a list cut at an entry, or
+                # recorded before files were added. Publish refuses it too.
+                findings.extend(
+                    CheckFinding(
+                        severity="error",
+                        section="producer",
+                        message=u.message(),
+                        source=project_path / u.pointer,
+                        kind="dvc_folder_unlisted",
+                        hint=u.hint() + ", then re-run 'mintd check'.",
+                    )
+                    for u in unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
+                                              remote=inspection.dvc_remote_name or "")
+                )
                 try:
                     findings.extend(
                         _check_data_products_delivery(
