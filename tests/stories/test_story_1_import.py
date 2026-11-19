@@ -1,17 +1,39 @@
 """Story 1: Bring a dataset into my project.
 
-- Given: a fresh project, and a published product with a primary output.
-- When: I run `mintd data import <name>`.
-- Then: the primary lands in my project, ready to commit, and `mintd check`
-  is clean.
-- Pass:
+What import brings: by default, only the product's primary; with `--path`,
+only the named dataset or folder; with `--all`, everything the producer
+tracks at the pinned rev. In every case each byte downloads once and nothing
+outside the request is fetched.
+
+- Given: a fresh project, and a published product that has a primary output,
+  a declared non-primary output (`data/extra`), and a tracked folder no output
+  declares (`data/raw`).
+- Pass, in every case:
   - every landed file hashes to its pointer's checksum;
-  - nothing besides the primary downloads;
-  - files are not duplicated;
+  - each byte downloads once, and nothing outside the request is fetched;
   - ✓ appears only if files landed;
   - exit 0.
-- With `--all`, every declared output lands, and each object downloads once.
 - Catches: ✓ printed when nothing landed (the bug fixed in #60).
+
+Default case (Holds):
+- When: I run `mintd data import <name>` (later `mintd use <name>`).
+- Then: only the primary lands in my project, ready to commit, and
+  `mintd check` is clean.
+- Pass: nothing besides the primary downloads.
+
+`--path` case (Holds):
+- When: I run `mintd data import <name> --path data/extra`, and separately
+  `--path data/raw`.
+- Then: only the named dataset or folder lands: a declared non-primary output,
+  and an undeclared tracked folder.
+- Pass: every file under the named path lands and matches; nothing outside it
+  downloads, the primary included.
+
+`--all` case (Target until `--all` changes):
+- When: I run `mintd data import <name> --all`.
+- Then: everything the producer tracks at that rev lands: every `.dvc` pointer
+  and every `dvc.lock` out, declared or not.
+- Pass: every tracked file lands, `data/raw` included.
 """
 
 from __future__ import annotations
@@ -23,11 +45,6 @@ import yaml
 
 from tests._harness.expect import assert_landed_match_pointers, md5, result, s3_state
 from tests._harness.git import _git
-
-
-def _published(product, *outs: str) -> dict[str, bytes]:
-    """`{S3 key under the product's prefix: bytes}` for each file of `outs`."""
-    return {f"{out}/{name}": body for out in outs for name, body in product.outs[out].items()}
 
 
 def _changed(project: Path) -> set[str]:
@@ -46,9 +63,15 @@ def _tree(project: Path) -> set[str]:
 
 
 @pytest.mark.parametrize(("flags", "outs"), [
-    ((), ("data/final",)),
-    (("--all",), ("data/final", "data/extra")),
-], ids=["primary", "all"])
+    pytest.param((), ("data/final",), id="primary"),
+    pytest.param(("--path", "data/extra"), ("data/extra",), id="path-extra"),
+    pytest.param(("--path", "data/raw"), ("data/raw",), id="path-raw"),
+    # What --all brings today, declared outputs only; drop it when the Target below passes.
+    pytest.param(("--all",), ("data/final", "data/extra"), id="all-declared"),
+    pytest.param(("--all",), ("data/final", "data/extra", "data/raw"), id="all", marks=pytest.mark.xfail(
+        strict=True, raises=AssertionError,
+        reason="Target: --all imports only data_products.outputs today, so data/raw does not land")),
+])
 def test_import_lands_what_was_asked_and_downloads_each_object_once(
     product, fresh_project, mintd, s3_server, flags, outs,
 ) -> None:
@@ -58,7 +81,7 @@ def test_import_lands_what_was_asked_and_downloads_each_object_once(
     run = mintd("data", "import", product.name, *flags, cwd=project)
 
     assert run.returncode == 0, run.stderr
-    published = _published(product, *outs)
+    published = product.published(*outs)
     landed = assert_landed_match_pointers(project)
     assert landed == {f"{root}/{key}": md5(body) for key, body in published.items()}, "landed bytes are the producer's"
     assert result(run.stdout)["file_count"] == len(published)

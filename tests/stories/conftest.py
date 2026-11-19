@@ -24,7 +24,8 @@ from tests._harness.s3 import BUCKET, S3Server
 
 @dataclasses.dataclass
 class Product:
-    """A made-up product: `data/final/` is its primary, `data/extra/` another output."""
+    """A made-up product: `data/final/` is its primary, `data/extra/` another
+    output, and `data/raw/` a folder it tracks that no output declares."""
 
     producer: LocalProducer
     name = "harness-demo"
@@ -32,7 +33,12 @@ class Product:
     outs = {
         "data/final": {"a.csv": b"alpha\n", "b.csv": b"beta\n"},
         "data/extra": {"c.csv": b"gamma\n"},
+        "data/raw": {"r.csv": b"raw\n"},
     }
+
+    def published(self, *outs: str) -> dict[str, bytes]:
+        """`{S3 key under prefix: bytes}` for each file of `outs`, every out when none are named."""
+        return {f"{out}/{name}": body for out in outs or self.outs for name, body in self.outs[out].items()}
 
 
 def register(registry: Path, meta: dict, work: Path) -> None:
