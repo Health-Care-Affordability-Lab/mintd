@@ -219,6 +219,28 @@ def test_parse_dvc_outs_reads_a_cloud_key_cut_short_as_no_version_id(tmp_path: P
     assert (out.path, out.md5, out.version_id) == ("a.csv", "abc123", None)
 
 
+@pytest.mark.parametrize("files", ["  files:\n", "  files:\n  -\n"], ids=["files", "entry"])
+def test_a_files_list_cut_short_reads_as_listing_nothing(tmp_path: Path, files: str) -> None:
+    """A pointer cut short right after `files:`, or after a bare `-`, holds
+    null there. Both parsers read it as a folder listing nothing (which push
+    refuses as an empty list), not a TypeError.
+
+    Mutation: iterate `out["files"]` as it is -> raises, red.
+    """
+    f = tmp_path / "d.dvc"
+    f.write_text("outs:\n- path: d\n  hash: md5\n" + files)
+    (out,) = parse_dvc_outs(f, "origin")
+    assert (out.path, out.files) == ("d", [])
+
+    (tmp_path / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - d\n")
+    indented = "".join("    " + line for line in files.splitlines(keepends=True))
+    (tmp_path / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: d\n      hash: md5\n" + indented
+    )
+    (out,) = parse_dvc_lock_outs(tmp_path, "origin")
+    assert (out.path, out.files) == ("d", [])
+
+
 def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None:
     """Real lab shape (a project's `data/imports/<product>/final.dvc`):
     frozen + deps[].repo + dir-suffixed md5. Detection is at the file

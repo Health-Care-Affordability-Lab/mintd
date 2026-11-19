@@ -437,7 +437,8 @@ def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
                     version_id=_extract_version_id_from_file_entry(fe, remote_name),
                     is_path_based=_is_path_based_file_entry(fe, remote_name),
                 )
-                for fe in out["files"]
+                for fe in out["files"] or []  # null in a pointer cut short right after `files:`
+                if isinstance(fe, dict)
             ]
         outs.append(DvcOut(
             target="",
@@ -656,7 +657,8 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
                         version_id=_extract_version_id_from_file_entry(fe, remote_name),
                         is_path_based=_is_path_based_file_entry(fe, remote_name),
                     )
-                    for fe in out["files"]
+                    for fe in out["files"] or []  # null in a lock cut short right after `files:`
+                    if isinstance(fe, dict)
                 ]
             else:
                 is_files_format = False
