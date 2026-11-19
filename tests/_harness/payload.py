@@ -58,8 +58,10 @@ def publish_payload(
     work: Path,
     remote: Path | Mapping[str, str],
     outs: Mapping[str, bytes | Mapping[str, bytes]],
+    *,
+    push: bool = True,
 ) -> None:
-    """`dvc add` each out and push to `remote`.
+    """`dvc add` each out and, unless `push` is False, push to `remote`.
 
     PRECONDITION: `work` is already a git worktree. Against a plain directory
     `Repo.init` raises `InitError("… not tracked by any supported SCM tool")`.
@@ -81,7 +83,8 @@ def publish_payload(
             # *process* cwd, not against its own root, so a relative one here
             # silently adds the wrong file when pytest runs from the repo root.
             repo.add(str(_write_out(work, rel, body)))
-        repo.push()
+        if push:
+            repo.push()
     finally:
         repo.close()
 
