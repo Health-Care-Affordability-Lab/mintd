@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._harness import HarnessError
 from tests._harness.expect import assert_landed_match_pointers, assert_unchanged, md5, snapshot
 from tests._harness.git import _git
 from tests._harness.producer import register
@@ -39,7 +40,8 @@ from tests._harness.s3 import BUCKET
 def _delete_pinned(product, s3_server, names: set[str]):
     """Delete the pinned versions of the primary's files `names`; return the
     fix that uploads them again and re-pins the pointer."""
-    assert s3_server.endpoint.startswith("http://127.0.0.1:"), "deletes only on the emulator"
+    if not s3_server.endpoint.startswith("http://127.0.0.1:"):  # not an assert: an xfail mark below would swallow it
+        raise HarnessError(f"refusing to delete on {s3_server.endpoint}: deletes only on the emulator")
     pointer = product.producer.work / "data" / "final.dvc"
     doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
     gone = [f for f in doc["outs"][0]["files"] if f["relpath"] in names]
