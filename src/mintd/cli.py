@@ -51,7 +51,10 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
 )
-from ._fast_sync_ops import FastSyncOps, S3AccessDenied, gitignored_pointers
+from ._fast_sync_ops import FastSyncOps, gitignored_pointers
+from . import _s3
+from ._s3 import S3AccessDenied
+from .errors import MintdError
 from ._push_verify import PushRefused
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
@@ -258,6 +261,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as e:
         args._reporter.error(str(e))
         return 1
+    except MintdError as e:
+        # The one place a seam's error is rendered: what failed, what to do, the exit code.
+        args._reporter.error(str(e), hint=e.hint)
+        return e.exit_code
     except CatalogEntryInvalid as e:
         # Every verb that reads the catalog can hit this, and only one of them
         # (`data import`, plain arm) happened to catch the pydantic half via
@@ -797,15 +804,12 @@ def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
     """Build production ``SubprocessFastSyncOps`` from config.
     Tests monkeypatch this function to inject fakes.
 
-    Probes for ``boto3`` explicitly because ``_fast_sync_ops`` uses
-    module-level optional-import sentinels and imports cleanly even when
-    boto3 is unavailable. Without this probe we'd hand back a fast-sync
+    Probes ``_s3.available()`` because ``mintd._s3`` imports cleanly even
+    when boto3 is unavailable. Without this probe we'd hand back a fast-sync
     instance whose first network call would crash.
     """
-    try:
-        import boto3  # noqa: F401 — availability probe only
-    except ImportError as exc:
-        logger.warning("fast-sync unavailable (boto3 not importable): %s", exc)
+    if not _s3.available():
+        logger.warning("fast-sync unavailable: boto3 is not importable")
         return None
     from ._fast_sync_ops import SubprocessFastSyncOps
     return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
@@ -850,10 +854,8 @@ def _resolve_s3_listing_ops(config: Config):
     isn't importable so the handler can emit a clean "boto3 unavailable"
     error instead of crashing on the first network call.
     """
-    try:
-        import boto3  # noqa: F401
-    except ImportError as exc:
-        logger.warning("data ls unavailable (boto3 not importable): %s", exc)
+    if not _s3.available():
+        logger.warning("data ls unavailable: boto3 is not importable")
         return None
     return list_product_objects
 
@@ -863,13 +865,10 @@ def _resolve_cache_ops(config: Config):
     monkeypatch this seam to inject a moto client. Probes boto3 like
     ``_resolve_fast_sync_ops`` so a missing dependency yields a clean
     ``reporter.error`` + exit 2 instead of a first-call crash."""
-    try:
-        import boto3  # noqa: F401 — availability probe only
-    except ImportError as exc:
-        logger.warning("cache unavailable (boto3 not importable): %s", exc)
+    if not _s3.available():
+        logger.warning("cache unavailable: boto3 is not importable")
         return None
-    from ._fast_sync_ops import _create_s3_client
-    return _create_s3_client
+    return _s3.create_client
 
 
 def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> RegistryGitOps:
@@ -1292,13 +1291,11 @@ def _handle_data_push(args: argparse.Namespace) -> int:
 
 
 def _share_boto3_available(reporter: Reporter) -> bool:
-    """Probe for ``boto3`` with the same posture as ``_resolve_fast_sync_ops``:
+    """Probe ``_s3.available()`` with the same posture as ``_resolve_fast_sync_ops``:
     a clean ``reporter.error`` + exit 2, never a traceback from a later
-    ``_create_s3_client`` call whose ``boto3`` is ``None``."""
-    try:
-        import boto3  # noqa: F401 — availability probe only
-    except ImportError as exc:
-        logger.warning("share unavailable (boto3 not importable): %s", exc)
+    ``_s3.create_client`` call whose ``boto3`` is ``None``."""
+    if not _s3.available():
+        logger.warning("share unavailable: boto3 is not importable")
         reporter.error(
             "share requires boto3, which is not installed",
             hint="install it: pip install 'dvc[s3]'",
@@ -3187,7 +3184,7 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
             try:
                 config = Config.load()
                 endpoint = config.storage_endpoint or "default AWS endpoint"
-                profile = config.aws_profile_name or "default"
+                profile = _s3.resolve_profile({}, config.aws_profile_name)[0] or "default"
             except Exception:
                 endpoint, profile = "default AWS endpoint", "default"
             ms_clause = f" — 200 OK, {s3_step.latency_ms}ms" if s3_step.latency_ms is not None else " — 200 OK"

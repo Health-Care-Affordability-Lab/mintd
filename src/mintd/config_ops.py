@@ -222,8 +222,10 @@ def validate_config(
 
     The schema step is load-bearing: if the config doesn't parse, the
     later steps are marked ``skipped`` (we have no values to test
-    against). The AWS profile step is informational — it reports which
-    boto3 credential source will be used but never fails. The S3 step
+    against). The AWS profile step reports the profile every S3 command
+    will use and where its name came from (``_s3.resolve_profile``); it fails
+    when that profile is named but doesn't exist, or the AWS configuration
+    can't be read, because every S3 command then fails too. The S3 step
     is only meaningful when a ``bucket`` is supplied; otherwise it's
     ``skipped``.
     """
@@ -244,8 +246,30 @@ def validate_config(
         message=f"config parses cleanly ({len(populated)} fields)",
     )
 
+    from ._s3 import available, profile_session, resolve_profile
+    from .errors import MintdError
+
     profile = config.aws_profile_name
-    if profile == "mintd":
+    named, source = resolve_profile({}, profile)
+    problem: str | None = None
+    if available():
+        try:
+            # The same check every S3 command makes first: a named profile must exist, and the
+            # AWS files must parse (boto3 reads them even when nothing is named). No network.
+            profile_session({}, profile)
+        except MintdError as e:
+            problem = f"{e}; {e.hint}"
+        except Exception as e:  # a malformed AWS config file, say: this command diagnoses it, so report it
+            problem = f"could not read the AWS configuration: {type(e).__name__}: {e}"
+    if problem is not None:
+        profile_step = ValidationStep(name="aws_profile", status="fail", message=problem)
+    elif source.startswith("named by AWS_"):
+        profile_step = ValidationStep(
+            name="aws_profile",
+            status="ok",
+            message=f"'{named}' profile, {source}",
+        )
+    elif named == "mintd":
         profile_step = ValidationStep(
             name="aws_profile",
             status="ok",
@@ -273,25 +297,20 @@ def validate_config(
 def _check_bucket(
     bucket: str, profile: str | None, endpoint_url: str | None = None
 ) -> ValidationStep:
-    try:
-        import boto3
-        from botocore.exceptions import (
-            ClientError,
-            EndpointConnectionError,
-            NoCredentialsError,
-        )
-    except ImportError:
+    from ._s3 import ClientError, EndpointConnectionError, NoCredentialsError, available, create_client
+    from .errors import MintdError
+
+    if not available():
         return ValidationStep(
             name="s3",
             status="skipped",
             message="boto3 not installed",
         )
     try:
-        if profile:
-            session = boto3.Session(profile_name=profile)
-            client = session.client("s3", endpoint_url=endpoint_url)
-        else:
-            client = boto3.client("s3", endpoint_url=endpoint_url)
+        client = create_client({"endpointurl": endpoint_url} if endpoint_url else {}, profile)
+    except MintdError as e:
+        # ValidationStep has no hint field, and render_validation prints the message only.
+        return ValidationStep(name="s3", status="fail", message=f"{e}; {e.hint}")
     except Exception as e:
         return ValidationStep(
             name="s3",

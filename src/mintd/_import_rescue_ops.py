@@ -40,16 +40,12 @@ import yaml
 from . import imports
 from ._fast_sync_ops import (
     _DEFAULT_DVC_CACHE_REL,
-    _DRIFT_404_CODES,
     _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
-    ClientError,
     DvcFileEntry,
-    boto3,
     cache_path_for,
     ensure_dir_manifest,
     is_cached,
-    _create_s3_client,
     outs_for_target,
     outs_materialized,
     parse_remote_config_text,
@@ -57,7 +53,9 @@ from ._fast_sync_ops import (
     read_cached_dir_manifest,
     fetch_to_cache,
 )
+from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
+from .errors import MintdError
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -376,7 +374,7 @@ def rescue_import_pull(
             f"producer's bucket ({dep.producer_repo}@{dep.contract_pin[:7]})"
         )
 
-    if boto3 is None:
+    if not available():
         return RescueResult(
             ok=False,
             reason="boto3 is not installed, so the producer's bucket cannot be reached",
@@ -415,7 +413,12 @@ def rescue_import_pull(
 
     # 5. Build the S3 client and fetch each uncached blob.
     try:
-        s3 = _create_s3_client(producer.remote_cfg, aws_profile_name)
+        # The producer's `profile` names a profile on the producer's machine; the
+        # consumer reads the producer's bucket with its own credentials.
+        consumer_cfg = {k: v for k, v in producer.remote_cfg.items() if k != "profile"}
+        s3 = _create_s3_client(consumer_cfg, aws_profile_name)
+    except MintdError as exc:
+        return RescueResult(ok=False, reason=str(exc), hint=exc.hint)
     except Exception as exc:
         return RescueResult(
             ok=False,

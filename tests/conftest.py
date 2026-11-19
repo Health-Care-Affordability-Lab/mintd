@@ -123,6 +123,10 @@ def _real_aws_credentials_are_unreachable(monkeypatch):
     # that wants a profile sets the env var itself; one that wants the HOME
     # FALLBACK branch deletes the env var and overrides the boom at the
     # default_credentials_path seam.
+    # An exported AWS_PROFILE names a profile every S3 client must find (mintd._s3
+    # resolve_profile), so a developer's shell must not steer the suite either.
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)  # botocore reads it first
     monkeypatch.setenv(
         "AWS_SHARED_CREDENTIALS_FILE", "/mintd-tests-no-credentials-file"
     )

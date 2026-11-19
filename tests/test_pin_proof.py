@@ -8,7 +8,8 @@ from pathlib import Path
 
 import yaml
 
-from mintd._fast_sync_ops import HeadVerdict, cache_path_for, probe_versions
+from mintd._fast_sync_ops import cache_path_for
+from mintd._s3 import HeadVerdict, probe_versions
 from mintd._pin_proof import CacheHashes, Entry, hash_cache_object, prove, publishable_scope
 
 R = "storage"

@@ -699,3 +699,45 @@ def test_entries_from_producer_pointer_reads_dvc_file():
     got = _entries_from_producer_pointer(dep, producer, fetcher=_F())
     assert got is not None
     assert {e.relpath for e in got} == {"big.dta", "small.dta"}
+
+
+def test_rescue_reads_the_producers_bucket_with_the_consumers_credentials(producer_bucket, tmp_path):
+    """The producer's remote names a profile from the producer's machine. The
+    consumer has no such profile, and can't edit the producer's .dvc/config, so
+    the rescue uses the consumer's own credentials and still lands the bytes.
+    Mutation that must redden this: pass the producer's `profile` to the client."""
+    s3, bucket = producer_bucket
+    objs = _seed_objects(s3, bucket)
+    producer = tmp_path / "producer"
+    sha = _git_repo(producer, {".dvc/config": PRODUCER_CONFIG + "    profile = producer-only\n"})
+    consumer = tmp_path / "consumer"
+    entries = _entries(objs)
+    dir_md5 = ensure_dir_manifest(consumer / ".dvc" / "cache", entries)
+    _consumer(consumer, str(producer), sha, dir_md5, len(objs["big"][0]) + len(objs["small"][0]))
+    fake = _FakeDvcOps()
+    fake.workspace = consumer
+    fake.pull_raises_for = {TARGET: DvcPullError(FIELD_SIG)}
+    summary, rep = _run_pull(consumer, fake)
+    assert (consumer / "data/imports/producer/final/big.dta").read_bytes() == objs["big"][0]
+    assert summary.error_count == 0
+
+
+def test_rescue_reports_a_missing_named_profile_with_its_hint(producer_bucket, tmp_path, monkeypatch):
+    """A profile the consumer names (AWS_PROFILE) but lacks: the rescue fails for
+    that target with the profile's own hint, not a generic credentials one."""
+    s3, bucket = producer_bucket
+    objs = _seed_objects(s3, bucket)
+    producer = tmp_path / "producer"
+    sha = _git_repo(producer, {".dvc/config": PRODUCER_CONFIG})
+    consumer = tmp_path / "consumer"
+    dir_md5 = ensure_dir_manifest(consumer / ".dvc" / "cache", _entries(objs))
+    _consumer(consumer, str(producer), sha, dir_md5, len(objs["big"][0]) + len(objs["small"][0]))
+    monkeypatch.setenv("AWS_PROFILE", "nope")
+    fake = _FakeDvcOps()
+    fake.workspace = consumer
+    fake.pull_raises_for = {TARGET: DvcPullError(FIELD_SIG)}
+    summary, rep = _run_pull(consumer, fake)
+    assert summary.error_count == 1
+    errors = " ".join(" ".join(map(str, e)) for e in rep.events_of("error"))
+    assert "AWS profile 'nope' (named by AWS_PROFILE)" in errors
+    assert "unset AWS_PROFILE" in errors

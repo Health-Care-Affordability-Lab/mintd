@@ -24,7 +24,6 @@ from mintd._fast_sync_ops import (
     SubprocessFastSyncOps,
     _check_dvc,
     cache_path_for,
-    check_bucket_versioning,
     classify_targets,
     discover_all_outs,
     ensure_dir_manifest,
@@ -45,6 +44,7 @@ from mintd._fast_sync_ops import (
     DvcFileEntry,
     DvcOut,
 )
+from mintd._s3 import check_bucket_versioning
 
 
 # ---------- helpers ----------
@@ -951,7 +951,7 @@ def test_try_fast_pull_with_missing_boto3_falls_back(tmp_path: Path) -> None:
     the orchestrator routes everything to fallback rather than crashing."""
     _write_dvc_config(tmp_path, "irrelevant")
     _write_dvc_file_md5(tmp_path, "a", "deadbeef")
-    with patch("mintd._fast_sync_ops.boto3", None), \
+    with patch("mintd._s3.boto3", None), \
          patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
@@ -2294,7 +2294,7 @@ def test_dvc_cmd_smoke() -> None:
 
 # ---------- slice B (pull-all audit fixes 2+3): retry, don't demote ----------
 #
-# Style note: fakes below patch ``mintd._fast_sync_ops.time.sleep`` so the
+# Style note: fakes below patch ``mintd._s3.time.sleep`` so the
 # capped exponential backoff is instant in tests.
 
 def _client_error(code: str, status: int = 400, op: str = "HeadObject") -> ClientError:
@@ -2315,7 +2315,7 @@ def test_is_transient_s3_error_classification() -> None:
         ReadTimeoutError,
     )
 
-    from mintd._fast_sync_ops import is_transient_s3_error
+    from mintd._s3 import is_transient_s3_error
 
     # Widened ClientError code set (503/500/RequestTimeout/SlowDown + Throttling).
     assert is_transient_s3_error(_client_error("503", 503)) is True
@@ -2342,7 +2342,7 @@ def test_check_bucket_versioning_transient_error_retried_not_disabled() -> None:
                 raise _client_error("503", 503, "GetBucketVersioning")
             return {"Status": "Enabled"}
 
-    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+    with patch("mintd._s3.time.sleep") as mock_sleep:
         assert check_bucket_versioning(_FlakyS3(), "bkt") is True
     assert calls["n"] == 3
     assert mock_sleep.call_count == 2
@@ -2363,7 +2363,7 @@ def test_spot_check_versions_transient_head_error_retried_no_drift(tmp_path: Pat
             return {"VersionId": VersionId}
 
     out = DvcOut(target="a", path="a", md5="c" * 32, is_dir=False, version_id="v1")
-    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+    with patch("mintd._s3.time.sleep") as mock_sleep:
         drift = spot_check_versions(_FlakyS3(), "bkt", "", [out], tmp_path)
     assert drift == []
     assert calls["n"] == 2
@@ -2383,7 +2383,7 @@ def test_spot_check_versions_persistent_transient_is_inconclusive_not_drift(tmp_
             raise ReadTimeoutError(endpoint_url="https://s3.example")
 
     out = DvcOut(target="a", path="a", md5="c" * 32, is_dir=False, version_id="v1")
-    with patch("mintd._fast_sync_ops.time.sleep"):
+    with patch("mintd._s3.time.sleep"):
         drift = spot_check_versions(_DeadS3(), "bkt", "", [out], tmp_path)
     assert drift == []
     assert calls["n"] == 3  # all attempts consumed
@@ -2437,7 +2437,7 @@ def test_try_fast_pull_no_credentials_named_reason_not_retried(tmp_path: Path) -
     _write_dvc_file_md5(tmp_path, "a", "deadbeef")
     with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)), \
          patch("mintd._fast_sync_ops._create_s3_client", return_value=_NoCredsS3()), \
-         patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+         patch("mintd._s3.time.sleep") as mock_sleep:
         result = SubprocessFastSyncOps().try_fast_pull(
             project_path=tmp_path, targets=["a"], remote_name="origin"
         )
@@ -2466,7 +2466,7 @@ def test_fetch_to_cache_retries_connection_reset_then_succeeds(tmp_path: Path) -
         Path(Filename).write_bytes(body)
 
     fake_s3 = type("FakeS3", (), {"download_file": staticmethod(fake_download_file)})()
-    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+    with patch("mintd._s3.time.sleep") as mock_sleep:
         assert fetch_to_cache(fake_s3, "b", "k", cp, md5) is True
     assert calls["n"] == 2
     assert mock_sleep.call_count == 1
@@ -2647,7 +2647,7 @@ def test_retry_transient_backoff_durations_pinned() -> None:
     or an unbounded backoff would otherwise pass the suite."""
     from unittest.mock import call
 
-    from mintd._fast_sync_ops import retry_transient
+    from mintd._s3 import retry_transient
 
     calls = {"n": 0}
 
@@ -2657,7 +2657,7 @@ def test_retry_transient_backoff_durations_pinned() -> None:
             raise _client_error("503", 503)
         return "ok"
 
-    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+    with patch("mintd._s3.time.sleep") as mock_sleep:
         assert retry_transient(_flaky) == "ok"
     assert calls["n"] == 3
     assert mock_sleep.call_args_list == [call(0.5), call(1.0)]
@@ -2669,9 +2669,9 @@ def test_retry_transient_backoff_caps_at_8s() -> None:
     def _dead() -> None:
         raise _client_error("503", 503)
 
-    from mintd._fast_sync_ops import retry_transient
+    from mintd._s3 import retry_transient
 
-    with patch("mintd._fast_sync_ops.time.sleep") as mock_sleep:
+    with patch("mintd._s3.time.sleep") as mock_sleep:
         with pytest.raises(ClientError):
             retry_transient(_dead, attempts=10)
     assert [c.args[0] for c in mock_sleep.call_args_list] == [

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from botocore.awsrequest import AWSResponse
 
-from mintd._fast_sync_ops import S3AccessDenied, probe_versions
+from mintd._s3 import S3AccessDenied, probe_versions
 
 
 @pytest.fixture(autouse=True)

@@ -686,7 +686,7 @@ class _CountingClient:
 
 
 def _factory(client):
-    return lambda _cfg, _prof: client
+    return lambda _cfg, _prof, **_: client
 
 
 def _cfg() -> Config:

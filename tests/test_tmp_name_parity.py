@@ -62,7 +62,7 @@ def _cache_lane(s3, bucket: str, tmp_path: Path):
         cache_pull(
             project_path=proj, config=Config(),
             reporter=Reporter(json_mode=True),
-            s3_client_factory=lambda _c, _p: s3,
+            s3_client_factory=lambda _c, _p, **_: s3,
         )
 
     return fetch, proj / "report.csv"

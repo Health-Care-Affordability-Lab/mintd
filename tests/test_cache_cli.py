@@ -30,7 +30,7 @@ def _load_config(monkeypatch: pytest.MonkeyPatch, cfg: Config) -> None:
 
 
 def _use_factory(monkeypatch: pytest.MonkeyPatch, client) -> None:
-    monkeypatch.setattr("mintd.cli._resolve_cache_ops", lambda config: (lambda _c, _p: client))
+    monkeypatch.setattr("mintd.cli._resolve_cache_ops", lambda config: (lambda _c, _p, **_: client))
 
 
 def _project(tmp_path: Path, bucket: str, prefix: str = "lab/proj") -> Path:
