@@ -147,9 +147,10 @@ class Reporter:
             return
         self._active_progress.update(self._progress_task_id, description=msg)
 
-    def info(self, msg: str) -> None:
+    def info(self, msg: str, *, soft_wrap: bool = False) -> None:
+        """soft_wrap: no newlines inserted, for a line meant to be copied."""
         if self.level >= 1 and not self.json_mode:
-            self._stderr.print(msg)
+            self._stderr.print(msg, soft_wrap=soft_wrap)
 
     def success(self, msg: str, *, elapsed_s: Optional[float] = None) -> None:
         if self.json_mode:
@@ -165,8 +166,10 @@ class Reporter:
     def error(self, msg: str, *, hint: Optional[str] = None) -> None:
         self._stderr.print(f"error: {msg}")
         if hint:
+            # soft_wrap: no newlines inserted, so a command in a hint
+            # (the install line) stays one line when copied.
             for line in hint.splitlines():
-                self._stderr.print(f"  hint: {line}")
+                self._stderr.print(f"  hint: {line}", soft_wrap=True)
 
     def result(self, payload: Any, *, pretty: Optional[Callable[[Any], str]] = None) -> None:
         if self.json_mode:

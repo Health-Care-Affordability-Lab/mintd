@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Install mintd with reflink support.
+# Install mintd's newest release, with reflink support.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
+#   curl -fsSL https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.sh | bash
 #
-# Or from a specific branch:
-#   curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/<branch>/install.sh | bash -s -- --branch <branch>
+# A given release:
+#   curl -fsSL https://github.com/Health-Care-Affordability-Lab/mintd/releases/download/vX.Y.Z/install.sh | bash
+#
+# It downloads that release's wheel, checks it against the release's SHA-256,
+# and installs it with the dependency versions in the release's
+# constraints.txt. Nothing is built from mintd's source.
 set -euo pipefail
 
 # The uv this script installs when none is found, and the oldest it accepts
@@ -19,13 +23,37 @@ version_lt() {
     [[ "$1" != "$2" && "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
 }
 
-REPO="ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git"
-BRANCH=""
+# .github/workflows/release.yml writes the release's tag on the next line;
+# it is empty in the repository's own copy.
+MINTD_TAG=""
+RELEASES="https://github.com/Health-Care-Affordability-Lab/mintd/releases"
+
+# True when file $1's SHA-256 is the first field of file $2.
+sha256_matches() {
+    local have
+    have=$( { sha256sum "$1" 2>/dev/null || shasum -a 256 "$1"; } | awk '{print $1}')
+    [[ -n "$have" && "$have" == "$(awk '{print $1; exit}' "$2")" ]]
+}
+
+# Everything runs from main, called on the last line: a download cut short
+# defines nothing, runs nothing, and so installs nothing.
+main() {
+
+# The repository's own copy (an old install line) runs the newest release's
+# install.sh instead. Fetching it is kept apart from running it, so a failed
+# install is never reported as "no release".
+if [[ -z "$MINTD_TAG" ]]; then
+    [[ -z "${MINTD_FORWARDED:-}" ]] || { echo "error: the newest release's install.sh has no tag in it" >&2; exit 1; }
+    script=$(curl -fsSL "$RELEASES/latest/download/install.sh") || {
+        echo "error: no mintd release is out yet; see $RELEASES" >&2; exit 1; }
+    export MINTD_FORWARDED=1
+    exec bash -c "$script" install.sh "$@"
+fi
+
 WITH_SCHEMA=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --branch) BRANCH="$2"; shift 2 ;;
         --with-schema) WITH_SCHEMA=1; shift ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -43,25 +71,30 @@ else
     fi
 fi
 
-GIT_URL="git+${REPO}"
-if [[ -n "$BRANCH" ]]; then
-    GIT_URL="${GIT_URL}@${BRANCH}"
-fi
+WHEEL="mintd-${MINTD_TAG#v}-py3-none-any.whl"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+echo "Downloading mintd ${MINTD_TAG}..."
+for f in "$WHEEL" "$WHEEL.sha256" constraints.txt; do
+    curl -fsSL -o "$TMP/$f" "$RELEASES/download/$MINTD_TAG/$f"
+done
+sha256_matches "$TMP/$WHEEL" "$TMP/$WHEEL.sha256" || {
+    echo "error: $WHEEL does not match its SHA-256; nothing was installed." >&2; exit 1; }
 
-# uv tool install accepts PEP 508 extras when the spec is suffixed `[extra]`.
-# Wrap the whole spec so the shell doesn't glob the brackets.
+# A direct reference carries the extra; quoted so the shell doesn't glob it.
 if [[ "$WITH_SCHEMA" -eq 1 ]]; then
-    INSTALL_SPEC="${GIT_URL}[schema]"
+    INSTALL_SPEC="mintd[schema] @ file://$TMP/$WHEEL"
 else
-    INSTALL_SPEC="$GIT_URL"
+    INSTALL_SPEC="$TMP/$WHEEL"
 fi
 
-echo "Installing mintd..."
+echo "Installing mintd ${MINTD_TAG}..."
 # Pin Python to the newest version CI tests (.github/workflows/test.yml).
 # Unpinned, uv uses the first Python it finds or downloads the newest, which
 # can outrun wheels for dvc's compiled deps (pygit2 had none for 3.15 at
 # first, and its source build needs libgit2).
-uv tool install --force --reinstall --refresh --python 3.13 "$INSTALL_SPEC"
+uv tool install --force --reinstall --refresh --python 3.13 \
+    --constraints "$TMP/constraints.txt" "$INSTALL_SPEC"
 
 # Locate the tool's Python interpreter
 TOOL_PYTHON="$HOME/.local/share/uv/tools/mintd/bin/python"
@@ -77,7 +110,8 @@ if [[ ! -f "$TOOL_PYTHON" ]]; then
 fi
 
 echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
-uv pip install --python "$TOOL_PYTHON" cffi reflink || {
+# With the release's constraints, so cffi is the version the release pins.
+uv pip install --python "$TOOL_PYTHON" --constraints "$TMP/constraints.txt" cffi reflink || {
     echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
 }
 
@@ -135,3 +169,7 @@ fi
 echo ""
 echo "Installed uv tools:"
 uv tool list 2>/dev/null || echo "  (could not run 'uv tool list')" >&2
+
+}
+
+main "$@"

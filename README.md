@@ -44,55 +44,34 @@ See [`vocab.md`](vocab.md) for the long version.
 
 ### One-liner (recommended)
 
-Prerequisite: an SSH key on your GitHub account that has access to this
-repo (`ssh -T git@github.com` should greet you).
-
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
+curl -fsSL https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
+irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1 | iex
 ```
 
-Both scripts install `uv` if missing, run `uv tool install --python 3.13
-git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
-(isolated venv on the newest Python CI tests, `mintd` on PATH), then layer `cffi + reflink` into the
-tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
-to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
+These install the newest release the maintainer has promoted. Both scripts
+install `uv` 0.13.9 if it is missing, download the release's wheel, check it
+against the release's SHA-256, and run `uv tool install --python 3.13` with the
+release's `constraints.txt`, which pins every dependency (DVC included) to the
+versions that release was tested with. `uv tool install` does not check the
+hashes in that file, so the dependencies are pinned by version, not by hash.
+Then the scripts add `cffi` (pinned the same way) and `reflink` (built on your
+machine, not pinned) to the tool's environment, so DVC's reflink cache mode
+works on APFS / XFS / Btrfs.
 
-
-### Manual install
-
-```bash
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
-# irm https://astral.sh/uv/install.ps1 | iex       # Windows
-
-uv tool install --python 3.13 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
-```
-
-Or `pipx install git+…` / `pip install --user git+…` if you prefer.
-(`pip install --user` needs the user-scripts dir on PATH — on Windows
-that's `%APPDATA%\Python\Python3XX\Scripts`.)
-
-Optionally add reflink support, which the one-liner does for you:
-
-```bash
-uv pip install --python ~/.local/share/uv/tools/mintd/bin/python cffi reflink
-```
-
-You'll also need **DVC** with the S3 backend, since `mintd` shells out to
-it for every data operation:
-
-```bash
-pip install 'dvc[s3]'
-# or: brew install dvc / winget install iterative.dvc
-```
+- To update, run the same line again. `uv tool upgrade mintd` does not apply.
+- For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on
+  Windows run
+  `& ([scriptblock]::Create((irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1))) -WithSchema`.
+- For a given release, use `releases/download/vX.Y.Z/` in place of
+  `releases/latest/download/`.
 
 Verify:
 
@@ -100,6 +79,11 @@ Verify:
 mintd --version
 mintd --help
 ```
+
+`mintd --version` and bare `mintd` also say, on stderr, when a newer release
+is out, or that this version was withdrawn, with the line that updates. They
+look it up at most once a day, give up after 2 seconds, and say nothing
+offline or under `--json` or `-q`.
 
 > Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them
 > under WSL2, Git Bash, or MSYS2 — there are no `.ps1` siblings yet.

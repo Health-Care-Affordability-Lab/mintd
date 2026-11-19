@@ -68,6 +68,8 @@ class Config(BaseModel):
                 data = yaml.safe_load(fh) or {}
         except yaml.YAMLError as e:
             raise ConfigError(f"malformed YAML in {path}: {e}") from e
+        except UnicodeDecodeError as e:  # e.g. saved as Latin-1, or UTF-16 by PowerShell 5.1
+            raise ConfigError(f"{path} is not UTF-8 text: {e}") from e
         try:
             return cls.model_validate(data)
         except ValidationError as e:

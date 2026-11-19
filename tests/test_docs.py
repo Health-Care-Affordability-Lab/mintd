@@ -11,7 +11,7 @@ import argparse
 import re
 from pathlib import Path
 
-from mintd.cli import _build_parser
+from mintd.cli import _build_parser, _install_line
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = [REPO / "README.md", REPO / "vocab.md", REPO / "RELEASING.md"]
@@ -106,3 +106,15 @@ def test_vocab_headings_name_code_that_exists() -> None:
         if not re.search(rf"(?m)^\s*(?:class|def)\s+{n}\b|^\s*{n}\s*[:=]|\bimport\b.*\b{n}\b", src)
     )
     assert not missing, "vocab.md headings name code that is not in src/: " + ", ".join(missing)
+
+
+def test_readme_gives_the_release_install_lines() -> None:
+    """README shows exactly the lines mintd itself prints, and no line that
+    installs from a branch instead of a promoted release."""
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert _install_line(windows=False) in readme
+    assert _install_line(windows=True) in readme
+    for path in (REPO / "README.md", REPO / "install.sh", REPO / "install.ps1"):
+        text = path.read_text(encoding="utf-8")
+        assert "raw.githubusercontent.com" not in text, path.name
+        assert "git+ssh" not in text and "git+https" not in text, path.name

@@ -127,6 +127,49 @@ from .publish import (
 
 logger = logging.getLogger(__name__)
 
+_RELEASES = "https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download"
+
+
+def _install_line(*, with_schema: bool = False, windows: bool = os.name == "nt") -> str:
+    """The one line that installs, or updates to, the newest promoted release.
+
+    README.md shows exactly these lines (tests/test_docs.py checks it).
+    """
+    if windows:
+        if with_schema:
+            return f"& ([scriptblock]::Create((irm {_RELEASES}/install.ps1))) -WithSchema"
+        return f"irm {_RELEASES}/install.ps1 | iex"
+    return f"curl -fsSL {_RELEASES}/install.sh | bash" + (" -s -- --with-schema" if with_schema else "")
+
+
+def _reinstall_hint(*, windows: bool = os.name == "nt") -> str:
+    """The [schema] hint. On Windows it says the line is for PowerShell, not cmd."""
+    where = ", in PowerShell" if windows else ""
+    return f"reinstall mintd with the [schema] extra{where}: {_install_line(with_schema=True, windows=windows)}"
+
+
+def _release_notice(args: argparse.Namespace) -> None:
+    """On stderr, when a newer release is out or this one was withdrawn.
+
+    Never under --json or -q, and never an error: `mintd --version` must work
+    with a broken config and offline. stdout stays exactly `mintd <version>`.
+    """
+    # No stderr (`2>&-`): rich would fall back to stdout, which must stay one line.
+    if args.json_out or args.quiet or sys.stderr is None:
+        return
+    from ._release_check import is_release, newest_release, release_notice
+
+    try:
+        cache_dir = Config.load().resolved_cache_dir()
+    except (ConfigError, OSError):
+        return
+    notice = release_notice(__version__, newest_release(cache_dir, __version__))
+    if notice and is_release(__version__):
+        where = ", in PowerShell" if os.name == "nt" else ""
+        notice += f"\n  update{where}: {_install_line()}"
+    if notice:  # a dev build gets no update line: the release would be older
+        args._reporter.info(notice, soft_wrap=True)
+
 
 class MetadataSchemaTooOld(MintdError):
     hint = "run 'mintd update metadata' to migrate this project to v2"
@@ -218,11 +261,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     args._reporter = _build_reporter(args)
-    args._reporter.install_log_bridge()
+    if args.show_version:
+        print(f"mintd {__version__}")
+        _release_notice(args)
+        return 0
     handler = getattr(args, "_handler", None)
     if handler is None:
         parser.print_help()
+        if args.command is None:  # bare `mintd`, not `mintd data`
+            _release_notice(args)
         return 0
+    # Only where the finally below removes it: a bridge left installed keeps
+    # writing to whatever stderr it captured.
+    args._reporter.install_log_bridge()
     try:
         return handler(args)
     except KeyboardInterrupt:
@@ -356,7 +407,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="mintd: Lightweight data product framework for research labs",
     )
     _add_global_output_flags(parser)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    # Not dest="version": publish's positional `version` shares the namespace.
+    parser.add_argument("--version", dest="show_version", action="store_true",
+                        help="show mintd's version, and say on stderr when a newer release is out")
     subs = parser.add_subparsers(dest="command")
 
     p_init = subs.add_parser("init", help="Create a new mintd project")
@@ -1510,6 +1563,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
         ColumnNamesLookLikeData,
+        SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
     )
@@ -1525,6 +1579,7 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
         _hint((ValueError, RuntimeError), "check file format support (.dta, .csv, .json, .parquet) and integrity"),
         _hint(ColumnNamesLookLikeData),  # a ValueError, but it names its own fix
         _hint(FileNotFoundError, f"add supported data files under {data_dir} or pass --data-dir"),
+        _hint(SchemaExtraNotInstalled, _reinstall_hint()),
         reporter.status("Generating schema..."),
     ):
         generate_schema_file(
