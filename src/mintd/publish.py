@@ -306,6 +306,9 @@ def _apply_publish(
                 f"dvc push failed: {exc}",
                 recovery_hint="metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.",
             ) from exc
+        except BaseException:  # Ctrl-C or a wall timeout
+            _atomic_write_json(metadata_path, original_metadata_json)
+            raise
     changed: list[str] | None = None
     if prepared is not None:
         try:

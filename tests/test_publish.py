@@ -9,6 +9,7 @@ from mintd.publish import (
     InvalidCurrentVersion, _resolve_version
 )
 from mintd._dvc_ops import DvcNotInstalled, DvcPushError
+from mintd._subprocess import WallTimeoutExceeded
 from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
@@ -1564,11 +1565,19 @@ def test_publish_rerun_at_the_same_version_commits_the_reattached_pointers(tmp_p
     assert f"version_id: {v}" in committed
 
 
-def test_publish_after_a_failed_push_leaves_a_clean_tree_to_rerun(tmp_path, s3_versioned, monkeypatch):
+@pytest.mark.parametrize("error, raised", [
+    (DvcPushError("dvc push exited 1"), DvcPushFailed),
+    (KeyboardInterrupt(), KeyboardInterrupt),
+    (WallTimeoutExceeded(1.0), WallTimeoutExceeded),
+], ids=["fails", "ctrl-c", "times-out"])
+def test_publish_after_a_failed_push_leaves_a_clean_tree_to_rerun(tmp_path, s3_versioned, monkeypatch, error, raised):
     """The repair re-attached an ID and DVC cut the pointer short before the
-    push failed. The pointer goes back as it was, so with metadata.json rolled
-    back the tree is clean and `mintd publish` can simply run again.
-    Mutation: drop `uploading` in `_apply_publish` -> the cut pointer stays, red."""
+    push failed, was interrupted or timed out. The pointer goes back as it was,
+    and metadata.json is rolled back, so the tree is clean and `mintd publish`
+    can simply run again.
+    Mutations: drop `uploading` in `_apply_publish` -> the cut pointer stays,
+    red; drop the push's `except BaseException` -> metadata.json keeps 0.1.1
+    on Ctrl-C and timeout, red."""
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
     s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
@@ -1580,13 +1589,15 @@ def test_publish_after_a_failed_push_leaves_a_clean_tree_to_rerun(tmp_path, s3_v
     def dvc_cuts_it_short(cwd, targets):
         assert pointer.read_bytes() != before  # the repair wrote
         pointer.write_bytes(pointer.read_bytes()[:20])
-        raise DvcPushError("dvc push exited 1")
+        raise error
 
     dvc.on_push = dvc_cuts_it_short
-    with pytest.raises(DvcPushFailed) as excinfo:
+    with pytest.raises(raised) as excinfo:
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc,
                         git_ops=_FakeRegistryGitOps())
-    assert excinfo.value.recovery_hint == "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`."
+    if raised is DvcPushFailed:
+        assert excinfo.value.recovery_hint == (
+            "metadata.json was rolled back; fix the DVC remote and rerun `mintd publish`.")
     assert pointer.read_bytes() == before
     status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, check=True, capture_output=True, text=True)
     assert status.stdout == ""
