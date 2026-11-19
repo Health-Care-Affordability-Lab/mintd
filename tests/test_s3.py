@@ -122,11 +122,12 @@ def test_the_push_check_pools_as_many_connections_as_its_probe_threads(client_po
 
 @pytest.fixture
 def credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A shared credentials file holding `[present]` and `[other]`, and no config file."""
+    """A shared credentials file holding `[present]`, `[other]` and `[committed]`, and no config file."""
     creds = tmp_path / "credentials"
     creds.write_text(
         "[present]\naws_access_key_id = AKIAPRESENT\naws_secret_access_key = s\n"
         "[other]\naws_access_key_id = AKIAOTHER\naws_secret_access_key = s\n"
+        "[committed]\naws_access_key_id = AKIACOMMITTED\naws_secret_access_key = s\n"
     )
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
@@ -141,28 +142,51 @@ def _key(client) -> str:
     return client._request_signer._credentials.access_key
 
 
-@pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE"])
-def test_a_named_profile_that_is_missing_fails_and_says_where_the_name_came_from(
-    credentials: Path, monkeypatch: pytest.MonkeyPatch, source: str,
+@pytest.mark.parametrize(("remote", "env", "message", "hint"), [
+    pytest.param({"profile": "nope"}, {}, "AWS profile 'nope' (named in .dvc/config)",
+                 "add a [nope] section there, or remove `profile` from the remote in .dvc/config (or .dvc/config.local)",
+                 id="the-remote"),
+    pytest.param({}, {"AWS_PROFILE": "nope"}, "AWS profile 'nope' (named by AWS_PROFILE)",
+                 "add a [nope] section there, or unset AWS_PROFILE", id="AWS_PROFILE"),
+    pytest.param({}, {"AWS_DEFAULT_PROFILE": "nope"}, "AWS profile 'nope' (named by AWS_DEFAULT_PROFILE)",
+                 "add a [nope] section there, or unset AWS_DEFAULT_PROFILE", id="AWS_DEFAULT_PROFILE"),
+    pytest.param({}, {"AWS_PROFILE": ""}, "AWS profile '' (named by AWS_PROFILE)",
+                 "unset AWS_PROFILE, or set it to a profile that exists", id="an-empty-AWS_PROFILE"),
+    pytest.param({"profile": ""}, {}, "AWS profile '' (named in .dvc/config)",
+                 "remove `profile` from the remote in .dvc/config (or .dvc/config.local), or set it to a profile that exists",
+                 id="an-empty-remote-profile"),
+])
+def test_a_named_profile_that_is_missing_is_an_error_saying_what_named_it(
+    credentials: Path, monkeypatch: pytest.MonkeyPatch, remote: dict, env: dict, message: str, hint: str,
 ) -> None:
-    """Mutation that must redden this: fall back to the default chain on ProfileNotFound."""
+    """A missing named profile is an error, never a fallback to other credentials, and it
+    says which setting named it. An empty name still names a profile, as botocore and dvc
+    read it (`dvc remote modify --local <remote> profile ""` writes `profile = ""`).
+    Mutations that must redden this: fall back to the default chain on ProfileNotFound;
+    stop reading AWS_DEFAULT_PROFILE; treat an empty variable, or an empty remote profile,
+    as naming nothing. mintd's own profile here is `other`, which exists, so a fallback to it
+    would succeed and fail the test."""
     from mintd import _s3
     from mintd.errors import MintdError
 
-    remote = {"profile": "nope"} if source == "dvc-config" else {}
-    if source == "AWS_PROFILE":
-        monkeypatch.setenv("AWS_PROFILE", "nope")
+    for var, value in env.items():
+        monkeypatch.setenv(var, value)
     with pytest.raises(MintdError) as raised:
-        _s3.create_client(remote, "mintd")
-    where = "named in .dvc/config" if source == "dvc-config" else "named by AWS_PROFILE"
-    assert str(raised.value) == f"AWS profile 'nope' ({where}) isn't in {credentials}"
-    assert raised.value.hint.startswith("add a [nope] section there, or ")
+        _s3.create_client(remote, "other")
+    assert str(raised.value) == f"{message} isn't in {credentials}"
+    assert raised.value.hint == hint
 
 
-def test_a_named_profile_that_exists_is_used(credentials: Path) -> None:
+@pytest.mark.parametrize(("remote", "key"), [
+    pytest.param({"profile": "present"}, "AKIAPRESENT", id="a-named-profile-that-exists"),
+    pytest.param({}, "AKIAENV", id="nothing-named-the-default-chain"),
+])
+def test_the_client_signs_with_the_profile_it_resolves(credentials: Path, remote: dict, key: str) -> None:
+    """A named profile that exists is used; with nothing named, boto3's default chain is,
+    on purpose, so CI and sandboxes keep working."""
     from mintd import _s3
 
-    assert _key(_s3.create_client({"profile": "present"}, None)) == "AKIAPRESENT"
+    assert _key(_s3.create_client(remote, None)) == key
 
 
 @pytest.mark.parametrize(("remote", "env", "mintd", "want"), [
@@ -187,12 +211,6 @@ def test_the_profile_order_is_the_remote_then_aws_profile_then_mintd(
     assert _s3.resolve_profile(remote, mintd) == want
 
 
-def test_nothing_named_uses_the_default_chain(credentials: Path) -> None:
-    from mintd import _s3
-
-    assert _key(_s3.create_client({}, None)) == "AKIAENV"
-
-
 def test_data_pull_stops_on_a_missing_named_profile_and_never_falls_back_to_dvc(
     credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -215,21 +233,36 @@ def test_data_pull_stops_on_a_missing_named_profile_and_never_falls_back_to_dvc(
     assert "dvc pull" not in err
 
 
-def test_config_validate_reports_the_profile_it_checks_and_keeps_the_hint(
-    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With AWS_PROFILE naming a profile that exists, the profile step is ok and says which
+    profile it checked and what named it."""
     from mintd.config_ops import validate_config
 
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "other")
-    profile_step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
-    assert profile_step.message == "'other' profile, named by AWS_PROFILE"
+    step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
+    assert (step.status, step.message) == ("ok", "'other' profile, named by AWS_PROFILE")
+
+
+@pytest.mark.parametrize(("bucket", "step_name"), [
+    pytest.param(None, "aws_profile", id="the-profile-step"),
+    pytest.param("b", "s3", id="the-s3-step-with-a-bucket"),
+])
+def test_config_validate_fails_a_missing_named_profile_with_its_hint(
+    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str | None, step_name: str,
+) -> None:
+    """Every S3 command fails on it, so validate can't call it ok, and the hint says how to fix it.
+    Mutations that must redden this: drop the existence check in the profile step; drop the hint."""
+    from mintd.config_ops import validate_config
+
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "nope")
-    s3_step = next(s for s in validate_config(cfg, bucket="b") if s.name == "s3")
-    assert s3_step.status == "fail"
-    assert "AWS profile 'nope' (named by AWS_PROFILE)" in s3_step.message
-    assert "add a [nope] section there, or unset AWS_PROFILE" in s3_step.message
+    step = next(s for s in validate_config(cfg, bucket=bucket) if s.name == step_name)
+    assert step.status == "fail"
+    assert "AWS profile 'nope' (named by AWS_PROFILE)" in step.message
+    assert "add a [nope] section there, or unset AWS_PROFILE" in step.message
 
 
 @pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE", "empty-in-config.local"])
@@ -259,76 +292,38 @@ def test_dvc_also_fails_on_a_missing_named_profile(s3_server, real_dvc, tmp_path
     assert ("profile ()" if source.startswith("empty") else "nope") in r.stdout + r.stderr
 
 
-def test_a_profile_only_aws_default_profile_names_is_named_in_the_error(credentials: Path, monkeypatch) -> None:
-    """botocore also reads AWS_DEFAULT_PROFILE; the error names it, never 'None'."""
-    from mintd import _s3
-    from mintd.errors import MintdError
-
-    monkeypatch.setenv("AWS_DEFAULT_PROFILE", "nope")
-    with pytest.raises(MintdError) as raised:
-        _s3.create_client({}, None)
-    assert "AWS profile 'nope' (named by AWS_DEFAULT_PROFILE)" in str(raised.value)
-    assert raised.value.hint.endswith("unset AWS_DEFAULT_PROFILE")
-
-
-def test_a_config_local_profile_overrides_the_committed_one(credentials: Path, tmp_path: Path) -> None:
-    """dvc lays .dvc/config.local over .dvc/config, so mintd does too: a committed
-    profile this machine lacks, overridden locally by one it has, is no error.
-    Mutation that must redden this: read .dvc/config alone in get_remote_config."""
-    from mintd import _s3
-    from mintd._fast_sync_ops import get_remote_config
-
-    (tmp_path / ".dvc").mkdir()
-    (tmp_path / ".dvc" / "config").write_text("['remote \"origin\"']\n    url = s3://b/p\n    profile = nope\n")
-    (tmp_path / ".dvc" / "config.local").write_text(
-        "['remote \"origin\"']\n    profile = present\n    url = s3://scratch/x\n    endpointurl = http://localhost:9\n"
-    )
-    cfg = get_remote_config(tmp_path, "origin")
-    # Only the profile: the committed config stays the remote's location of record.
-    assert cfg == {"url": "s3://b/p", "profile": "present"}
-    assert _key(_s3.create_client(cfg, None)) == "AKIAPRESENT"
-
-
-@pytest.mark.parametrize("level", ["config", "config.local"])
-@pytest.mark.parametrize("value", ['"mintd"', "'mintd'", "mintd # mine", '"mintd" # mine'])
-def test_a_quoted_or_commented_profile_reads_as_dvc_reads_it(real_dvc, tmp_path: Path, value: str, level: str) -> None:
-    """A hand-edited `profile = "mintd"` or `profile = mintd # mine` names `mintd` for dvc
-    (configobj strips one pair of quotes and an unquoted inline comment), so it does for
-    fast sync, the cache lane and the push check too.
-    Mutation that must redden this: drop the stripping in get_remote_config or merged_remote."""
+@pytest.mark.parametrize("level", ["config", "config.local", "config.local-over-a-committed-profile"])
+@pytest.mark.parametrize(("value", "dvc_reads"), [
+    pytest.param('"mintd"', "mintd", id="double-quoted"),
+    pytest.param("'mintd'", "mintd", id="single-quoted"),
+    pytest.param("mintd # mine", "mintd", id="an-inline-comment"),
+    pytest.param('"mintd" # mine', "mintd", id="quoted-with-a-comment"),
+    pytest.param('""', "", id="empty-double-quotes"),
+    pytest.param("''", "", id="empty-single-quotes"),
+    pytest.param("", "", id="nothing-after-the-equals"),
+])
+def test_mintd_reads_a_hand_edited_profile_as_dvc_reads_it(real_dvc, tmp_path: Path, value: str, dvc_reads: str, level: str) -> None:
+    """dvc's config reader (configobj) strips one pair of matching quotes and an unquoted inline
+    comment, so `profile = "mintd"` and `profile = mintd # mine` name `mintd`, and `profile = ""`
+    names the empty profile, which then fails as missing. Fast sync, the cache lane
+    (`get_remote_config`) and the push check (`merged_remote`) read every form as dvc does, in
+    `.dvc/config`, in `.dvc/config.local` alone (`dvc remote modify --local`), and in a
+    `.dvc/config.local` laid over a committed profile.
+    Mutations that must redden this: drop the stripping in get_remote_config or in merged_remote."""
     from mintd._fast_sync_ops import get_remote_config
     from mintd._push_verify import merged_remote
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
     remote = "['remote \"storage\"']\n"
-    (tmp_path / ".dvc" / "config").write_text(f"[core]\n    remote = storage\n{remote}    url = s3://b/p\n")
-    with (tmp_path / ".dvc" / level).open("a") as f:
-        f.write(f"{remote if level == 'config.local' else ''}    profile = {value}\n")
+    committed = "    profile = committed\n" if level == "config.local-over-a-committed-profile" else ""
+    (tmp_path / ".dvc" / "config").write_text(f"[core]\n    remote = storage\n{remote}    url = s3://b/p\n{committed}")
+    target = "config" if level == "config" else "config.local"
+    with (tmp_path / ".dvc" / target).open("a") as f:
+        f.write(f"{remote if target == 'config.local' else ''}    profile = {value}\n")
 
-    dvc_reads = real_dvc(["config", "remote.storage.profile"], cwd=tmp_path, check=True).stdout.strip()
-    assert dvc_reads == "mintd"
+    assert real_dvc(["config", "remote.storage.profile"], cwd=tmp_path, check=True).stdout.strip() == dvc_reads
     assert get_remote_config(tmp_path, "storage")["profile"] == dvc_reads
     assert merged_remote(tmp_path, "storage")["profile"] == dvc_reads
-
-
-@pytest.mark.parametrize("value", ['""', "''", ""])
-def test_an_empty_remote_profile_is_named_and_missing_as_dvc_reads_it(credentials: Path, tmp_path: Path, value: str) -> None:
-    """`dvc remote modify --local <remote> profile ""` writes `profile = ""`, which dvc reads
-    as profile '' and fails on (test_dvc_also_fails_on_a_missing_named_profile). mintd stops
-    too, never falling back to other credentials.
-    Mutation that must redden this: test the remote's profile by truthiness in resolve_profile."""
-    from mintd import _s3
-    from mintd._fast_sync_ops import get_remote_config
-    from mintd._push_verify import merged_remote
-    from mintd.errors import MintdError
-
-    (tmp_path / ".dvc").mkdir()
-    (tmp_path / ".dvc" / "config").write_text("['remote \"storage\"']\n    url = s3://b/p\n    profile = present\n")
-    (tmp_path / ".dvc" / "config.local").write_text(f"['remote \"storage\"']\n    profile = {value}\n")
-    for cfg in (get_remote_config(tmp_path, "storage"), merged_remote(tmp_path, "storage")):
-        with pytest.raises(MintdError) as raised:
-            _s3.create_client(cfg, "other")
-        assert "AWS profile '' (named in .dvc/config)" in str(raised.value)
 
 
 def test_a_pull_of_imports_only_never_checks_the_projects_own_profile(credentials: Path, tmp_path: Path) -> None:
@@ -347,20 +342,6 @@ def test_a_pull_of_imports_only_never_checks_the_projects_own_profile(credential
     )
     result = SubprocessFastSyncOps().try_fast_pull(project_path=tmp_path, targets=["imp"], remote_name="origin")
     assert result.fallback_targets == ["imp"]
-
-
-def test_config_validate_fails_a_missing_named_profile_without_a_bucket(credentials: Path, tmp_path, monkeypatch) -> None:
-    """Every S3 command fails on it, so validate can't call it ok.
-    Mutation that must redden this: drop the existence check in the profile step."""
-    from mintd.config_ops import validate_config
-
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text("registry_url: x\n")
-    monkeypatch.setenv("AWS_PROFILE", "nope")
-    step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
-    assert step.status == "fail"
-    assert "AWS profile 'nope' (named by AWS_PROFILE)" in step.message
-    assert "add a [nope] section there, or unset AWS_PROFILE" in step.message
 
 
 def test_the_config_validate_cli_prints_the_hint_and_names_the_profile_it_checks(
@@ -391,41 +372,26 @@ def test_the_config_validate_cli_prints_the_hint_and_names_the_profile_it_checks
     assert "(profile: other)" in out
 
 
-def test_an_empty_aws_profile_names_the_empty_profile_as_botocore_does(credentials: Path, monkeypatch) -> None:
-    """botocore reads a set-but-empty AWS_PROFILE as profile '' and fails; so do we,
-    with a message that names it, never 'None'."""
-    from mintd import _s3
-    from mintd.errors import MintdError
-
-    monkeypatch.setenv("AWS_PROFILE", "")
-    with pytest.raises(MintdError) as raised:
-        _s3.create_client({}, None)
-    assert "AWS profile '' (named by AWS_PROFILE)" in str(raised.value)
-    assert raised.value.hint == "unset AWS_PROFILE, or set it to a profile that exists"
-
-
+@pytest.mark.parametrize("named", ["present", None], ids=["a-named-profile", "nothing-named"])
 def test_config_validate_reports_an_unreadable_aws_config_instead_of_crashing(
-    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: str | None,
 ) -> None:
-    """The diagnostic command reports a malformed AWS config file as a failed step.
-    Mutation that must redden this: catch only MintdError in the profile step."""
+    """The diagnostic command reports a malformed AWS config file as a failed step. Named or
+    not, boto3 parses the files, so every S3 command would fail.
+    Mutations that must redden this: catch only MintdError in the profile step; check only
+    when a profile is named (the nothing-named case)."""
     from mintd.config_ops import validate_config
 
     bad = tmp_path / "bad-aws-config"
     bad.write_text("this is not ini\n[profile x\n")
     monkeypatch.setenv("AWS_CONFIG_FILE", str(bad))
+    if named:
+        monkeypatch.setenv("AWS_PROFILE", named)
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
-    # Named or not: boto3 parses the files either way, so every S3 command would fail.
-    # Mutation that must redden the second case: check only when a profile is named.
-    for named in ("present", None):
-        if named:
-            monkeypatch.setenv("AWS_PROFILE", named)
-        else:
-            monkeypatch.delenv("AWS_PROFILE", raising=False)
-        step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
-        assert step.status == "fail", named
-        assert step.message.startswith("could not read the AWS configuration: "), named
+    step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
+    assert step.status == "fail"
+    assert step.message.startswith("could not read the AWS configuration: ")
 
 
 def _committed_and_local(tmp_path: Path, local: str) -> Path:
@@ -435,23 +401,30 @@ def _committed_and_local(tmp_path: Path, local: str) -> Path:
     return tmp_path
 
 
-def test_a_config_local_without_this_remotes_section_leaves_the_committed_profile(tmp_path: Path) -> None:
-    """Mutation that must redden this: stop catching the missing section (KeyError)."""
+@pytest.mark.parametrize(("local", "profile", "key"), [
+    pytest.param("['remote \"origin\"']\n    profile = present\n    url = s3://scratch/x\n    endpointurl = http://localhost:9\n",
+                 "present", "AKIAPRESENT", id="its-profile-crosses-and-nothing-else"),
+    pytest.param("['remote \"other\"']\n    profile = present\n", "committed", "AKIACOMMITTED", id="no-section-for-this-remote"),
+    pytest.param("['remote \"origin\"']\n    profile = present\n    sse_kms_key_id = alias/x%y\n",
+                 "present", "AKIAPRESENT", id="a-percent-sign-in-another-key"),
+])
+def test_config_local_lends_the_committed_remote_only_its_profile(
+    credentials: Path, tmp_path: Path, local: str, profile: str, key: str,
+) -> None:
+    """dvc lays `.dvc/config.local` over `.dvc/config`, so a profile set there for this remote
+    is the one this machine uses, and the client signs with it. Every other key stays the
+    committed one: the committed config is the remote's location of record. A `config.local`
+    with no section for this remote leaves the committed profile, and a `%` in it is literal,
+    as in dvc.
+    Mutations that must redden this: read .dvc/config alone; let every config.local key cross;
+    raise when config.local has no section for this remote; parse with configparser's
+    %-interpolation."""
+    from mintd import _s3
     from mintd._fast_sync_ops import get_remote_config
 
-    project = _committed_and_local(tmp_path, "['remote \"other\"']\n    profile = present\n")
-    assert get_remote_config(project, "origin") == {"url": "s3://b/p", "profile": "committed"}
-
-
-def test_a_percent_sign_in_config_local_keeps_the_local_profile(tmp_path: Path) -> None:
-    """dvc's config has no %-interpolation; a `%` in another key must not drop the
-    local profile. Mutation that must redden this: parse with configparser's default interpolation."""
-    from mintd._fast_sync_ops import get_remote_config
-
-    project = _committed_and_local(
-        tmp_path, "['remote \"origin\"']\n    profile = present\n    sse_kms_key_id = alias/x%y\n"
-    )
-    assert get_remote_config(project, "origin") == {"url": "s3://b/p", "profile": "present"}
+    cfg = get_remote_config(_committed_and_local(tmp_path, local), "origin")
+    assert cfg == {"url": "s3://b/p", "profile": profile}
+    assert _key(_s3.create_client(cfg, None)) == key
 
 
 def test_an_unreadable_config_local_is_an_error_not_a_silent_fallback(tmp_path: Path) -> None:
