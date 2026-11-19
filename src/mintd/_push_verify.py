@@ -13,7 +13,6 @@ and only its verdict may print a ✓.
 
 from __future__ import annotations
 
-import configparser
 import contextlib
 import hashlib
 import os
@@ -27,7 +26,7 @@ from typing import Any
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
-from ._dvc_state import discover_all_outs, dvc_config_value, parse_s3_url, pipeline_files
+from ._dvc_state import default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
@@ -58,53 +57,8 @@ class PushRefused(MintdError):
         self.hint = hint
 
 
-def _parsers(root: Path) -> list[configparser.ConfigParser]:
-    found = []
-    for name in ("config", "config.local"):
-        parser = configparser.ConfigParser(strict=False, interpolation=None)
-        try:
-            parser.read(root / ".dvc" / name, encoding="utf-8")
-        except configparser.Error:
-            continue
-        found.append(parser)
-    return found
-
-
-def _section(parser: configparser.ConfigParser, remote: str) -> dict[str, str]:
-    from ._storage_state import _extract_remote_section_name
-
-    for name in parser.sections():
-        if _extract_remote_section_name(name) == remote:
-            return dict(parser.items(name))
-    return {}
-
-
-def merged_remote(root: Path, remote: str) -> dict[str, str]:
-    """The remote's settings as DVC pushes with them: ``.dvc/config`` with
-    ``.dvc/config.local`` laid over it."""
-    merged: dict[str, str] = {}
-    for parser in _parsers(root):
-        merged.update(_section(parser, remote))
-    if "profile" in merged:
-        merged["profile"] = dvc_config_value(merged["profile"])
-    return merged
-
-
 def _version_aware(cfg: dict[str, str]) -> bool:
     return str(cfg.get("version_aware", "")).strip().lower() in ("true", "1", "yes")
-
-
-def merged_default_remote(root: Path) -> str | None:
-    """``core.remote`` with config.local over config, as DVC merges them;
-    else the one remote both files name between them."""
-    from ._storage_state import _extract_remote_section_name
-
-    parsers = _parsers(root)
-    for parser in reversed(parsers):
-        if parser.has_option("core", "remote"):
-            return parser.get("core", "remote")
-    names = {n for p in parsers for s in p.sections() if (n := _extract_remote_section_name(s))}
-    return names.pop() if len(names) == 1 else None
 
 
 def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
@@ -251,7 +205,7 @@ def prepare(
 ) -> Prepared | None:
     """Refuse, plan and write the repair; None when the remote isn't
     version-aware (nothing there is pinned by version)."""
-    default = merged_default_remote(root)
+    default = default_remote_name(root)
     name = remote_arg or default
     if name is None:
         return None

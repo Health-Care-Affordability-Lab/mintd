@@ -214,11 +214,11 @@ class S3HoldsWhatThePointersSay:
     def _truth(self, key: str) -> tuple[str, int | None]:
         from mintd._dvc_state import discover_all_outs, parse_s3_url
         from mintd._pin_proof import publishable_scope
-        from mintd._push_verify import merged_default_remote, merged_remote
+        from mintd._dvc_state import default_remote_name, merged_remote
 
         for cfg in self._base.rglob(".dvc/config"):
             root = cfg.parent.parent
-            name = merged_default_remote(root)
+            name = default_remote_name(root)
             url = merged_remote(root, name).get("url", "") if name else ""
             if not url.startswith("s3://"):
                 continue

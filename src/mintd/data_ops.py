@@ -989,31 +989,12 @@ def data_pull(
 
 
 def _default_dvc_remote(project_path: Path) -> str | None:
-    """Pick the dvc remote name for the project.
+    """The project's default DVC remote, as dvc picks it (``_dvc_state.default_remote_name``:
+    ``core.remote`` from ``.dvc/config.local`` over ``.dvc/config``); ``None`` when there is
+    none. A config dvc can't read stops here with its ``MintdError``."""
+    from ._dvc_state import default_remote_name
 
-    Order:
-      1. ``[core] remote = <name>`` if present (DVC's standard default).
-      2. The single ``[remote "..."]`` section if there's exactly one
-         (covers freshly-cloned data products: their .dvc/config typically
-         declares one remote per product and no [core] default).
-      3. None — caller defaults to "origin".
-
-    Name-resolution logic is hoisted into
-    ``_dvc_state._default_remote_name_from_config`` so it is written once
-    (shared with ``parse_remote_config_text``'s default-remote path).
-    """
-    import configparser
-
-    from ._dvc_state import _default_remote_name_from_config
-    config_file = project_path / ".dvc" / "config"
-    if not config_file.is_file():
-        return None
-    cp = configparser.ConfigParser()
-    try:
-        cp.read(config_file)
-    except configparser.Error:
-        return None
-    return _default_remote_name_from_config(cp)
+    return default_remote_name(project_path)
 
 
 def _cut_short_hint(pointers: list[str]) -> str:
@@ -1229,25 +1210,16 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     records version IDs (or an object layout) importers cannot use, or checks
     them against a service importers don't read. ``named``: the
     push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
-    import configparser
+    from ._dvc_state import read_dvc_config
 
-    from ._storage_state import _extract_remote_section_name
-
-    parser = configparser.ConfigParser(strict=False, interpolation=None)
-    try:
-        parser.read(root / ".dvc" / "config.local", encoding="utf-8")
-    except configparser.Error:
-        return None
-    local = parser.get("core", "remote", fallback="")
-    if local and local != default and not named:
-        return f".dvc/config.local sends pushes to {local}; importers pull from the default remote {default}"
-    for section in parser.sections():
-        if _extract_remote_section_name(section) == default:
-            keys = sorted(
-                k for k in ("url", "version_aware", "endpointurl", "endpoint") if parser.has_option(section, k)
-            )
-            if keys:
-                return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
+    local = read_dvc_config(root, "local")  # dvc can't push with an unreadable one either: its MintdError stops here
+    redirected = local.get("core", {}).get("remote", "")
+    if redirected and redirected != default and not named:
+        return f".dvc/config.local sends pushes to {redirected}; importers pull from the default remote {default}"
+    section = local["remote"].get(default, {})
+    keys = sorted(k for k in ("url", "version_aware", "endpointurl", "endpoint") if k in section)
+    if keys:
+        return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
     return None
 
 

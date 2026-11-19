@@ -24,9 +24,9 @@ cannot disagree about what "delivered" means.
 """
 from __future__ import annotations
 
-import configparser
 import dataclasses
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -954,108 +954,121 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
     return all_outs, fallback, hash_missing
 
 
-def _default_remote_name_from_config(cp: "configparser.ConfigParser") -> str | None:
-    """Resolve the *default* DVC remote name from a parsed config.
+def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
+    """A DVC config file's text, read the way dvc reads it (``dvc.config.Config.load_file``):
+    configobj, which strips one pair of matching quotes and an unquoted inline ``#``
+    comment and keeps ``;``; every key and section name lowercased, and ``core.remote``'s
+    value too; and each
+    ``remote "<name>"`` section gathered under ``conf["remote"][<name>]``. Unlike dvc,
+    ``%(name)s`` is read literally. An unquoted ``[remote <name>]`` header is read as that
+    remote, as mintd always has. A file configobj can't parse is a ``MintdError``, since
+    dvc can't read it either; ``source`` names it in the message."""
+    # dvc's own reader, installed with dvc (which requires configobj >= 5.0.9). It ships no type
+    # information, and the type-ignore count may only shrink, so it is imported untyped.
+    configobj = importlib.import_module("configobj")
+    try:
+        parsed = configobj.ConfigObj(text.splitlines(), interpolation=False).dict()
+    except configobj.ConfigObjError as exc:
+        raise MintdError(f"can't read {source}: {exc}", hint="fix or remove it; dvc can't read it either") from exc
+    conf: dict[str, Any] = {"remote": {}}
+    for section, values in parsed.items():
+        if not isinstance(values, dict):
+            continue  # a key outside any section: dvc's schema refuses it, and nothing here reads one
+        # A comma-separated value comes back as a list; dvc's schema would refuse it as a remote setting.
+        keys = {k.lower(): ", ".join(v) if isinstance(v, list) else v for k, v in values.items()}
+        name = section.lower()
+        named = re.fullmatch(r'\s*remote\s*"(.*)"\s*', name) or re.fullmatch(r"\s*remote\s+([^\s\"]+)\s*", name)
+        if named:
+            conf["remote"][named.group(1)] = keys
+        else:
+            conf[name] = keys
+    if isinstance(conf.get("core", {}).get("remote"), str):
+        conf["core"]["remote"] = conf["core"]["remote"].lower()  # dvc's schema lowercases it, as it does remote names
+    return conf
 
-    Order (the same logic ``data_ops._default_dvc_remote`` delegates here so
-    it is written once):
-      1. ``[core] remote = <name>`` if present (DVC's standard default);
-      2. the single ``[remote "..."]`` section if there's exactly one
-         (covers freshly-cloned products whose ``.dvc/config`` declares one
-         remote and no ``[core]`` default);
-      3. ``None`` — ambiguous (multiple remotes, no default) or no remote.
 
-    DVC has shipped three section-header spellings: ``'remote "name"'``
-    (single-quoted, the modern default), ``remote "name"`` (double-quoted),
-    and ``remote name`` (unquoted); all three are matched.
-    """
-    import re
-    if cp.has_section("core") and cp.has_option("core", "remote"):
-        return cp.get("core", "remote")
-    remote_names: list[str] = []
-    for section in cp.sections():
-        m = re.fullmatch(r"""'?remote\s+"?(?P<name>[^"']+)"?'?""", section)
-        if m:
-            remote_names.append(m.group("name"))
-    if len(remote_names) == 1:
-        return remote_names[0]
-    return None
+def read_dvc_config(root: Path, level: Literal["repo", "local"]) -> dict[str, Any]:
+    """``.dvc/config`` (``"repo"``) or ``.dvc/config.local`` (``"local"``), read by
+    :func:`read_dvc_config_text`. A missing file reads as empty; one that can't be read is
+    a ``MintdError``."""
+    path = root / ".dvc" / ("config.local" if level == "local" else "config")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"remote": {}}
+    except (OSError, UnicodeDecodeError) as exc:
+        raise MintdError(f"can't read {path}: {exc}", hint="fix or remove it; dvc can't read it either") from exc
+    return read_dvc_config_text(text, str(path))
+
+
+def default_remote_in(*confs: dict[str, Any]) -> str | None:
+    """The default remote across parsed configs given highest level first, as dvc merges
+    them: the first ``core.remote`` set. Else, unlike dvc, the one remote they name between
+    them; ``None`` when there is no such single remote."""
+    for conf in confs:
+        name = conf.get("core", {}).get("remote")
+        if name:
+            return str(name)
+    names = {n for conf in confs for n in conf["remote"]}
+    return names.pop() if len(names) == 1 else None
+
+
+def default_remote_name(root: Path) -> str | None:
+    """The project's default DVC remote: ``.dvc/config.local`` over ``.dvc/config``
+    (:func:`default_remote_in`)."""
+    return default_remote_in(read_dvc_config(root, "local"), read_dvc_config(root, "repo"))
 
 
 def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, str]:
-    """Parse a DVC ``.dvc/config`` (given as text) into one remote's key/value map.
-
-    DVC has shipped two formats for remote sections: the older quoted form
-    ``['remote "origin"']`` (literal single quotes in the section header)
-    and the unquoted forms ``[remote "origin"]`` / ``[remote origin]``.
-    Probe all three so the parser works across DVC versions.
-
-    When ``remote_name is None`` the default remote is resolved via
-    :func:`_default_remote_name_from_config`; an ambiguous config (multiple
-    remotes and no ``[core]`` default) raises ``KeyError`` so callers can map
-    it to an actionable hint. A named-but-absent remote also raises
-    ``KeyError``.
-    """
-    cp = configparser.ConfigParser(interpolation=None)  # dvc's config has no %-interpolation
-    cp.read_string(text)
-
+    """One remote's settings from a DVC config given as text (the import-rescue lane reads a
+    producer's committed config from git). ``remote_name=None`` takes the default
+    (:func:`default_remote_in`); no default, or a named remote that is absent, raises
+    ``KeyError`` so callers can map it to a hint."""
+    conf = read_dvc_config_text(text, ".dvc/config")
     if remote_name is None:
-        resolved = _default_remote_name_from_config(cp)
-        if resolved is None:
-            raise KeyError(
-                "no default DVC remote: config has no [core] remote and not "
-                "exactly one remote section"
-            )
-        remote_name = resolved
-
-    candidates = (
-        f"'remote \"{remote_name}\"'",
-        f'remote "{remote_name}"',
-        f"remote {remote_name}",
-    )
-    for section in candidates:
-        if cp.has_section(section):
-            return dict(cp[section])
-
-    raise KeyError(f"remote {remote_name} not found in DVC config")
+        remote_name = default_remote_in(conf)
+        if remote_name is None:
+            raise KeyError("no default DVC remote: config has no [core] remote and not exactly one remote section")
+    if remote_name not in conf["remote"]:
+        raise KeyError(f"remote {remote_name} not found in DVC config")
+    return dict(conf["remote"][remote_name])
 
 
 def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
-    """A DVC remote section from ``.dvc/config``, with one per-machine
-    override from ``.dvc/config.local``: the remote's ``profile``
-    (``dvc remote modify --local <remote> profile <name>``), which dvc uses too.
-    Every other key stays the committed one, because the committed config is
-    the remote's location of record (cf. ``data_ops._local_redirect``). Path
-    wrapper over :func:`parse_remote_config_text`."""
+    """The remote as fast sync, the cache lane and import's location check read it: the
+    committed ``.dvc/config`` section, with one per-machine override from
+    ``.dvc/config.local``, the remote's ``profile`` (``dvc remote modify --local <remote>
+    profile <name>``), which dvc uses too. Every other key stays the committed one: pointers
+    record S3 version IDs against the committed location, the one every importer and fresh
+    clone reads, so a ``config.local`` that moves ``url``, ``endpointurl`` or ``version_aware``
+    points where those IDs don't belong (``data_ops._local_redirect`` refuses to publish
+    from there). A remote with no committed section uses its ``config.local`` section: there
+    is no location of record then, and dvc reads that one. The push check reads the other
+    view, :func:`merged_remote`."""
     config_path = project_path / ".dvc" / "config"
     if not config_path.exists():
         raise FileNotFoundError(f"no .dvc/config at {config_path}")
-    try:
-        cfg = parse_remote_config_text(config_path.read_text(), remote_name)
-    except KeyError as exc:
-        raise KeyError(f"{exc.args[0]} ({config_path})") from exc
-    local = config_path.with_name("config.local")
-    if local.is_file():
-        try:
-            local_cfg = parse_remote_config_text(local.read_text(), remote_name)
-        except KeyError:
-            local_cfg = {}  # no section for this remote there
-        except configparser.Error as exc:
-            # dvc can't read it either; carrying on with the committed profile would use other credentials.
-            raise MintdError(f"can't read {local}: {exc}", hint="fix or remove it; dvc can't read it either") from exc
-        if "profile" in local_cfg:
-            cfg["profile"] = local_cfg["profile"]
-    if "profile" in cfg:
-        cfg["profile"] = dvc_config_value(cfg["profile"])
+    committed = read_dvc_config(project_path, "repo")["remote"].get(remote_name)
+    local = read_dvc_config(project_path, "local")["remote"].get(remote_name)
+    if committed is None and local is None:
+        raise KeyError(f"remote {remote_name} not found in DVC config ({config_path})")
+    if committed is None:
+        return dict(local)
+    cfg = dict(committed)
+    if local is not None and "profile" in local:
+        cfg["profile"] = local["profile"]
     return cfg
 
 
-def dvc_config_value(raw: str) -> str:
-    """A DVC config value as dvc reads it (configobj): one pair of matching quotes
-    stripped, else an unquoted inline ``#`` comment. ``;`` starts no comment."""
-    import re
-    quoted = re.fullmatch(r"""\s*(["'])(.*?)\1\s*(?:#.*)?""", raw)
-    return quoted.group(2) if quoted else raw.split("#", 1)[0].strip()
+def merged_remote(root: Path, remote: str) -> dict[str, str]:
+    """The remote as dvc pushes with it, for the push check: every key of
+    ``.dvc/config.local`` laid over ``.dvc/config``. The check asks whether dvc's upload
+    landed, so it must look where dvc wrote; whether that is the location of record is a
+    separate check (``data_ops._local_redirect``). Fast sync reads the committed view,
+    :func:`get_remote_config`."""
+    merged = dict(read_dvc_config(root, "repo")["remote"].get(remote, {}))
+    merged.update(read_dvc_config(root, "local")["remote"].get(remote, {}))
+    return merged
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
@@ -1525,13 +1538,8 @@ def delivery(
 def dvc_cache_dir(root: Path) -> Path:
     """The project's DVC cache: ``[cache] dir`` from ``.dvc/config.local``,
     then ``.dvc/config`` (relative to ``.dvc/``), else ``.dvc/cache``."""
-    for name in ("config.local", "config"):
-        parser = configparser.ConfigParser(strict=False, interpolation=None)
-        try:
-            parser.read(root / ".dvc" / name, encoding="utf-8")
-        except configparser.Error:
-            continue
-        value = parser.get("cache", "dir", fallback="")
+    for level in ("local", "repo"):
+        value = read_dvc_config(root, level).get("cache", {}).get("dir", "")
         if value:
             return Path(os.path.normpath(root / ".dvc" / value))
     return root / ".dvc" / "cache"

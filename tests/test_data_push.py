@@ -1857,11 +1857,11 @@ def test_check_a_nested_dvc_project_is_not_in_scope(moto_push, tmp_path) -> None
 def test_check_a_config_local_naming_only_another_remote_keeps_the_default(tmp_path: Path) -> None:
     """`dvc remote add --local scratch ...` leaves `.dvc/config`'s
     `core.remote` the default; DVC still pushes there, so mintd checks there."""
-    from mintd._push_verify import merged_default_remote
+    from mintd._dvc_state import default_remote_name
 
     stage_dvc_project(tmp_path)
     (tmp_path / ".dvc" / "config.local").write_text("['remote \"scratch\"']\n    url = /tmp/scratch\n")
-    assert merged_default_remote(tmp_path) == "storage"
+    assert default_remote_name(tmp_path) == "storage"
 
 
 def test_check_a_first_push_of_new_data_is_not_reported_as_a_repair(moto_push, tmp_path, monkeypatch, capsys) -> None:

@@ -311,7 +311,7 @@ def test_mintd_reads_a_hand_edited_profile_as_dvc_reads_it(real_dvc, tmp_path: P
     `.dvc/config.local` laid over a committed profile.
     Mutations that must redden this: drop the stripping in get_remote_config or in merged_remote."""
     from mintd._dvc_state import get_remote_config
-    from mintd._push_verify import merged_remote
+    from mintd._dvc_state import merged_remote
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
     remote = "['remote \"storage\"']\n"
