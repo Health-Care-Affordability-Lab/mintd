@@ -1,13 +1,15 @@
 name: tag
 # mintd's version comes from git tags (setuptools-scm). Each PR merged into main
 # tags its merge commit: the next patch version, or the next minor when the PR
-# carries the `minor` label. The first tag is v0.1.0.
+# carries the `minor` label. The first tag is v0.1.0. It then starts
+# release.yml on that tag, which makes it a prerelease (RELEASING.md).
 on:
   pull_request:
     types: [closed]
     branches: [main]
 permissions:
   contents: write
+  actions: write  # to start release.yml on the new tag
 concurrency:
   # One at a time, so two quick merges cannot both claim the same version.
   group: tag
@@ -49,3 +51,12 @@ jobs:
               tag -a "$next" "$SHA" -m "$next (#$PR)"
           git push origin "$next"
           echo "tagged $SHA as $next"
+      - name: Start the release workflow on the tag
+        env:
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(git tag --points-at "$SHA" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          echo "started release.yml on $tag"

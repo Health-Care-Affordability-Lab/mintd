@@ -74,3 +74,34 @@ def test_plain_tagged_commit_is_skipped(tmp_path: Path) -> None:
 def test_first_tag_is_v0_1_0(tmp_path: Path) -> None:
     work, shas = _repo(tmp_path, [[]])
     assert _run_tag_step(work, shas[0]) == f"tagged {shas[0]} as v0.1.0\n"
+
+
+def _run_dispatch_step(work: Path, sha: str, stubs: Path) -> list[str]:
+    """The dispatch step with a `gh` that only records its arguments."""
+    log = stubs / "gh.log"
+    gh = stubs / "gh"
+    gh.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
+    gh.chmod(0o755)
+    steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["tag"]["steps"]
+    script = next(s["run"] for s in steps if s.get("name") == "Start the release workflow on the tag")
+    env = {**_ENV, "SHA": sha, "GITHUB_REPOSITORY": "o/r", "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    return log.read_text().splitlines()
+
+
+def test_dispatch_starts_release_on_the_new_tag(tmp_path: Path) -> None:
+    work, shas = _repo(tmp_path, [["v0.4.0"], []])
+    _run_tag_step(work, shas[-1])
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref v0.4.1"]
+
+
+def test_dispatch_skips_a_hotfix_tag_on_the_same_commit(tmp_path: Path) -> None:
+    # `git tag --points-at` lists v0.4.0.post1 before v0.4.1.
+    work, shas = _repo(tmp_path, [["v0.4.0"], ["v0.4.0.post1"]])
+    _run_tag_step(work, shas[-1])
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref v0.4.1"]

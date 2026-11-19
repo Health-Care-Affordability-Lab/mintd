@@ -1,0 +1,135 @@
+name: release
+# Turns a vX.Y.Z tag into a GitHub prerelease, then waits for the maintainer to
+# promote it. tag.yml starts this on each new tag: a tag pushed with GITHUB_TOKEN
+# starts no `push: tags` workflow, but a dispatch does. For a hotfix tag, run
+# `gh workflow run release.yml --ref vX.Y.Z.postN`. The runbook is RELEASING.md.
+#
+# The wheel is built once here, and that file is what the prerelease carries;
+# nothing is rebuilt at promotion. `releases/latest` skips prereleases, so
+# users get this tag only after the `promote` job is approved.
+on:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  test:
+    # CI on the exact tag being released.
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+  build:
+    # Read-only: the build runs the build backend fresh from PyPI
+    # (setuptools-scm is not in the lock), so it never holds a write token.
+    needs: test
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0  # setuptools-scm reads the version from the tag
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          # Keep equal to test.yml, install.sh and install.ps1.
+          version: "0.13.9"
+          python-version: "3.13"
+      - name: Build the release files
+        run: |
+          set -euo pipefail
+          # The tag is written into files users run, so it must be exactly this shape.
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]] || { echo "::error::$TAG is not vX.Y.Z or vX.Y.Z.postN"; exit 1; }
+          # Outside the checkout, so the tree stays clean for setuptools-scm.
+          # The lock pins setuptools for the build (setuptools-scm is not in it).
+          uv export --locked --no-dev --no-emit-project --no-hashes -q -o "$RUNNER_TEMP/build.txt"
+          uv build --wheel --build-constraints "$RUNNER_TEMP/build.txt" --out-dir dist
+          wheel="mintd-${TAG#v}-py3-none-any.whl"
+          # A misread version (a dev build) never ships under a release tag.
+          test -f "dist/$wheel" || { echo "::error::built $(ls dist), expected $wheel"; exit 1; }
+          (cd dist && sha256sum "$wheel" > "$wheel.sha256")
+          # With hashes. --extra schema adds the pins `--with-schema` needs;
+          # a constraints file only limits versions, it installs nothing.
+          uv export --locked --no-dev --no-emit-project --extra schema -q -o dist/constraints.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: dist/
+          if-no-files-found: error
+  prerelease:
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+      - name: Publish the prerelease
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          notes="commit: $GITHUB_SHA
+          gate run: $run_url
+
+          - CI (test.yml) on this tag: passed
+          - live tier: run by hand on the lab Linux box when the change touches download or push paths; result: not recorded yet
+          - canary: run by hand (RELEASING.md); result: not recorded yet
+
+          A prerelease: \`releases/latest\` skips it. It becomes the latest release only when the maintainer approves this run's \`release\` environment (RELEASING.md)."
+          # --verify-tag: never create a tag here. An existing Release makes
+          # this fail, so a release's files are never replaced.
+          gh release create "$TAG" --verify-tag --prerelease --latest=false \
+            --title "$TAG" --notes "$notes" dist/*
+  promote:
+    needs: prerelease
+    runs-on: ubuntu-26.04
+    # Waits here until the maintainer approves (RELEASING.md).
+    environment: release
+    permissions:
+      contents: write
+      actions: read  # to read the environment's protection rules
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Mark the release latest
+        run: |
+          set -euo pipefail
+          # GitHub creates a missing environment unprotected; never promote through one.
+          n=$(gh api "repos/$GH_REPO/environments/release" \
+                --jq '[(.protection_rules // [])[] | select(.type == "required_reviewers")] | length')
+          [ "$n" -ge 1 ] || { echo "::error::the release environment has no required reviewer (RELEASING.md)"; exit 1; }
+          [ "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$GITHUB_SHA" ] \
+            || { echo "::error::$TAG no longer points at $GITHUB_SHA"; exit 1; }
+          # The install line downloads install.sh/install.ps1 from the latest
+          # release, so a release without them must never become latest.
+          assets=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for f in install.sh install.ps1; do
+            grep -qx "$f" <<< "$assets" || { echo "::error::$TAG has no $f, so the install line could not install it"; exit 1; }
+          done
+          # Approving a stale run must not move users back; a rollback is
+          # done by hand (RELEASING.md). Only a 404 means "no latest release
+          # yet"; any other failure stops here. On an error gh prints the
+          # response body on stdout, so the output is never read as a tag then.
+          err=$(mktemp)
+          if latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2>"$err"); then
+            :
+          elif grep -q 'HTTP 404' "$err"; then
+            latest=""
+          else
+            cat "$err" >&2; exit 1
+          fi
+          if [ -n "$latest" ] && [ "$(printf '%s\n' "$latest" "$TAG" | sort -V | tail -n1)" != "$TAG" ]; then
+            echo "::error::$latest is already latest and newer than $TAG; to roll back, see RELEASING.md"; exit 1
+          fi
+          gh release edit "$TAG" --prerelease=false --latest
+          [ "$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)" = "$TAG" ]
+          echo "$TAG is now the latest release"

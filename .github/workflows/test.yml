@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # release.yml reruns these jobs on the exact tag it releases.
+  workflow_call:
 jobs:
   test:
     # Named without the image, so an image bump never renames a required check.
