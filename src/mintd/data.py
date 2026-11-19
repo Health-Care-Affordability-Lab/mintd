@@ -34,6 +34,7 @@ from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
+from .errors import MintdError
 from .imports import DataDependency, NotAnImportError
 from .producer import (
     FetchError,
@@ -95,7 +96,7 @@ class CloneResult:
     pull_error_count: int = 0
 
 
-class ImportDestinationExists(Exception):
+class ImportDestinationExists(MintdError):
     """A `.dvc` file already exists at the destination. The consumer resolves
     by passing `force=True` or removing the file first."""
 
@@ -114,14 +115,16 @@ class StaleBackupExists(ImportDestinationExists):
     protect.
     """
 
+    hint = "nothing was deleted or overwritten"
 
-class ImportNotFound(Exception):
+
+class ImportNotFound(MintdError):
     """The named import or subscription is not there: `bump_import` finds no
     matching `.dvc` under `data/imports/`, an enclave verb finds no matching
     `approved_products[]` row, or `check` has no consumer finding for it."""
 
 
-class AmbiguousImport(Exception):
+class AmbiguousImport(MintdError):
     """The `(product, --path)` selector matches more than one `.dvc` file or
     namespace folder.
 
@@ -136,7 +139,7 @@ class AmbiguousImport(Exception):
     """
 
 
-class UnknownProductPath(ValueError):
+class UnknownProductPath(MintdError, ValueError):
     """A requested ``--path`` is not a tracked output of the product. The
     message lists the product's `data_products.outputs[].path` values (and
     primary) so the user can pick a real target instead of decoding a raw
@@ -150,12 +153,12 @@ class UnknownProductPath(ValueError):
         self.hint = hint
 
 
-class NoTrackedOutputs(Exception):
+class NoTrackedOutputs(MintdError):
     """`--all` selected the product's `data_products.outputs` and found none
     usable. Importing nothing is a refusal, not a success."""
 
 
-class UndeliverableImport(Exception):
+class UndeliverableImport(MintdError):
     """`dvc import` exited 0 and landed no file for an output that the
     producer's DVC state at the recorded pin cannot deliver, judged by
     `_dvc_state.delivery`, the predicate the producer's own `mintd check`
@@ -179,7 +182,7 @@ class BumpBlocked(Exception):
         self.finding = finding
 
 
-class PrimaryRemovedAtHead(Exception):
+class PrimaryRemovedAtHead(MintdError):
     """Producer's HEAD has `data_products.primary = None`. The consumer must
     either pin to an older SHA explicitly or stop importing this producer."""
 

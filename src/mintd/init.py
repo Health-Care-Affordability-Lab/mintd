@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 from ._console import Reporter
+from .errors import MintdError
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
 from ._storage_state import SLUG_REGEX, compute_storage_prefix
 from ._templates import (
@@ -43,7 +44,7 @@ _TIERS: list[tuple[str, str]] = [
 ]
 
 
-class InitDestinationExists(Exception):
+class InitDestinationExists(MintdError):
     """The target already holds files the scaffold would overwrite."""
 
     def __init__(self, msg: str, *, hint: str | None = None) -> None:
@@ -296,8 +297,9 @@ def init_project(
         )
     except OSError as exc:
         # mkdir raises FileExistsError / NotADirectoryError / PermissionError
-        # for a --path that is a regular file or unwritable. cli.py catches
-        # InitOpError, not OSError, so without this the user gets a traceback.
+        # for a --path that is a regular file or unwritable. `cli.main` renders
+        # InitOpError (a `MintdError`), not a bare OSError, so without this the
+        # user gets a traceback.
         raise InitOpError(f"cannot write to {project_path}: {exc}") from exc
 
     if resuming and reporter is not None:

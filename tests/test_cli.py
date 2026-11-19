@@ -522,49 +522,21 @@ def test_data_import_bump_renders_the_stale_backup_refusal() -> None:
     refusal that exists to make the researcher LOOK at their last complete
     payload would have come out of `main()` as a traceback instead.
 
-    Read from the SOURCE for the same reason as
-    `test_data_import_forwards_the_dvc_argv_on_both_arms`: the only runtime
-    path to the raise under `--bump` goes through `check_project`, and
-    stubbing that or `bump_import` would grow the internal-stub census
-    `test_substrate_rules.py` pins shrink-only.
+    Checked on the TYPE for the same reason as
+    `test_data_import_forwards_the_dvc_argv_on_both_arms` read the source:
+    the only runtime path to the raise under `--bump` goes through
+    `check_project`, and stubbing that or `bump_import` would grow the
+    internal-stub census `test_substrate_rules.py` pins shrink-only. A
+    `MintdError` is rendered by `cli.main` from every verb, with its own hint.
 
-    Mutation: drop `ImportDestinationExists` from the `--bump` arm's handlers
+    Mutation: make `StaleBackupExists` a plain exception, or drop its hint
     -> this reddens.
     """
-    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
-    handler = next(
-        n for n in tree.body
-        if isinstance(n, ast.FunctionDef) and n.name == "_handle_data_import"
-    )
-    bump_try = next(
-        node for node in ast.walk(handler)
-        if isinstance(node, ast.Try)
-        and any(
-            isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-            and c.func.id == "bump_import"
-            for stmt in node.body for c in ast.walk(stmt)
-        )
-    )
-    arm = next(
-        (
-            h for h in bump_try.handlers
-            if h.type is not None
-            and any(
-                isinstance(n, ast.Name) and n.id == "StaleBackupExists"
-                for n in ast.walk(h.type)
-            )
-        ),
-        None,
-    )
-    assert arm is not None, "the --bump arm lets the refusal out as a traceback"
-    rendered = [
-        c for stmt in arm.body for c in ast.walk(stmt)
-        if isinstance(c, ast.Call)
-        and isinstance(c.func, ast.Attribute)
-        and c.func.attr == "error"
-    ]
-    assert rendered, "the refusal is caught but never shown"
-    assert any("hint" in {kw.arg for kw in c.keywords} for c in rendered)
+    from mintd.data import StaleBackupExists
+    from mintd.errors import MintdError
+
+    assert issubclass(StaleBackupExists, MintdError), "the refusal leaves main() as a traceback"
+    assert StaleBackupExists("x").hint == "nothing was deleted or overwritten"
 
 
 def test_data_import_timeout_reaches_the_dvc_ops_factory(
@@ -1267,8 +1239,8 @@ def test_data_pull_and_clone_exit_2_when_boto3_is_missing(
     pull that had fetched a file, and under `--json` the warning vanished
     entirely -- empty stderr, no `errors` key, exit 0.
 
-    Mutation: drop either `return 2` in `cli.py` -> the pull arms report
-    `rc == 0` and the clone arms fail on the missing message. Observed while
+    Mutation: drop `exit_code=2` from `_require_fast_sync_ops`'s raise -> all
+    four cases exit 1. Observed while
     writing this: with the gate removed and the degraded branch already gone,
     `data pull` exits 0 having silently taken the crash-recovery lane, because
     `data_pull`'s `except Exception` swallows `None.try_fast_pull`.
@@ -3167,7 +3139,7 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
     `print(..., file=sys.stderr)`, asserted by set equality. Pins the
     slice-38a print→reporter migration. Set equality, not `offenders == []`,
     so the literal can only shrink: a name that stops writing to stderr must
-    be removed from it, and a seventh `file=sys.stderr` writer must be added
+    be removed from it, and a new `file=sys.stderr` writer must be added
     deliberately.
 
     SCOPE HOLE CLOSED (1b). The matcher used to read `file=` keywords only, so
@@ -3183,8 +3155,6 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
     Allowlist rationale:
       - error: argparse framework override (not a handler).
       - _handle_data_pull: frozen surface (slice 36/37 own its rendering).
-      - _handle_config_show / _handle_config_setup / _handle_update_metadata:
-        not in the 38a audit (decision 4 — touched handlers only).
       - _render_bump_blocked: shared renderer; 38b cleanup candidate.
     """
     import ast
@@ -3195,10 +3165,7 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
         for child in ast.iter_child_nodes(node):
             parent[child] = node
 
-    allowlist = {
-        "error", "_handle_data_pull", "_handle_config_show",
-        "_handle_config_setup", "_handle_update_metadata", "_render_bump_blocked",
-    }
+    allowlist = {"error", "_handle_data_pull", "_render_bump_blocked"}
     writers: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -3704,12 +3671,13 @@ def test_cli_publish_unreachable_registry_exits_one_with_hint(
     """The read half of the same crash. `prepare_publish` reaches
     `client.fetch` for the preview's catalog diff; `GitCatalogClient.fetch`
     refreshes the registry clone, so an offline or VPN-gated registry raises
-    `GitOpError` there. `_handle_publish` catches only `PublishError`, and
-    `main()` catches neither — publish exited through a raw traceback on
+    `GitOpError` there. `_handle_publish` caught only `PublishError`, and
+    `main()` caught neither — publish exited through a raw traceback on
     every project without an enclave manifest.
 
     Mutation: drop the `except GitOpError` arm in `prepare_publish` -> this
-    reddens (the GitOpError escapes `cli.main`).
+    reddens (`main` renders the GitOpError with its git-auth hint, not the
+    registry_url one).
     """
     client, dvc_ops = patched_clients
     _publishable_project(tmp_path, client)
@@ -4283,7 +4251,8 @@ def test_enclave_add_hints_only_name_flags_the_parser_accepts() -> None:
     accepted = {opt for action in add._actions for opt in action.option_strings}
 
     source = inspect.getsource(cli._handle_enclave_add)
-    hints = _re.findall(r'hint=(["\'])(.*?)\1', source, _re.S)
+    # `hint="..."` keywords and `_hint(<type>, "...")`'s positional hint.
+    hints = _re.findall(r'(?:hint=|_hint\([^"\']*)(["\'])(.*?)\1', source, _re.S)
     named = {f for _, text in hints for f in _re.findall(r"--[a-z][a-z0-9-]*", text)}
 
     assert named, "no hints found; the regex or the handler moved"
@@ -4434,7 +4403,8 @@ def test_data_import_escaping_path_is_reported_not_raised(
     the import handler did not, so a leading slash in `--path` — an ordinary
     typo — exited `main()` as a Python traceback.
 
-    Mutation: drop the `except UnknownProductPath` arm -> this reddens.
+    Mutation: drop the `_hint(UnknownProductPath, …)` line in
+    `_handle_data_import` -> this reddens.
     """
     client, dvc_ops = patched_clients
     _register_demo_xw(client)
@@ -4447,8 +4417,8 @@ def test_data_import_escaping_path_is_reported_not_raised(
     assert dvc_ops.calls == []
     err = " ".join(capsys.readouterr().err.split())
     assert "outside the import root" in err
-    # The hint is the only thing distinguishing this clause from the broad
-    # `except (... ValueError)` below it, which also renders the message.
+    # The hint is the only thing distinguishing this clause from the bare
+    # `_hint(ValueError)` around it, which also renders the message.
     assert "relative to the producer" in err
 
 
@@ -4493,7 +4463,7 @@ def test_data_import_bump_renders_an_unreachable_registry(
     which the bump handler did not catch. Offline / VPN-gated registries are
     ordinary for this fleet, so it must render, not traceback.
 
-    Mutation: drop the `except GitOpError` arm -> this reddens.
+    Mutation: make `GitOpError` a plain `Exception` -> traceback.
     """
     client, _ = patched_clients
     _register_demo_xw(client)
@@ -4524,8 +4494,8 @@ def test_data_import_bump_renders_a_bad_namespace(
     Whitespace-normalised because the reporter wraps long messages at the
     terminal width, which can split the phrase across lines.
 
-    Mutation: drop `UnknownProductPath` from the bump arm's except tuple ->
-    this reddens.
+    Mutation: make `UnknownProductPath` a plain `ValueError` -> traceback
+    (`--bump` has only `_hint(DvcOpError, …)`).
     """
     monkeypatch.chdir(tmp_path)
 
@@ -4558,8 +4528,8 @@ def test_data_import_duplicate_pointer_reports_instead_of_tracebacking(
     handler caught it only under `--bump`, so a consumer holding a legacy
     plus a mirrored pointer got a raw traceback out of `main()`.
 
-    Mutation: drop `AmbiguousImport` from `_handle_data_import`'s non-bump
-    `except` chain -> this reddens.
+    Mutation: make `AmbiguousImport` a plain `Exception` -> traceback, this
+    reddens.
     """
     client, _dvc_ops = patched_clients
     _register_demo_xw(client)
@@ -4749,10 +4719,10 @@ def _reachable_raises(root: str) -> set[str]:
     return raised
 
 
-#: Every exception the non-bump arm must render, and the hint fragment that
-#: proves it was rendered by ITS OWN clause rather than swallowed by a
-#: broader one. Without the hints, collapsing the whole chain into a single
-#: `except Exception` passes every case here.
+#: Every exception plain `data import` must render, and the hint fragment that
+#: proves it rendered with ITS OWN hint (its class hint, or the `_hint(...)`
+#: naming its type) rather than a broader one's. Without the hints, a single
+#: `_hint(Exception, ...)` around the block passes every case here.
 _EXPECTED_HINTS: dict[str, str | None] = {
     "AmbiguousImport": None,
     # Raised behind `client.fetch` (`CatalogCache.ensure_fresh` -> git
@@ -4785,8 +4755,8 @@ _EXC_ARGS: dict[str, tuple[Any, ...]] = {
 def test_import_raise_sites_all_have_a_handler_case() -> None:
     """The tripwire for `_reachable_raises`' two scope holes.
 
-    A NEW name means a raise site nothing renders — add the clause, then the
-    entry. A VANISHED name means the walk went blind (a helper moved out of
+    A NEW name means a raise site nothing renders — make it a `MintdError` (or
+    give it a `_hint(...)` in `_handle_data_import`), then add the entry. A VANISHED name means the walk went blind (a helper moved out of
     data.py), not that the raise site is gone.
     """
     assert _reachable_raises("import_product") | {"GitOpError"} == set(_EXPECTED_HINTS)
@@ -4801,21 +4771,21 @@ def test_data_import_renders_every_reachable_exception(
     patched_clients,
 ) -> None:
     """Every exception type reachable inside `_handle_data_import`'s non-bump
-    `try` renders through the reporter with rc 1 — with its own hint — never
-    a raw traceback out of `main()` (which catches only KeyboardInterrupt /
-    WallTimeoutExceeded / ConfigError).
+    `with _hint(...)` block renders through the reporter with rc 1 — with its own hint — never
+    a raw traceback out of `main()` (which renders only `MintdError`).
 
     The type is raised from the `dvc_ops.import_` boundary — the last call in
-    the `try` — because what is under test is the handler's `except` chain,
-    not each raise site's own trigger.
+    that block — because what is under test is the hint each type renders
+    with, not each raise site's own trigger.
 
-    Mutations: drop any name from that chain, fold a hinted clause into the
-    bare-message tuple, or collapse the chain into `except Exception` -> the
-    matching case reddens.
+    Mutations: make a type a plain exception, or drop a `_hint` line or class
+    hint it relies on -> the matching case reddens.
     """
     client, dvc_ops = patched_clients
     _register_demo_xw(client)
-    exc_type = getattr(cli, exc_name, None) or getattr(builtins, exc_name)
+    from mintd import data as data_mod
+
+    exc_type = getattr(data_mod, exc_name, None) or getattr(builtins, exc_name)
 
     def _raise(**_: Any) -> Path:
         raise exc_type(*_EXC_ARGS.get(exc_name, ("boom",)))
@@ -4843,7 +4813,7 @@ def test_a_corrupt_registry_entry_is_an_error_not_a_traceback(
     registry file exited through a stack trace. `main()` catches it now, so
     every catalog-reading verb is covered, not just this one.
 
-    Mutation: remove the `CatalogEntryInvalid` arm from `main()` -> raises.
+    Mutation: make `CatalogEntryInvalid` a plain `Exception` -> raises.
     """
     from mintd.catalog import CatalogEntryInvalid
 
@@ -5075,3 +5045,135 @@ def test_the_skipped_line_names_every_pointer() -> None:
     line = _skipped_line(names)
     assert all(n in line for n in names)
     assert line.endswith("DVC never pushes or pulls them, because .gitignore rules exclude them")
+
+
+@pytest.mark.parametrize(
+    ("argv", "hook"),
+    [
+        (["data", "add", "x.csv"], "add_raises"),
+        (["data", "verify"], "status_raises"),
+        (["data", "remove", "x.csv"], "remove_raises"),
+        (["data", "push"], "push_raises"),
+        (["data", "import", "demo-xw", "--dest-root", "."], "import_raises"),
+    ],
+)
+def test_a_missing_dvc_exits_2_with_the_install_hint(
+    argv: list[str], hook: str, patched_clients, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A missing bundled dvc exits 2 from every DVC verb. The code and the hint
+    ride on `DvcNotInstalled` itself and `main` renders them, so no verb can
+    drop the 2 by catching `DvcOpError` first.
+
+    Mutation: drop `exit_code = 2` from `DvcNotInstalled` -> rc 1, red. Or give
+    data import's `_hint(DvcOpError, ...)` an `exit_code=1` -> its case reddens."""
+    from mintd._dvc_ops import DvcNotInstalled
+
+    client, dvc_ops = patched_clients
+    _register_demo_xw(client)
+    setattr(dvc_ops, hook, DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd."))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".dvc").mkdir()
+
+    assert cli.main(argv) == 2
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: mintd's bundled dvc is missing" in err
+    assert "hint: install DVC: pip install 'dvc[s3]'" in err
+
+
+def test_a_failed_dvc_import_exits_1_with_the_verbose_retry_hint(
+    patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Any other dvc failure on plain `data import` keeps exit 1 and the
+    verb's own hint.
+
+    Mutation: drop data import's `_hint(DvcOpError, ...)` -> no hint, red."""
+    from mintd._dvc_ops import DvcOpError
+
+    client, dvc_ops = patched_clients
+    _register_demo_xw(client)
+    dvc_ops.import_raises = DvcOpError("boom")
+
+    assert cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: boom" in err
+    assert "hint: retry with --dvc-arg=-v for verbose DVC output" in err
+
+
+def test_init_with_a_missing_dvc_exits_2_with_the_install_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], patched_init_ops,
+) -> None:
+    """`mintd init` raises its own `DvcNotInstalled`, so it needs the same code
+    and hint as the DVC verbs'.
+
+    Mutation: drop `exit_code = 2` from `_init_ops.DvcNotInstalled` -> rc 1, red."""
+    from mintd._init_ops import DvcNotInstalled
+
+    def _missing(target_dir: Path) -> None:
+        raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.")
+
+    monkeypatch.setattr(patched_init_ops, "dvc_init", _missing)
+
+    assert cli.main(["init", "data", "my_proj", "--path", str(tmp_path)]) == 2
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: mintd's bundled dvc is missing" in err
+    assert "hint: install DVC: pip install 'dvc[s3]'" in err
+
+
+def test_main_prints_an_error_and_its_hint_verbatim(
+    patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`main` renders through rich, which would drop a `[x]` as markup and swap
+    `:warning:` for an emoji. Both are user data here (a path, a dvc message).
+
+    Mutation: drop `emoji=False` from the Reporter's stderr console -> red."""
+    from mintd.errors import MintdError
+
+    client, dvc_ops = patched_clients
+    _register_demo_xw(client)
+    dvc_ops.import_raises = MintdError(
+        "cannot read data/[x]/a.csv: :warning: denied", hint="see [docs] :warning:",
+    )
+
+    assert cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "error: cannot read data/[x]/a.csv: :warning: denied" in err
+    assert "hint: see [docs] :warning:" in err
+
+
+def test_cli_error_arms_only_render_in_main() -> None:
+    """Every error renders once, in `main`: no other except arm in cli.py only
+    renders and returns an exit code. An error a verb can hit is a `MintdError`
+    (hinted on its class, at its raise site, or by the verb's `_hint`), so this
+    set can only shrink.
+
+    The survivors: `main`'s two arms are the renderer; `NothingNewToPackage` is
+    a success (two info lines, exit 0); `MetadataAlreadyV2` prints a report to
+    stdout, not an error line.
+
+    Mutation: put back `except ShareError as e: reporter.error(...); return 1`
+    in `_handle_share_put` -> this reddens.
+    """
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+
+    def renders(stmt: ast.stmt) -> bool:
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            return False
+        func = stmt.value.func
+        return (isinstance(func, ast.Attribute) and func.attr in {"error", "result", "warn", "info"}) or (
+            isinstance(func, ast.Name) and func.id == "print"
+        )
+
+    found = {
+        (fn.name, ast.unparse(arm.type) if arm.type else "")
+        for fn in tree.body if isinstance(fn, ast.FunctionDef)
+        for arm in ast.walk(fn) if isinstance(arm, ast.ExceptHandler)
+        if len(arm.body) >= 2 and isinstance(arm.body[-1], ast.Return) and all(renders(s) for s in arm.body[:-1])
+    }
+    assert found == {
+        ("main", "KeyboardInterrupt"),
+        ("main", "MintdError"),
+        ("_handle_enclave_package", "NothingNewToPackage"),
+        ("_handle_update_metadata", "metadata_migrate.MetadataAlreadyV2"),
+    }

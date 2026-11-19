@@ -13,6 +13,7 @@ import importlib.metadata
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from ..errors import MintdError
 from typing import Literal
 
 from .engine import render_template
@@ -34,7 +35,7 @@ _METADATA_TEMPLATES: frozenset[str] = frozenset(
 )
 
 
-class InitNameInvalid(Exception):
+class InitNameInvalid(MintdError):
     """Project name did not match the alphanumeric / dash / underscore regex."""
 
 

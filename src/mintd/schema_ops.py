@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+
+from .errors import MintdError
 from typing import Any, TypedDict
 
 FRICTIONLESS_SCHEMA_URL = "https://specs.frictionlessdata.io/schemas/table-schema.json"
@@ -21,8 +23,10 @@ SUPPORTED_EXTENSIONS = {".csv", ".dta", ".json", ".parquet"}
 DEFAULT_MISSING_VALUES = ["", "NA", "."]
 
 
-class SchemaExtraNotInstalled(Exception):
+class SchemaExtraNotInstalled(MintdError):
     """Raised when `mintd data schema generate` runs without the `[schema]` extra."""
+
+    hint = "Reinstall mintd with: install.sh --with-schema (or: uv tool install --force 'mintd[schema]')"
 
 
 def _lazy_pandas() -> Any:

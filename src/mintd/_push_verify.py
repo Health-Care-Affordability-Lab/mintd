@@ -26,6 +26,7 @@ from typing import Any
 
 
 from ._dvc_state import abbreviate, dvc_cache_dir
+from .errors import MintdError
 from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
@@ -49,7 +50,7 @@ from ._pin_proof import (
 _CREDENTIAL_KEYS = ("access_key_id", "secret_access_key", "session_token")
 
 
-class PushRefused(Exception):
+class PushRefused(MintdError):
     """Push stops before uploading or writing anything."""
 
     def __init__(self, message: str, hint: str | None = None) -> None:

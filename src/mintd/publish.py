@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ._atomic import _atomic_write_text
 from ._dvc_ops import DvcOpError, DvcOps
+from .errors import MintdError
 from ._registry_git_ops import (
     GhAuthError,
     GhNotInstalled,
@@ -39,18 +40,20 @@ if TYPE_CHECKING:
 _SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 
-class PublishError(Exception):
+class PublishError(MintdError):
     def __init__(self, message: str, *, pushed: bool = False, tagged: bool = False, catalog_updated: bool = False, recovery_hint: str = ""):
         self.pushed = pushed
         self.tagged = tagged
         self.catalog_updated = catalog_updated
         self.recovery_hint = recovery_hint
-        super().__init__(message)
+        super().__init__(message, hint=recovery_hint or None)
 
 
 class PublishNonInteractive(PublishError):
     """Slice 32: publish needs a TTY (or --yes) for the interactive
     preview confirmation gate."""
+
+    hint = "re-run with --yes to skip the interactive preview."
 
 
 class PublishBlocked(PublishError):

@@ -50,11 +50,13 @@ class Reporter:
         # starting with `/` (an absolute --source-path) parses as a closing tag
         # and raises MarkupError, which is not a ValueError and so escapes every
         # CLI handler as a traceback. No caller passes intentional markup
-        # (grep-verified), so nothing is lost by turning it off.
+        # (grep-verified), so nothing is lost by turning it off. emoji=False for
+        # the same reason: rich swaps a `:warning:` in a message for an emoji
+        # even with markup off.
         self._stderr = Console(file=sys.stderr, no_color=no_color, force_terminal=None,
-                               markup=False)
+                               markup=False, emoji=False)
         self._stdout = Console(file=sys.stdout, no_color=no_color, force_terminal=None,
-                               markup=False)
+                               markup=False, emoji=False)
         self._active_status: Optional[Status] = None
         self._active_progress: Optional[Progress] = None
         self._progress_task_id: Optional[TaskID] = None
