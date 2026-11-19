@@ -2,8 +2,10 @@ name: stories
 # The user stories in tests/stories, run against the installed mintd. Observe
 # mode: `stories` is not a required check, so a red run reports without blocking
 # a merge. Main's stories and harness judge the PR's wheel, so a PR cannot
-# weaken the checks that run on it. A PR's own new or changed stories run here
-# only once it merges; run them locally with `uv run pytest tests/stories`.
+# weaken the checks that run on it. When a PR changes the stories, their
+# harness, the dependencies or this workflow, its own stories also run here
+# against the same wheel, and their summary line goes to the job summary; they
+# never decide the job.
 on:
   push:
     branches: [main]
@@ -50,3 +52,25 @@ jobs:
         env:
           MINTD_BIN: ${{ runner.temp }}/mintd/bin/mintd
         run: uv run --no-sync pytest tests/stories -q -rxX -m "not slow"
+      - name: The PR's own stories (reported, not judged)
+        # One step, so the path check runs inside it: when nothing it watches
+        # changed, it says so in the log and the summary and exits. Main's
+        # stories above decide the job: this step reports its result, a
+        # failure included, and exits 0 on every path.
+        if: ${{ !cancelled() }}
+        env:
+          MINTD_BIN: ${{ runner.temp }}/mintd/bin/mintd
+        run: |
+          if git diff --quiet origin/main...HEAD -- tests/stories tests/_harness tests/conftest.py pyproject.toml uv.lock .github/workflows/stories.yml; then
+            echo "The PR's own stories: not run; the PR changes no story, harness, dependency or this workflow." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          uv sync --locked --extra dev || { echo "**The PR's own stories could not run**: \`uv sync\` failed." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; }
+          uv run --no-sync pytest tests/stories -q -rxX -m "not slow" 2>&1 | tee "$RUNNER_TEMP/own-stories.txt"
+          rc=${PIPESTATUS[0]}
+          line=$(tail -n 1 "$RUNNER_TEMP/own-stories.txt" | sed -E 's/^=+ //; s/ =+$//')
+          if [ "$rc" -eq 0 ]; then
+            echo "The PR's own stories: $line" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**The PR's own stories FAILED** (pytest exit $rc): $line. Main's stories decide this job; this is a report." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
