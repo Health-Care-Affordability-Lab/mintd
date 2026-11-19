@@ -232,7 +232,7 @@ def test_config_validate_reports_the_profile_it_checks_and_keeps_the_hint(
     assert "add a [nope] section there, or unset AWS_PROFILE" in s3_step.message
 
 
-@pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE"])
+@pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE", "empty-in-config.local"])
 def test_dvc_also_fails_on_a_missing_named_profile(s3_server, real_dvc, tmp_path: Path, source: str) -> None:
     """mintd now refuses exactly where dvc does: plain `dvc push` against an emulated S3
     fails on the same missing named profile."""
@@ -247,13 +247,16 @@ def test_dvc_also_fails_on_a_missing_named_profile(s3_server, real_dvc, tmp_path
     real_dvc(["remote", "modify", "storage", "endpointurl", endpoint], cwd=project, check=True)
     if source == "dvc-config":
         real_dvc(["remote", "modify", "storage", "profile", "nope"], cwd=project, check=True)
-    else:
+    elif source == "AWS_PROFILE":
         real_dvc.env["AWS_PROFILE"] = "nope"
+    else:  # dvc writes `profile = ""` and reads it as profile ''
+        real_dvc(["remote", "modify", "storage", "profile", "nope"], cwd=project, check=True)
+        real_dvc(["remote", "modify", "--local", "storage", "profile", ""], cwd=project, check=True)
     (project / "x.csv").write_text("x\n")
     real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
     r = real_dvc(["push"], cwd=project)
     assert r.returncode != 0
-    assert "nope" in r.stdout + r.stderr
+    assert ("profile ()" if source.startswith("empty") else "nope") in r.stdout + r.stderr
 
 
 def test_a_profile_only_aws_default_profile_names_is_named_in_the_error(credentials: Path, monkeypatch) -> None:
@@ -284,6 +287,48 @@ def test_a_config_local_profile_overrides_the_committed_one(credentials: Path, t
     # Only the profile: the committed config stays the remote's location of record.
     assert cfg == {"url": "s3://b/p", "profile": "present"}
     assert _key(_s3.create_client(cfg, None)) == "AKIAPRESENT"
+
+
+@pytest.mark.parametrize("level", ["config", "config.local"])
+@pytest.mark.parametrize("value", ['"mintd"', "'mintd'", "mintd # mine", '"mintd" # mine'])
+def test_a_quoted_or_commented_profile_reads_as_dvc_reads_it(real_dvc, tmp_path: Path, value: str, level: str) -> None:
+    """A hand-edited `profile = "mintd"` or `profile = mintd # mine` names `mintd` for dvc
+    (configobj strips one pair of quotes and an unquoted inline comment), so it does for
+    fast sync, the cache lane and the push check too.
+    Mutation that must redden this: drop the stripping in get_remote_config or merged_remote."""
+    from mintd._fast_sync_ops import get_remote_config
+    from mintd._push_verify import merged_remote
+
+    real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
+    remote = "['remote \"storage\"']\n"
+    (tmp_path / ".dvc" / "config").write_text(f"[core]\n    remote = storage\n{remote}    url = s3://b/p\n")
+    with (tmp_path / ".dvc" / level).open("a") as f:
+        f.write(f"{remote if level == 'config.local' else ''}    profile = {value}\n")
+
+    dvc_reads = real_dvc(["config", "remote.storage.profile"], cwd=tmp_path, check=True).stdout.strip()
+    assert dvc_reads == "mintd"
+    assert get_remote_config(tmp_path, "storage")["profile"] == dvc_reads
+    assert merged_remote(tmp_path, "storage")["profile"] == dvc_reads
+
+
+@pytest.mark.parametrize("value", ['""', "''", ""])
+def test_an_empty_remote_profile_is_named_and_missing_as_dvc_reads_it(credentials: Path, tmp_path: Path, value: str) -> None:
+    """`dvc remote modify --local <remote> profile ""` writes `profile = ""`, which dvc reads
+    as profile '' and fails on (test_dvc_also_fails_on_a_missing_named_profile). mintd stops
+    too, never falling back to other credentials.
+    Mutation that must redden this: test the remote's profile by truthiness in resolve_profile."""
+    from mintd import _s3
+    from mintd._fast_sync_ops import get_remote_config
+    from mintd._push_verify import merged_remote
+    from mintd.errors import MintdError
+
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text("['remote \"storage\"']\n    url = s3://b/p\n    profile = present\n")
+    (tmp_path / ".dvc" / "config.local").write_text(f"['remote \"storage\"']\n    profile = {value}\n")
+    for cfg in (get_remote_config(tmp_path, "storage"), merged_remote(tmp_path, "storage")):
+        with pytest.raises(MintdError) as raised:
+            _s3.create_client(cfg, "other")
+        assert "AWS profile '' (named in .dvc/config)" in str(raised.value)
 
 
 def test_a_pull_of_imports_only_never_checks_the_projects_own_profile(credentials: Path, tmp_path: Path) -> None:

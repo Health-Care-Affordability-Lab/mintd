@@ -286,7 +286,7 @@ def resolve_profile(remote_cfg: dict[str, str], aws_profile_name: str | None) ->
     resolves it the same way: dvc-s3 reads the remote's ``profile``, and mintd sets
     ``AWS_PROFILE`` for dvc only when none is exported.
     """
-    if remote_cfg.get("profile"):
+    if "profile" in remote_cfg:  # even if empty: dvc names profile '' then, as botocore does for AWS_PROFILE
         return remote_cfg["profile"], "named in .dvc/config"
     for var in ("AWS_DEFAULT_PROFILE", "AWS_PROFILE"):  # botocore's order: the first one set wins, even if empty
         if var in os.environ:

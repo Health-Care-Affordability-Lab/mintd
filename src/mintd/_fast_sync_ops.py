@@ -1115,7 +1115,17 @@ def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
             raise MintdError(f"can't read {local}: {exc}", hint="fix or remove it; dvc can't read it either") from exc
         if "profile" in local_cfg:
             cfg["profile"] = local_cfg["profile"]
+    if "profile" in cfg:
+        cfg["profile"] = dvc_config_value(cfg["profile"])
     return cfg
+
+
+def dvc_config_value(raw: str) -> str:
+    """A DVC config value as dvc reads it (configobj): one pair of matching quotes
+    stripped, else an unquoted inline ``#`` comment. ``;`` starts no comment."""
+    import re
+    quoted = re.fullmatch(r"""\s*(["'])(.*?)\1\s*(?:#.*)?""", raw)
+    return quoted.group(2) if quoted else raw.split("#", 1)[0].strip()
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:

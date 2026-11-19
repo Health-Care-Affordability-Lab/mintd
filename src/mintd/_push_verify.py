@@ -26,7 +26,7 @@ from typing import Any
 
 
 from ._dvc_state import abbreviate, dvc_cache_dir
-from ._fast_sync_ops import discover_all_outs, parse_s3_url
+from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
@@ -84,6 +84,8 @@ def merged_remote(root: Path, remote: str) -> dict[str, str]:
     merged: dict[str, str] = {}
     for parser in _parsers(root):
         merged.update(_section(parser, remote))
+    if "profile" in merged:
+        merged["profile"] = dvc_config_value(merged["profile"])
     return merged
 
 
