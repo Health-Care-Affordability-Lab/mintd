@@ -992,7 +992,7 @@ def clone_and_pull_product(
     remote_bucket: str | None = None
     try:
         from ._dvc_state import get_remote_config, parse_s3_url
-        url = get_remote_config(resolved_dest, require_default_remote(resolved_dest)).get("url", "")
+        url = get_remote_config(resolved_dest, require_default_remote(resolved_dest, local_ok=True)).get("url", "")
         remote_bucket, _ = parse_s3_url(url)
     except Exception:
         remote_bucket = None

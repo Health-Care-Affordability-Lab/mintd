@@ -50,11 +50,13 @@ from ._fast_sync_ops import (
     ensure_out_cached,
 )
 from ._dvc_state import (
+    _all_dvc_outs,
     _names_a_stage,
     abbreviate,
     does_not_parse,
     dvc_cache_dir,
     judge_pointers,
+    outs_matching,
     push_targets,
     require_default_remote,
     stages_behind,
@@ -879,13 +881,20 @@ def data_pull(
 
     if default_remote is None:
         # dvc pull needs no remote of this project for imports or for what its cache holds; for other
-        # data this asks for one before dvc runs, saying how to set one. Stricter than dvc for a cached
-        # stage out named by path or stage, and for an out with its own `remote:`.
+        # data this asks for one before dvc runs, saying how to set one. A target that reaches no out
+        # with a hash (a typo, an import made with --no-download, a stage named by its stage name) is
+        # left to dvc, which lands it or says why. Stricter than dvc for an out with its own `remote:`.
         cache_dir = dvc_cache_dir(project_path)
-        per_target = [outs_for_target(project_path, t, remote_name) for t in targets or []]
-        needed = [*all_pipeline, *(o for outs in per_target for o in outs)]
-        if not all(per_target) or not all(o.is_import or ensure_out_cached(cache_dir, o) for o in needed):
-            require_default_remote(project_path)
+        tracked: list[DvcOut] | None = None
+        needed = list(all_pipeline)
+        for t in targets or []:
+            outs = outs_for_target(project_path, t, remote_name)
+            if not outs:  # a path at, inside or above an out, a pointer's or dvc.lock's
+                tracked = _all_dvc_outs(project_path, remote_name) if tracked is None else tracked
+                outs = [o for o in outs_matching(project_path, t, remote_name, outs=tracked) if o.use_cache]
+            needed += outs
+        if not all(o.is_import or ensure_out_cached(cache_dir, o) for o in needed):
+            require_default_remote(project_path, local_ok=True)
 
     total_bytes = _compute_total_bytes(
         project_path, targets or [], pipeline_outs, remote_name,

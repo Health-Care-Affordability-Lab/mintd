@@ -113,7 +113,7 @@ def test_remote_precedence_with_no_default_is_refused(tmp_path: Path) -> None:
     dvc_ops = _FakeDvcOps()
     with pytest.raises(MintdError, match="no default DVC remote") as raised:
         data_push(project_path=tmp_path, dvc_ops=dvc_ops)
-    assert raised.value.hint == "set a default: dvc remote default store (add --local to keep it out of git)"
+    assert raised.value.hint == "set a default: dvc remote default store, and commit .dvc/config"
     assert dvc_ops.push_calls == []
 
 

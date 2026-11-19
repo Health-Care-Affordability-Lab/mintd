@@ -74,13 +74,20 @@ def test_the_default_remote_and_its_url_are_the_ones_dvc_uses(real_dvc, tmp_path
 @pytest.mark.parametrize(("config", "local", "cache"), [
     pytest.param("[cache]\n    dir = ../committed\n", None, "committed", id="in-config"),
     pytest.param("[cache]\n    dir = ../committed\n", "[cache]\n    dir = ../mine\n", "mine", id="config-local-over-config"),
+    pytest.param("[cache]\n    dir = ../committed\n", "[cache]\n    dir =\n", ".dvc", id="an-empty-dir-in-config-local"),
+    pytest.param("[cache]\n    dir = ~/home-cache\n", None, "dvc-home/home-cache", id="a-dir-under-home"),
 ])
-def test_the_cache_dir_is_the_one_dvc_uses(real_dvc, tmp_path: Path, config, local, cache) -> None:
+def test_the_cache_dir_is_the_one_dvc_uses(real_dvc, tmp_path: Path, monkeypatch, config, local, cache) -> None:
     """Push's pointer checks read the cache dvc writes to: `cache.dir` from `config.local` over
-    `.dvc/config`, relative to `.dvc/`. Mutation that must redden this: read .dvc/config first."""
+    `.dvc/config`, `~` expanded, relative to `.dvc/`; an empty `dir =` overrides too, and dvc
+    then writes into `.dvc/` itself. Mutations that must redden this: read .dvc/config first;
+    skip an empty value; leave `~` unexpanded."""
+    for var in ("HOME", "USERPROFILE"):  # the home real_dvc gives dvc
+        monkeypatch.setenv(var, str(tmp_path / "dvc-home"))
     root = _project(real_dvc, tmp_path, config, local)
-    assert Path(_dvc_reads(real_dvc, root, "cache.dir")).resolve() == dvc_cache_dir(root).resolve()
-    assert dvc_cache_dir(root).resolve() == (root / cache).resolve()
+    dvc_dir = real_dvc(["cache", "dir"], cwd=root, check=True).stdout.strip()
+    assert Path(dvc_dir).resolve() == dvc_cache_dir(root).resolve()
+    assert dvc_cache_dir(root).resolve() == (tmp_path / cache).resolve()
 
 
 @pytest.mark.parametrize(("value", "dvc_raw", "version_aware"), [
@@ -168,8 +175,9 @@ def test_an_unquoted_remote_header_stops_as_it_stops_dvc(real_dvc, tmp_path: Pat
     assert raised.value.hint == 'write [remote "origin"]; dvc can\'t read this config either'
 
 
-def _consumer_of_one_import(real_dvc, tmp_path: Path) -> Path:
-    """A consumer with one real `dvc import` and no remote of its own, its data not yet pulled."""
+def _consumer_of_one_import(real_dvc, tmp_path: Path, *flags: str) -> Path:
+    """A consumer with one real `dvc import` and no remote of its own, its data not yet pulled.
+    ``flags`` go to `dvc import`: `--no-download` records the import with no hash."""
     import shutil
 
     from tests._harness.git import _git
@@ -181,23 +189,28 @@ def _consumer_of_one_import(real_dvc, tmp_path: Path) -> Path:
     (consumer / "data").mkdir(parents=True)
     _git(["init", "-q", "-b", "main"], cwd=consumer)
     real_dvc(["init", "-q"], cwd=consumer, check=True)
-    real_dvc(["import", producer.url, "data/final", "-o", "data/final"], cwd=consumer, check=True)
-    shutil.rmtree(consumer / "data" / "final")
+    real_dvc(["import", *flags, producer.url, "data/final", "-o", "data/final"], cwd=consumer, check=True)
+    shutil.rmtree(consumer / "data" / "final", ignore_errors=True)
     shutil.rmtree(consumer / ".dvc" / "cache", ignore_errors=True)
     return consumer
 
 
-def test_imports_only_and_no_remote_pull_as_dvc_pulls(real_dvc, tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("flags", [pytest.param((), id="imported"), pytest.param(("--no-download",), id="no-download")])
+def test_imports_only_and_no_remote_pull_as_dvc_pulls(real_dvc, tmp_path: Path, monkeypatch, capsys, flags) -> None:
     """Imports fetch from their producers, so a consumer of imports alone needs no remote of
     its own: `dvc pull` lands them, and so does `mintd data pull`, which asks for a default
-    remote only once a target needs the project's own.
-    Mutation that must redden this: require the default before looking at the targets."""
+    remote only once a target needs the project's own. An import made with `--no-download`
+    (`mintd data import` forwards it) records no hash; it lands too.
+    Mutations that must redden this: require the default before looking at the targets; ask
+    for one when a target reaches no out with a hash."""
     import shutil
 
     from mintd import cli
 
-    consumer = _consumer_of_one_import(real_dvc, tmp_path)
+    consumer = _consumer_of_one_import(real_dvc, tmp_path, *flags)
+    pointer = (consumer / "data" / "final.dvc").read_text()
     real_dvc(["pull"], cwd=consumer, check=True)
+    (consumer / "data" / "final.dvc").write_text(pointer)  # as the import left it
     assert (consumer / "data/final/a.csv").read_bytes() == b"v1\n"
     shutil.rmtree(consumer / "data" / "final")
     shutil.rmtree(consumer / ".dvc" / "cache", ignore_errors=True)
@@ -262,16 +275,18 @@ def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(
     assert "hint: set a default: dvc remote default store (add --local to keep it out of git)" in err
 
 
-@pytest.mark.parametrize("track", [
-    pytest.param([["add", "-q", "x.csv"]], id="a-pointer"),
-    pytest.param(_STAGE, id="a-pipeline-out"),
+@pytest.mark.parametrize(("track", "targets"), [
+    pytest.param([["add", "-q", "x.csv"]], [], id="a-pointer"),
+    pytest.param(_STAGE, [], id="a-pipeline-out"),
+    pytest.param(_STAGE, ["x.csv"], id="a-pipeline-out-by-name"),
 ])
 def test_no_default_remote_and_the_data_in_the_cache_pull_as_dvc_pulls(
-    real_dvc, tmp_path: Path, monkeypatch, capsys, track,
+    real_dvc, tmp_path: Path, monkeypatch, capsys, track, targets,
 ) -> None:
     """With no remote to pull from, `dvc pull` still restores what its cache holds (with a
     warning), so a project needs a default remote only for data the cache lacks; mintd asks
-    for one only then. Mutation that must redden this: ask whatever the cache holds."""
+    for one only then, for a stage out named by its path too. Mutations that must redden this:
+    ask whatever the cache holds; ask for any named target that has no pointer."""
     from mintd import cli
 
     project = tmp_path / "project"
@@ -286,7 +301,8 @@ def test_no_default_remote_and_the_data_in_the_cache_pull_as_dvc_pulls(
     assert (project / "x.csv").read_bytes() == tracked
     (project / "x.csv").unlink()
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
-    assert cli.main(["data", "pull", "--path", str(project)]) == 0, capsys.readouterr().err
+    monkeypatch.chdir(project)
+    assert cli.main(["data", "pull", "--path", str(project), *targets]) == 0, capsys.readouterr().err
     assert (project / "x.csv").read_bytes() == tracked
 
 
@@ -326,3 +342,49 @@ def test_check_names_the_fix_for_a_config_with_no_default_remote(tmp_path: Path,
     inspection = inspect_storage(tmp_path)
     assert inspection.state == StorageState.PARTIAL_META_ONLY
     assert hint in (repair_hint(inspection) or "")
+
+
+def test_a_target_that_is_no_output_gets_dvcs_answer_not_the_remote_hint(
+    real_dvc, tmp_path: Path, monkeypatch, capsys,
+) -> None:
+    """With no default remote, a target that reaches no tracked out is a typo, not a call for a
+    remote: dvc says it "does not exist as an output", and mintd passes that on rather than
+    asking for a default remote. Mutation that must redden this: ask for one when a target
+    reaches no out."""
+    from mintd import cli
+
+    consumer = _consumer_of_one_import(real_dvc, tmp_path)
+    dvc = real_dvc(["pull", "data/finl"], cwd=consumer)
+    assert dvc.returncode != 0 and "does not exist as an output" in dvc.stdout + dvc.stderr
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    monkeypatch.chdir(consumer)
+    assert cli.main(["data", "pull", "--path", str(consumer), "data/finl"]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "no default DVC remote" not in err and "does not exist as an output" in err
+
+
+def test_an_empty_default_in_config_local_unsets_it_as_dvc_does(real_dvc, tmp_path: Path) -> None:
+    """dvc merges `config.local` over `.dvc/config`, so an empty `remote =` there leaves no
+    default, and push refuses. Mutation that must redden this: skip an empty value."""
+    from mintd._dvc_state import default_remote_name
+
+    root = _project(real_dvc, tmp_path, f"[core]\n    remote = storage\n{R}    url = s3://b/p\n", "[core]\n    remote =\n")
+    assert _dvc_reads(real_dvc, root, "core.remote") == ""
+    assert default_remote_name(root) is None
+
+
+@pytest.mark.parametrize(("local_ok", "hint"), [
+    pytest.param(True, "set a default: dvc remote default store (add --local to keep it out of git)", id="pull-and-clone"),
+    pytest.param(False, "set a default: dvc remote default store, and commit .dvc/config", id="push-cache-and-publish"),
+])
+def test_the_no_default_hint_offers_local_only_where_a_local_default_serves(tmp_path: Path, local_ok, hint) -> None:
+    """A default kept in `config.local` serves pull and clone, but push's commit gate, publish
+    and the storage check read the committed `.dvc/config`, so their hint says to commit it.
+    Mutation that must redden this: one hint for every verb."""
+    from mintd._dvc_state import require_default_remote
+
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text('[\'remote "store"\']\n    url = s3://b/p\n')
+    with pytest.raises(MintdError) as raised:
+        require_default_remote(tmp_path, local_ok=local_ok)
+    assert raised.value.hint == hint

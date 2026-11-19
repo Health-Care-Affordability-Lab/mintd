@@ -1009,13 +1009,13 @@ def read_dvc_config(root: Path, level: Literal["repo", "local"]) -> dict[str, An
 
 def default_remote_in(*confs: dict[str, Any]) -> str | None:
     """The default remote across parsed configs given highest level first, as dvc merges
-    them: the first ``core.remote`` set. ``None`` when none sets it: dvc then picks no
-    remote either (``dvc pull`` and ``dvc push`` stop with "No remote provided and no default
-    remote set"), even when the configs name exactly one."""
+    them: the first ``core.remote`` set, where an empty ``remote =`` sets none. ``None`` when
+    none sets it: dvc then picks no remote either (``dvc pull`` and ``dvc push`` stop with "No
+    remote provided and no default remote set"), even when the configs name exactly one."""
     for conf in confs:
-        name = conf.get("core", {}).get("remote")
-        if name:
-            return str(name)
+        core = conf.get("core", {})
+        if "remote" in core:
+            return str(core["remote"]) or None
     return None
 
 
@@ -1025,15 +1025,18 @@ def default_remote_name(root: Path) -> str | None:
     return default_remote_in(read_dvc_config(root, "local"), read_dvc_config(root, "repo"))
 
 
-def require_default_remote(root: Path) -> str:
+def require_default_remote(root: Path, *, local_ok: bool = False) -> str:
     """The project's default remote, or the ``MintdError`` dvc's own refusal calls for, with a
-    hint that names the remote when the project has exactly one."""
+    hint that names the remote when the project has exactly one. ``local_ok``: the caller
+    only reads (pull, clone), so a default kept in ``config.local`` serves it; push, the cache
+    lane and publish need it committed, where importers and the storage check read it."""
     name = default_remote_name(root)
     if name is not None:
         return name
     remotes = sorted({*read_dvc_config(root, "repo")["remote"], *read_dvc_config(root, "local")["remote"]})
     if len(remotes) == 1:
-        hint = f"set a default: dvc remote default {remotes[0]} (add --local to keep it out of git)"
+        hint = (f"set a default: dvc remote default {remotes[0]} (add --local to keep it out of git)" if local_ok
+                else f"set a default: dvc remote default {remotes[0]}, and commit .dvc/config")
     elif remotes:
         hint = "set a default: dvc remote default <name>"
     else:
@@ -1558,12 +1561,13 @@ def delivery(
 
 
 def dvc_cache_dir(root: Path) -> Path:
-    """The project's DVC cache: ``[cache] dir`` from ``.dvc/config.local``,
-    then ``.dvc/config`` (relative to ``.dvc/``), else ``.dvc/cache``."""
+    """The project's DVC cache, as dvc resolves it: ``[cache] dir`` from ``.dvc/config.local``,
+    then ``.dvc/config``, with ``~`` expanded and relative to ``.dvc/`` (so an empty ``dir =``
+    is ``.dvc/`` itself, where dvc then writes), else ``.dvc/cache``."""
     for level in ("local", "repo"):
-        value = read_dvc_config(root, level).get("cache", {}).get("dir", "")
-        if value:
-            return Path(os.path.normpath(root / ".dvc" / value))
+        cache = read_dvc_config(root, level).get("cache", {})
+        if "dir" in cache:
+            return Path(os.path.normpath(root / ".dvc" / os.path.expanduser(str(cache["dir"]))))
     return root / ".dvc" / "cache"
 
 

@@ -425,7 +425,7 @@ def test_resolve_repo_remote_with_no_default_is_refused_as_dvc_refuses_it(tmp_pa
     (tmp_path / ".dvc" / "config").write_text('[\'remote "store"\']\n    url = s3://b/p\n')
     with pytest.raises(CacheError, match="no default DVC remote") as ei:
         resolve_repo_remote(tmp_path, None)
-    assert ei.value.hint == "set a default: dvc remote default store (add --local to keep it out of git)"
+    assert ei.value.hint == "set a default: dvc remote default store, and commit .dvc/config"
     assert resolve_repo_remote(tmp_path, "Store").bucket == "b"
 
 
