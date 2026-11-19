@@ -206,6 +206,16 @@ def test_imports_only_and_no_remote_pull_as_dvc_pulls(real_dvc, tmp_path: Path, 
     assert (consumer / "data/final/a.csv").read_bytes() == b"v1\n"
 
 
+def _drop_cache(root: Path) -> None:
+    """Remove the project's dvc cache. dvc writes its files read-only, which Windows won't delete."""
+    import shutil
+
+    cache = root / ".dvc" / "cache"
+    for path in cache.rglob("*"):
+        path.chmod(0o700)
+    shutil.rmtree(cache)
+
+
 _STAGE = [["stage", "add", "-n", "make", "-o", "x.csv", "echo x > x.csv"], ["repro", "-q"]]
 
 
@@ -224,7 +234,6 @@ def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(
     Mutations that must redden this: take the one remote again; fall back to dvc pull; for a
     pipeline out, ask only about the outs fast sync can serve (with no remote, none); pass a
     named target that reads as no out (a stage out by its path)."""
-    import shutil
 
     from mintd import _dvc_ops, cli
 
@@ -237,7 +246,7 @@ def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(
         real_dvc(argv, cwd=project, check=True)
     real_dvc(["push", "-r", "store"], cwd=project, check=True)
     (project / "x.csv").unlink()
-    shutil.rmtree(project / ".dvc" / "cache")
+    _drop_cache(project)
     dvc = real_dvc(["pull"], cwd=project)
     assert dvc.returncode != 0 and "no default remote" in (dvc.stdout + dvc.stderr).lower()
 
@@ -271,13 +280,14 @@ def test_no_default_remote_and_the_data_in_the_cache_pull_as_dvc_pulls(
     (project / "x.csv").write_text("x\n")
     for argv in track:
         real_dvc(argv, cwd=project, check=True)
+    tracked = (project / "x.csv").read_bytes()  # what the stage wrote: Windows' `echo` adds a space
     (project / "x.csv").unlink()
     real_dvc(["pull"], cwd=project, check=True)
-    assert (project / "x.csv").read_text() == "x\n"
+    assert (project / "x.csv").read_bytes() == tracked
     (project / "x.csv").unlink()
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
     assert cli.main(["data", "pull", "--path", str(project)]) == 0, capsys.readouterr().err
-    assert (project / "x.csv").read_text() == "x\n"
+    assert (project / "x.csv").read_bytes() == tracked
 
 
 def test_clone_matches_a_path_with_no_default_remote_and_leaves_the_refusal_to_pull(tmp_path: Path) -> None:
