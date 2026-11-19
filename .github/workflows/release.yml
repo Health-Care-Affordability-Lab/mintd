@@ -36,6 +36,8 @@ jobs:
           # Keep equal to test.yml, install.sh and install.ps1.
           version: "0.13.9"
           python-version: "3.13"
+          # No cache: one written by another workflow's run must not feed the build.
+          enable-cache: false
       - name: Build the release files
         run: |
           set -euo pipefail
@@ -83,10 +85,22 @@ jobs:
           - canary: run by hand (RELEASING.md); result: not recorded yet
 
           A prerelease: \`releases/latest\` skips it. It becomes the latest release only when the maintainer approves this run's \`release\` environment (RELEASING.md)."
-          # --verify-tag: never create a tag here. An existing Release makes
-          # this fail, so a release's files are never replaced.
-          gh release create "$TAG" --verify-tag --prerelease --latest=false \
-            --title "$TAG" --notes "$notes" dist/*
+          # --verify-tag: never create a tag here.
+          if ! gh release view "$TAG" --json tagName > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --prerelease --latest=false --title "$TAG" --notes "$notes"
+          fi
+          # Upload only the files the release lacks; one it has must be the
+          # same bytes. A rerun can finish a release but never change one.
+          have=$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.digest)"')
+          for f in dist/*; do
+            name=${f##*/}
+            digest=$(awk -v n="$name" '$1 == n {print $2}' <<< "$have")
+            if [ -z "$digest" ]; then
+              gh release upload "$TAG" "$f"
+            elif [ "$digest" != "sha256:$(sha256sum "$f" | cut -d' ' -f1)" ]; then
+              echo "::error::$TAG already has a different $name; a release's files are never replaced"; exit 1
+            fi
+          done
   promote:
     needs: prerelease
     runs-on: ubuntu-26.04
@@ -107,7 +121,7 @@ jobs:
           n=$(gh api "repos/$GH_REPO/environments/release" \
                 --jq '[(.protection_rules // [])[] | select(.type == "required_reviewers")] | length')
           [ "$n" -ge 1 ] || { echo "::error::the release environment has no required reviewer (RELEASING.md)"; exit 1; }
-          [ "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$GITHUB_SHA" ] \
+          [ "$(gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha)" = "$GITHUB_SHA" ] \
             || { echo "::error::$TAG no longer points at $GITHUB_SHA"; exit 1; }
           # The install line downloads install.sh/install.ps1 from the latest
           # release, so a release without them must never become latest.

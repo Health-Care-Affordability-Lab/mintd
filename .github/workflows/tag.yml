@@ -10,13 +10,15 @@ on:
 permissions:
   contents: write
   actions: write  # to start release.yml on the new tag
-concurrency:
-  # One at a time, so two quick merges cannot both claim the same version.
-  group: tag
-  cancel-in-progress: false
 jobs:
   tag:
     if: github.event.pull_request.merged == true
+    # One at a time, so two quick merges cannot both claim the same version.
+    # On the job, so a PR closed without merging never queues here and
+    # cancels a merge's pending run (GitHub keeps one pending run per group).
+    concurrency:
+      group: tag
+      cancel-in-progress: false
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -58,5 +60,6 @@ jobs:
         run: |
           set -euo pipefail
           tag=$(git tag --points-at "$SHA" | grep -xE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
-          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          # The full ref: a bare name could also match a branch.
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "refs/tags/$tag"
           echo "started release.yml on $tag"

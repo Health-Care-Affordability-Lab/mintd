@@ -95,7 +95,7 @@ def test_dispatch_starts_release_on_the_new_tag(tmp_path: Path) -> None:
     _run_tag_step(work, shas[-1])
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref v0.4.1"]
+    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref refs/tags/v0.4.1"]
 
 
 def test_dispatch_skips_a_hotfix_tag_on_the_same_commit(tmp_path: Path) -> None:
@@ -104,4 +104,4 @@ def test_dispatch_skips_a_hotfix_tag_on_the_same_commit(tmp_path: Path) -> None:
     _run_tag_step(work, shas[-1])
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref v0.4.1"]
+    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref refs/tags/v0.4.1"]

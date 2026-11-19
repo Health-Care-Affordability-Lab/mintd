@@ -78,7 +78,7 @@ jobs:
           "$mintd" check --help
           "$mintd" publish --help
           "$mintd" data --help
-          "$mintd" init enclave ci-smoke --path "${{ runner.temp }}"
+          "$mintd" init enclave ci-smoke --path "$RUNNER_TEMP"
   windows-test:
     # REQUIRED since the canary first went fully green (fsync fix #5 +
     # test-portability #7): a red windows-test now means a real regression.
@@ -146,4 +146,4 @@ jobs:
           & $mintd check --help
           & $mintd publish --help
           & $mintd data --help
-          & $mintd init enclave ci-smoke --path "${{ runner.temp }}"
+          & $mintd init enclave ci-smoke --path $env:RUNNER_TEMP

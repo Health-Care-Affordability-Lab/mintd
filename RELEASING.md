@@ -75,6 +75,6 @@ Land the same fix on `main` with a normal PR: `tag.yml` never creates or counts 
 
 ## A failed run
 
-Use "Re-run failed jobs" in the same run: it keeps the same commit and builds from the same tag.
-Don't dispatch again for a tag that has a release: `gh release create` refuses it, so a release's
-files are never replaced.
+Use "Re-run failed jobs" in the same run: it reuses the build's files. If the prerelease already
+exists, the rerun uploads only the files it lacks and stops if one it has differs. A release's files
+are never replaced.
