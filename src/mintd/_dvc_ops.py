@@ -557,7 +557,9 @@ class SubprocessDvcOps:
         # Absolutized against the PROCESS cwd; the return value below stays
         # computed from the original `path`. See the rule on `DvcOps`.
         cmd = [*dvc_cmd(), "add", str(path.absolute())]
-        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
+        # transfer tier, NOT fast: dvc add hashes every byte, so its run time
+        # grows with the data.
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
             raise DvcAddError(
@@ -571,7 +573,9 @@ class SubprocessDvcOps:
         cmd = [*dvc_cmd(), "status", "--json"]
         if targets:
             cmd.extend(targets)
-        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd, json_mode=True)
+        # transfer tier, NOT fast: dvc status hashes every workspace file it
+        # has not hashed yet (all of them on a fresh clone).
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd, json_mode=True)
 
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
@@ -598,7 +602,9 @@ class SubprocessDvcOps:
 
     def remove(self, name: str, *, cwd: Path) -> None:
         cmd = [*dvc_cmd(), "remove", name]
-        r = self._spawn(cmd, wall_timeout=self._timeouts.fast, cwd=cwd)
+        # transfer tier, NOT fast: without --outs, dvc remove unprotects every
+        # out, which copies hardlinked or symlinked files out of the cache.
+        r = self._spawn(cmd, wall_timeout=self._timeouts.transfer, cwd=cwd)
         if r.returncode != 0:
             stderr = "".join(r.stderr_lines)
             raise DvcRemoveError(

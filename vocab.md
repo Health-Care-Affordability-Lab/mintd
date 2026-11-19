@@ -347,13 +347,15 @@ Why: the archive is the only artifact guaranteed to cross the gap, so the lander
 
 ### Config (`~/.config/mintd/config.yaml`) ([src/mintd/_config.py](src/mintd/_config.py))
 
-A frozen Pydantic `Config` (`extra="forbid"`) loaded from `$MINTD_CONFIG_DIR/config.yaml` or `~/.config/mintd/config.yaml`; a missing file means all defaults. Fields include `registry_url`, `cache_dir` (default `~/.cache/mintd`), `timeouts`, `author`, `share_user`, `storage_endpoint`, `storage_bucket_prefix`. Managed with `mintd config show | setup | validate`. **Timeout tiers** are wall-clock caps for spawned dvc/git commands: `timeouts.fast` (default 30 s) for quick calls, `timeouts.transfer` (default unbounded) for import, push, pull, checkout and git transfers.
+A frozen Pydantic `Config` (`extra="forbid"`) loaded from `$MINTD_CONFIG_DIR/config.yaml` or `~/.config/mintd/config.yaml`; a missing file means all defaults. Fields include `registry_url`, `cache_dir` (default `~/.cache/mintd`), `timeouts`, `author`, `share_user`, `storage_endpoint`, `storage_bucket_prefix`. Managed with `mintd config show | setup | validate`. **Timeout tiers** are wall-clock caps for spawned dvc/git commands: `timeouts.fast` (default 30 s) for quick calls, `timeouts.transfer` (default unbounded) for add, status, remove, import, push, pull, checkout and git transfers.
 
 The CLI loads config and passes values down. The exception is the scaffold renderer (`_templates/_render.py`), which calls `Config.load()` itself to fill template fields such as `author` and `organization`, falling back to defaults if loading fails.
 
 **AWS profile (`[mintd]`)**: `Config.aws_profile_name` is `"mintd"` when the shared credentials file (`$AWS_SHARED_CREDENTIALS_FILE`, else `~/.aws/credentials`) has a `[mintd]` section, otherwise `None` (boto3's default chain). The boto3 clients mintd opens itself (fast-sync, the repo file cache, share, `data ls`, the import-rescue lane) use it; dvc gets it as `AWS_PROFILE` via `setdefault`, so an `AWS_PROFILE` already exported in the shell wins; `mintd init` writes it as the DVC remote's `profile`. `mintd config setup` offers to write the section (mode 0600, atomic, `[default]` untouched), and `mintd config validate` reports which source is in use.
 
 Why checkout is a transfer: it materializes cache blobs, which can mean minutes of copying on non-reflink filesystems, longer than the 30 s fast cap allows.
+
+Why add, status and remove are transfers: add hashes every byte, status hashes every file it has not hashed yet, and remove copies hardlinked or symlinked files out of the cache, so on a large folder each can outlast the 30 s fast cap.
 
 ### Subprocess seams (`DvcOps`, `RegistryGitOps`, `Fetcher`, `InitOps`)
 

@@ -386,6 +386,70 @@ def test_subprocess_checkout_default_timeouts_mean_no_wall_timeout(
     assert seen["kwargs"]["wall_timeout"] is None
 
 
+@pytest.mark.parametrize("argv", [
+    ["data", "add", "data/raw"], ["data", "verify"], ["data", "remove", "data/raw.dvc"],
+], ids=["add", "verify", "remove"])
+@pytest.mark.parametrize(("fast", "transfer", "locked", "rc"), [
+    (0.01, 600, False, 0),
+    (0.01, None, False, 0),
+    (600, 1, True, 1),
+], ids=["fast-below-call-time", "default-transfer", "transfer-below-call-time"])
+def test_dvc_calls_whose_run_time_grows_with_the_data_run_under_transfer(
+    argv, fast, transfer, locked, rc, tmp_path: Path, monkeypatch, capsys, real_dvc,
+) -> None:
+    """`data add` runs `dvc add`, which hashes every byte; `data verify` runs
+    `dvc status`, which hashes every file it has not hashed yet (all of them on
+    a fresh clone); `data remove` runs `dvc remove`, which copies hardlinked or
+    symlinked files out of the cache. All three grow with the data, so they run
+    under `timeouts.transfer`, not the 30 s `fast` cap that stopped a
+    first-time add of a 40 GiB folder.
+
+    The clock starts at `proc.wait` (`_subprocess.py`), after the spawn. In
+    the transfer-below case the test holds dvc's own repository lock, so dvc
+    cannot finish: it spends 3.0 s on lock retries, then exits with "Unable to
+    acquire lock". The 1 s `transfer` cap must fire first on any machine. In
+    the fast-below case `fast` is below any dvc call's run time, and the call
+    runs under a 600 s `transfer`. The default-transfer case leaves `transfer`
+    unset, as shipped, so the call has no cap at all.
+
+    Mutation: putting any of the three verbs back on `fast` turns its three cases
+    red. The fast-below and default-transfer cases time out at 0.01 s; the
+    transfer-below case ends in dvc's lock error instead of the 1 s timeout.
+    Falling back to `fast` when `transfer` is unset turns default-transfer
+    red."""
+    from dvc.lock import make_lock
+
+    from mintd import cli
+
+    cfg = tmp_path / "mintd-config"
+    cfg.mkdir()
+    transfer_line = "" if transfer is None else f"  transfer: {transfer}\n"
+    (cfg / "config.yaml").write_text(f"timeouts:\n  fast: {fast}\n{transfer_line}", encoding="utf-8")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg))
+    ws = tmp_path / "ws"
+    (ws / "data" / "raw").mkdir(parents=True)
+    (ws / "data" / "raw" / "x.csv").write_text("x\n")
+    real_dvc(["init", "--no-scm", "-q"], cwd=ws, check=True)
+    if argv[1] != "add":
+        real_dvc(["add", "-q", "data/raw"], cwd=ws, check=True)
+    monkeypatch.chdir(ws)  # data add runs in Path("."); data verify defaults --path to "."
+    lock = make_lock(str(ws / ".dvc" / "tmp" / "lock"), tmp_dir=str(ws / ".dvc" / "tmp"))
+    if locked:
+        lock.lock()
+    try:
+        got = cli.main(argv)
+    finally:
+        if locked:
+            lock.unlock()
+
+    assert got == rc
+    err = capsys.readouterr().err
+    if locked:
+        assert f"exceeded wall timeout of {float(transfer)}s" in err
+    else:
+        assert "exceeded wall timeout" not in err
+
+
 def test_subprocess_pull_translates_storage_key_tuple(
     monkeypatch, tmp_path: Path,
 ) -> None:
