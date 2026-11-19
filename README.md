@@ -195,6 +195,21 @@ mintd publish
 
 ## Example: consume someone else's dataset
 
+What each command brings:
+
+| Command | Data | Code |
+|---|---|---|
+| `mintd data import <name>` | the primary output | none |
+| `mintd data import <name> --path <path>` | only that path, a folder or a file, declared as an output or not | only if the path is code in the producer's git |
+| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out | none |
+| `mintd data clone <name>` | every DVC-tracked output, declared or not | all of it: a full git clone of the producer's repo |
+| `mintd data clone <name> --primary` | the primary output only | all of it, as above |
+
+An import lands under `data/imports/<full_name>/`, and its `.dvc` file pins the
+producer commit it came from (`--rev`; default: the producer's HEAD). A clone
+of a data product lands in `./data_<name>/`, and its `--path` takes only
+declared outputs.
+
 ```bash
 # See what's published in the lab catalog:
 mintd registry sync
