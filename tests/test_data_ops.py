@@ -126,6 +126,15 @@ def test_data_pull_no_targets_discovers_and_routes_through_fast_sync(
     assert fake.pull_calls == []
 
 
+def test_data_pull_reads_a_remote_named_in_another_case_as_dvc_does(tmp_path: Path) -> None:
+    """dvc looks remote names up lowercased, and mintd's reader keeps them so: `--remote Origin`
+    is the remote `origin`. Mutation that must redden this: pass the name on as given."""
+    (tmp_path / "a.dvc").write_text("outs:\n- md5: 0123456789abcdef0123456789abcdef\n  path: a\n")
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=_FakeDvcOps(), fast_sync_ops=fast_fake, remote="Origin")
+    assert fast_fake.calls[0].remote_name == "origin"
+
+
 def test_data_pull_no_targets_empty_repo_returns_early(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -168,7 +168,7 @@ def _resolve_producer(
         return None, RescueResult(
             ok=False,
             reason=(
-                f"the producer's .dvc/config ({dep.producer_repo}) has no single "
+                f"the producer's .dvc/config ({dep.producer_repo}) sets no "
                 f"default remote"
             ),
             hint="ask the producer to set a [core] remote in .dvc/config",

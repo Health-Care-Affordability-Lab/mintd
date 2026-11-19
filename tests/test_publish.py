@@ -1658,7 +1658,15 @@ def test_publish_rolls_metadata_back_even_when_a_pointer_cant_be_put_back(tmp_pa
     assert lock.read_bytes() == locked
 
 
-def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):
+@pytest.mark.parametrize(("local", "refusal"), [
+    pytest.param('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n', "config.local overrides storage's endpointurl",
+                 id="a-location-override"),
+    pytest.param("[core\n", "can't read .*config.local", id="a-config-local-dvc-cannot-read"),
+])
+def test_publish_refuses_a_location_config_local_redirects_before_any_push(
+    tmp_path, s3_versioned, monkeypatch, local, refusal,
+):
+    """Mutation that must redden the second case: check config.local outside the rollback again."""
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
     s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
@@ -1666,10 +1674,11 @@ def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_p
     (proj / ".dvc" / ".gitignore").write_text("/config.local\n")  # as `dvc init` writes it
     subprocess.run(["git", "add", ".dvc/.gitignore"], cwd=proj, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "ignore config.local"], cwd=proj, check=True)
-    (proj / ".dvc" / "config.local").write_text('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n')
+    (proj / ".dvc" / "config.local").write_text(local)
     dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
-    with pytest.raises(DvcPushFailed, match="config.local overrides storage's endpointurl"):
+    with pytest.raises(DvcPushFailed, match=refusal) as excinfo:
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc, git_ops=git)
+    assert "rolled back" in excinfo.value.recovery_hint
     assert dvc.push_calls == [] and git.tag_calls == []
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
 

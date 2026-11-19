@@ -137,6 +137,16 @@ def repair_hint(inspection: StorageInspection) -> str | None:
         )
 
     if state == StorageState.PARTIAL_META_ONLY:
+        from ._dvc_state import read_dvc_config
+        from .errors import MintdError
+
+        name = inspection.metadata_remote_name or "<remote>"
+        try:
+            remotes = read_dvc_config(inspection.dvc_config_path.parent.parent, "repo")["remote"]
+        except MintdError as exc:  # `dvc remote add` would fail on it too
+            return f"{exc}; {exc.hint}"
+        if name.lower() in remotes:
+            return f".dvc/config has remote {name!r} but sets no default remote. Run: dvc remote default {name}"
         return (
             f"metadata.storage is configured but .dvc/config has no remote. "
             f"Run: dvc remote add -d {inspection.metadata_remote_name or '<remote>'} "
@@ -244,7 +254,8 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
     """Return (default_remote_name, url, version_aware) from .dvc/config.
 
     Read through ``_dvc_state``'s DVC config reader, as dvc reads it; the default is
-    ``core.remote``, else the single remote section (``default_remote_in``).
+    ``core.remote`` (``default_remote_in``). With none set, or a config dvc can't read,
+    there is no default remote (``repair_hint`` says which).
 
     ``version_aware`` is that remote's ``version_aware = true`` flag. Only the
     committed ``.dvc/config`` is read, never ``config.local``: a consumer's

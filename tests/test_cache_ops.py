@@ -416,6 +416,19 @@ def test_resolve_repo_remote_missing_config_raises_cache_error(tmp_path: Path) -
     assert ei.value.hint is not None
 
 
+def test_resolve_repo_remote_with_no_default_is_refused_as_dvc_refuses_it(tmp_path: Path) -> None:
+    """One remote and no `core.remote`: dvc picks none, and the cache lane stops with the
+    same hint as pull and push. A remote it is given is looked up lowercased, as dvc does.
+    Mutations that must redden this: take the one remote, or guess "origin", again; look the
+    given name up as given."""
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text('[\'remote "store"\']\n    url = s3://b/p\n')
+    with pytest.raises(CacheError, match="no default DVC remote") as ei:
+        resolve_repo_remote(tmp_path, None)
+    assert ei.value.hint == "set a default: dvc remote default store (add --local to keep it out of git)"
+    assert resolve_repo_remote(tmp_path, "Store").bucket == "b"
+
+
 def test_resolve_repo_remote_non_s3_raises_cache_error(tmp_path: Path) -> None:
     _dvc_config(tmp_path, "gdrive://folder")
     with pytest.raises(CacheError) as ei:

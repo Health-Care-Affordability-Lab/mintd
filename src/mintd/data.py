@@ -26,7 +26,9 @@ from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
-from ._dvc_state import delivery, normalize_target, outs_matching, path_covers, require_default_remote
+from ._dvc_state import (
+    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+)
 from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
@@ -727,7 +729,7 @@ def _resolve_targets_in_clone(
     Raises `UnknownProductPath` for a path that reaches no out, naming what
     the clone really tracks; the caller removes the clone.
     """
-    remote_name = require_default_remote(dest)
+    remote_name = default_remote_name(dest) or ""  # outs match by path; data_pull refuses where a remote is needed
     resolved: set[str] = set()
     unverified: list[str] = []
     # Re-enumerates the clone once per selector (documented on

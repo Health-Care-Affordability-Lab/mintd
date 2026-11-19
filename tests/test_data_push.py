@@ -2149,11 +2149,34 @@ def test_check_a_reupload_dvc_drops_from_its_pointer_fails(moto_push, tmp_path, 
     assert "dropped them from their pointer: data/d/b.csv" in err and "✓" not in err
 
 
-def test_check_refuses_outs_with_their_own_remote(moto_push, tmp_path, monkeypatch, capsys) -> None:
+def test_check_takes_the_default_remote_named_in_another_case_as_dvc_does(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """dvc looks remote names up lowercased, so `--remote Storage` names the default remote
+    `storage`, and dvc pins under that name. Mutations that must redden this: compare the names
+    as given, in the check or in the commit gate."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    before = _head(proj)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push", "--remote", "Storage"]) == 0, _err(capsys)
+    assert dvc.push_calls
+    assert _head(proj) != before and _head(tmp_path / "origin.git", "main") == _head(proj)
+
+
+@pytest.mark.parametrize("own", [
+    "backup",
+    pytest.param("Storage", id="the-default-in-another-case"),  # dvc pins it as `cloud.Storage`
+])
+def test_check_refuses_outs_with_their_own_remote(moto_push, tmp_path, monkeypatch, capsys, own) -> None:
+    """An out's own `remote:` is refused, even the default's name in another case: dvc reads
+    that remote's config lowercased but records the out's pins under the name as written, where
+    the check can't find them. Mutation that must redden the second case: compare it lowercased."""
     dvc, s3, bucket = moto_push
     proj = _moto_producer(tmp_path, s3)
     doc = yaml.safe_load((proj / "data" / "x.csv.dvc").read_text())
-    doc["outs"][0]["remote"] = "backup"
+    doc["outs"][0]["remote"] = own
     (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
     monkeypatch.chdir(proj)
     assert cli.main(["data", "push"]) == 1

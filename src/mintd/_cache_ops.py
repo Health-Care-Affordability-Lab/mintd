@@ -360,7 +360,7 @@ def resolve_repo_remote(project_path: Path, remote: str | None) -> RepoRemote:
     ``compute_storage_prefix``. Every failure is a typed, hinted ``CacheError``
     (no silent degradation — cache has no fallback lane)."""
     try:
-        remote_name = remote or require_default_remote(project_path)
+        remote_name = remote.lower() if remote else require_default_remote(project_path)  # as dvc looks names up
         remote_cfg = get_remote_config(project_path, remote_name)
     except MintdError as exc:  # no default remote, or a config dvc can't read: dvc refuses too
         raise CacheError(str(exc), hint=exc.hint) from exc

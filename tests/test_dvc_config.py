@@ -206,12 +206,24 @@ def test_imports_only_and_no_remote_pull_as_dvc_pulls(real_dvc, tmp_path: Path, 
     assert (consumer / "data/final/a.csv").read_bytes() == b"v1\n"
 
 
-def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(real_dvc, tmp_path: Path, monkeypatch, capsys) -> None:
+_STAGE = [["stage", "add", "-n", "make", "-o", "x.csv", "echo x > x.csv"], ["repro", "-q"]]
+
+
+@pytest.mark.parametrize(("track", "targets"), [
+    pytest.param([["add", "-q", "x.csv"]], [], id="a-pointer"),
+    pytest.param(_STAGE, [], id="a-pipeline-out"),
+    pytest.param(_STAGE, ["x.csv"], id="a-pipeline-out-by-name"),
+])
+def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(
+    real_dvc, tmp_path: Path, monkeypatch, capsys, track, targets,
+) -> None:
     """With one remote and no `core.remote`, dvc picks none: `dvc pull` stops with "No remote
     provided and no default remote set". `mintd data pull` stops too, before any download,
     with a hint naming that remote, and never runs dvc (whose raw message the user would see).
     It used to take the one remote.
-    Mutations that must redden this: take the one remote again; fall back to dvc pull."""
+    Mutations that must redden this: take the one remote again; fall back to dvc pull; for a
+    pipeline out, ask only about the outs fast sync can serve (with no remote, none); pass a
+    named target that reads as no out (a stage out by its path)."""
     import shutil
 
     from mintd import _dvc_ops, cli
@@ -221,7 +233,8 @@ def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(real_dvc, tmp_pa
     real_dvc(["init", "-q", "--no-scm"], cwd=project, check=True)
     real_dvc(["remote", "add", "store", str(tmp_path / "store")], cwd=project, check=True)
     (project / "x.csv").write_text("x\n")
-    real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
+    for argv in track:
+        real_dvc(argv, cwd=project, check=True)
     real_dvc(["push", "-r", "store"], cwd=project, check=True)
     (project / "x.csv").unlink()
     shutil.rmtree(project / ".dvc" / "cache")
@@ -233,7 +246,73 @@ def test_one_remote_and_no_default_is_refused_as_dvc_refuses_it(real_dvc, tmp_pa
 
     monkeypatch.setattr(_dvc_ops.SubprocessDvcOps, "pull", no_dvc)
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
-    assert cli.main(["data", "pull", "--path", str(project)]) == 1
+    monkeypatch.chdir(project)
+    assert cli.main(["data", "pull", "--path", str(project), *targets]) == 1
     err = " ".join(capsys.readouterr().err.split())
     assert "error: no default DVC remote in .dvc/config" in err
     assert "hint: set a default: dvc remote default store (add --local to keep it out of git)" in err
+
+
+@pytest.mark.parametrize("track", [
+    pytest.param([["add", "-q", "x.csv"]], id="a-pointer"),
+    pytest.param(_STAGE, id="a-pipeline-out"),
+])
+def test_no_default_remote_and_the_data_in_the_cache_pull_as_dvc_pulls(
+    real_dvc, tmp_path: Path, monkeypatch, capsys, track,
+) -> None:
+    """With no remote to pull from, `dvc pull` still restores what its cache holds (with a
+    warning), so a project needs a default remote only for data the cache lacks; mintd asks
+    for one only then. Mutation that must redden this: ask whatever the cache holds."""
+    from mintd import cli
+
+    project = tmp_path / "project"
+    project.mkdir()
+    real_dvc(["init", "-q", "--no-scm"], cwd=project, check=True)
+    (project / "x.csv").write_text("x\n")
+    for argv in track:
+        real_dvc(argv, cwd=project, check=True)
+    (project / "x.csv").unlink()
+    real_dvc(["pull"], cwd=project, check=True)
+    assert (project / "x.csv").read_text() == "x\n"
+    (project / "x.csv").unlink()
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    assert cli.main(["data", "pull", "--path", str(project)]) == 0, capsys.readouterr().err
+    assert (project / "x.csv").read_text() == "x\n"
+
+
+def test_clone_matches_a_path_with_no_default_remote_and_leaves_the_refusal_to_pull(tmp_path: Path) -> None:
+    """Clone matches a `--path` to the clone's outs by path, which needs no remote; data pull
+    then refuses only where the project's own remote is needed, so imports alone still clone.
+    Mutation that must redden this: require the default remote in the resolver again."""
+    from mintd.data import _resolve_targets_in_clone
+
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text(f"{R}    url = s3://b/p\n")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "x.csv.dvc").write_text("outs:\n- md5: 0123456789abcdef0123456789abcdef\n  path: x.csv\n")
+    targets, _ = _resolve_targets_in_clone(tmp_path, targets=["data/x.csv"], name="p", rev_primary=False)
+    assert targets == ["data/x.csv"]
+
+
+@pytest.mark.parametrize(("config", "hint"), [
+    pytest.param(f"{R}    url = s3://b/lab/p\n",
+                 ".dvc/config has remote 'storage' but sets no default remote. Run: dvc remote default storage",
+                 id="one-remote-and-no-default"),
+    pytest.param("[remote storage]\n    url = s3://b/lab/p\n",
+                 'an unquoted [remote storage] header; write [remote "storage"]', id="an-unquoted-header"),
+])
+def test_check_names_the_fix_for_a_config_with_no_default_remote(tmp_path: Path, config: str, hint: str) -> None:
+    """`mintd check` reads no default remote from these, as dvc does; its repair is the one dvc
+    takes, not `dvc remote add`, which fails on both. Mutation that must redden this: drop the
+    two cases from the repair hint."""
+    import json
+
+    from mintd._storage_state import StorageState, inspect_storage, repair_hint
+
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text(config)
+    storage = {"bucket": "b", "prefix": "lab/p", "dvc": {"remote_name": "storage"}}
+    (tmp_path / "metadata.json").write_text(json.dumps({"storage": storage}))
+    inspection = inspect_storage(tmp_path)
+    assert inspection.state == StorageState.PARTIAL_META_ONLY
+    assert hint in (repair_hint(inspection) or "")

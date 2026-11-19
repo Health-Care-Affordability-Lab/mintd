@@ -47,11 +47,13 @@ from ._dvc_state import (
 from ._fast_sync_ops import (
     FastSyncOps,
     cached_targets,
+    ensure_out_cached,
 )
 from ._dvc_state import (
     _names_a_stage,
     abbreviate,
     does_not_parse,
+    dvc_cache_dir,
     judge_pointers,
     push_targets,
     require_default_remote,
@@ -826,7 +828,7 @@ def data_pull(
             f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pulled; "
             "change the .gitignore, or drop this target"
         )
-    default_remote = remote or _default_dvc_remote(project_path)
+    default_remote = remote.lower() if remote else _default_dvc_remote(project_path)  # dvc lowercases names too
     # "" names no remote: a pull of imports alone reads only their producers' buckets, and
     # dvc pull needs no remote of this project for them either. Anything else does (below).
     remote_name = default_remote or ""
@@ -875,11 +877,15 @@ def data_pull(
         else:
             logger.info("no .dvc targets and no pipeline outs discovered")
 
-    if default_remote is None and (pipeline_outs or not all(
-        (outs := outs_for_target(project_path, t, remote_name)) and all(o.is_import for o in outs)
-        for t in targets or []
-    )):
-        require_default_remote(project_path)  # dvc pull refuses too; this says how to set one, and dvc never runs
+    if default_remote is None:
+        # dvc pull needs no remote of this project for imports or for what its cache holds; for other
+        # data this asks for one before dvc runs, saying how to set one. Stricter than dvc for a cached
+        # stage out named by path or stage, and for an out with its own `remote:`.
+        cache_dir = dvc_cache_dir(project_path)
+        per_target = [outs_for_target(project_path, t, remote_name) for t in targets or []]
+        needed = [*all_pipeline, *(o for outs in per_target for o in outs)]
+        if not all(per_target) or not all(o.is_import or ensure_out_cached(cache_dir, o) for o in needed):
+            require_default_remote(project_path)
 
     total_bytes = _compute_total_bytes(
         project_path, targets or [], pipeline_outs, remote_name,
@@ -1027,9 +1033,9 @@ def data_push(
     aws_profile: str | None = None,
     memo_path: Path | None = None,
 ) -> PushSummary:
-    # Resolve the effective remote for display only (explicit > .dvc/config >
-    # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
-    # applies its own default when None. ``targets=None`` pushes everything
+    # The effective remote is the explicit one, else .dvc/config's default; with
+    # neither, push stops here, as dvc push does. dvc still gets the raw ``remote``
+    # and applies its own default when None. ``targets=None`` pushes everything
     # tracked (dvc's default) in one argv.
     #
     # Push needs no fast-sync analog — it uploads from an intact local cache.
@@ -1041,6 +1047,7 @@ def data_push(
     # ``.dvc`` paths with bare paths uploads only the last ``.dvc`` target's
     # outs at exit 0 (the ``index_from_targets`` leak ``_shape_groups``
     # documents), so the groups are never mixed.
+    remote = remote.lower() if remote else remote  # dvc lowercases remote names when it looks one up
     effective_remote = remote or require_default_remote(project_path)  # dvc push refuses with no default too
     groups: list[list[str] | None] = [None]
     selection: frozenset[str] | None = None
@@ -1274,7 +1281,7 @@ def commit_pushed_pointers(
     default = storage.dvc_remote_name
     if default is None:
         return left("no default DVC remote in .dvc/config")
-    if remote is not None and remote != default:
+    if remote is not None and remote.lower() != default:
         return left(f"pushed to --remote {remote}; importers pull from the default remote {default}")
     redirect = _local_redirect(root, default, named=remote is not None)
     if redirect is not None:
