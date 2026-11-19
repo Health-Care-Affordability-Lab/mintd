@@ -89,17 +89,25 @@ jobs:
           if ! gh release view "$TAG" --json tagName > /dev/null 2>&1; then
             gh release create "$TAG" --verify-tag --prerelease --latest=false --title "$TAG" --notes "$notes"
           fi
-          # Upload only the files the release lacks; one it has must be the
-          # same bytes. A rerun can finish a release but never change one.
-          have=$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.digest)"')
+          # Only a prerelease is changed here; a promoted release never is.
+          [ "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = true ] \
+            || { echo "::error::$TAG is not a prerelease; a promoted release is never changed"; exit 1; }
+          # A rerun can finish a release but never change one. Every file the
+          # release already has must be these same bytes, all checked before
+          # anything is uploaded; then only the missing files are uploaded.
+          have=$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.state) \(.digest)"')
           for f in dist/*; do
-            name=${f##*/}
-            digest=$(awk -v n="$name" '$1 == n {print $2}' <<< "$have")
-            if [ -z "$digest" ]; then
-              gh release upload "$TAG" "$f"
+            line=$(awk -v n="${f##*/}" '$1 == n' <<< "$have")
+            [ -n "$line" ] || continue
+            read -r name state digest <<< "$line"
+            if [ "$state" != uploaded ] || [ "$digest" = null ]; then
+              echo "::error::$TAG has an incomplete upload of $name (RELEASING.md, A failed run)"; exit 1
             elif [ "$digest" != "sha256:$(sha256sum "$f" | cut -d' ' -f1)" ]; then
               echo "::error::$TAG already has a different $name; a release's files are never replaced"; exit 1
             fi
+          done
+          for f in dist/*; do
+            awk -v n="${f##*/}" '$1 == n {found = 1} END {exit !found}' <<< "$have" || gh release upload "$TAG" "$f"
           done
   promote:
     needs: prerelease

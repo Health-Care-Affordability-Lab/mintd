@@ -76,18 +76,18 @@ def test_first_tag_is_v0_1_0(tmp_path: Path) -> None:
     assert _run_tag_step(work, shas[0]) == f"tagged {shas[0]} as v0.1.0\n"
 
 
-def _run_dispatch_step(work: Path, sha: str, stubs: Path) -> list[str]:
+def _run_dispatch_step(work: Path, sha: str, stubs: Path, gh_rc: int = 0) -> tuple[int, list[str]]:
     """The dispatch step with a `gh` that only records its arguments."""
     log = stubs / "gh.log"
+    log.touch()
     gh = stubs / "gh"
-    gh.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
+    gh.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\nexit {gh_rc}\n')
     gh.chmod(0o755)
     steps = yaml.safe_load(_WORKFLOW.read_text())["jobs"]["tag"]["steps"]
     script = next(s["run"] for s in steps if s.get("name") == "Start the release workflow on the tag")
     env = {**_ENV, "SHA": sha, "GITHUB_REPOSITORY": "o/r", "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}"}
     result = subprocess.run(["bash", "-c", script], cwd=work, env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    return log.read_text().splitlines()
+    return result.returncode, log.read_text().splitlines()
 
 
 def test_dispatch_starts_release_on_the_new_tag(tmp_path: Path) -> None:
@@ -95,7 +95,7 @@ def test_dispatch_starts_release_on_the_new_tag(tmp_path: Path) -> None:
     _run_tag_step(work, shas[-1])
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref refs/tags/v0.4.1"]
+    assert _run_dispatch_step(work, shas[-1], stubs) == (0, ["workflow run release.yml --repo o/r --ref v0.4.1"])
 
 
 def test_dispatch_skips_a_hotfix_tag_on_the_same_commit(tmp_path: Path) -> None:
@@ -104,4 +104,38 @@ def test_dispatch_skips_a_hotfix_tag_on_the_same_commit(tmp_path: Path) -> None:
     _run_tag_step(work, shas[-1])
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    assert _run_dispatch_step(work, shas[-1], stubs) == ["workflow run release.yml --repo o/r --ref refs/tags/v0.4.1"]
+    assert _run_dispatch_step(work, shas[-1], stubs) == (0, ["workflow run release.yml --repo o/r --ref v0.4.1"])
+
+
+def test_dispatch_starts_nothing_for_a_commit_without_a_release_tag(tmp_path: Path) -> None:
+    work, shas = _repo(tmp_path, [["v0.4.0.post1"]])
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    assert _run_dispatch_step(work, shas[0], stubs) == (0, [])
+
+
+def test_dispatch_refuses_when_a_branch_has_the_tags_name(tmp_path: Path) -> None:
+    """The dispatch API takes a branch or tag name, so the two must not collide."""
+    work, shas = _repo(tmp_path, [["v0.4.0"], []])
+    _run_tag_step(work, shas[-1])
+    _git(work, "push", "-q", "origin", f"{shas[0]}:refs/heads/v0.4.1")
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    assert _run_dispatch_step(work, shas[-1], stubs) == (1, [])
+
+
+def test_dispatch_fails_when_gh_fails(tmp_path: Path) -> None:
+    work, shas = _repo(tmp_path, [["v0.4.0"], []])
+    _run_tag_step(work, shas[-1])
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    rc, _ = _run_dispatch_step(work, shas[-1], stubs, gh_rc=1)
+    assert rc != 0
+
+
+def test_a_merge_older_than_the_newest_tag_is_not_tagged(tmp_path: Path) -> None:
+    """The tag queue's order is not guaranteed. When a newer merge was tagged
+    first, an older one would otherwise get the higher version."""
+    work, shas = _repo(tmp_path, [["v0.4.0"], [], ["v0.4.1"]])
+    assert _run_tag_step(work, shas[1]) == f"{shas[1]} is older than v0.4.1, which includes it; not tagged\n"
+    assert _git(tmp_path / "origin.git", "tag", "--points-at", shas[1]) == ""

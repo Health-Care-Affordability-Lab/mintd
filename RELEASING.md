@@ -77,4 +77,11 @@ Land the same fix on `main` with a normal PR: `tag.yml` never creates or counts 
 
 Use "Re-run failed jobs" in the same run: it reuses the build's files. If the prerelease already
 exists, the rerun uploads only the files it lacks and stops if one it has differs. A release's files
-are never replaced.
+are never replaced, and a release that is no longer a prerelease is never changed.
+
+- **An incomplete upload.** If the run stops with "has an incomplete upload of `<file>`", an
+  interrupted upload left that file half there. The maintainer deletes that one file from the
+  prerelease (`gh release delete-asset vX.Y.Z <file>`), then re-runs the failed jobs.
+- **Starting a release by hand.** If the tag job could not start it (for example, a branch has the
+  tag's name), run `gh workflow run release.yml --ref vX.Y.Z`, or Actions → release → Run workflow,
+  with "Use workflow from" set to the tag.

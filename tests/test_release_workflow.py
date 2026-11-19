@@ -135,6 +135,7 @@ def test_only_the_approved_promote_job_marks_a_release_latest() -> None:
     # One line per command: join the backslash-continued lines.
     others = "\n".join(_runs(job) for job in _JOBS if job != "promote").replace("\\\n", " ")
     assert not re.search(r"--latest(?!=false)", others)
+    assert "--prerelease=false" not in others
     create = re.search(r"gh release create[^\n]*", others)
     assert create and re.search(r"--prerelease(?![=\w-])", create[0]) and "--verify-tag" in create[0]
 
@@ -143,7 +144,9 @@ def test_the_tag_job_runs_only_on_a_merge_one_at_a_time() -> None:
     assert _TAG_JOB["if"] == "github.event.pull_request.merged == true"
     # On the job: a workflow-level group would let a PR closed unmerged queue
     # there and cancel a merge's pending run.
-    assert _TAG_JOB["concurrency"] == {"group": "tag", "cancel-in-progress": False}
+    # queue: max keeps every waiting run; one pending run per group would let a
+    # third run cancel a merge's tagging.
+    assert _TAG_JOB["concurrency"] == {"group": "tag", "cancel-in-progress": False, "queue": "max"}
     assert "concurrency" not in _WF["tag.yml"]
 
 
@@ -208,34 +211,50 @@ _STUB_GH_PUBLISH = """#!/bin/bash
 echo "gh $*" >> "$LOG"
 case "$*" in
   "release view"*"--json tagName"*) [ "$EXISTS" = 1 ] || { echo "release not found" >&2; exit 1; } ;;
-  "release view"*"--json assets"*) cat "$HAVE" ;;
+  "release view"*"--json isPrerelease"*) echo "$PRERELEASE" ;;
+  "release view"*"--json assets"*) [ "$ASSETS_FAIL" = 1 ] && exit 1; cat "$HAVE" ;;
+  "release upload"*) [ "${4##*/}" = "$UPLOAD_FAIL" ] && exit 1 ;;
 esac
+exit 0
 """
+
+_SAME, _OTHER, _HALF = "same", "other", "half"
 
 
 @_BASH
 @pytest.mark.parametrize(
-    ("exists", "have", "created", "uploaded", "ok"),
+    ("case", "exists", "have", "created", "uploaded", "error"),
     [
-        (False, {}, True, ["a.whl", "b.txt"], True),  # a new release
-        (True, {"a.whl": "same"}, False, ["b.txt"], True),  # a rerun finishes it
-        (True, {"a.whl": "same", "b.txt": "same"}, False, [], True),  # nothing left to do
-        (True, {"a.whl": "other"}, False, [], False),  # a file differs: never replaced
+        ("new", False, {}, True, ["a.whl", "b.txt"], None),
+        ("rerun finishes it", True, {"a.whl": _SAME}, False, ["b.txt"], None),
+        ("nothing left", True, {"a.whl": _SAME, "b.txt": _SAME}, False, [], None),
+        # b differs: nothing is uploaded, not even the missing a
+        ("a file differs", True, {"b.txt": _OTHER}, False, [], "already has a different b.txt"),
+        ("an incomplete upload", True, {"a.whl": _HALF}, False, [], "incomplete upload of a.whl"),
+        ("not a prerelease", True, {}, False, [], "is not a prerelease"),
+        ("the asset lookup fails", True, {}, False, [], ""),
+        ("an upload fails", False, {}, True, ["a.whl", "b.txt"], ""),
     ],
 )
 def test_publishing_never_replaces_a_release_file(
-    tmp_path: Path, exists: bool, have: dict[str, str], created: bool, uploaded: list[str], ok: bool
+    tmp_path: Path, case: str, exists: bool, have: dict[str, str], created: bool, uploaded: list[str], error: str | None
 ) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
     files = {"a.whl": b"wheel", "b.txt": b"pins"}
     for name, data in files.items():
         (dist / name).write_bytes(data)
-    digest = {name: f"sha256:{hashlib.sha256(data).hexdigest()}" for name, data in files.items()}
-    lines = [f"{name} {digest[name] if kind == 'same' else 'sha256:' + '0' * 64}" for name, kind in have.items()]
-    (tmp_path / "have").write_text("".join(f"{line}\n" for line in lines))
+    answer = {
+        _SAME: lambda n: f"uploaded sha256:{hashlib.sha256(files[n]).hexdigest()}",
+        _OTHER: lambda n: "uploaded sha256:" + "0" * 64,
+        _HALF: lambda n: "open null",
+    }
+    (tmp_path / "have").write_text("".join(f"{n} {answer[kind](n)}\n" for n, kind in have.items()))
     env = {
         **_stubs(tmp_path, gh=_STUB_GH_PUBLISH), "TAG": "v1.2.3", "EXISTS": "1" if exists else "0",
+        "PRERELEASE": "false" if case == "not a prerelease" else "true",
+        "ASSETS_FAIL": "1" if case == "the asset lookup fails" else "0",
+        "UPLOAD_FAIL": "a.whl" if case == "an upload fails" else "",
         "HAVE": str(tmp_path / "have"), "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
         "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }
@@ -244,9 +263,12 @@ def test_publishing_never_replaces_a_release_file(
         cwd=tmp_path, env=env, capture_output=True, text=True,
     )
     log = (tmp_path / "log").read_text().splitlines()
-    assert (result.returncode == 0) is ok, result.stdout + result.stderr
+    assert (result.returncode == 0) is (error is None), result.stdout + result.stderr
+    if error:
+        assert error in result.stdout
     assert any(line.startswith("gh release create v1.2.3 --verify-tag --prerelease --latest=false") for line in log) is created
-    assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded
+    assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded[: 1 if case == "an upload fails" else None]
+    assert not any(line.startswith("gh release edit") for line in log)
 
 
 # --- promoting, run with a stub gh ---------------------------------------
