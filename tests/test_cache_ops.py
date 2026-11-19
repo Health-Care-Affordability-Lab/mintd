@@ -1869,11 +1869,14 @@ def test_no_transport_calls_in_cache_module() -> None:
 # "the cache is durable" stayed green). This replaces it with a POSITIVE
 # allowlist: parse the cache surface, extract every string literal that reaches
 # a user-facing sink (reporter.success/error/warn/info/result/status/progress,
-# the CacheError family's msg+hint, and argparse help=/hint=/desc=), and for any
-# literal that still names "cache" after the approved uses are stripped, fail.
+# the CacheError family's and MintdError's msg+hint, `_hint`'s hint, and argparse
+# help=/hint=/desc=), and for any literal that still names "cache" after the
+# approved uses are stripped, fail.
 
 _SINK_ATTRS = {"success", "error", "warn", "info", "result", "status", "progress"}
-_SINK_FUNCS = {"CacheError", "CacheKeyError", "CacheCollisionError", "TransferError"}
+_SINK_FUNCS = {
+    "CacheError", "CacheKeyError", "CacheCollisionError", "TransferError", "MintdError", "_hint",
+}
 _KW_SINKS = {"help", "hint", "desc"}
 # The approved appearances of the word "cache" in user-facing text: the full
 # store name, the local `cache/` directory, the `mintd cache` command, and the

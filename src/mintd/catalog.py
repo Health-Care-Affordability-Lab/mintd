@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from .errors import MintdError
+
 if TYPE_CHECKING:
     from ._console import Reporter
     from .model import Metadata
@@ -49,14 +51,18 @@ def _pr_url(registry_repo_url: str, pr_number: int) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-class CatalogEntryInvalid(Exception):
+class CatalogEntryInvalid(MintdError):
     """A catalog entry exists but cannot be read — unparseable YAML, or a shape
     `CatalogEntry` rejects. Distinct from `CatalogNotFound`: "run 'mintd data
     list'" is the wrong advice for a file that is right there and broken."""
 
+    hint = "fix the entry in the registry repo, then 'mintd registry sync'"
 
-class CatalogNotFound(Exception):
+
+class CatalogNotFound(MintdError):
     """Raised by fetch()/update() when the named entry is not in the catalog."""
+
+    hint = "run 'mintd data list' to see available products"
 
 
 class CatalogAlreadyExists(Exception):

@@ -18,6 +18,7 @@ import subprocess
 from dataclasses import dataclass
 
 from ._git_invoke import git_env
+from .errors import MintdError
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -53,8 +54,10 @@ class BranchInfo:
     ahead: int | None
 
 
-class GitOpError(Exception):
+class GitOpError(MintdError):
     """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
+
+    hint = "check git auth (gh auth status / ssh -T git@github.com)"
 
     def __init__(self, command: list[str], stderr: str) -> None:
         super().__init__(f"git command failed: {' '.join(command)}\n{stderr}")

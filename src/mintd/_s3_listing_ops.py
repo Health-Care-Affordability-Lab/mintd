@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, List, Optional
 from ._s3 import ClientError, create_client as _create_s3_client
+from .errors import MintdError
 
 @dataclass(frozen=True)
 class S3Object:
@@ -24,14 +25,14 @@ class S3ListingResult:
     objects: List[S3Object]
     truncated_to_prefix: Optional[str]
 
-class S3ListingError(Exception):
+class S3ListingError(MintdError):
     pass
 
 class BucketNotFound(S3ListingError):
     pass
 
 class BucketAccessError(S3ListingError):
-    pass
+    hint = "check AWS credentials (aws configure list / aws_profile_name)"
 
 _SUB_PATH_FORBIDDEN = ("..", "\\")
 

@@ -58,6 +58,7 @@ from mintd._s3 import (
 )
 from mintd._s3_listing_ops import _normalise_sub_path
 from mintd._storage_state import SLUG_REGEX
+from mintd.errors import MintdError
 
 # The botocore network-layer exceptions retry_transient itself classifies
 # transient (is_transient_s3_error): they survive a full retry budget and,
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-class TransferError(Exception):
+class TransferError(MintdError):
     """A transfer failed. Carries a CLI-ready ``hint`` (may be ``None``)."""
 
     def __init__(self, msg: str, *, hint: str | None = None) -> None:
@@ -442,10 +443,10 @@ def file_sha256(path: Path) -> str:
 SHARE_PREFIX = "share/"
 
 
-class ShareError(Exception):
+class ShareError(MintdError):
     """A share operation failed. Carries a CLI-ready ``hint`` (may be ``None``).
 
-    Mapped in cli.py exactly like ``S3ListingError`` → ``reporter.error``."""
+    A ``MintdError``: ``cli.main`` renders it with its hint."""
 
     def __init__(self, msg: str, *, hint: str | None = None) -> None:
         super().__init__(msg)

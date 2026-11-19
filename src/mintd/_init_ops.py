@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Protocol
 from ._git_invoke import git_env
 from ._dvc_invoke import dvc_cmd, dvc_env
+from .errors import MintdError
 
 
-class InitOpError(Exception):
+class InitOpError(MintdError):
     """Non-zero exit from `git init` or `dvc init`."""
 
 
@@ -23,6 +24,9 @@ class GitNotInstalled(InitOpError):
 
 class DvcNotInstalled(InitOpError):
     """`dvc` binary not on PATH."""
+
+    hint = "install DVC: pip install 'dvc[s3]'"
+    exit_code = 2
 
 
 class InitNonInteractive(InitOpError):

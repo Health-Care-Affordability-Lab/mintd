@@ -24,7 +24,8 @@ import posixpath
 import shlex
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NoReturn, Optional
 
@@ -34,16 +35,10 @@ from . import __version__, config_ops, metadata_migrate
 from ._console import Reporter
 from ._config import Config, ConfigError
 from ._dvc_ops import (
-    DvcImportPathNotFound,
-    DvcNotInRepoError,
-    DvcNotInstalled,
     DvcOpError,
     DvcOps,
-    DvcPushError,
-    DvcStorageKeyError,
     SubprocessDvcOps,
 )
-from ._subprocess import WallTimeoutExceeded
 from ._registry_git_ops import (
     GhAuthError,
     GhNotInstalled,
@@ -55,14 +50,11 @@ from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
 from .errors import MintdError
-from ._push_verify import PushRefused
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
-from ._init_ops import InitOpError
 from .catalog import (
     CatalogAlreadyExists,
     CatalogClient,
-    CatalogEntryInvalid,
     CatalogFilter,
     CatalogNotFound,
     GitCatalogClient,
@@ -70,14 +62,10 @@ from .catalog import (
 from ._dvc_state import abbreviate
 from .check import CheckFinding, check_project
 from .data import (
-    AmbiguousImport,
     BumpBlocked,
     ImportDestinationExists,
-    StaleBackupExists,
     ImportNotFound,
-    NoTrackedOutputs,
     PrimaryRemovedAtHead,
-    UndeliverableImport,
     UnknownProductPath,
     bump_import,
     clone_and_pull_product,
@@ -94,22 +82,18 @@ from .data_ops import (
     data_verify,
 )
 from ._s3_listing_ops import (
-    BucketAccessError,
     BucketNotFound,
     S3ListingResult,
     list_product_objects,
 )
-from ._archive_ops import ArchiveAlreadyExists, UnsafeArchiveMember
+from ._archive_ops import UnsafeArchiveMember
 from ._share_ops import (
-    ShareError,
-    TransferError,
     neutralize_control_chars,
     resolve_share_user,
     share_get,
     share_put,
 )
 from ._cache_ops import (
-    CacheError,
     CachePullSummary,
     CachePushSummary,
     cache_pull,
@@ -118,18 +102,9 @@ from ._cache_ops import (
     resolve_repo_remote,
 )
 from .enclave import (
-    AlreadyApproved,
-    AmbiguousSubscription,
-    AppendOnlyViolation,
     EnclaveManifest,
-    EnclavePullError,
     InvalidTransferManifest,
-    DestinationExists,
     NothingNewToPackage,
-    NothingToPackage,
-    TransferManifestNotFound,
-    PathTraversalDetected,
-    WrongEnclave,
     enclave_add,
     enclave_bump,
     enclave_package,
@@ -140,22 +115,22 @@ from .enclave import (
     subscription_label,
 )
 from .imports import scan_imports
-from .init import InitDestinationExists, InitNameInvalid, init_project
+from .init import init_project
 from .model import Metadata
 from .pending_registrations import PendingRegistrations
 from .producer import MissingPrimaryDataProduct, ProducerError
 from .publish import (
     PublishBlocked,
-    PublishError,
     PublishNonInteractive,
     PublishPreview,
-    WorkingTreeDirty,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class MetadataSchemaTooOld(Exception):
+class MetadataSchemaTooOld(MintdError):
+    hint = "run 'mintd update metadata' to migrate this project to v2"
+
     def __init__(self, path: Path, found: str) -> None:
         super().__init__(f"metadata.json at {path} is schema {found!r}, expected '2.0'")
         self.path = path
@@ -163,11 +138,14 @@ class MetadataSchemaTooOld(Exception):
 
 
 def _load_metadata_with_schema_hint(path: Path) -> Metadata:
-    """Read metadata.json. Raises ``MetadataSchemaTooOld`` when the file is
-    on the v1 schema (so callers can hint at `mintd update metadata`); the
-    underlying ``pydantic.ValidationError`` otherwise. ``FileNotFoundError``
-    propagates verbatim."""
-    raw = path.read_text(encoding="utf-8")
+    """Read metadata.json for `registry register` and `registry update`.
+    Every failure is a ``MintdError``: a missing file, the v1 schema
+    (``MetadataSchemaTooOld``, hinting at `mintd update metadata`), or a v2
+    file pydantic rejects."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise MintdError(str(exc)) from exc
     try:
         peek = json.loads(raw)
     except json.JSONDecodeError:
@@ -175,7 +153,13 @@ def _load_metadata_with_schema_hint(path: Path) -> Metadata:
     sv = peek.get("schema_version") if isinstance(peek, dict) else None
     if sv is not None and sv != "2.0":
         raise MetadataSchemaTooOld(path=path, found=str(sv))
-    return Metadata.model_validate_json(raw)
+    try:
+        return Metadata.model_validate_json(raw)
+    except ValidationError as exc:
+        raise MintdError(
+            f"metadata.json failed v2 schema validation ({len(exc.errors())} field error(s))",
+            hint="run 'mintd check' to see field-level details",
+        ) from exc
 
 
 def _add_global_output_flags(parser: argparse.ArgumentParser) -> None:
@@ -244,38 +228,39 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         args._reporter.error("interrupted by user")
         return 130
-    except WallTimeoutExceeded as e:
-        # Catches the fast-tier default (30s on dvc init /
-        # etc.) and any user-configured timeouts.transfer that fires from
-        # handlers that don't catch the exception themselves (data pull /
-        # push / add / verify / remove / import / publish). data clone
-        # catches it locally for a richer message. str(e) is the full
-        # sentence ("command exceeded wall timeout of Ns"), never the bare
-        # seconds float.
-        args._reporter.error(
-            str(e),
-            hint="raise (or null out) the matching timeouts: entry in "
-                 "~/.config/mintd/config.yaml",
-        )
-        return 1
-    except ConfigError as e:
-        args._reporter.error(str(e))
-        return 1
     except MintdError as e:
-        # The one place a seam's error is rendered: what failed, what to do, the exit code.
+        # The one place an error is rendered: what failed, what to do, the exit code.
         args._reporter.error(str(e), hint=e.hint)
         return e.exit_code
-    except CatalogEntryInvalid as e:
-        # Every verb that reads the catalog can hit this, and only one of them
-        # (`data import`, plain arm) happened to catch the pydantic half via
-        # its bare `ValueError`. One arm here rather than eleven below.
-        args._reporter.error(
-            str(e),
-            hint="fix the entry in the registry repo, then 'mintd registry sync'",
-        )
-        return 1
     finally:
         args._reporter.uninstall_log_bridge()
+
+
+@contextmanager
+def _hint(
+    errors: type[BaseException] | tuple[type[BaseException], ...],
+    hint: str | None = None,
+    *,
+    exit_code: int | None = None,
+    message: str | None = None,
+) -> Iterator[None]:
+    """Re-raise ``errors`` from the block as a ``MintdError`` carrying this
+    verb's advice, for ``main`` to render.
+
+    For an error whose raise site several verbs share, so the advice depends
+    on the verb. ``hint`` applies only where the error has none of its own;
+    ``exit_code`` overrides the error's own (else 1); ``message`` replaces
+    ``str(error)``. The result is a plain ``MintdError``, so an outer
+    ``_hint`` on a base class (``ValueError``, say) no longer matches it.
+    """
+    try:
+        yield
+    except errors as e:
+        raise MintdError(
+            message or str(e),
+            hint=getattr(e, "hint", None) or hint,
+            exit_code=exit_code or getattr(e, "exit_code", None),
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -815,10 +800,10 @@ def _resolve_fast_sync_ops(config: Config) -> FastSyncOps | None:
     return SubprocessFastSyncOps(aws_profile_name=config.aws_profile_name)
 
 
-def _require_fast_sync_ops(config: Config, reporter: Reporter) -> FastSyncOps | None:
-    """Resolve fast-sync for `data pull` / `data clone`, or report and fail.
+def _require_fast_sync_ops(config: Config) -> FastSyncOps:
+    """Resolve fast-sync for `data pull` / `data clone`, or fail.
 
-    Returns None ONLY when boto3 is not importable -- the one degraded case
+    Fails ONLY when boto3 is not importable -- the one degraded case
     `_resolve_fast_sync_ops` has. boto3 is a required dependency, so that
     state is a broken install and never a supported configuration; both
     callers exit 2, the posture a missing bundled `dvc` already takes.
@@ -835,14 +820,15 @@ def _require_fast_sync_ops(config: Config, reporter: Reporter) -> FastSyncOps | 
     mintd without boto3, so there is nothing for a
     flag to serve.
 
-    `reporter.error`, not `warn`: `warn` is json-suppressed, which is how
-    the deleted lane stayed completely invisible to a `--json` consumer.
+    An error, not a warning: `warn` is json-suppressed, which is how the
+    deleted lane stayed completely invisible to a `--json` consumer.
     """
     fast_sync_ops = _resolve_fast_sync_ops(config)
     if fast_sync_ops is None:
-        reporter.error(
+        raise MintdError(
             "mintd's boto3 dependency is missing — reinstall mintd",
             hint="pip install 'dvc[s3]'",
+            exit_code=2,
         )
     return fast_sync_ops
 
@@ -903,7 +889,6 @@ def _handle_check(args: argparse.Namespace) -> int:
 def _handle_init(args: argparse.Namespace) -> int:
     from ._config import Config
     from ._console import Reporter
-    from ._init_ops import InitNonInteractive
     from .init import (
         _prompt_classification,
     )
@@ -914,11 +899,7 @@ def _handle_init(args: argparse.Namespace) -> int:
     classification: str | None = None
     slug: str | None = None
     if args.project_type != "enclave":
-        try:
-            classification, slug = _prompt_classification(reporter=reporter)
-        except InitNonInteractive as exc:
-            reporter.error(str(exc))
-            return 1
+        classification, slug = _prompt_classification(reporter=reporter)
 
     try:
         config = Config.load()
@@ -933,25 +914,20 @@ def _handle_init(args: argparse.Namespace) -> int:
     # ~/.aws/credentials) has a [mintd] section; otherwise None.
     profile = config.aws_profile_name
 
-    try:
-        project_path, written = init_project(
-            project_type=args.project_type,
-            name=args.name,
-            target_dir=args.path,
-            language=args.lang,
-            use_current_repo=args.use_current_repo,
-            force=args.force,
-            classification=classification,
-            slug=slug,
-            bucket=bucket,
-            endpoint=endpoint,
-            profile=profile,
-            reporter=reporter,
-        )
-    except (InitDestinationExists, InitNameInvalid, InitOpError) as exc:
-        # getattr: only InitDestinationExists carries a hint.
-        reporter.error(str(exc), hint=getattr(exc, "hint", None))
-        return 1
+    project_path, written = init_project(
+        project_type=args.project_type,
+        name=args.name,
+        target_dir=args.path,
+        language=args.lang,
+        use_current_repo=args.use_current_repo,
+        force=args.force,
+        classification=classification,
+        slug=slug,
+        bucket=bucket,
+        endpoint=endpoint,
+        profile=profile,
+        reporter=reporter,
+    )
     # Render paths relative to cwd when possible so the user sees the subdir.
     cwd = Path.cwd().resolve()
     try:
@@ -991,34 +967,18 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     reporter = args._reporter
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    fast_sync_ops = _require_fast_sync_ops(config, reporter)
-    if fast_sync_ops is None:
-        return 2
-    try:
-        summary = data_pull(
-            project_path=project_path,
-            targets=args.targets or None,
-            dvc_ops=dvc_ops,
-            fast_sync_ops=fast_sync_ops,
-            remote=args.remote,
-            jobs=args.jobs,
-            extra_dvc_args=args.dvc_args or None,
-            reporter=reporter,
-            aws_profile_name=config.aws_profile_name,
-        )
-    except DvcNotInstalled as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
-    except DvcStorageKeyError as e:
-        # dvc's opaque StorageKeyError tuple crash, already translated by
-        # _dvc_ops into the failing target (the DvcOpError subclass that
-        # populates the base-class ``hint``); render with the targeted-retry
-        # hint instead of the bare tuple.
-        reporter.error(str(e), hint=e.hint)
-        return 1
-    except DvcOpError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
+    fast_sync_ops = _require_fast_sync_ops(config)
+    summary = data_pull(
+        project_path=project_path,
+        targets=args.targets or None,
+        dvc_ops=dvc_ops,
+        fast_sync_ops=fast_sync_ops,
+        remote=args.remote,
+        jobs=args.jobs,
+        extra_dvc_args=args.dvc_args or None,
+        reporter=reporter,
+        aws_profile_name=config.aws_profile_name,
+    )
     if summary.error_count:
         # Targets data_pull did not land in the workspace. Each was already
         # reported via reporter.error with its own hint inside data_pull;
@@ -1089,24 +1049,11 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                 aws_profile=config.aws_profile_name,
                 memo_path=config.resolved_cache_dir() / "proven-versions.sqlite",
             )
-    except PushRefused as e:
-        reporter.error(str(e), hint=e.hint)
-        return 1
     except S3AccessDenied as e:
-        reporter.error(
+        raise MintdError(
             f"S3 refused to show the pinned versions, so the push can't be checked: {e}",
             hint="check AWS credentials: mintd config validate",
-        )
-        return 1
-    except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
-        return 2
-    except DvcPushError as e:
-        reporter.error(str(e), hint="check AWS credentials: mintd config validate")
-        return 1
-    except DvcOpError as e:
-        reporter.error(str(e))
-        return 1
+        ) from e
     # Importers read the producer's pushed commit, never this working tree,
     # and a version-aware push writes S3 version IDs into exactly these files,
     # so a pointer that differs from HEAD is one no importer can see yet.
@@ -1144,9 +1091,8 @@ def _handle_data_push(args: argparse.Namespace) -> int:
                     head[p] = None  # unreadable: judge every out it records
             gate = judge_push(prepared, pointers, head=head, dvc_uploaded_nothing=summary.up_to_date)
         except S3AccessDenied as e:
-            reporter.error(f"S3 refused to show the pinned versions: {e}",
-                           hint="check AWS credentials: mintd config validate")
-            return 1
+            raise MintdError(f"S3 refused to show the pinned versions: {e}",
+                             hint="check AWS credentials: mintd config validate") from e
         if not gate.ok:
             if reporter.json_mode:
                 reporter.result({"remote": summary.remote, "verify": gate.counts, "errors": gate.lines,
@@ -1290,46 +1236,36 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _share_boto3_available(reporter: Reporter) -> bool:
+def _share_boto3_available() -> None:
     """Probe ``_s3.available()`` with the same posture as ``_resolve_fast_sync_ops``:
-    a clean ``reporter.error`` + exit 2, never a traceback from a later
+    a clean error + exit 2, never a traceback from a later
     ``_s3.create_client`` call whose ``boto3`` is ``None``."""
     if not _s3.available():
         logger.warning("share unavailable: boto3 is not importable")
-        reporter.error(
+        raise MintdError(
             "share requires boto3, which is not installed",
             hint="install it: pip install 'dvc[s3]'",
+            exit_code=2,
         )
-        return False
-    return True
 
 
 def _handle_share_put(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    if not _share_boto3_available(reporter):
-        return 2
-    try:
-        user, source = resolve_share_user(config)
-    except ShareError as e:
-        reporter.error(str(e), hint=e.hint)
-        return 1
+    _share_boto3_available()
+    user, source = resolve_share_user(config)
     if source == "author":
         reporter.info(
             f"💡 sharing as '{user}' — set share_user in "
             "~/.config/mintd/config.yaml to pin this"
         )
-    try:
-        result = share_put(
-            local_path=args.file,
-            user=user,
-            config=config,
-            reporter=reporter,
-            as_value=args.as_value,
-        )
-    except (ShareError, TransferError) as e:
-        reporter.error(str(e), hint=e.hint)
-        return 1
+    result = share_put(
+        local_path=args.file,
+        user=user,
+        config=config,
+        reporter=reporter,
+        as_value=args.as_value,
+    )
     if reporter.json_mode:
         reporter.result(
             {
@@ -1355,18 +1291,13 @@ def _handle_share_put(args: argparse.Namespace) -> int:
 def _handle_share_get(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
-    if not _share_boto3_available(reporter):
-        return 2
-    try:
-        result = share_get(
-            ref=args.ref,
-            config=config,
-            reporter=reporter,
-            out=args.out,
-        )
-    except (ShareError, TransferError) as e:
-        reporter.error(str(e), hint=e.hint)
-        return 1
+    _share_boto3_available()
+    result = share_get(
+        ref=args.ref,
+        config=config,
+        reporter=reporter,
+        out=args.out,
+    )
     if reporter.json_mode:
         reporter.result(
             {
@@ -1385,49 +1316,40 @@ def _handle_share_get(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any] | int:
+def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any]:
     """Shared preflight for the three cache verbs: project probe + config +
-    boto3-backed factory. Returns ``(reporter, project_path, config, factory)``
-    or an exit code."""
+    boto3-backed factory. Returns ``(reporter, project_path, config, factory)``."""
     reporter = args._reporter
     project_path = args.path.resolve()
     if not (project_path / ".dvc").is_dir():
-        reporter.error(
+        raise MintdError(
             f"not inside a mintd project (no .dvc/ at {project_path})",
             hint="the repo file cache (S3) lives inside a project's own bucket "
                  "prefix — cd into the project; for ad-hoc handoffs use mintd share put",
         )
-        return 1
     config = Config.load()
     factory = _resolve_cache_ops(config)
     if factory is None:
-        reporter.error(
+        raise MintdError(
             "the repo file cache (S3) requires boto3, which is not installed",
             hint="install it: pip install 'dvc[s3]'",
+            exit_code=2,
         )
-        return 2
     return reporter, project_path, config, factory
 
 
 def _handle_cache_push(args: argparse.Namespace) -> int:
-    pre = _cache_project_preflight(args)
-    if isinstance(pre, int):
-        return pre
-    reporter, project_path, config, factory = pre
-    try:
-        summary = cache_push(
-            project_path=project_path,
-            paths=args.paths,
-            config=config,
-            reporter=reporter,
-            remote=args.remote,
-            jobs=args.jobs,
-            dry_run=args.dry_run,
-            s3_client_factory=factory,
-        )
-    except (CacheError, TransferError) as exc:
-        reporter.error(str(exc), hint=getattr(exc, "hint", None))
-        return 1
+    reporter, project_path, config, factory = _cache_project_preflight(args)
+    summary = cache_push(
+        project_path=project_path,
+        paths=args.paths,
+        config=config,
+        reporter=reporter,
+        remote=args.remote,
+        jobs=args.jobs,
+        dry_run=args.dry_run,
+        s3_client_factory=factory,
+    )
     return _render_cache_push(summary, reporter)
 
 
@@ -1476,11 +1398,9 @@ def _render_cache_push(summary: CachePushSummary, reporter: Reporter) -> int:
 
 
 def _handle_cache_pull(args: argparse.Namespace) -> int:
-    pre = _cache_project_preflight(args)
-    if isinstance(pre, int):
-        return pre
-    reporter, project_path, config, factory = pre
-    try:
+    reporter, project_path, config, factory = _cache_project_preflight(args)
+    # bad --prefix via _normalise_sub_path
+    with _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2):
         summary = cache_pull(
             project_path=project_path,
             config=config,
@@ -1491,12 +1411,6 @@ def _handle_cache_pull(args: argparse.Namespace) -> int:
             force=args.force,
             s3_client_factory=factory,
         )
-    except (CacheError, TransferError) as exc:
-        reporter.error(str(exc), hint=getattr(exc, "hint", None))
-        return 1
-    except ValueError as exc:  # bad --prefix via _normalise_sub_path
-        reporter.error(str(exc), hint="drop '..', a leading '/', or '\\' from --prefix")
-        return 2
     return _render_cache_pull(summary, reporter)
 
 
@@ -1545,32 +1459,19 @@ def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
 
 
 def _handle_cache_ls(args: argparse.Namespace) -> int:
-    pre = _cache_project_preflight(args)
-    if isinstance(pre, int):
-        return pre
-    reporter, project_path, config, factory = pre
-    try:
-        repo = resolve_repo_remote(project_path, args.remote)
-    except CacheError as exc:
-        reporter.error(str(exc), hint=exc.hint)
-        return 1
-    try:
-        with reporter.status("Listing the repo file cache (S3)..."):
-            result = list_cache_objects(
-                repo,
-                sub_path=args.prefix,
-                aws_profile_name=config.aws_profile_name,
-                factory=factory,
-            )
-    except ValueError as exc:
-        reporter.error(str(exc), hint="drop '..', a leading '/', or '\\' from --prefix")
-        return 2
-    except BucketNotFound as exc:
-        reporter.error(str(exc), hint="check the project's remote url in .dvc/config")
-        return 1
-    except BucketAccessError as exc:
-        reporter.error(str(exc), hint="check AWS credentials (aws configure list / aws_profile_name)")
-        return 1
+    reporter, project_path, config, factory = _cache_project_preflight(args)
+    repo = resolve_repo_remote(project_path, args.remote)
+    with (
+        _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2),
+        _hint(BucketNotFound, "check the project's remote url in .dvc/config"),
+        reporter.status("Listing the repo file cache (S3)..."),
+    ):
+        result = list_cache_objects(
+            repo,
+            sub_path=args.prefix,
+            aws_profile_name=config.aws_profile_name,
+            factory=factory,
+        )
 
     payload = _data_ls_payload("cache", result, include_versions=False)
     # Overwrite the built-in `mintd data pull` hint with the cache-pull one. The
@@ -1600,14 +1501,8 @@ def _handle_data_add(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    try:
+    with _hint(DvcOpError, "check the path exists inside a DVC project; 'mintd init' scaffolds one"):
         produced = data_add(args.path, project_path=Path("."), dvc_ops=dvc_ops)
-    except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
-        return 2
-    except DvcOpError as e:
-        reporter.error(str(e), hint=e.hint or "check the path exists inside a DVC project; 'mintd init' scaffolds one")
-        return 1
     print(str(produced))
     return 0
 
@@ -1615,48 +1510,27 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
         ColumnNamesLookLikeData,
-        SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
     )
 
     reporter = getattr(args, "_reporter", None) or Reporter()
-    try:
+    with _hint(FileNotFoundError, "cd into a mintd project (one with metadata.json), or pass --project-dir"):
         project_dir = args.project_dir or find_project_root()
-    except FileNotFoundError as e:
-        reporter.error(
-            str(e),
-            hint="cd into a mintd project (one with metadata.json), or pass --project-dir",
-        )
-        return 1
 
     data_dir = args.data_dir or (project_dir / "data" / "final")
     output = args.output or (project_dir / "schemas" / "v1" / "schema.json")
 
-    try:
-        with reporter.status("Generating schema..."):
-            generate_schema_file(
-                data_dir, output, recursive=args.recursive,
-                allow_numeric_column_names=args.allow_numeric_column_names,
-            )
-    except SchemaExtraNotInstalled:
-        reporter.error(
-            "schema generation requires the [schema] extra",
-            hint=(
-                "Reinstall mintd with: install.sh --with-schema "
-                "(or: uv tool install --force 'mintd[schema]')"
-            ),
+    with (
+        _hint((ValueError, RuntimeError), "check file format support (.dta, .csv, .json, .parquet) and integrity"),
+        _hint(ColumnNamesLookLikeData),  # a ValueError, but it names its own fix
+        _hint(FileNotFoundError, f"add supported data files under {data_dir} or pass --data-dir"),
+        reporter.status("Generating schema..."),
+    ):
+        generate_schema_file(
+            data_dir, output, recursive=args.recursive,
+            allow_numeric_column_names=args.allow_numeric_column_names,
         )
-        return 1
-    except FileNotFoundError as e:
-        reporter.error(str(e), hint=f"add supported data files under {data_dir} or pass --data-dir")
-        return 1
-    except ColumnNamesLookLikeData as e:
-        reporter.error(str(e))  # it names its own fix
-        return 1
-    except (ValueError, RuntimeError) as e:
-        reporter.error(str(e), hint="check file format support (.dta, .csv, .json, .parquet) and integrity")
-        return 1
 
     reporter.success(f"Schema saved to: {output}")
     return 0
@@ -1666,19 +1540,12 @@ def _handle_data_verify(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    try:
-        with reporter.status("Verifying DVC data..."):
-            status_map = data_verify(
-                project_path=args.path,
-                targets=args.targets or None,
-                dvc_ops=dvc_ops,
-            )
-    except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
-        return 2
-    except DvcOpError as e:
-        reporter.error(str(e), hint=e.hint or "retry with --dvc-arg=-v for verbose DVC output")
-        return 1
+    with _hint(DvcOpError, "retry with --dvc-arg=-v for verbose DVC output"), reporter.status("Verifying DVC data..."):
+        status_map = data_verify(
+            project_path=args.path,
+            targets=args.targets or None,
+            dvc_ops=dvc_ops,
+        )
     if not status_map:
         print("clean")
         return 0
@@ -1694,14 +1561,8 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    try:
+    with _hint(DvcOpError, "check the name; 'mintd data verify' lists tracked outputs"):
         data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
-    except DvcNotInstalled as e:
-        reporter.error(str(e), hint="install DVC: pip install 'dvc[s3]'")
-        return 2
-    except DvcOpError as e:
-        reporter.error(str(e), hint=e.hint or "check the name; 'mintd data verify' lists tracked outputs")
-        return 1
     print(f"removed: {args.name}")
     return 0
 
@@ -1712,14 +1573,9 @@ def _handle_data_ls(args: argparse.Namespace) -> int:
     client = _resolve_catalog_client(config)
     listing_fn = _resolve_s3_listing_ops(config)
     if listing_fn is None:
-        reporter.error("boto3 not installed", hint="pip install 'boto3'")
-        return 2
+        raise MintdError("boto3 not installed", hint="pip install 'boto3'", exit_code=2)
 
-    try:
-        entry = client.fetch(args.name)
-    except CatalogNotFound as exc:
-        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
-        return 1
+    entry = client.fetch(args.name)
 
     dumped = entry.model_dump()
     storage = dumped.get("storage") or {}
@@ -1743,24 +1599,18 @@ def _handle_data_ls(args: argparse.Namespace) -> int:
             reporter.result(None, pretty=lambda _p: msg)
         return 1
 
-    try:
-        with reporter.status(f"Listing {args.name} on S3..."):
-            result = listing_fn(
-                bucket=bucket, prefix=prefix, endpoint=endpoint,
-                sub_path=args.sub_path,
-                recursive=args.recursive,
-                include_versions=args.versions,
-                aws_profile_name=config.aws_profile_name,
-            )
-    except ValueError as exc:
-        reporter.error(str(exc))
-        return 2
-    except BucketNotFound as exc:
-        reporter.error(str(exc), hint="check storage.bucket / storage.endpoint in the producer's metadata.json")
-        return 1
-    except BucketAccessError as exc:
-        reporter.error(str(exc), hint="check AWS credentials (aws configure list / aws_profile_name)")
-        return 1
+    with (
+        _hint(ValueError, exit_code=2),
+        _hint(BucketNotFound, "check storage.bucket / storage.endpoint in the producer's metadata.json"),
+        reporter.status(f"Listing {args.name} on S3..."),
+    ):
+        result = listing_fn(
+            bucket=bucket, prefix=prefix, endpoint=endpoint,
+            sub_path=args.sub_path,
+            recursive=args.recursive,
+            include_versions=args.versions,
+            aws_profile_name=config.aws_profile_name,
+        )
 
     payload = _data_ls_payload(args.name, result, include_versions=args.versions)
     no_truncate = getattr(args, "no_truncate", False)
@@ -1919,12 +1769,20 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
         aws_profile_name=config.aws_profile_name,
     )
     registry_git_ops = SubprocessRegistryGitOps(timeouts=effective_timeouts, reporter=reporter)
-    fast_sync_ops = _require_fast_sync_ops(config, reporter)
-    if fast_sync_ops is None:
-        return 2
+    fast_sync_ops = _require_fast_sync_ops(config)
 
     reporter.debug(f"resolved registry_url={config.registry_url}")
-    try:
+    with (
+        _hint(ValueError),
+        _hint(MissingPrimaryDataProduct, "drop --primary to pull every tracked output"),
+        _hint(
+            UnknownProductPath,
+            "pass --path with one of the tracked outputs listed above, "
+            "or drop --path/--primary to pull everything",
+        ),
+        _hint(ImportDestinationExists, "pass --dest <path> or remove the existing directory"),
+        _hint(ProducerError, "check git auth (gh auth status / ssh -T git@github.com)"),
+    ):
         clone_result = clone_and_pull_product(
             client, dvc_ops, registry_git_ops, fast_sync_ops,
             name=args.name,
@@ -1937,42 +1795,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             reporter=reporter,
             aws_profile_name=config.aws_profile_name,
         )
-    except CatalogNotFound as exc:
-        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
-        return 1
-    except MissingPrimaryDataProduct as exc:
-        reporter.error(str(exc), hint="drop --primary to pull every tracked output")
-        return 1
-    except UnknownProductPath as exc:
-        reporter.error(
-            str(exc),
-            hint=exc.hint or (
-                "pass --path with one of the tracked outputs listed above, "
-                "or drop --path/--primary to pull everything"
-            ),
-        )
-        return 1
-    except ImportDestinationExists as exc:
-        reporter.error(str(exc), hint="pass --dest <path> or remove the existing directory")
-        return 1
-    except DvcNotInstalled as exc:
-        reporter.error(str(exc), hint="pip install 'dvc[s3]'")
-        return 2
-    except ProducerError as exc:
-        reporter.error(str(exc), hint="check git auth (gh auth status / ssh -T git@github.com)")
-        return 1
-    except GitOpError as exc:
-        reporter.error(str(exc), hint="check git auth (gh auth status / ssh -T git@github.com)")
-        return 1
-    except WallTimeoutExceeded as exc:
-        reporter.error(f"command exceeded wall timeout of {exc.seconds}s")
-        return 1
-    except (DvcOpError, ValueError) as exc:
-        # DvcOpError.hint is None except on the subclasses that populate it
-        # (DvcStorageKeyError's targeted `mintd data pull <target>` retry).
-        reporter.error(str(exc), hint=exc.hint if isinstance(exc, DvcOpError) else None)
-        return 1
-    
+
     dest = clone_result.dest
     elapsed = time.monotonic() - t0
     primary = _read_primary_from_clone(dest)
@@ -2137,7 +1960,10 @@ def _handle_data_import(args: argparse.Namespace) -> int:
 
     if args.bump:
         try:
-            with reporter.status(f"Bumping {args.name}..."):
+            with (
+                _hint(DvcOpError, "check connectivity then retry: mintd config validate"),
+                reporter.status(f"Bumping {args.name}..."),
+            ):
                 result = bump_import(
                     client,
                     dvc_ops,
@@ -2148,34 +1974,6 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                 )
         except BumpBlocked as exc:
             return _render_bump_blocked(exc)
-        except StaleBackupExists as exc:
-            # D14. Its own type rather than a reason-guess on the message: the
-            # plain refusal means "the destination is in your way, clear it",
-            # this one means "mintd will not touch your last complete working copy".
-            # Both arms carry both reasons since D16, so both need this split.
-            reporter.error(str(exc), hint="nothing was deleted or overwritten")
-            return 1
-        except (
-            AmbiguousImport,
-            ImportNotFound,
-            PrimaryRemovedAtHead,
-            # The namespace/ownership guards' raise site on this arm.
-            UnknownProductPath,
-        ) as exc:
-            reporter.error(str(exc))
-            return 1
-        except GitOpError as exc:
-            # `--bump` reads the catalog now (product name -> namespace),
-            # which it did not before, so an unreachable registry is a new
-            # failure mode on this path. `data clone` renders it the same way.
-            reporter.error(
-                str(exc),
-                hint="check git auth (gh auth status / ssh -T git@github.com)",
-            )
-            return 1
-        except DvcOpError as exc:
-            reporter.error(str(exc), hint="check connectivity then retry: mintd config validate")
-            return 1
         if not result.changed:
             old = result.old_pin[:7] if result.old_pin else "?"
             if reporter.json_mode:
@@ -2194,7 +1992,16 @@ def _handle_data_import(args: argparse.Namespace) -> int:
                 reporter.success(f"✓ bumped {args.name}: {old} → {new}")
         return 0
 
-    try:
+    with (
+        # `_require_repo_url`'s bare ValueError: `CatalogEntry` is
+        # `extra="allow"` with no required fields, so an entry with no
+        # `repository.github_url` reaches it.
+        _hint(ValueError),
+        # The containment guard's raise site: a leading slash in `--path`, or
+        # a catalog entry carrying an absolute/`..` output path.
+        _hint(UnknownProductPath, "pass --path relative to the producer's repo root"),
+        _hint(DvcOpError, "retry with --dvc-arg=-v for verbose DVC output"),
+    ):
         produced = import_product(
             client,
             dvc_ops,
@@ -2213,66 +2020,6 @@ def _handle_data_import(args: argparse.Namespace) -> int:
             reporter=reporter,
             registry_git_ops=_resolve_git_ops(config),
         )
-    except CatalogNotFound as exc:
-        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
-        return 1
-    except UnknownProductPath as exc:
-        # The containment guard's raise site. `data clone` already renders
-        # this (see `_handle_data_clone`); without it here a leading slash in
-        # `--path`, or a catalog entry carrying an absolute/`..` output path,
-        # exits through `main()` as a raw traceback.
-        reporter.error(
-            str(exc),
-            hint="pass --path relative to the producer's repo root",
-        )
-        return 1
-    except UndeliverableImport as exc:
-        # dvc exited 0 but landed nothing the producer can deliver: no ✓, and
-        # the hint says whose fix it is.
-        reporter.error(str(exc), hint=exc.hint)
-        return 1
-    except StaleBackupExists as exc:
-        # Ahead of the bare-message tuple below, which would render this
-        # hintless, and ahead of `ImportDestinationExists` in it — D16 made the
-        # stale-backup refusal reachable from the PLAIN import arm too, and the
-        # two need opposite advice. The general arm's "remove the existing
-        # directory" names the `.mintd-bump-backup` holding the last complete
-        # working copy of the payload: the one action D14 exists to prevent.
-        reporter.error(str(exc), hint="nothing was deleted or overwritten")
-        return 1
-    except (
-        AmbiguousImport,
-        MissingPrimaryDataProduct,
-        ImportDestinationExists,
-        ImportNotFound,
-        NoTrackedOutputs,
-        PrimaryRemovedAtHead,
-        ProducerError,
-        # `_require_repo_url`'s bare ValueError. `CatalogEntry` is
-        # `extra="allow"` with no required fields, so an entry with no
-        # `repository.github_url` reaches it. LAST in the tuple so
-        # `UnknownProductPath` — a ValueError subclass — keeps its own hint
-        # above; `_handle_data_clone` catches ValueError the same way.
-        ValueError,
-    ) as exc:
-        reporter.error(str(exc))
-        return 1
-    except GitOpError as exc:
-        # Not bump-only: the plain arm reads the catalog too (`client.fetch`
-        # -> `CatalogCache.ensure_fresh` -> git clone/fetch/reset), so an
-        # unreachable registry lands here as well. Same hint as `--bump`
-        # and `data clone`.
-        reporter.error(
-            str(exc),
-            hint="check git auth (gh auth status / ssh -T git@github.com)",
-        )
-        return 1
-    except DvcOpError as exc:
-        reporter.error(
-            str(exc),
-            hint=exc.hint or "retry with --dvc-arg=-v for verbose DVC output",
-        )
-        return 1
     summary = _import_summary(produced)
     if reporter.json_mode:
         reporter.result({**summary, "produced": [str(p) for p in produced]})
@@ -2373,15 +2120,12 @@ def _render_catalog_table(entries, *, detailed: bool, width: int) -> str:
 
 
 def _handle_enclave_list(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
-    try:
+    with _hint(
+        FileNotFoundError,
+        "create one with 'mintd enclave add <repo> --pin <sha>', or pass --manifest <path>",
+        message=f"enclave_manifest.yaml not found at {args.manifest}",
+    ):
         manifest = EnclaveManifest.load(args.manifest)
-    except FileNotFoundError:
-        reporter.error(
-            f"enclave_manifest.yaml not found at {args.manifest}",
-            hint="create one with 'mintd enclave add <repo> --pin <sha>', or pass --manifest <path>",
-        )
-        return 1
     repo_filter: str | None = args.repo
 
     approved = [ap for ap in manifest.approved_products if repo_filter is None or ap.repo == repo_filter]
@@ -2419,7 +2163,22 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     try:
-        with reporter.status(f"Bumping {args.name}..."):
+        with (
+            # `--force` skips the check_project reachability gate and resolves
+            # the producer's HEAD directly, so an unreachable/broken producer or
+            # a malformed catalog entry (no github_url) surfaces here rather
+            # than as a BumpBlocked finding.
+            _hint(
+                (ProducerError, ValueError),
+                "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
+            ),
+            # A pydantic ValidationError is a ValueError: inside the clause
+            # above, so it keeps this hint. The manifest is human-editable.
+            _hint(ValidationError, "enclave_manifest.yaml is malformed; fix the reported field"),
+            _hint(ImportNotFound, "'mintd enclave list' to see subscribed repos"),
+            _hint(PrimaryRemovedAtHead, "pin to an older SHA or unsubscribe with 'mintd enclave remove'"),
+            reporter.status(f"Bumping {args.name}..."),
+        ):
             result = enclave_bump(
                 client,
                 manifest_path=args.manifest,
@@ -2428,34 +2187,6 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
             )
     except BumpBlocked as exc:
         return _render_bump_blocked(exc)
-    except ImportNotFound as exc:
-        reporter.error(str(exc), hint="'mintd enclave list' to see subscribed repos")
-        return 1
-    except PrimaryRemovedAtHead as exc:
-        reporter.error(str(exc), hint="pin to an older SHA or unsubscribe with 'mintd enclave remove'")
-        return 1
-    except AppendOnlyViolation as exc:
-        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
-        return 1
-    except CatalogNotFound as exc:
-        # `--force` resolves the producer's catalog entry directly (bypassing
-        # check_project, which folds this into a BumpBlocked finding), so a
-        # removed/offline entry surfaces here. Render clean, not a traceback.
-        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
-        return 1
-    except ValidationError as exc:
-        # pydantic ValidationError subclasses ValueError, so it would otherwise
-        # be swallowed by the producer/catalog clause below with a misleading
-        # hint. The manifest is human-editable — point at the local file.
-        reporter.error(str(exc), hint="enclave_manifest.yaml is malformed; fix the reported field")
-        return 1
-    except (ProducerError, ValueError) as exc:
-        # `--force` skips the check_project reachability gate and resolves the
-        # producer's HEAD directly, so an unreachable/broken producer or a
-        # malformed catalog entry (no github_url) surfaces here rather than as a
-        # BumpBlocked finding. Render it as a clean error instead of a traceback.
-        reporter.error(str(exc), hint="check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD")
-        return 1
     if result is None:
         print("up to date")
     else:
@@ -2467,7 +2198,12 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
-    try:
+    with (
+        _hint((ProducerError, ValueError), "check the repo/pin arguments"),
+        # `--path` is not a flag on this parser; following the old hint exited
+        # 64 with `unrecognized arguments`.
+        _hint(MissingPrimaryDataProduct, "pass --source-path <output> or --all"),
+    ):
         path = enclave_add(
             client,
             manifest_path=args.manifest,
@@ -2476,23 +2212,6 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
             source_path=args.source_path,
             all_=args.all_outputs,
         )
-    except AlreadyApproved as exc:
-        reporter.error(str(exc), hint="already subscribed; 'mintd enclave list' to review")
-        return 1
-    except CatalogNotFound as exc:
-        reporter.error(str(exc), hint="run 'mintd data list' to see available products")
-        return 1
-    except MissingPrimaryDataProduct as exc:
-        # `--path` is not a flag on this parser; following the old hint exited
-        # 64 with `unrecognized arguments`.
-        reporter.error(str(exc), hint="pass --source-path <output> or --all")
-        return 1
-    except AppendOnlyViolation as exc:
-        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
-        return 1
-    except (ProducerError, ValueError) as exc:
-        reporter.error(str(exc), hint="check the repo/pin arguments")
-        return 1
     # Re-load to print the just-added entry's resolved pin.
     manifest = EnclaveManifest.load(path)
     ap = manifest.approved_products[-1]
@@ -2523,10 +2242,9 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
 
 
 def _handle_enclave_remove(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
-    try:
+    with _hint(ImportNotFound, "'mintd enclave list' to see subscribed repos"):
         enclave_remove(
             client,
             manifest_path=args.manifest,
@@ -2535,19 +2253,6 @@ def _handle_enclave_remove(args: argparse.Namespace) -> int:
             all_=args.all_outputs,
             primary=args.primary,
         )
-    except AmbiguousSubscription as exc:
-        reporter.error(
-            str(exc),
-            hint="pass --source-path <path> or --primary to remove one, "
-                 "or --all to remove every subscription",
-        )
-        return 1
-    except ImportNotFound as exc:
-        reporter.error(str(exc), hint="'mintd enclave list' to see subscribed repos")
-        return 1
-    except AppendOnlyViolation as exc:
-        reporter.error(str(exc), hint="approved_products is append-only; edit the manifest by hand")
-        return 1
     msg = f"removed: {args.repo}"
     if args.source_path:
         msg += f" (source_path={args.source_path})"
@@ -2595,53 +2300,25 @@ def _handle_enclave_pull(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    try:
-        with reporter.status("Pulling enclave data..."):
-            _, written = enclave_pull(
-                client,
-                dvc_ops,
-                manifest_path=args.manifest,
-                repo=args.repo,
-                force=args.force,
-                reporter=reporter,
-            )
-    except FileNotFoundError:
-        # The enclave manifest itself is missing -- mirrors
-        # _handle_enclave_list and _handle_enclave_verify, both of which
-        # already fixed this identical leak. The cwd guard above now funnels
-        # every user into this path, so leaving it raw would trade one bad
-        # message for a traceback.
-        reporter.error(
-            f"{args.manifest.name} not found at {args.manifest}",
-            hint="run this from the enclave repo root, or pass --manifest <path>",
+    with (
+        _hint(ValueError),
+        # The enclave manifest itself is missing. The cwd guard above funnels
+        # every user into this path.
+        _hint(
+            FileNotFoundError,
+            "run this from the enclave repo root, or pass --manifest <path>",
+            message=f"{args.manifest.name} not found at {args.manifest}",
+        ),
+        reporter.status("Pulling enclave data..."),
+    ):
+        _, written = enclave_pull(
+            client,
+            dvc_ops,
+            manifest_path=args.manifest,
+            repo=args.repo,
+            force=args.force,
+            reporter=reporter,
         )
-        return 1
-    except EnclavePullError as exc:
-        # The pin/repo retry hint only makes sense when the producer's pin/repo
-        # is actually the problem. For an un-DVC-initialized enclave (now
-        # auto-fixed by lazy init, but possible if `dvc` itself is broken) it
-        # actively misleads — point at DVC init instead.
-        if isinstance(exc.cause, DvcNotInRepoError):
-            hint = (
-                "enclave is not DVC-initialized; re-run `mintd enclave pull` "
-                "(it initializes DVC automatically) or run `dvc init` once"
-            )
-        elif isinstance(exc.cause, DvcImportPathNotFound):
-            hint = f"check {exc.repo}'s pin/repo, then retry: mintd enclave pull {exc.repo}"
-        else:
-            hint = f"retry: mintd enclave pull {exc.repo}"
-        reporter.error(str(exc), hint=hint)
-        return 1
-    except (
-        CatalogNotFound,
-        ImportNotFound,
-        MissingPrimaryDataProduct,
-        ProducerError,
-        AppendOnlyViolation,
-        ValueError,
-    ) as exc:
-        reporter.error(str(exc))
-        return 1
     # Computed ONCE for both lanes. Text mode already got the D7 report as
     # warns from enclave_pull, but it used to print "nothing to pull" straight
     # after them — the line the whole branch exists to stop saying, since what
@@ -2699,7 +2376,10 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
         else None
     )
     try:
-        with reporter.status("Packaging enclave archive..."):
+        with (
+            _hint((UnsafeArchiveMember, InvalidTransferManifest), "re-run 'mintd enclave pull --force'"),
+            reporter.status("Packaging enclave archive..."),
+        ):
             archive, skipped = enclave_package(
                 manifest_path=args.manifest,
                 name=args.repo,
@@ -2719,18 +2399,6 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
             f"  mintd enclave package --resend{' ' + args.repo if args.repo else ''}"
         )
         return 0
-    except NothingToPackage as exc:
-        reporter.error(str(exc), hint="run 'mintd enclave pull' first")
-        return 1
-    except ArchiveAlreadyExists as exc:
-        reporter.error(str(exc), hint="remove it or pass --output <path>")
-        return 1
-    except (UnsafeArchiveMember, InvalidTransferManifest) as exc:
-        reporter.error(str(exc), hint="re-run 'mintd enclave pull --force'")
-        return 1
-    except AppendOnlyViolation as exc:
-        reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
-        return 1
     if skipped:
         # Count repos, not `downloaded[]` rows: one product with several
         # outputs is several rows, and "skipped 3 products: my-repo" reads as
@@ -2759,61 +2427,22 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
 
 def _handle_enclave_verify(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
-    try:
-        with reporter.status("Verifying enclave manifest..."):
-            _, written = enclave_verify(
-                extracted_dir=args.extracted_dir,
-                manifest_path=args.manifest,
-                data_root=args.data_root,
-            )
-    # All three subclasses are caught BEFORE the InvalidTransferManifest base
-    # clause. Its one "the archive is malformed" hint is wrong for each of
-    # them.
-    except TransferManifestNotFound as exc:
-        reporter.error(
-            str(exc),
-            hint=(
-                "point at the directory you extracted into, not the .tar.gz:\n"
-                "mkdir -p incoming && tar -xzf <archive>.tar.gz -C incoming\n"
-                "mintd enclave verify incoming"
-            ),
+    with (
+        # The enclave manifest itself is missing.
+        _hint(
+            FileNotFoundError,
+            "run this from the enclave repo root, or pass --manifest <path>",
+            message=f"enclave_manifest.yaml not found at {args.manifest}",
+        ),
+        # The base class's hint; its subclasses carry their own.
+        _hint(InvalidTransferManifest, "the archive is malformed; re-export from source"),
+        reporter.status("Verifying enclave manifest..."),
+    ):
+        _, written = enclave_verify(
+            extracted_dir=args.extracted_dir,
+            manifest_path=args.manifest,
+            data_root=args.data_root,
         )
-        return 1
-    except DestinationExists as exc:
-        reporter.error(
-            str(exc),
-            hint=(
-                "that product is already in data/ but has no transferred[] row — it "
-                "was probably landed by hand; append the row or remove the directory"
-            ),
-        )
-        return 1
-    except WrongEnclave as exc:
-        reporter.error(
-            str(exc),
-            hint=(
-                "nothing was moved; run this from the enclave the transfer was "
-                "built for, or pass --manifest /path/to/enclave_manifest.yaml"
-            ),
-        )
-        return 1
-    except InvalidTransferManifest as exc:
-        reporter.error(str(exc), hint="the archive is malformed; re-export from source")
-        return 1
-    except PathTraversalDetected as exc:
-        reporter.error(str(exc), hint="unsafe paths — do not extract; contact the sender")
-        return 1
-    except AppendOnlyViolation as exc:
-        reporter.error(str(exc), hint="transferred[] is append-only; edit the manifest by hand")
-        return 1
-    except FileNotFoundError:
-        # The enclave manifest itself is missing — mirrors _handle_enclave_list.
-        # Previously leaked a raw traceback.
-        reporter.error(
-            f"enclave_manifest.yaml not found at {args.manifest}",
-            hint="run this from the enclave repo root, or pass --manifest <path>",
-        )
-        return 1
     if not written:
         print("nothing to verify (all entries already in transferred[])")
         return 0
@@ -2828,23 +2457,7 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
-    try:
-        metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
-    except FileNotFoundError as exc:
-        reporter.error(str(exc))
-        return 1
-    except MetadataSchemaTooOld as exc:
-        reporter.error(
-            str(exc),
-            hint="run 'mintd update metadata' to migrate this project to v2",
-        )
-        return 1
-    except ValidationError as exc:
-        reporter.error(
-            f"metadata.json failed v2 schema validation ({len(exc.errors())} field error(s))",
-            hint="run 'mintd check' to see field-level details",
-        )
-        return 1
+    metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
     findings = check_project(args.path, upgrades=False, client=client)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
@@ -2861,14 +2474,13 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
     try:
         unseen = _resolve_git_ops(config).uncommitted_files(args.path)
     except GitOpError as exc:
-        reporter.error(
+        raise MintdError(
             f"could not check the project against HEAD: {exc.stderr.strip() or exc}",
             hint=(
                 "importers read this project's git history, so register needs a working git "
                 "repository: fix git (or 'git init' and commit), then rerun 'mintd registry register'"
             ),
-        )
-        return 1
+        ) from exc
     if unseen:
         shown = ", ".join(unseen[:8]) + (f" … ({len(unseen)} in all)" if len(unseen) > 8 else "")
         reporter.error(
@@ -2884,11 +2496,10 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
         try:
             result = client.register(metadata, reporter=reporter)
         except CatalogAlreadyExists as exc:
-            reporter.error(
+            raise MintdError(
                 f"catalog entry {str(exc)!r} already exists",
                 hint="use 'mintd registry update' to push changes to an existing entry",
-            )
-            return 1
+            ) from exc
     if result.dry_run:
         reporter.info(f"Would register {result.name!r} (dry-run; no PR opened).")
         return 0
@@ -2906,53 +2517,34 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
     client = _resolve_catalog_client(config)
-    try:
-        metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
-    except FileNotFoundError as exc:
-        reporter.error(str(exc))
-        return 1
-    except MetadataSchemaTooOld as exc:
-        reporter.error(
-            str(exc),
-            hint="run 'mintd update metadata' to migrate this project to v2",
-        )
-        return 1
-    except ValidationError as exc:
-        reporter.error(
-            f"metadata.json failed v2 schema validation ({len(exc.errors())} field error(s))",
-            hint="run 'mintd check' to see field-level details",
-        )
-        return 1
+    metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
     with reporter.status("Updating project registry entry…"):
 
         try:
             result = client.update(metadata, dry_run=args.dry_run, reporter=reporter)
         except CatalogNotFound as exc:
-            reporter.error(
+            raise MintdError(
                 f"catalog entry {str(exc)!r} not found",
                 hint="run 'mintd registry register' first to register this project",
-            )
-            return 1
+            ) from exc
         # Specific clause first — RegistryBranchExists is a GitOpError.
         except (RegistryBranchExists, PRConflictError) as exc:
-            reporter.error(
+            raise MintdError(
                 f"the registry rejected branch {exc.branch} for {metadata.project.name!r}",
                 hint=(
                     "an earlier catalog PR is probably still open on it — check "
                     f"`gh pr list --head {exc.branch}` on the registry, then rerun "
                     "`mintd registry update` (safe to retry; nothing in this project changed)"
                 ),
-            )
-            return 1
+            ) from exc
         except (GitOpError, GhAuthError, GhNotInstalled) as exc:
-            reporter.error(
+            raise MintdError(
                 f"could not update the registry entry for {metadata.project.name!r}: {exc}",
                 hint=(
                     "check `gh auth status` and network access to the registry, then rerun "
                     "`mintd registry update` — nothing in this project changed"
                 ),
-            )
-            return 1
+            ) from exc
     if not result.changes:
         reporter.info("No changes to publish." + (" (dry-run)" if result.dry_run else ""))
         return 0
@@ -3034,12 +2626,6 @@ def _handle_publish(args: argparse.Namespace) -> int:
         if len(exc.findings) > 5:
             reporter.info(f"  ... and {len(exc.findings) - 5} more")
         return 1
-    except WorkingTreeDirty as exc:
-        reporter.error(str(exc), hint=exc.recovery_hint or None)
-        return 1
-    except PublishError as exc:
-        reporter.error(str(exc), hint=exc.recovery_hint or None)
-        return 1
 
     _render_publish_preview(reporter, preview)
 
@@ -3047,31 +2633,23 @@ def _handle_publish(args: argparse.Namespace) -> int:
         reporter.info("(dry-run: no side effects)")
         return 0
     if not args.assume_yes:
-        try:
-            ok = _prompt_publish_confirm(reporter)
-        except PublishNonInteractive as exc:
-            reporter.error(str(exc), hint="re-run with --yes to skip the interactive preview.")
-            return 1
+        ok = _prompt_publish_confirm(reporter)
         if not ok:
             reporter.info("publish cancelled.")
             return 0
 
     with reporter.status(f"Publishing v{preview.new_version}…"):
-        try:
-            result = _apply_publish(
-                preview,
-                project_path=args.path,
-                client=client,
-                dvc_ops=dvc_ops,
-                git_ops=git_ops,
-                message=args.message,
-                reporter=reporter,
-                aws_profile=config.aws_profile_name,
-                memo_path=config.resolved_cache_dir() / "proven-versions.sqlite",
-            )
-        except (WorkingTreeDirty, PublishError) as exc:
-            reporter.error(str(exc), hint=exc.recovery_hint or None)
-            return 1
+        result = _apply_publish(
+            preview,
+            project_path=args.path,
+            client=client,
+            dvc_ops=dvc_ops,
+            git_ops=git_ops,
+            message=args.message,
+            reporter=reporter,
+            aws_profile=config.aws_profile_name,
+            memo_path=config.resolved_cache_dir() / "proven-versions.sqlite",
+        )
     tag = f"v{result.version}"
     storage = getattr(preview.new_metadata, "storage", None)
     prefix_clause = ""
@@ -3136,11 +2714,7 @@ def _prompt_publish_confirm(
 
 
 def _handle_config_show(args: argparse.Namespace) -> int:
-    try:
-        config = Config.load(args.path) if args.path is not None else Config.load()
-    except ConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    config = Config.load(args.path) if args.path is not None else Config.load()
     text = config_ops.render_config(config, json_out=args.json_out)
     # YAML emits a trailing newline already; JSON does not. Use print's
     # default newline only when the rendered text doesn't carry one.
@@ -3150,22 +2724,18 @@ def _handle_config_show(args: argparse.Namespace) -> int:
 
 def _handle_config_setup(args: argparse.Namespace) -> int:
     write = not args.dry_run
-    try:
-        if args.from_file is not None:
-            source = None if args.from_file == "-" else args.from_file
-            config = config_ops.apply_from_file(args.path, source, write=write)
-        elif args.migrate_v1 is not None:
-            config = config_ops.apply_migrate_v1(args.path, args.migrate_v1, write=write)
-        elif args.set_pairs:
-            pairs = [config_ops.parse_set_pair(s) for s in args.set_pairs]
-            config = config_ops.apply_set_updates(args.path, pairs, write=write)
-        else:
-            # No flags → interactive walkthrough of the Config fields
-            # (minus config_ops._SETUP_SKIP_FIELDS).
-            config = config_ops.interactive_setup(args.path, write=write)
-    except ConfigError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    if args.from_file is not None:
+        source = None if args.from_file == "-" else args.from_file
+        config = config_ops.apply_from_file(args.path, source, write=write)
+    elif args.migrate_v1 is not None:
+        config = config_ops.apply_migrate_v1(args.path, args.migrate_v1, write=write)
+    elif args.set_pairs:
+        pairs = [config_ops.parse_set_pair(s) for s in args.set_pairs]
+        config = config_ops.apply_set_updates(args.path, pairs, write=write)
+    else:
+        # No flags → interactive walkthrough of the Config fields
+        # (minus config_ops._SETUP_SKIP_FIELDS).
+        config = config_ops.interactive_setup(args.path, write=write)
     if args.dry_run:
         print("# dry-run: would write the following:")
     print(config_ops.render_config(config), end="")
@@ -3206,17 +2776,12 @@ def _handle_update_metadata(args: argparse.Namespace) -> int:
             args.path, dry_run=args.dry_run
         )
     except FileNotFoundError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+        raise MintdError(str(exc)) from exc
     except metadata_migrate.MetadataAlreadyV2 as exc:
-        print(f"already v2: {exc}")
+        print(f"already v2: {exc}")  # stdout, as a report: not an error line
         return 1
     except metadata_migrate.MetadataMigrateError as exc:
-        print(
-            f"error: migration produced invalid v2 metadata: {exc}",
-            file=sys.stderr,
-        )
-        return 2
+        raise MintdError(f"migration produced invalid v2 metadata: {exc}", exit_code=2) from exc
     if args.json_out:
         print(
             json.dumps(

@@ -12,15 +12,16 @@ from __future__ import annotations
 import os
 import tarfile
 from pathlib import Path
+from .errors import MintdError
 from typing import Protocol
 
 
-class ArchiveError(Exception):
+class ArchiveError(MintdError):
     pass
 
 
 class ArchiveAlreadyExists(ArchiveError):
-    pass
+    hint = "remove it or pass --output <path>"
 
 
 class InvalidArchive(ArchiveError):

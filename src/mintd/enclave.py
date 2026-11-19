@@ -32,7 +32,8 @@ from .data import (
 )
 from .check import CheckFinding, _resolve_approved_product_url, consumer_walk_failure
 from .producer import MissingPrimaryDataProduct, ProducerView
-from ._dvc_ops import DvcOpError, DvcOps
+from ._dvc_ops import DvcImportPathNotFound, DvcNotInRepoError, DvcOpError, DvcOps
+from .errors import MintdError
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -71,15 +72,31 @@ class EnclavePullError(DvcOpError):
     """A single producer's `dvc import` failed during `enclave_pull`.
 
     Subclasses DvcOpError so a generic DVC handler still catches it; carries
-    `.repo` as structured data so the CLI can name the failing producer in
-    its hint without parsing the message (slice-9 convention)."""
+    `.repo` as structured data so the hint names the failing producer
+    without parsing the message (slice-9 convention).
+
+    The pin/repo retry hint only makes sense when the producer's pin/repo is
+    actually the problem. For an un-DVC-initialized enclave (now auto-fixed
+    by lazy init, but possible if `dvc` itself is broken) it actively
+    misleads — point at DVC init instead."""
 
     def __init__(self, repo: str, cause: Exception) -> None:
         super().__init__(f"failed to pull {repo!r}: {cause}")
         self.repo = repo
         self.cause = cause
+        if isinstance(cause, DvcNotInRepoError):
+            self.hint = (
+                "enclave is not DVC-initialized; re-run `mintd enclave pull` "
+                "(it initializes DVC automatically) or run `dvc init` once"
+            )
+        elif isinstance(cause, DvcImportPathNotFound):
+            self.hint = f"check {repo}'s pin/repo, then retry: mintd enclave pull {repo}"
+        else:
+            self.hint = f"retry: mintd enclave pull {repo}"
 
-class AppendOnlyViolation(Exception):
+class AppendOnlyViolation(MintdError):
+    hint = "transferred[] is append-only; edit the manifest by hand"
+
     def __init__(self, path: Path, changed_indices: list[int]) -> None:
         super().__init__(
             f"transferred[] entries changed at indices {changed_indices} in {path}"
@@ -87,7 +104,9 @@ class AppendOnlyViolation(Exception):
         self.path = path
         self.changed_indices = changed_indices
 
-class AlreadyApproved(Exception):
+class AlreadyApproved(MintdError):
+    hint = "already subscribed; 'mintd enclave list' to review"
+
     def __init__(self, name: str, manifest_path: Path, label: str) -> None:
         super().__init__(
             f"{name!r} ({label}) already in approved_products[] of {manifest_path}"
@@ -97,7 +116,7 @@ class AlreadyApproved(Exception):
         self.label = label
 
 
-class AmbiguousSubscription(Exception):
+class AmbiguousSubscription(MintdError):
     """A repo-only selector named several subscriptions of one producer.
 
     Since P5 a repo can hold more than one row, so `enclave remove <repo>` with
@@ -105,6 +124,8 @@ class AmbiguousSubscription(Exception):
     `pydantic.ValidationError` subclasses ValueError, so a blanket handler in
     the CLI would swallow a malformed manifest under this exception's hint.
     """
+
+    hint = "pass --source-path <path> or --primary to remove one, or --all to remove every subscription"
 
     def __init__(self, name: str, manifest_path: Path, labels: list[str]) -> None:
         super().__init__(
@@ -115,8 +136,10 @@ class AmbiguousSubscription(Exception):
         self.manifest_path = manifest_path
         self.labels = labels
 
-class NothingToPackage(Exception):
+class NothingToPackage(MintdError):
     """`enclave_package` filtered `downloaded[]` to an empty set."""
+
+    hint = "run 'mintd enclave pull' first"
 
 
 class NothingNewToPackage(NothingToPackage):
@@ -129,7 +152,7 @@ class NothingNewToPackage(NothingToPackage):
     selection."""
 
 
-class InvalidTransferManifest(Exception):
+class InvalidTransferManifest(MintdError):
     """`_transfer_manifest.yaml` malformed or references a missing directory."""
 
 
@@ -141,6 +164,12 @@ class TransferManifestNotFound(InvalidTransferManifest):
     — and one specific fix. The base class's "the archive is malformed" hint is
     wrong for it and sends people back across the air gap for a good archive."""
 
+    hint = (
+        "point at the directory you extracted into, not the .tar.gz:\n"
+        "mkdir -p incoming && tar -xzf <archive>.tar.gz -C incoming\n"
+        "mintd enclave verify incoming"
+    )
+
 
 class WrongEnclave(InvalidTransferManifest):
     """The transfer was built for a different enclave than this repo.
@@ -151,6 +180,11 @@ class WrongEnclave(InvalidTransferManifest):
     `transferred[]` is append-only, so the false row can only be removed by
     hand-editing the manifest."""
 
+    hint = (
+        "nothing was moved; run this from the enclave the transfer was "
+        "built for, or pass --manifest /path/to/enclave_manifest.yaml"
+    )
+
 
 class DestinationExists(InvalidTransferManifest):
     """`data/<repo>/<version_folder>` exists with no matching `transferred[]` row.
@@ -159,9 +193,16 @@ class DestinationExists(InvalidTransferManifest):
     last-resort `tar` path writes no audit row), so verify's idempotence skip
     — which keys on `transferred[]` — misses and the dest-collision guard fires."""
 
+    hint = (
+        "that product is already in data/ but has no transferred[] row — it "
+        "was probably landed by hand; append the row or remove the directory"
+    )
 
-class PathTraversalDetected(Exception):
+
+class PathTraversalDetected(MintdError):
     """A `TransferContent` member would escape the extracted dir (CVE-2007-4559)."""
+
+    hint = "unsafe paths — do not extract; contact the sender"
 
     def __init__(self, member: str) -> None:
         super().__init__(
@@ -747,8 +788,8 @@ def enclave_pull(
             # reflecting every product completed so far — plus any outputs of THIS
             # product already fetched and moved — before propagating, so a partial
             # run's on-disk data is recorded and the next run skips it. Fail-loud
-            # is preserved: we always re-raise UNCHANGED, so cli.py's
-            # EnclavePullError hint still fires and exit codes are unchanged.
+            # is preserved: we always re-raise UNCHANGED, so EnclavePullError's
+            # hint still fires and exit codes are unchanged.
             # BaseException (not Exception) so a KeyboardInterrupt/SystemExit
             # mid-pull also flushes; the bare `raise` guarantees it is never
             # swallowed.

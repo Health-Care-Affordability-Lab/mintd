@@ -33,6 +33,7 @@ from ._producer_git_ops import (
     GitArchiveFetcher,
 )
 from .model import DataProductOutput, Metadata
+from .errors import MintdError
 
 __all__ = [
     "FetchError",
@@ -47,11 +48,11 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-class MissingPrimaryDataProduct(Exception):
+class MissingPrimaryDataProduct(MintdError):
     """The producer's metadata has no `data_products.primary` to resolve."""
 
 
-class ProducerError(Exception):
+class ProducerError(MintdError):
     """Validation-level failure constructing a ProducerView.
 
     Wraps the `FetchError` transport reasons a metadata fetch raises

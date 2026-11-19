@@ -13,8 +13,10 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .errors import MintdError
 
-class ConfigError(Exception):
+
+class ConfigError(MintdError):
     """Malformed YAML or Pydantic-validation failure while loading config."""
 
 

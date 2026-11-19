@@ -8,6 +8,8 @@ import time
 import sys
 from pathlib import Path
 
+from .errors import MintdError
+
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -16,7 +18,9 @@ class StreamResult:
     stdout_lines: List[str]
     stderr_lines: List[str]
 
-class WallTimeoutExceeded(Exception):
+class WallTimeoutExceeded(MintdError):
+    hint = "raise (or null out) the matching timeouts: entry in ~/.config/mintd/config.yaml"
+
     def __init__(self, seconds: float) -> None:
         self.seconds = seconds
         super().__init__(f"command exceeded wall timeout of {seconds}s")

@@ -18,18 +18,19 @@ from ._config import Timeouts
 from ._console import Reporter
 from ._dvc_invoke import dvc_cmd, dvc_env
 from ._subprocess import StreamResult, run_streaming
+from .errors import MintdError
 
 
-class DvcOpError(Exception):
+class DvcOpError(MintdError):
     """Generic non-zero exit from a `dvc` invocation.
 
-    ``hint`` is an optional actionable recovery command for the CLI's error
-    renderer; ``None`` on every subclass except the ones that populate it
-    (currently ``DvcRepoPathError``, ``DvcStorageKeyError`` and
-    ``DvcImportPathNotFound``).
+    A ``MintdError``, so ``cli.main`` renders it. ``hint`` is an optional
+    actionable recovery command; ``None`` on every subclass except the ones
+    that populate it (currently ``DvcNotInstalled``, ``DvcPushError``,
+    ``DvcRepoPathError``, ``DvcStorageKeyError``, ``DvcImportPathNotFound``
+    and enclave's ``EnclavePullError``). Where it is ``None``, a verb's ``_hint(...)``
+    supplies one.
     """
-
-    hint: str | None = None
 
 
 def pull_retry_hint(target: str | None) -> str:
@@ -64,9 +65,14 @@ class DvcRepoPathError(DvcOpError):
 class DvcNotInstalled(DvcOpError):
     """mintd's bundled dvc is missing: `sys.executable -m dvc` cannot run it."""
 
+    hint = "install DVC: pip install 'dvc[s3]'"
+    exit_code = 2
+
 
 class DvcPushError(DvcOpError):
     """`dvc push` exited non-zero."""
+
+    hint = "check AWS credentials: mintd config validate"
 
 
 class DvcPullError(DvcOpError):
