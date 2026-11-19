@@ -54,6 +54,7 @@ from ._registry_git_ops import (
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
+from .errors import MintdError
 from ._push_verify import PushRefused
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
@@ -260,6 +261,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as e:
         args._reporter.error(str(e))
         return 1
+    except MintdError as e:
+        # The one place a seam's error is rendered: what failed, what to do, the exit code.
+        args._reporter.error(str(e), hint=e.hint)
+        return e.exit_code
     except CatalogEntryInvalid as e:
         # Every verb that reads the catalog can hit this, and only one of them
         # (`data import`, plain arm) happened to catch the pydantic half via
@@ -3179,7 +3184,7 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
             try:
                 config = Config.load()
                 endpoint = config.storage_endpoint or "default AWS endpoint"
-                profile = config.aws_profile_name or "default"
+                profile = _s3.resolve_profile({}, config.aws_profile_name)[0] or "default"
             except Exception:
                 endpoint, profile = "default AWS endpoint", "default"
             ms_clause = f" — 200 OK, {s3_step.latency_ms}ms" if s3_step.latency_ms is not None else " — 200 OK"

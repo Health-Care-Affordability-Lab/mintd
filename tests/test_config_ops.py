@@ -220,11 +220,15 @@ def test_validate_s3_client_uses_config_storage_endpoint(
         def head_bucket(self, Bucket: str) -> dict:
             return {}
 
-    def spy_client(service: str, **kwargs: object) -> _Client:
-        captured.update(kwargs)
-        return _Client()
+    class _Session:  # one constructor: no named profile still builds a Session (the default chain)
+        def __init__(self, profile_name: str | None = None) -> None:
+            captured["profile_name"] = profile_name
 
-    monkeypatch.setattr("boto3.client", spy_client)
+        def client(self, service: str, **kwargs: object) -> _Client:
+            captured.update(kwargs)
+            return _Client()
+
+    monkeypatch.setattr("boto3.Session", _Session)
     steps = validate_config(cfg, bucket="b")
     s3_step = next(s for s in steps if s.name == "s3")
     assert captured["endpoint_url"] == "https://s3.wasabisys.com"
@@ -279,11 +283,15 @@ def test_validate_s3_client_endpoint_none_without_storage_endpoint(
         def head_bucket(self, Bucket: str) -> dict:
             return {}
 
-    def spy_client(service: str, **kwargs: object) -> _Client:
-        captured.update(kwargs)
-        return _Client()
+    class _Session:  # one constructor: no named profile still builds a Session (the default chain)
+        def __init__(self, profile_name: str | None = None) -> None:
+            captured["profile_name"] = profile_name
 
-    monkeypatch.setattr("boto3.client", spy_client)
+        def client(self, service: str, **kwargs: object) -> _Client:
+            captured.update(kwargs)
+            return _Client()
+
+    monkeypatch.setattr("boto3.Session", _Session)
     steps = validate_config(cfg, bucket="b")
     s3_step = next(s for s in steps if s.name == "s3")
     assert captured["endpoint_url"] is None

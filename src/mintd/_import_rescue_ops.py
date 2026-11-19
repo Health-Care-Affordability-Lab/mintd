@@ -55,6 +55,7 @@ from ._fast_sync_ops import (
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
+from .errors import MintdError
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -412,7 +413,12 @@ def rescue_import_pull(
 
     # 5. Build the S3 client and fetch each uncached blob.
     try:
-        s3 = _create_s3_client(producer.remote_cfg, aws_profile_name)
+        # The producer's `profile` names a profile on the producer's machine; the
+        # consumer reads the producer's bucket with its own credentials.
+        consumer_cfg = {k: v for k, v in producer.remote_cfg.items() if k != "profile"}
+        s3 = _create_s3_client(consumer_cfg, aws_profile_name)
+    except MintdError as exc:
+        return RescueResult(ok=False, reason=str(exc), hint=exc.hint)
     except Exception as exc:
         return RescueResult(
             ok=False,

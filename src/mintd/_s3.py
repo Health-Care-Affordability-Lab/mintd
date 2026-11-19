@@ -10,11 +10,15 @@ names are inert placeholders.
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+
+from ._aws_credentials import shared_credentials_path
+from .errors import MintdError
 
 try:
     import boto3
@@ -272,13 +276,55 @@ def probe_versions(
     return out
 
 
+def resolve_profile(remote_cfg: dict[str, str], aws_profile_name: str | None) -> tuple[str | None, str]:
+    """The AWS profile a client for this remote uses, and where its name came from.
+
+    The remote's ``profile`` in ``.dvc/config`` (or ``.dvc/config.local``), else
+    ``AWS_DEFAULT_PROFILE`` or ``AWS_PROFILE`` (botocore's order), else mintd's
+    ``[mintd]`` profile (``Config.aws_profile_name``); ``(None, "")`` means boto3's
+    default credential chain, on purpose, so CI and sandboxes keep working. dvc
+    resolves it the same way: dvc-s3 reads the remote's ``profile``, and mintd sets
+    ``AWS_PROFILE`` for dvc only when none is exported.
+    """
+    if remote_cfg.get("profile"):
+        return remote_cfg["profile"], "named in .dvc/config"
+    for var in ("AWS_DEFAULT_PROFILE", "AWS_PROFILE"):  # botocore's order: the first one set wins, even if empty
+        if var in os.environ:
+            return os.environ[var], f"named by {var}"
+    if aws_profile_name:
+        return aws_profile_name, "mintd's [mintd] profile"
+    return None, ""
+
+
+_UNNAME = {
+    "named in .dvc/config": "remove `profile` from the remote in .dvc/config (or .dvc/config.local)",
+    "named by AWS_DEFAULT_PROFILE": "unset AWS_DEFAULT_PROFILE",
+    "named by AWS_PROFILE": "unset AWS_PROFILE",
+}
+
+
+def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) -> Any:
+    """A boto3 session for the profile :func:`resolve_profile` picks. A named profile
+    that doesn't exist is a ``MintdError``, never a fallback to other credentials.
+    No credentials are loaded yet, so this checks the name and nothing else."""
+    name, source = resolve_profile(remote_cfg, aws_profile_name)
+    try:
+        return boto3.Session(profile_name=name)
+    except ProfileNotFound as exc:
+        unname = _UNNAME.get(source, "run mintd config setup")
+        raise MintdError(
+            f"AWS profile '{name}' ({source}) isn't in {shared_credentials_path()}",
+            # An empty variable still names a profile for boto3 and dvc; there is no [] section to add.
+            hint=f"add a [{name}] section there, or {unname}" if name else f"{unname}, or set it to a profile that exists",
+        ) from exc
+
+
 def create_client(
     remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None,
 ) -> Any:
-    try:
-        session = boto3.Session(profile_name=aws_profile_name)
-    except ProfileNotFound:
-        session = boto3.Session()
+    """An S3 client for a DVC remote section (``endpointurl``/``endpoint``, ``region``,
+    ``profile``), on :func:`profile_session`'s session."""
+    session = profile_session(remote_cfg, aws_profile_name)
 
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:
@@ -301,14 +347,6 @@ def available() -> bool:
     except ImportError:
         return False
     return boto3 is not None
-
-
-def plain_client(aws_profile_name: str | None, endpoint_url: str | None) -> Any:
-    """The client ``mintd config validate`` checks a bucket with: a named profile must
-    exist, so there is no fallback to the default chain."""
-    if aws_profile_name:
-        return boto3.Session(profile_name=aws_profile_name).client("s3", endpoint_url=endpoint_url)
-    return boto3.client("s3", endpoint_url=endpoint_url)
 
 
 def download(

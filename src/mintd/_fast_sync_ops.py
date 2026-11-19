@@ -32,6 +32,7 @@ from mintd._s3 import (
     retry_transient,
 )
 from mintd._s3 import create_client as _create_s3_client  # tests patch it here
+from mintd.errors import MintdError
 from mintd.model import FastPullResult
 
 if TYPE_CHECKING:
@@ -1065,7 +1066,7 @@ def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, st
     it to an actionable hint. A named-but-absent remote also raises
     ``KeyError``.
     """
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)  # dvc's config has no %-interpolation
     cp.read_string(text)
 
     if remote_name is None:
@@ -1090,15 +1091,31 @@ def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, st
 
 
 def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
-    """Read a DVC remote section from ``.dvc/config`` (path wrapper over
-    :func:`parse_remote_config_text`)."""
+    """A DVC remote section from ``.dvc/config``, with one per-machine
+    override from ``.dvc/config.local``: the remote's ``profile``
+    (``dvc remote modify --local <remote> profile <name>``), which dvc uses too.
+    Every other key stays the committed one, because the committed config is
+    the remote's location of record (cf. ``data_ops._local_redirect``). Path
+    wrapper over :func:`parse_remote_config_text`."""
     config_path = project_path / ".dvc" / "config"
     if not config_path.exists():
         raise FileNotFoundError(f"no .dvc/config at {config_path}")
     try:
-        return parse_remote_config_text(config_path.read_text(), remote_name)
+        cfg = parse_remote_config_text(config_path.read_text(), remote_name)
     except KeyError as exc:
         raise KeyError(f"{exc.args[0]} ({config_path})") from exc
+    local = config_path.with_name("config.local")
+    if local.is_file():
+        try:
+            local_cfg = parse_remote_config_text(local.read_text(), remote_name)
+        except KeyError:
+            local_cfg = {}  # no section for this remote there
+        except configparser.Error as exc:
+            # dvc can't read it either; carrying on with the committed profile would use other credentials.
+            raise MintdError(f"can't read {local}: {exc}", hint="fix or remove it; dvc can't read it either") from exc
+        if "profile" in local_cfg:
+            cfg["profile"] = local_cfg["profile"]
+    return cfg
 
 
 def parse_s3_url(url: str) -> tuple[str, str]:
@@ -1748,6 +1765,18 @@ class SubprocessFastSyncOps:
         if not available():
             return _degrade_all("boto3 not importable")
 
+        all_outs, fallback, hash_missing = classify_targets(project_path, targets, remote_name)
+        if pipeline_outs:
+            all_outs.extend(pipeline_outs)
+        fallback.extend(hash_missing)
+        if not all_outs:
+            # Nothing on this project's remote to fetch (all imports, say), so no
+            # client: its profile can't stop a pull that never reads that bucket.
+            return _build_fast_pull_result(
+                synced=0, fallback=fallback, incomplete_targets=[], blocked_targets=[],
+                blocked_reasons={}, drift_notes=[], files_dir_failures=[],
+            )
+
         s3 = _create_s3_client(remote_cfg, self._aws_profile_name, pool=jobs)
         try:
             versioning_enabled = check_bucket_versioning(s3, bucket)
@@ -1760,13 +1789,6 @@ class SubprocessFastSyncOps:
             return _degrade_all(f"bucket versioning probe failed: {exc}")
         if not versioning_enabled:
             return _degrade_all("bucket versioning disabled")
-
-        all_outs, fallback, hash_missing = classify_targets(project_path, targets, remote_name)
-
-        if pipeline_outs:
-            all_outs.extend(pipeline_outs)
-
-        fallback.extend(hash_missing)
 
         # Spot-check drift demotes ONLY the affected outs (named in the
         # reason), never the whole batch. Probe errors are retried inside

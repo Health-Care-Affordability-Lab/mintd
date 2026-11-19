@@ -46,6 +46,7 @@ from ._dvc_state import _names_a_stage, abbreviate, judge_pointers, push_targets
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
 from ._storage_state import inspect_storage
+from .errors import MintdError
 from .model import FastPullResult
 
 if TYPE_CHECKING:
@@ -849,6 +850,8 @@ def data_pull(
                         pipeline_outs=pipeline_outs,
                         reporter=reporter,
                     )
+                except MintdError:
+                    raise  # the user's to fix (a missing named AWS profile); dvc would fail on it too
                 except Exception as exc:
                     logger.warning("fast-sync raised; falling back to full dvc pull: %s", exc)
                     fast_sync_failed = True

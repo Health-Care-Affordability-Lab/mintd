@@ -279,7 +279,7 @@ def prepare(
         )
     bucket, prefix = parse_s3_url(str(cfg["url"]))
     s3 = _create_s3_client(
-        cfg, cfg.get("profile") or os.environ.get("AWS_PROFILE") or aws_profile, pool=16,
+        cfg, aws_profile, pool=16,  # the remote's profile, then AWS_PROFILE, then aws_profile: _s3.resolve_profile
     )
     cache = CacheHashes(dvc_cache_dir(root))
     scope = publishable_scope(root, remote=name, prefix=prefix, cache_dir=cache.cache_dir,
