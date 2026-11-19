@@ -82,6 +82,11 @@ are never replaced, and a release that is no longer a prerelease is never change
 - **An incomplete upload.** If the run stops with "has an incomplete upload of `<file>`", an
   interrupted upload left that file half there. The maintainer deletes that one file from the
   prerelease (`gh release delete-asset vX.Y.Z <file>`), then re-runs the failed jobs.
+- **The tag job's `queue: max`.** `tag.yml` keeps every waiting tag run with
+  `concurrency: queue: max`, which GitHub documents but actionlint does not know yet. After the
+  first merge that uses it, check that the tag run succeeded and the merge got its tag. If GitHub
+  rejects the key, remove that one line from `tag.yml` in a PR. That PR's merge gets the next tag,
+  and its release includes the merge that went untagged.
 - **Starting a release by hand.** If the tag job could not start it (for example, a branch has the
   tag's name), run `gh workflow run release.yml --ref vX.Y.Z`, or Actions → release → Run workflow,
   with "Use workflow from" set to the tag.
