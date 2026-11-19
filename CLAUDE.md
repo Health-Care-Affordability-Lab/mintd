@@ -7,6 +7,9 @@
 - Set up with `uv sync --extra dev`.
 - Before calling a change done, run what CI runs: `uv run ruff check src tests`,
   `uv run mypy src/mintd`, `uv run pytest`.
+- When a PR changes `tests/stories/`, `tests/_harness/`, `tests/conftest.py`,
+  `pyproject.toml` or `uv.lock`, run `uv run pytest tests/stories -rxX` locally, from
+  a clean commit, and put its summary line in the PR's Reviewer notes.
 
 ## Grounding
 
