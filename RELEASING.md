@@ -5,17 +5,38 @@
 - Merging a PR into `main` tags its merge commit `vX.Y.Z` (`.github/workflows/tag.yml`) and starts
   `.github/workflows/release.yml` on that tag.
 - `release.yml` reruns CI (`test.yml`) on the tag, builds the wheel once, and publishes a GitHub
-  prerelease with the wheel, its SHA-256 (`<wheel>.sha256`) and `constraints.txt` (the locked
-  dependencies, with hashes). `releases/latest` never points at a prerelease.
+  prerelease with the wheel, its SHA-256 (`<wheel>.sha256`), `constraints.txt` (the locked
+  dependencies, with hashes), and `install.sh` and `install.ps1` with the tag written in. It then
+  installs that release with its own scripts, from its URL, on Linux, macOS and Windows, and runs
+  the story tests against the Linux install.
+- The install line, `…/releases/latest/download/install.sh` (or `install.ps1`), runs the latest
+  release's own script, and `releases/latest` never points at a prerelease.
 - The run's `promote` job then waits for the maintainer's approval in the `release` environment.
   Approved, it checks the release (see Promote) and marks that same release, built from that
   same commit, as the latest release.
 
+## What the install line checks
+
+- The release's wheel is checked against the release's SHA-256 before anything is installed. On a
+  mismatch, nothing is installed.
+- Every dependency is pinned to the version in the release's `constraints.txt`. That file also holds
+  their hashes, but `uv tool install` does not check hashes in a constraints file (uv 0.13.9, with
+  or without a cache), so dependencies are pinned by version, not by hash. reflink has no wheel for
+  Python 3.13 and is not in the lock, so it is built on the user's machine and not pinned.
+- Checking the dependencies' hashes would mean installing with `uv pip sync --require-hashes` into
+  a virtual environment the scripts manage themselves. That gives up what `uv tool` provides
+  (`uv tool list`, `uv tool uninstall`, the `mintd` command on PATH), so the scripts would have to
+  create the environment, the PATH entry and an uninstall path on each system.
+
 ## The gate's evidence
 
-It is on the prerelease's notes. The workflow writes the CI line; people fill in the rest.
+It is on the prerelease's notes. The workflow writes the first two lines; people fill in the rest.
 
 - **CI on this tag:** written by the workflow.
+- **Clean install:** written by the workflow: the release's own `install.sh` on Linux (with
+  `--with-schema`) and macOS, its `install.ps1` on Windows PowerShell 5.1 (plain, then
+  `-WithSchema` over it), and the story tests against the Linux install. The stories run on Linux
+  only.
 - **Live tier:** run by hand, read-only, on the lab Linux box, when the change touches download or
   push paths. Never in CI. Write the result on the live-tier line: `passed N of N checks on N
   products`, or `not run: <reason>`. Release notes are public: counts only, never the name of a
@@ -46,10 +67,14 @@ with write access, and any workflow token with `contents: write`, can still edit
 ## Roll back
 
 ```bash
+# vPREV must carry the install scripts: the install line runs the latest release's own.
+gh release view vPREV --json assets --jq '[.assets[].name] | (index("install.sh") != null) and (index("install.ps1") != null)'   # must print true
 gh release edit vPREV --latest      # the last good release is latest again
 gh release edit vBAD --prerelease   # the withdrawn one goes back to prerelease
 ```
 
+- Never roll back to a release without `install.sh` and `install.ps1`, such as one made before the
+  install scripts shipped: the install line would then fail with "no mintd release is out yet".
 - In that order, so there is always an explicit latest release.
 - An emergency rollback skips the canary: vPREV already passed it.
 - When there is time, prefer a revert PR. It ships as the next patch, through the gate.

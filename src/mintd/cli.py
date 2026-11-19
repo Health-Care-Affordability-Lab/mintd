@@ -127,6 +127,26 @@ from .publish import (
 
 logger = logging.getLogger(__name__)
 
+_RELEASES = "https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download"
+
+
+def _install_line(*, with_schema: bool = False, windows: bool = os.name == "nt") -> str:
+    """The one line that installs, or updates to, the newest promoted release.
+
+    README.md shows exactly these lines (tests/test_docs.py checks it).
+    """
+    if windows:
+        if with_schema:
+            return f"& ([scriptblock]::Create((irm {_RELEASES}/install.ps1))) -WithSchema"
+        return f"irm {_RELEASES}/install.ps1 | iex"
+    return f"curl -fsSL {_RELEASES}/install.sh | bash" + (" -s -- --with-schema" if with_schema else "")
+
+
+def _reinstall_hint(*, windows: bool = os.name == "nt") -> str:
+    """The [schema] hint. On Windows it says the line is for PowerShell, not cmd."""
+    where = ", in PowerShell" if windows else ""
+    return f"reinstall mintd with the [schema] extra{where}: {_install_line(with_schema=True, windows=windows)}"
+
 
 class MetadataSchemaTooOld(MintdError):
     hint = "run 'mintd update metadata' to migrate this project to v2"
@@ -1510,6 +1530,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
         ColumnNamesLookLikeData,
+        SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
     )
@@ -1525,6 +1546,7 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
         _hint((ValueError, RuntimeError), "check file format support (.dta, .csv, .json, .parquet) and integrity"),
         _hint(ColumnNamesLookLikeData),  # a ValueError, but it names its own fix
         _hint(FileNotFoundError, f"add supported data files under {data_dir} or pass --data-dir"),
+        _hint(SchemaExtraNotInstalled, _reinstall_hint()),
         reporter.status("Generating schema..."),
     ):
         generate_schema_file(
