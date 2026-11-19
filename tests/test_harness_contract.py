@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from mintd._config import Timeouts
 from mintd._dvc_ops import DvcOpError, SubprocessDvcOps
@@ -35,6 +36,7 @@ from mintd.producer import ProducerError, ProducerView
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness import HarnessError
 from tests._harness.consumer import Import
+from tests._harness.expect import assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
 
@@ -1702,3 +1704,32 @@ def test_story_2_deletes_only_on_the_emulator() -> None:
     server = SimpleNamespace(endpoint="https://s3.wasabisys.com", client=None)
     with pytest.raises(HarnessError, match="refusing to delete on https://s3.wasabisys.com"):
         _delete_pinned(SimpleNamespace(), server, {"b.csv"})
+
+
+def _tracked_project(root: Path) -> None:
+    """A project shaped like the lab's real products: a foreach stage with a
+    wdir, one cached out and one `cache: false` out in `dvc.lock`, and a
+    folder pointer written with its `files:` list and no top-level md5."""
+    (root / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"foreach": ["x"], "do": {
+        "wdir": "code", "cmd": "true",
+        "outs": ["../data/final/a.csv", {"../data/final/report.json": {"cache": False}}],
+    }}}}), encoding="utf-8")
+    (root / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build@x": {"cmd": "true", "outs": [
+        {"path": "../data/final/a.csv", "hash": "md5", "md5": md5(b"a"), "size": 1},
+        {"path": "../data/final/report.json", "hash": "md5", "md5": "0" * 32, "size": 2},
+    ]}}}), encoding="utf-8")
+    (root / "data" / "final").mkdir(parents=True)
+    (root / "data" / "raw").mkdir()
+    (root / "data" / "raw.dvc").write_text(yaml.safe_dump({"outs": [
+        {"hash": "md5", "path": "raw", "files": [{"relpath": "r.csv", "md5": md5(b"r")}]},
+    ]}), encoding="utf-8")
+    (root / "data" / "final" / "a.csv").write_bytes(b"a")
+    (root / "data" / "final" / "report.json").write_bytes(b"{}")
+    (root / "data" / "raw" / "r.csv").write_bytes(b"r")
+
+
+def test_landed_files_include_dvc_lock_outs_and_files_list_folders(tmp_path: Path) -> None:
+    """Mutations that turn it red: drop the `dvc.lock` loop in `_outs`, the
+    `cache: false` skip, the `do` lookup, or `_files_of` reading `files:` first."""
+    _tracked_project(tmp_path)
+    assert assert_landed_match_pointers(tmp_path) == {"data/final/a.csv": md5(b"a"), "data/raw/r.csv": md5(b"r")}
