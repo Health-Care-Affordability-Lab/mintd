@@ -211,7 +211,7 @@ def init_project(
     )
 
     # Resume only over a COMPLETE tree. A crash *mid-render* also leaves the
-    # sentinel and a matching metadata.json (it is written 2nd of 14), but
+    # sentinel and a matching metadata.json (it is written 2nd), but
     # resuming there would skip the render and report success over a scaffold
     # missing .gitignore and dvc.yaml. Partial trees fall through to the
     # refusal below, where --force re-renders and completes them.
