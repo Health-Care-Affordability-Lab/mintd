@@ -33,8 +33,9 @@ manifest.json name it), and nothing records a landing date inside.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from functools import partial
 import hashlib
 import json
 from pathlib import Path
@@ -45,14 +46,15 @@ from typing import TYPE_CHECKING, Any
 import zipfile
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ._atomic import _atomic_write_text
 from ._dvc_ops import DvcOps
 from ._dvc_state import dvc_cache_dir
-from ._fast_sync_ops import parse_dvc_outs, read_cached_dir_manifest
+from ._fast_sync_ops import DvcFileEntry, cache_path_for, dir_manifest_md5, parse_dvc_outs, read_cached_dir_manifest
 from ._producer_git_ops import FetchError, GitArchiveFetcher
 from .catalog import CatalogClient
+from .check import _POINTER_ABSENT, MatchKind, _digest_pairs, _pointer_match
 from .data import _import_namespace, _imports_index, _require_repo_url, import_product
 from .errors import MintdError
 from .imports import DataDependency
@@ -108,6 +110,17 @@ class ApprovedProduct(BaseModel):
     # Written by older mintd and ignored: the catalog says where the entry is.
     registry_entry: str | None = None
 
+    @field_validator("source_path")
+    @classmethod
+    def _a_producer_path(cls, v: str | None) -> str | None:
+        """A path as the producer's outputs name it: `./x`, `/x`, `a//b`, `..`
+        or an empty path names no output, so it is refused before any import."""
+        if v is not None and (
+            v.startswith("/") or "\\" in v or any(s in ("", ".", "..") for s in v.rstrip("/").split("/"))
+        ):
+            raise ValueError("a relative producer path such as data/final, with no empty, '.' or '..' part")
+        return v
+
 
 class EnclaveManifest(BaseModel):
     """Typed view of `enclave_manifest.yaml`. Unknown keys are refused, so a
@@ -155,6 +168,8 @@ class _Version:
     md5: str  # the out's md5 in that pointer
     src: Path
     files: tuple[tuple[str, str], ...]  # (relpath under src, "" for a file out; md5)
+    unit: str = ""  # the import it is read from, when that is a folder above `path`
+    anchored: bool = True  # checked against the producer's own pointer (`_check_against_producer`)
 
 
 def enclave_package(
@@ -168,6 +183,7 @@ def enclave_package(
     resend: bool = False,
     commit_time: Callable[[str, str], int] | None = None,
     reporter: "Reporter | None" = None,
+    warnings: list[str] | None = None,
 ) -> tuple[Path, list[tuple[str, str, str]]]:
     """Bring in every approved version, bundle the new ones, record them.
 
@@ -188,14 +204,17 @@ def enclave_package(
     kill skips that cleanup and can leave a zip with no row, which the rerun
     refuses as already existing.
 
-    Returns `(archive, skipped)`, `skipped` as `(repo, path, pin)`.
+    Returns `(archive, skipped)`, `skipped` as `(repo, path, pin)`. A path
+    the producer's own pointer does not name on its own crosses with a
+    warning, printed and written into the bundle's manifest.json; when
+    `warnings` is given, the same lines are appended to it.
     """
     if output_archive is None and output_dir is None:
         raise ValueError("Either output_archive or output_dir must be provided")
     manifest = EnclaveManifest.load(manifest_path)
     # Refuse a log rows cannot be appended to before anything is imported or
     # written, with a probe row in place of the real ones.
-    _with_rows(manifest_path.read_text(encoding="utf-8"), [{"event": "probe"}], manifest_path)
+    _with_rows(manifest_path.read_bytes().decode("utf-8"), [{"event": "probe"}], manifest_path)
     root = manifest_path.parent
     rows = [ap for ap in manifest.approved_products if name is None or ap.repo == name]
     if not rows:
@@ -220,12 +239,19 @@ def enclave_package(
                 skipped.append(key)
                 continue
             pending.setdefault((ap.repo, ap.pin), []).append(key[1])
+    # Every path this run approves, crossed or not: a path inside one of them
+    # is read from that folder's import (see `_bring_in`).
+    approved: dict[str, set[str]] = {}
+    for repo, path, _pin in [*skipped, *((r, p, q) for (r, q), ps in pending.items() for p in ps)]:
+        approved.setdefault(repo, set()).add(path)
     if not pending:
         raise NothingNewToPackage(
             f"all {len(skipped)} approved version(s){' for ' + name if name else ''} "
             "have already crossed the gap"
         )
-    when = commit_time or GitArchiveFetcher().commit_time_at
+    fetcher = GitArchiveFetcher()
+    producer_pointers: dict[tuple[str, ...], Any] = {}
+    when = commit_time or fetcher.commit_time_at
     versions: dict[tuple[str, str], str] = {}
     for repo, pin in pending:
         try:
@@ -250,23 +276,35 @@ def enclave_package(
 
     contents: list[dict[str, Any]] = []
     sums: dict[str, str] = {}
+    unanchored: list[str] = []
     try:
         with zf:
             groups = sorted(pending, key=lambda k: f"data/{k[0]}/{versions[k]}/")
             for repo, pin in groups:
                 version = versions[(repo, pin)]
-                members: dict[str, tuple[Path, str]] = {}
+                members: dict[str, tuple[Path, str, _Version]] = {}
                 for path in pending[(repo, pin)]:
-                    v = _bring_in(client, dvc_ops, root, entries[repo], repo, pin, path, reporter)
+                    v = _bring_in(
+                        client, dvc_ops, root, entries[repo], repo, pin, path, approved[repo], reporter,
+                        partial(_pointer_match, fetcher, _require_repo_url(entries[repo], name=repo), pin,
+                                memo=producer_pointers),
+                    )
+                    if not v.anchored:
+                        unanchored.append(
+                            f"{repo} {path} at {pin[:7]}: the bytes match the local import, but are not checked "
+                            "against the producer's own record, whose pointer does not name this path on its own"
+                        )
+                        if reporter is not None:
+                            reporter.warn(unanchored[-1])
                     dest = _member(f"data/{repo}/{version}/{path}")
                     for rel, md5 in v.files:
-                        members[_member(f"{dest}/{rel}" if rel else dest)] = (v.src / rel if rel else v.src, md5)
+                        members[_member(f"{dest}/{rel}" if rel else dest)] = (v.src / rel if rel else v.src, md5, v)
                     contents.append({
                         "repo": repo, "path": path, "version": version, "contract_pin": v.pin,
                         "artifact_pin": v.md5, "dest": dest,
                     })
                 for member in sorted(members):
-                    src, md5 = members[member]
+                    src, md5, of = members[member]
                     try:
                         matches = _md5(src) == md5
                     except FileNotFoundError:
@@ -274,7 +312,7 @@ def enclave_package(
                     if not matches:
                         raise ChecksumMismatch(
                             f"{src} is missing or does not match its pin (md5 {md5})",
-                            hint=f"bring it back with 'mintd data pull', or 'mintd data import {repo} --force --path <path>'",
+                            hint=_import_again(dvc_cache_dir(root), repo, of.unit or of.path, of.pin, md5),
                         )
                     # `write` stats through a link, so the entry is a regular
                     # file holding the bytes just checked.
@@ -285,7 +323,10 @@ def enclave_package(
                 "transfer_id": transfer_id,
                 "transfer_date": today,
                 "contents": contents,
+                **({"warnings": unanchored} if unanchored else {}),
             }
+            if warnings is not None:
+                warnings.extend(unanchored)
             record = f"transfers/{transfer_id}"
             for member, text in (
                 (f"{record}/MD5SUMS", "".join(f"{md5}  {m}\n" for m, md5 in sorted(sums.items()))),
@@ -316,24 +357,119 @@ def _bring_in(
     repo: str,
     pin: str,
     path: str,
+    approved: set[str],
     reporter: "Reporter | None",
+    producer_match: Callable[[str], tuple[str | None, MatchKind | None]],
 ) -> _Version:
-    """Make `path` of `repo` an import at `pin`, and read it back.
+    """Make `path` of `repo` readable from an import at `pin`, and read it.
 
-    The approved pin wins: an import at any other commit (a `data import
-    --bump` the manifest has not caught up with, say) is re-imported at it."""
+    One import folder holds one pin, so the import unit is the outermost
+    folder above `path` (or `path` itself) that this run approves or that is
+    imported on disk, and `path` is read from it. The approved pin wins: a
+    unit imported at any other commit (another approval's, or a `data import
+    --bump` the manifest has not caught up with) is re-imported at `pin`.
+    The unit, and `path` when it is not the unit, must match the producer's
+    own pointer at `pin` wherever that pointer names them on its own
+    (`_check_against_producer`): a parent folder imported on disk, which the
+    producer names nowhere, never downgrades a path it does name."""
     imports = root / "data" / "imports"
     namespace = imports / _import_namespace(entry, repo)
-    pointer = _imports_index(namespace, name=repo).get(path)
+    index = _imports_index(namespace, name=repo)
+    unit = min((u for u in approved | set(index) | {path} if path == u or path.startswith(u + "/")), key=len)
+    pointer = index.get(unit)
     if pointer is None or DataDependency.from_dvc_file(pointer).contract_pin != pin:
         if pointer is not None and reporter is not None:
             reporter.warn(f"{pointer} is not at the approved pin {pin[:7]}; re-importing it there")
         import_product(
-            client, dvc_ops, repo, cwd=root, dest_root=imports, path=path,
+            client, dvc_ops, repo, cwd=root, dest_root=imports, path=unit,
             rev=pin, force=pointer is not None, reporter=reporter,
         )
-        pointer = _imports_index(namespace, name=repo)[path]
-    return _read_version(root, repo, path, pointer)
+        pointer = _imports_index(namespace, name=repo)[unit]
+    v = _read_version(root, repo, unit, pointer)
+    cache = dvc_cache_dir(root)
+    anchored = _check_against_producer(v, producer_match, pointer, cache)
+    if unit == path:
+        return replace(v, anchored=anchored)
+    inner = _inside(v, path)
+    return replace(inner, anchored=_check_against_producer(inner, producer_match, pointer, cache) or anchored)
+
+
+def _check_against_producer(
+    v: _Version, producer_match: Callable[[str], tuple[str | None, MatchKind | None]], pointer: Path, cache: Path
+) -> bool:
+    """Whether `v` is anchored to the producer's own pointer, refusing it
+    where that pointer names `v.path` and records other content. The import
+    pointer is local, and a re-import from a changed cache rewrites it to
+    match the change, so the chain starts at the producer: its pointer, then
+    the `.dir` hash, then each file's md5.
+
+    check's own matcher (`_pointer_match`) says how the producer names
+    `v.path`: on its own (`exact`, or `inside-files`, an entry of a per-file
+    pointer), or not (absent: a folder holding several pointers; `beneath`:
+    a folder of per-file lock outs; `inside-tree`: a path inside a folder
+    tracked as one tree, whose identity is the whole tree's). Where it does
+    not, the bytes are checked against the local import only, and False says
+    so. A read that fails is never taken for a difference."""
+    want, kind = producer_match(v.path)
+    if want is None:
+        raise MintdError(
+            f"could not read {v.repo}'s own pointer for {v.path} at {v.pin[:7]}",
+            hint="check git auth (gh auth status / ssh -T git@github.com), then retry",
+        )
+    if want == _POINTER_ABSENT or kind in ("beneath", "inside-tree"):
+        return False
+    if not _same_as_producer(v, want):
+        raise ChecksumMismatch(
+            f"{pointer}: the import of {v.path} ({v.md5}) is not what {v.repo}'s own pointer records at {v.pin[:7]} ({want})",
+            hint=_import_again(cache, v.repo, v.unit or v.path, v.pin, want, v.md5),
+        )
+    return True
+
+
+def _same_as_producer(v: _Version, want: str) -> bool:
+    """Whether `v`'s files are what `want`, the producer's own identity for
+    `v.path`, names: an md5 (a file, an entry of a per-file pointer, or a
+    folder's tree) or a `.files` digest (a per-file pointer, or a folder
+    inside one, whose digest pairs carry the path within that pointer)."""
+    if want == v.md5:
+        return True
+    if not want.endswith(".files"):
+        return False
+    files = sorted(v.files)
+    parts = v.path.split("/")
+    below = ["/".join(parts[i:]) for i in range(1, len(parts))]  # v.path inside each folder above it
+    return any(
+        f"{_digest_pairs(sorted((f'{s}/{r}' if s and r else s or r, m) for r, m in files))}.files" == want
+        for s in ["", *below]
+    )
+
+
+def _import_again(cache: Path, repo: str, path: str, pin: str, *md5s: str) -> str:
+    """Import at the pin, after deleting each cache object named in `md5s`
+    whose bytes do not hash to its name: DVC trusts a read-only cache object,
+    so `data pull` leaves a changed one in place and `--force` alone can
+    adopt it. One that hashes to its name is a good copy, and stays."""
+    stale = sorted({
+        str(c) for m in md5s if (c := cache_path_for(cache, m)).is_file() and _md5(c) != m.removesuffix(".dir")
+    })
+    first = f"delete {', '.join(stale)}, then " if stale else ""
+    return f"{first}import it again at the pin: 'mintd data import {repo} --force --path {path} --rev {pin}'"
+
+
+def _inside(folder: _Version, path: str) -> _Version:
+    """`path`, inside `folder`'s import at the same pin, read from it: a
+    second `dvc import` into a folder already imported is refused. A file
+    keeps its own md5; a sub-folder gets the tree md5 DVC would give it."""
+    rel = path[len(folder.path) + 1:]
+    files = tuple(
+        (r[len(rel) + 1:] if r != rel else "", m) for r, m in folder.files if r == rel or r.startswith(rel + "/")
+    )
+    if not files:
+        raise MintdError(f"{path} is not in {folder.path} at {folder.pin[:7]}", hint="check the approved source_path")
+    md5 = files[0][1] if files[0][0] == "" else dir_manifest_md5(
+        [DvcFileEntry(md5=m, relpath=r, size=0) for r, m in files]
+    )
+    return _Version(folder.repo, path, folder.pin, md5, folder.src / rel, files, unit=folder.path)
 
 
 def _resolve_outputs(
@@ -348,17 +484,23 @@ def _resolve_outputs(
 def _read_version(root: Path, repo: str, path: str, pointer: Path) -> _Version:
     """The files an import pointer pins, with their md5s.
 
-    From the pointer's `files:` list when it has one, else from the folder's
-    `.dir` manifest, which `dvc import` leaves in the project's cache."""
+    From the pointer's `files:` list when it has no top-level md5, else from
+    the folder's `.dir` manifest, which `dvc import` leaves in the project's
+    cache."""
     (out,) = parse_dvc_outs(pointer, remote_name="")
-    if out.files is not None:
+    # A `files:` list counts only with no top-level md5, as check's
+    # `_out_identity` reads it: beside a `.dir` md5 it is unchecked text, and
+    # the hash-checked `.dir` is what the md5 names.
+    if out.is_files_format and out.files is not None:
         files = [(f.relpath, f.md5) for f in out.files]
     elif out.is_dir:
         entries = read_cached_dir_manifest(dvc_cache_dir(root), out.md5)
         if entries is None:
             raise ChecksumMismatch(
-                f"{pointer}: the folder's file list ({out.md5}) is not in the DVC cache",
-                hint=f"bring it back with 'mintd data pull', or 'mintd data import {repo} --force --path {path}'",
+                f"{pointer}: the folder's file list ({out.md5}) is not in the DVC cache, or does not hash to it",
+                hint=_import_again(
+                    dvc_cache_dir(root), repo, path, DataDependency.from_dvc_file(pointer).contract_pin, out.md5
+                ),
             )
         files = [(e.relpath, e.md5) for e in entries]
     else:
@@ -401,7 +543,7 @@ def _row(event: str, transfer: dict[str, Any], content: dict[str, Any]) -> dict[
     }
 
 
-_LOG_KEY = re.compile(r"^transferred:[ \t]*(\[\s*\])?[ \t]*(#.*)?$", re.MULTILINE)
+_LOG_KEY = re.compile(r"^transferred:[ \t]*(\[\s*\])?[ \t]*(#[^\r\n]*)?(?=\r?$)", re.MULTILINE)
 _SURROGATE_PAIR = re.compile(r"\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})")
 
 
@@ -446,9 +588,10 @@ def _with_rows(text: str, rows: list[dict[str, Any]], manifest_path: Path) -> st
     if key.group(1):
         line = "transferred:" + (f" {key.group(2)}" if key.group(2) else "")
         text = text[: key.start()] + line + text[key.end():]
+    nl = "\r\n" if "\r\n" in text else "\n"  # the file's own line ending
     if not text.endswith("\n"):
-        text += "\n"
-    new = text + "".join(f"- {_row_line(r)}\n" for r in rows)
+        text += nl
+    new = text + "".join(f"- {_row_line(r)}{nl}" for r in rows)
     try:
         parsed = yaml.safe_load(new)
     except yaml.YAMLError:
@@ -470,8 +613,11 @@ def _records(manifest_path: Path, transfer_id: str) -> bool:
 
 
 def _append_rows(manifest_path: Path, rows: list[dict[str, Any]]) -> None:
-    """Append rows to `transferred:` (see `_with_rows`), atomically."""
-    _atomic_write_text(manifest_path, _with_rows(manifest_path.read_text(encoding="utf-8"), rows, manifest_path))
+    """Append rows to `transferred:` (see `_with_rows`), atomically, at the
+    file a symlink points to, keeping its mode and every byte before them."""
+    target = manifest_path.resolve()
+    new = _with_rows(target.read_bytes().decode("utf-8"), rows, manifest_path)
+    _atomic_write_text(target, new, newline="", mode=stat.S_IMODE(target.stat().st_mode))
 
 
 def _next_transfer_id(manifest: EnclaveManifest, today_iso: str) -> str:
@@ -491,7 +637,7 @@ def _next_transfer_id(manifest: EnclaveManifest, today_iso: str) -> str:
 # Each check fails, not passes, when MD5SUMS cannot be read: the macOS loop
 # counts the lines it read, and PowerShell stops on a Get-Content error.
 _MACOS_CHECK = (
-    'bad=0; n=0; while IFS= read -r line; do n=$((n+1)); f=${line#*  }; '
+    'bad=0; n=0; while IFS= read -r line || [ -n "$line" ]; do n=$((n+1)); f=${line#*  }; '
     'if [ "$(md5 -q "$f")" = "${line%%  *}" ]; then echo "$f: OK"; '
     'else echo "$f: FAILED"; bad=1; fi; done < MD5SUMS_PATH; [ "$bad" = 0 ] && [ "$n" -gt 0 ]'
 )

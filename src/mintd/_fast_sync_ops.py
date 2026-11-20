@@ -902,8 +902,10 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
 
     ``dir_md5`` may arrive with or without the ``.dir`` suffix; the cache
     filename always carries it (DVC's own layout — see ensure_dir_manifest).
-    Returns ``None`` when the manifest is absent or malformed in any way
-    (bad JSON, non-list payload, non-dict entries): callers treat that as
+    Returns ``None`` when the manifest is absent, when its bytes do not hash
+    to ``dir_md5`` (a changed or damaged cache, which can stay valid JSON
+    while dropping a file or swapping an md5), or when it is malformed in any
+    way (bad JSON, non-list payload, non-dict entries): callers treat that as
     "manifest not usable from cache" and fetch or route accordingly.
     """
     full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
@@ -911,7 +913,10 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
     if not manifest_path.is_file():
         return None
     try:
-        payload = json.loads(manifest_path.read_bytes())
+        raw = manifest_path.read_bytes()
+        if hashlib.md5(raw, usedforsecurity=False).hexdigest() != full_md5.removesuffix(".dir"):
+            return None
+        payload = json.loads(raw)
         if not isinstance(payload, list):
             return None
         return [

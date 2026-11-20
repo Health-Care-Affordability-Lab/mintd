@@ -11,6 +11,7 @@ mock_aws` (legacy `mock_s3` is removed).
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +40,7 @@ from mintd._fast_sync_ops import (
     parse_dvc_outs,
     partition_pipeline_outs,
     parse_s3_url,
+    read_cached_dir_manifest,
     s3_key_for,
     s3_key_for_out,
     spot_check_versions,
@@ -2722,3 +2724,23 @@ def test_retry_transient_backoff_caps_at_8s() -> None:
     assert [c.args[0] for c in mock_sleep.call_args_list] == [
         0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0,
     ]
+
+
+@pytest.mark.parametrize("tamper", ["drop an entry", "swap an md5"])
+def test_a_cached_dir_manifest_that_does_not_hash_to_its_name_is_not_used(tmp_path: Path, tamper: str) -> None:
+    """Every caller reads None as "not usable from cache". A list changed in
+    place can stay valid JSON, so it is used only when its bytes hash to the
+    tree md5 it is filed under."""
+    entries = [DvcFileEntry(md5=hashlib.md5(n.encode()).hexdigest(), relpath=n, size=1) for n in ("a.csv", "b.csv")]
+    md5 = ensure_dir_manifest(tmp_path, entries)
+    assert [e.relpath for e in read_cached_dir_manifest(tmp_path, md5) or []] == ["a.csv", "b.csv"]
+    path = cache_path_for(tmp_path, md5 if md5.endswith(".dir") else f"{md5}.dir")
+    path.chmod(0o644)
+    listing = json.loads(path.read_bytes())
+    if tamper == "drop an entry":
+        listing = listing[:1]
+    else:
+        listing[0]["md5"] = hashlib.md5(b"other").hexdigest()
+    path.write_text(json.dumps(listing), encoding="utf-8")
+
+    assert read_cached_dir_manifest(tmp_path, md5) is None

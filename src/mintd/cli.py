@@ -2058,6 +2058,7 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
             # A producer read at the pin, or the pin's commit date, failed.
             _hint(ProducerError, "check git auth (gh auth status / ssh -T git@github.com)"),
         ):
+            warnings: list[str] = []
             archive, skipped = enclave_package(
                 client,
                 dvc_ops,
@@ -2067,6 +2068,7 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
                 output_dir=output_dir,
                 resend=args.resend,
                 reporter=reporter,
+                warnings=warnings,
             )
     except NothingNewToPackage as exc:
         # Everything already crossed the gap — the routine steady state, not a
@@ -2092,7 +2094,7 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
     # `result` (not `print`) so the bundle path lands on stdout AND is flushed
     # before the stderr hint below. Also gives --json mode the skipped list.
     reporter.result(
-        {"archive": str(archive), "skipped": sorted({repo for repo, _, _ in skipped})},
+        {"archive": str(archive), "skipped": sorted({repo for repo, _, _ in skipped}), "warnings": warnings},
         pretty=lambda p: f"packaged: {p['archive']}",
     )
     reporter.info(

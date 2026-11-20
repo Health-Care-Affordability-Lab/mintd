@@ -11,11 +11,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +26,10 @@ import yaml
 
 from mintd._config import Timeouts
 from mintd._dvc_ops import SubprocessDvcOps
+from mintd._dvc_state import dvc_cache_dir
+from mintd._fast_sync_ops import DvcFileEntry, cache_path_for, dir_manifest_md5, ensure_dir_manifest, read_cached_dir_manifest
+from mintd._console import Reporter
+from mintd.check import _POINTER_ABSENT, _match_out
 from mintd.catalog import InMemoryCatalogClient
 from mintd.data import import_product
 from mintd.enclave import (
@@ -35,12 +41,15 @@ from mintd.enclave import (
     _append_rows,
     _records,
     _member,
+    _check_against_producer,
+    _Version,
     enclave_package,
 )
 from mintd.errors import MintdError
 from mintd.model import Metadata
 from tests._harness.expect import bundle_steps
 from tests._harness.git import _git
+from tests._harness.producer import build_local_producer
 
 FOLDER = {"a.csv": b"alpha\n", "b.csv": b"beta\n", "c d.csv": b"gamma\n", "sub/é.csv": b"delta\n"}
 HEADER = "enclave_name: enclave_x\n# approved by the data officer; transferred: below is the log\n"
@@ -227,9 +236,12 @@ def test_a_file_that_no_longer_matches_its_pin_is_refused(world) -> None:
     tampered.unlink()  # never write through a link into dvc's cache
     tampered.write_bytes(b"betA\n")
 
-    with pytest.raises(ChecksumMismatch, match="does not match its pin"):
+    with pytest.raises(ChecksumMismatch, match="does not match its pin") as raised:
         _package(world, resend=True)
 
+    assert raised.value.hint == (
+        f"import it again at the pin: 'mintd data import demo --force --path data/final --rev {world.pin1}'"
+    ), "the cache copy hashes to its name, so nothing is named to delete"
     assert world.manifest.read_bytes() == before
     assert len(list((world.enclave / "transfers").iterdir())) == 1, "the partial zip is removed"
 
@@ -426,6 +438,11 @@ def test_the_readme_commands_unzip_and_check_this_bundle(world, tmp_path: Path, 
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert len(_lines(ok, ": OK")) == len(FOLDER), ok.stdout + ok.stderr
     assert {k: (version / k).read_bytes() for k in FOLDER} == FOLDER
+    # A last line with no newline after it is checked too.
+    sums = inside / "transfers" / archive.stem / "MD5SUMS"
+    sums.write_bytes(sums.read_bytes().rstrip(b"\r\n"))
+    trimmed = _step(check, inside)
+    assert trimmed.returncode == 0 and len(_lines(trimmed, ": OK")) == len(FOLDER), trimmed.stdout + trimmed.stderr
 
     # 2. A resend unzipped over it changes nothing in place, and adds its record.
     stamps = {k: (version / k).stat().st_mtime_ns for k in FOLDER}
@@ -461,20 +478,27 @@ def test_the_readme_commands_unzip_and_check_this_bundle(world, tmp_path: Path, 
     assert len(_lines(bad, ": OK")) == len(FOLDER) - 1
 
 
-def test_package_runs_with_its_spinner_in_human_mode(world, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+@pytest.mark.parametrize("flags, source_path", [([], None), (["--json"], "data/final/a.csv")],
+                         ids=["human", "json, with a warning"])
+def test_package_runs_through_the_cli(world, monkeypatch: pytest.MonkeyPatch, capsys, flags, source_path) -> None:
     """The real handler with a real Reporter, as a person runs it. Each import
     shows its own spinner, and rich allows one live display at a time, so the
-    handler must not hold another around the whole package."""
+    handler must not hold another around the whole package. With --json the
+    result carries the warnings manifest.json records."""
     from mintd import cli
 
-    _approve(world, world.pin1)
+    _approve(world, world.pin1, source_path=source_path)
     monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: world.client)
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: world.ops)
 
-    rc = cli.main(["enclave", "package", "--manifest", str(world.manifest)])
+    rc = cli.main([*flags, "enclave", "package", "--manifest", str(world.manifest)])
 
-    assert rc == 0, capsys.readouterr().err
-    assert len(list((world.enclave / "transfers").glob("*.zip"))) == 1
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    (archive,) = (world.enclave / "transfers").glob("*.zip")
+    if flags:
+        # The test's own dvc ops print to stdout; the result is the last line.
+        assert json.loads(out.out.strip().splitlines()[-1])["warnings"] == _bundle(archive)[3]["warnings"] != []
 
 
 def test_a_pin_the_producer_cannot_serve_names_git_auth(world, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -621,3 +645,462 @@ def test_an_interrupt_after_the_rows_land_keeps_their_zip(world, monkeypatch: py
     zips = list((world.enclave / "transfers").glob("*.zip"))
     assert len(zips) == 1
     assert f'"transfer_id": "{zips[0].stem}"' in world.manifest.read_text(encoding="utf-8")
+
+
+def _rows_for(w: SimpleNamespace, *approvals: str) -> None:
+    """A manifest approving each `key: value` row given, all for `demo`."""
+    rows = "".join(f"  - repo: demo\n    {a}\n" for a in approvals)
+    w.manifest.write_text(HEADER + "approved_products:\n" + rows + "transferred: []\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("tamper", ["drop b.csv", "swap a.csv for other bytes"])
+def test_a_cached_file_list_that_does_not_hash_to_its_pin_is_refused(world, tamper: str) -> None:
+    """A cache changed or damaged in place can stay valid JSON. A list without
+    b.csv would bundle the folder without it while the log records it whole;
+    a swapped md5, with the file swapped to match, would bundle other bytes
+    and an MD5SUMS that agrees with them. The list must hash to the md5 the
+    import pointer pins."""
+    written = _approve(world, world.pin1)
+    world.ops.init(cwd=world.enclave)
+    import_product(world.client, world.ops, "demo", cwd=world.enclave, dest_root=world.enclave / "data" / "imports",
+                   path="data/final", rev=world.pin1)
+    (listing,) = dvc_cache_dir(world.enclave).rglob("*.dir")
+    listing.chmod(0o644)
+    entries = json.loads(listing.read_text(encoding="utf-8"))
+    if tamper == "drop b.csv":
+        entries = [e for e in entries if e["relpath"] != "b.csv"]
+    else:
+        for e in entries:
+            if e["relpath"] == "a.csv":
+                e["md5"] = _md5(b"evil\n")
+        (a,) = (world.enclave / "data" / "imports").rglob("a.csv")
+        a.unlink()
+        a.write_bytes(b"evil\n")
+    listing.write_text(json.dumps(entries), encoding="utf-8")
+
+    with pytest.raises(ChecksumMismatch, match="does not hash to it") as raised:
+        _package(world)
+
+    assert raised.value.hint == (
+        f"delete {cache_path_for(dvc_cache_dir(world.enclave), listing.parent.name + listing.name)}, then "
+        f"import it again at the pin: 'mintd data import demo --force --path data/final --rev {world.pin1}'"
+    ), "data pull leaves a changed list in place, and --force alone can adopt it"
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+    assert world.manifest.read_text(encoding="utf-8") == written
+
+
+@pytest.mark.parametrize("paths", [
+    ("data/final", "data/final/a.csv"),
+    ("data/final/a.csv", "data/final"),
+    ("data/final", "data/final/sub"),
+], ids=["folder-then-file", "file-then-folder", "folder-then-sub-folder"])
+def test_a_path_inside_an_approved_folder_comes_from_the_folders_import(world, paths: tuple[str, str]) -> None:
+    """Approved at one pin in one run, the folder is imported once and the
+    path inside it read from that import: a second `dvc import` into the
+    folder is refused. Each file is bundled once, and each approval logs a row."""
+    _rows_for(world, *(f"pin: {world.pin1}\n    source_path: {p}" for p in paths))
+
+    archive, _ = _package(world)
+
+    dest = f"data/demo/{VERSION_DATE}_{world.pin1[:7]}/data/final"
+    assert [n for n in _bundle(archive)[0] if n.startswith("data/")] == sorted(f"{dest}/{k}" for k in FOLDER)
+    assert "warnings" not in _bundle(archive)[3], "the folder's import is checked against the producer"
+    imports = world.enclave / "data" / "imports"
+    assert [q.relative_to(imports).as_posix() for q in imports.rglob("*.dvc")] == ["data_demo/data/final.dvc"], (
+        "one import, the folder's, where an import of the folder alone puts it"
+    )
+    rows = {r["path"]: r for r in _rows(world)}
+    assert list(rows) == list(paths)
+    inner = {"data/final/a.csv": _md5(FOLDER["a.csv"]),
+             "data/final/sub": dir_manifest_md5([DvcFileEntry(md5=_md5(FOLDER["sub/é.csv"]), relpath="é.csv", size=0)])}
+    for p in paths:
+        if p in inner:
+            assert rows[p]["artifact_pin"] == inner[p] and rows[p]["dest"] == f"data/demo/{VERSION_DATE}_{world.pin1[:7]}/{p}"
+    with pytest.raises(NothingNewToPackage):
+        _package(world)
+
+
+def test_appending_keeps_crlf_line_endings(world) -> None:
+    """Every byte before the new rows stays, and the rows end lines as the
+    file does."""
+    old = f"- {{repo: demo, contract_pin: {'c' * 40}, transfer_id: transfer-2026-07-28-000000}}\n"
+    raw = _approve(world, world.pin1, log="transferred:\n" + old).replace("\n", "\r\n").encode("utf-8")
+    world.manifest.write_bytes(raw)
+
+    _package(world)
+
+    after = world.manifest.read_bytes()
+    assert after.startswith(raw)
+    assert after.count(b"\n") == after.count(b"\r\n")
+    assert [r.get("event") for r in _rows(world)] == [None, "packaged"]
+
+
+def test_appending_keeps_a_read_only_manifest_read_only(world) -> None:
+    _approve(world, world.pin1)
+    world.manifest.chmod(0o444)
+    if sys.platform == "win32":
+        # Windows will not replace a read-only file: the run fails, and leaves
+        # no zip and no temp file behind.
+        with pytest.raises(PermissionError):
+            _package(world)
+        assert [q.name for q in world.enclave.rglob("*") if q.name.endswith((".tmp", ".zip"))] == []
+        return
+
+    _package(world)
+
+    assert stat.S_IMODE(world.manifest.stat().st_mode) == 0o444
+    assert [r["event"] for r in _rows(world)] == ["packaged"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs extra rights on Windows")
+def test_appending_writes_through_a_symlinked_manifest(world) -> None:
+    _approve(world, world.pin1)
+    real = world.enclave / "kept-elsewhere.yaml"
+    world.manifest.rename(real)
+    world.manifest.symlink_to(real)
+
+    _package(world)
+
+    assert world.manifest.is_symlink() and world.manifest.resolve() == real.resolve()
+    assert [r["event"] for r in yaml.safe_load(real.read_text(encoding="utf-8"))["transferred"]] == ["packaged"]
+
+
+@pytest.mark.parametrize("source_path", ["''", "./data/final", "/data/final", "data//final", "data/../final"])
+def test_a_source_path_that_names_no_output_is_refused_before_any_import(world, source_path: str) -> None:
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: {source_path}")
+
+    with pytest.raises(MintdError, match="source_path"):
+        _package(world)
+
+    assert not (world.enclave / ".dvc").exists(), "nothing was imported"
+
+
+def test_a_source_path_with_a_trailing_slash_still_loads(world) -> None:
+    """Older manifests may write one; it names the same output."""
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final/")
+
+    _package(world)
+
+    assert [r["path"] for r in _rows(world)] == ["data/final"]
+
+
+def test_all_approves_every_output_and_a_primary_row_beside_it_adds_nothing(world) -> None:
+    world.producer.add_output("data/extra.csv")
+    pin = world.producer.publish({"data/final": FOLDER, "data/extra.csv": b"x\n"}, message="two outputs")
+    world.client = InMemoryCatalogClient()
+    world.client.register(Metadata.model_validate(world.producer.metadata()))
+    _rows_for(world, f"pin: {pin}\n    all: true", f"pin: {pin}")
+
+    archive, _ = _package(world)
+
+    version = f"data/demo/{VERSION_DATE}_{pin[:7]}"
+    assert sorted(r["path"] for r in _rows(world)) == ["data/extra.csv", "data/final"]
+    assert [n for n in _bundle(archive)[0] if n.startswith("data/")] == sorted(
+        [f"{version}/data/extra.csv"] + [f"{version}/data/final/{k}" for k in FOLDER]
+    )
+
+
+def test_package_with_a_repo_bundles_only_that_products_approvals(world, tmp_path: Path) -> None:
+    other = build_local_producer(tmp_path / "other-producer")
+    meta = other.metadata()
+    meta["project"].update(name="other", full_name="data_other")
+    meta["repository"]["github_url"] = other.url
+    other._write_metadata(meta)
+    (other.work / "data" / "final").mkdir(parents=True, exist_ok=True)
+    pin = other.publish({"data/final": {"x.csv": b"x\n"}})
+    world.client.register(Metadata.model_validate(meta))
+    world.manifest.write_text(
+        HEADER + "approved_products:\n"
+        f"  - repo: demo\n    pin: {world.pin1}\n  - repo: other\n    pin: {pin}\n" + "transferred: []\n",
+        encoding="utf-8",
+    )
+
+    first, _ = _package(world, name="other")
+    second, _ = _package(world, name="demo")
+
+    assert [c["repo"] for c in _bundle(first)[3]["contents"]] == ["other"]
+    assert [c["repo"] for c in _bundle(second)[3]["contents"]] == ["demo"]
+    assert [r["repo"] for r in _rows(world)] == ["other", "demo"]
+    with pytest.raises(NothingToPackage, match="for nope"):
+        _package(world, name="nope")
+
+
+def _v2(w: SimpleNamespace) -> str:
+    """A second pin whose a.csv differs from pin1's."""
+    return w.producer.publish({"data/final": {**FOLDER, "a.csv": b"alpha v2\n"}}, message="v2")
+
+
+def _version_of(w: SimpleNamespace, pin: str) -> str:
+    return f"data/demo/{VERSION_DATE}_{pin[:7]}"
+
+
+def test_a_file_inside_a_folder_approved_at_another_pin_is_read_at_its_own_pin(world) -> None:
+    """One import folder holds one pin: the folder is imported at each pin in
+    turn, and a.csv is read from the import at its own."""
+    pin2 = _v2(world)
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final", f"pin: {pin2}\n    source_path: data/final/a.csv")
+
+    archive, _ = _package(world)
+
+    _, data, _, _ = _bundle(archive)
+    v1, v2 = _version_of(world, world.pin1), _version_of(world, pin2)
+    assert {n: b for n, b in data.items() if n.startswith("data/")} == {
+        **{f"{v1}/data/final/{k}": b for k, b in FOLDER.items()}, f"{v2}/data/final/a.csv": b"alpha v2\n",
+    }
+    assert {(r["path"], r["contract_pin"]) for r in _rows(world)} == {("data/final", world.pin1), ("data/final/a.csv", pin2)}
+
+
+def test_a_file_inside_a_folder_imported_earlier_at_another_pin_is_read_at_its_own_pin(world) -> None:
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final")
+    _package(world)
+    pin2 = _v2(world)
+    text = world.manifest.read_text(encoding="utf-8")
+    world.manifest.write_text(
+        text.replace("\ntransferred:", f"\n  - repo: demo\n    pin: {pin2}\n    source_path: data/final/a.csv\ntransferred:", 1),
+        encoding="utf-8",
+    )
+
+    archive, _ = _package(world)
+
+    _, data, _, _ = _bundle(archive)
+    assert {n: b for n, b in data.items() if n.startswith("data/")} == {
+        f"{_version_of(world, pin2)}/data/final/a.csv": b"alpha v2\n",
+    }
+    assert (_rows(world)[-1]["path"], _rows(world)[-1]["contract_pin"]) == ("data/final/a.csv", pin2)
+
+
+def test_a_file_resent_at_an_older_pin_beside_a_newer_folder(world) -> None:
+    """The folder crossed at pin1; now the folder at pin2 is new, and a.csv is
+    sent again at pin1. Each is read from the folder's import at its own pin."""
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final")
+    _package(world)
+    pin2 = _v2(world)
+    text = world.manifest.read_text(encoding="utf-8")
+    world.manifest.write_text(text.replace("\ntransferred:", (
+        f"\n  - repo: demo\n    pin: {pin2}\n    source_path: data/final"
+        f"\n  - repo: demo\n    pin: {world.pin1}\n    source_path: data/final/a.csv\ntransferred:"), 1), encoding="utf-8")
+
+    archive, _ = _package(world)
+
+    _, data, _, _ = _bundle(archive)
+    v1, v2 = _version_of(world, world.pin1), _version_of(world, pin2)
+    assert {n: b for n, b in data.items() if n.startswith("data/")} == {
+        f"{v1}/data/final/a.csv": b"alpha\n",
+        **{f"{v2}/data/final/{k}": b for k, b in {**FOLDER, "a.csv": b"alpha v2\n"}.items()},
+    }
+    assert {(r["path"], r["contract_pin"]) for r in _rows(world)[1:]} == {
+        ("data/final", pin2), ("data/final/a.csv", world.pin1),
+    }
+
+
+def test_a_path_the_approved_folder_does_not_hold_is_refused(world) -> None:
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final", f"pin: {world.pin1}\n    source_path: data/final/nope.csv")
+
+    with pytest.raises(MintdError, match="data/final/nope.csv is not in data/final"):
+        _package(world)
+
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+    assert _rows(world) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="DVC's trust of a read-only cache object, reproduced on POSIX")
+def test_an_import_that_adopted_a_changed_cache_is_refused_and_the_hint_recovers(world) -> None:
+    """A forced import with no pin, at HEAD == the approved pin, adopts a
+    changed list DVC trusts (cache objects are read-only) and rewrites the
+    import pointer to match it. Only the producer's own pointer still names
+    the real tree, so package checks against that."""
+    _approve(world, world.pin1)
+    world.ops.init(cwd=world.enclave)
+    where = {"cwd": world.enclave, "dest_root": world.enclave / "data" / "imports", "path": "data/final"}
+    import_product(world.client, world.ops, "demo", rev=world.pin1, **where)
+    (listing,) = dvc_cache_dir(world.enclave).rglob("*.dir")
+    listing.chmod(0o644)
+    entries = [e for e in json.loads(listing.read_text(encoding="utf-8")) if e["relpath"] != "b.csv"]
+    listing.write_text(json.dumps(entries), encoding="utf-8")
+    listing.chmod(0o444)
+    import_product(world.client, world.ops, "demo", force=True, **where)
+    (pointer,) = (world.enclave / "data" / "imports").rglob("final.dvc")
+    assert "nfiles: 3" in pointer.read_text(encoding="utf-8"), "the forced import adopted the changed list"
+
+    with pytest.raises(ChecksumMismatch, match="is not what demo's own pointer records") as raised:
+        _package(world)
+
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+    hint = raised.value.hint or ""
+    assert hint.endswith(f"import it again at the pin: 'mintd data import demo --force --path data/final --rev {world.pin1}'")
+    named = re.match(r"delete (.*), then ", hint)
+    assert named and named[1] == str(cache_path_for(dvc_cache_dir(world.enclave), listing.parent.name + listing.name)), (
+        "only the changed list under the producer's md5; the adopted one hashes to its name"
+    )
+    for stale in named[1].split(", "):
+        Path(stale).chmod(0o644)
+        Path(stale).unlink()
+    import_product(world.client, world.ops, "demo", force=True, rev=world.pin1, **where)
+    archive, _ = _package(world)
+    dest = f"{_version_of(world, world.pin1)}/data/final"
+    assert [n for n in _bundle(archive)[0] if n.startswith("data/")] == sorted(f"{dest}/{k}" for k in FOLDER)
+
+
+def _lock_outs(w: SimpleNamespace) -> tuple[str, str]:
+    """A folder a stage writes as per-file outs; DVC also writes a .gitignore there."""
+    pin = w.producer.publish_pipeline(
+        "stages:\n"
+        "  lane:\n"
+        "    cmd: python -c \"import pathlib; "
+        "d=pathlib.Path('data/lane'); d.mkdir(parents=True, exist_ok=True); "
+        "(d/'a.csv').write_bytes(b'a\\n'); (d/'b.csv').write_bytes(b'b\\n')\"\n"
+        "    outs:\n"
+        "      - data/lane/a.csv\n"
+        "      - data/lane/b.csv\n"
+    )
+    return pin, "data/lane"
+
+
+def _several_pointers(w: SimpleNamespace) -> tuple[str, str]:
+    """A folder holding one `.dvc` pointer per file, and none of its own."""
+    (w.producer.work / "data" / "pf").mkdir(parents=True, exist_ok=True)
+    pin = w.producer.publish({"data/final": FOLDER, "data/pf/a.csv": b"a\n", "data/pf/b.csv": b"b\n"}, message="pointers")
+    return pin, "data/pf"
+
+
+@pytest.mark.parametrize("shape", ["per-file lock outs", "several pointers", "sub-folder of a tree", "file in a tree"])
+def test_a_path_the_producers_pointer_does_not_name_crosses_with_a_warning(world, capsys, shape: str) -> None:
+    """The producer has no identity of its own for these paths, so their bytes
+    are checked against the local import only: each crosses, with one warning
+    on screen and in the transfer's manifest.json naming it."""
+    pin, path = {
+        "per-file lock outs": lambda: _lock_outs(world),
+        "several pointers": lambda: _several_pointers(world),
+        "sub-folder of a tree": lambda: (world.pin1, "data/final/sub"),
+        "file in a tree": lambda: (world.pin1, "data/final/a.csv"),
+    }[shape]()
+    _rows_for(world, f"pin: {pin}\n    source_path: {path}")
+
+    archive, _ = _package(world, reporter=Reporter())
+
+    warning = (f"demo {path} at {pin[:7]}: the bytes match the local import, but are not checked against "
+               "the producer's own record, whose pointer does not name this path on its own")
+    assert _bundle(archive)[3]["warnings"] == [warning]
+    assert warning in " ".join(capsys.readouterr().err.split())
+    assert [r["path"] for r in _rows(world)] == [path]
+
+
+def test_an_anchored_file_whose_import_differs_from_the_producers_pointer_is_refused(world) -> None:
+    pin = world.producer.publish({"data/final": FOLDER, "data/one.csv": b"one\n"}, message="one file")
+    _rows_for(world, f"pin: {pin}\n    source_path: data/one.csv")
+    first, _ = _package(world)
+    assert "warnings" not in _bundle(first)[3], "the producer's pointer names data/one.csv"
+    (pointer,) = (world.enclave / "data" / "imports").rglob("one.csv.dvc")
+    pointer.write_text(pointer.read_text(encoding="utf-8").replace(_md5(b"one\n"), _md5(b"evil\n")), encoding="utf-8")
+    copy = pointer.parent / "one.csv"
+    copy.unlink()
+    copy.write_bytes(b"evil\n")
+
+    with pytest.raises(ChecksumMismatch, match="is not what demo's own pointer records"):
+        _package(world, resend=True)
+
+
+def test_the_producer_check_reads_every_pointer_shape(tmp_path: Path) -> None:
+    """How check's own matcher names a path decides it: on its own (an exact
+    out, or an entry of a per-file pointer) the import is compared and any
+    difference refused; inside a tree, beneath it per-file lock outs, or
+    absent, it is not anchored and not refused. A failed read is neither."""
+    files = (("sub/a.csv", "1" * 32), ("sub/b.csv", "2" * 32))  # all under sub/: sub's digest is the folder's
+    per_file = {"outs": [{"path": "final", "files": [{"relpath": r, "md5": m} for r, m in files]}]}
+    tree = {"outs": [{"path": "final", "md5": "7" * 32 + ".dir"}]}
+    lock = {"stages": {"s": {"outs": [{"path": f"data/final/{r}", "md5": m} for r, m in files]}}}
+
+    def anchored(v: _Version, doc: dict, base: str = "data") -> bool:
+        def match(path: str) -> tuple[str | None, str | None]:
+            identity, kind = _match_out(doc, path, base_dir=base)
+            return identity or _POINTER_ABSENT, kind
+        return _check_against_producer(v, match, tmp_path / "x.dvc", tmp_path)
+
+    folder = _Version("demo", "data/final", "c" * 40, "9" * 32 + ".dir", tmp_path, files)
+    sub = _Version("demo", "data/final/sub", "c" * 40, "8" * 32 + ".dir", tmp_path, (("a.csv", "1" * 32), ("b.csv", "2" * 32)))
+    assert anchored(folder, per_file) and anchored(sub, per_file)
+    with pytest.raises(ChecksumMismatch):
+        anchored(replace(sub, files=(("a.csv", "1" * 32), ("b.csv", "3" * 32))), per_file)
+    with pytest.raises(ChecksumMismatch):
+        anchored(folder, tree)
+    assert not anchored(sub, tree)
+    assert not anchored(folder, lock, base="")
+    assert not anchored(folder, {"outs": []})
+    with pytest.raises(MintdError, match="could not read"):
+        _check_against_producer(folder, lambda p: (None, None), tmp_path / "x.dvc", tmp_path)
+
+
+def test_a_files_list_beside_a_tree_md5_is_not_read(world) -> None:
+    """A `files:` list counts only with no top-level md5, as check reads it.
+    A pointer that keeps the producer's tree md5 but lists other files, with
+    a.csv swapped to match, is read from the hash-checked tree instead."""
+    _approve(world, world.pin1)
+    _package(world)
+    (pointer,) = (world.enclave / "data" / "imports").rglob("final.dvc")
+    doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
+    doc["outs"][0]["files"] = [{"relpath": "a.csv", "md5": _md5(b"evil\n")}]
+    pointer.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    copy = pointer.parent / "final" / "a.csv"
+    copy.unlink()
+    copy.write_bytes(b"evil\n")
+
+    with pytest.raises(ChecksumMismatch, match="does not match its pin"):
+        _package(world, resend=True)
+
+
+def test_a_parent_folder_imported_on_disk_never_downgrades_a_path_the_producer_names(world) -> None:
+    """`data` imported on disk becomes the import unit, and the producer names
+    `data` nowhere. data/one.csv, which it names, is still checked against
+    that: an import whose tree was changed and re-hashed to match is refused."""
+    pin = world.producer.publish({"data/final": FOLDER, "data/one.csv": b"one\n"}, message="one file")
+    _rows_for(world, f"pin: {pin}\n    source_path: data/one.csv")
+    world.ops.init(cwd=world.enclave)
+    import_product(world.client, world.ops, "demo", cwd=world.enclave, dest_root=world.enclave / "data" / "imports",
+                   path="data", rev=pin)
+    first, _ = _package(world)
+    assert "warnings" not in _bundle(first)[3], "data/one.csv is named, and matches"
+    (pointer,) = (world.enclave / "data" / "imports").rglob("data.dvc")
+    doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
+    cache = dvc_cache_dir(world.enclave)
+    entries = read_cached_dir_manifest(cache, doc["outs"][0]["md5"]) or []
+    changed = [replace(e, md5=_md5(b"evil\n")) if e.relpath == "one.csv" else e for e in entries]
+    doc["outs"][0]["md5"] = ensure_dir_manifest(cache, changed)
+    pointer.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    copy = pointer.parent / "data" / "one.csv"
+    copy.unlink()
+    copy.write_bytes(b"evil\n")
+
+    with pytest.raises(ChecksumMismatch, match="is not what demo's own pointer records") as raised:
+        _package(world, resend=True)
+
+    assert raised.value.hint == f"import it again at the pin: 'mintd data import demo --force --path data --rev {pin}'", (
+        "data/one.csv was read from the data import, so that is what to import again"
+    )
+
+
+def test_the_per_file_refusal_names_the_folder_it_was_read_from(world) -> None:
+    """a.csv is read from the data/final import, so that is what to import
+    again; the cache copy hashes to its name, so the hint deletes nothing."""
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final", f"pin: {world.pin1}\n    source_path: data/final/a.csv")
+    _package(world)
+    copy = world.enclave / "data/imports/data_demo/data/final/a.csv"
+    copy.unlink()
+    copy.write_bytes(b"alpha!\n")
+
+    with pytest.raises(ChecksumMismatch, match="does not match its pin") as raised:
+        _package(world, resend=True)
+
+    assert raised.value.hint == f"import it again at the pin: 'mintd data import demo --force --path data/final --rev {world.pin1}'"
+
+
+def test_two_paths_inside_a_tree_both_cross_with_a_warning(world) -> None:
+    """Both are read from the data/final/sub import, inside a folder the
+    producer tracks as one tree; the second check of that unit is answered
+    from the memo of producer reads, which keeps how it matched."""
+    _rows_for(world, f"pin: {world.pin1}\n    source_path: data/final/sub", f"pin: {world.pin1}\n    source_path: data/final/sub/é.csv")
+
+    archive, _ = _package(world)
+
+    assert [w.split(":")[0] for w in _bundle(archive)[3]["warnings"]] == [
+        f"demo data/final/sub at {world.pin1[:7]}", f"demo data/final/sub/é.csv at {world.pin1[:7]}",
+    ]

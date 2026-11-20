@@ -831,7 +831,20 @@ def _pointer_md5(
     output_path: str,
     memo: dict[tuple[str, ...], Any],
 ) -> str | None:
-    """The producer's own DVC pointer md5 for `output_path` at `pin`, memoized.
+    """The producer's own DVC pointer md5 for `output_path` at `pin`: the
+    identity half of `_pointer_match`, which is where the work is done."""
+    return _pointer_match(fetcher, repo, pin, output_path, memo)[0]
+
+
+def _pointer_match(
+    fetcher: Fetcher,
+    repo: str,
+    pin: str,
+    output_path: str,
+    memo: dict[tuple[str, ...], Any],
+) -> tuple[str | None, MatchKind | None]:
+    """The producer's own DVC pointer md5 for `output_path` at `pin`, and how
+    `_match_out` matched it (`MatchKind`; None with no match), memoized.
 
     Returns the matching out's `md5` verbatim — `.dir` hashes INCLUDED: a
     directory manifest's hash moves when any file inside it moves, which is
@@ -846,7 +859,7 @@ def _pointer_md5(
     """
     key = (repo, pin, output_path)
     if key in memo:
-        return memo[key]
+        return memo[key], memo.get((*key, "kind"))
     clean = output_path.rstrip("/")
     absent_so_far = True  # flipped by any failure that is not PATH_MISSING
     for candidate, base_dir in _pointer_candidates(clean):
@@ -877,17 +890,17 @@ def _pointer_md5(
             except yaml.YAMLError:
                 absent_so_far = False
                 continue
-        md5 = _match_out_md5(data, clean, base_dir=base_dir)
+        md5, kind = _match_out(data, clean, base_dir=base_dir)
         # A `.outs` digest is a SET identity over the outs beneath the path;
         # with a stage dropped the set is incomplete, and a missing member
         # would read as "vanished" — drift that `bump` acts on. An exact or
         # enclosing match is one out's own identity and is unaffected.
         if md5 is not None and not (dropped_a_stage and md5.endswith(".outs")):
-            memo[key] = md5
-            return md5
+            memo[key], memo[(*key, "kind")] = md5, kind
+            return md5, kind
         # A readable document with no matching out is absence evidence.
     memo[key] = verdict = _POINTER_ABSENT if absent_so_far else None
-    return verdict
+    return verdict, None
 
 
 def _pointer_candidates(clean: str) -> list[tuple[str, str]]:
@@ -1080,8 +1093,22 @@ def _digest_pairs(pairs: list[tuple[str, str]]) -> str:
 
 
 def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | None:
+    """The content identity of the out matching `clean_path`: the identity
+    half of `_match_out`."""
+    return _match_out(data, clean_path, base_dir=base_dir)[0]
+
+
+#: How `_match_out` matched, beside the identity it returns. `exact`: an out
+#: at the path itself. `inside-files`: a path inside a per-file (`files:`) out,
+#: whose entries give the path's own identity. `inside-tree`: a path inside an
+#: out with only a `.dir` md5, so the identity is the whole tree's. `beneath`:
+#: the outs under the path, as one `.outs` digest.
+MatchKind = Literal["exact", "inside-files", "inside-tree", "beneath"]
+
+
+def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str | None, MatchKind | None]:
     """The content identity of the out matching `clean_path` in a parsed
-    `.dvc`/`dvc.lock` document.
+    `.dvc`/`dvc.lock` document, and how it matched (`MatchKind`).
 
     Every out is resolved against `base_dir` first, so one rule serves both
     shapes: a `.dvc` records `outs[].path` relative to itself (`data/final.dvc`
@@ -1110,7 +1137,7 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
     catalog on 2026-09-15: none is mixed; the fix must be a listing call.
     """
     if not isinstance(data, dict):
-        return None
+        return None, None
     out_lists: list[list[Any]] = []
     if isinstance(data.get("outs"), list):
         out_lists.append(data["outs"])
@@ -1133,7 +1160,7 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
             if resolved == clean_path:
                 identity = _out_identity(out)
                 if identity is not None:
-                    return identity
+                    return identity, "exact"
             elif clean_path.startswith(resolved + "/"):
                 depth = resolved.count("/")
                 if enclosing is None or depth > enclosing[0]:
@@ -1143,10 +1170,11 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
                 if identity is not None:
                     beneath.append((resolved, identity))
     if enclosing is not None:
-        return _out_identity(enclosing[1], enclosing[2])
+        kind: MatchKind = "inside-files" if isinstance(enclosing[1].get("files"), list) else "inside-tree"
+        return _out_identity(enclosing[1], enclosing[2]), kind
     if beneath:
-        return f"{_digest_pairs(sorted(beneath))}.outs"
-    return None
+        return f"{_digest_pairs(sorted(beneath))}.outs", "beneath"
+    return None, None
 
 
 def _drift_unknown_finding(
