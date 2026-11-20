@@ -2014,14 +2014,20 @@ def test_a_step_whose_item_ends_in_a_space_is_kept(real_dvc, tmp_path: Path) -> 
     """dvc writes a foreach item's trailing space into the lock key (`fan@t `)
     but lists the step as `fan@t`, so a live step must not read as a leftover.
     Mutation that must redden this: match lock keys to dvc's names exactly."""
+    import json
+    import sys
+
     from mintd._config import Timeouts
     from mintd._dvc_ops import SubprocessDvcOps
     from mintd._fast_sync_ops import parse_dvc_lock_outs
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
+    # Python writes the file, in double quotes, so cmd.exe runs it as a POSIX shell does.
+    write = "import pathlib; pathlib.Path('fan_${item}.csv').write_text('${item}')"
+    cmd = json.dumps(f'"{sys.executable}" -c "{write}"')
     (tmp_path / "dvc.yaml").write_text(
         "stages:\n  fan:\n    foreach: [p, 't ']\n    do:\n"
-        "      cmd: echo ${item} > 'fan_${item}.csv'\n      outs: ['fan_${item}.csv']\n"
+        f"      cmd: {cmd}\n      outs: ['fan_${{item}}.csv']\n"
     )
     real_dvc(["repro", "-q"], cwd=tmp_path, check=True)
     assert "'fan@t ':" in (tmp_path / "dvc.lock").read_text()
