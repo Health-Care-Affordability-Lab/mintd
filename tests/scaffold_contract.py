@@ -26,9 +26,8 @@ The remaining checks need no helper here — they live directly in
 rather than inspect them:
 
 * ``C6`` — the collision guard's target list matches what the renderer writes.
-* ``C7`` — a rendered scaffold passes the ruff hooks it ships, at a short *and*
-  a long project name.
-* ``C8`` — the ruff the scaffold pins is the ruff C7 checked it against.
+* ``C7`` — a rendered scaffold's Python passes ruff check and ruff format, at a
+  short *and* a long project name.
 """
 
 from __future__ import annotations
@@ -262,8 +261,8 @@ def check_embedded_mintd_commands(
 _KNOWN_TOP_DIRS = frozenset({"code", "logs"})
 
 # A candidate that carries regex / glob metacharacters is a pattern string
-# (e.g. check-dvc-sync's ``code/.*\.(py|do)$`` PIPELINE_PATTERNS, or a
-# ``data/**`` gitignore glob), not a real path reference — never a directory.
+# (e.g. a ``code/.*\.py$`` regex or a ``data/**`` gitignore glob), not a real
+# path reference — never a directory.
 _PATTERN_CHARS = frozenset("*$()\\?[]|{}")
 
 # Stata local-macro interpolation, e.g. `project_root' or `datetime'. These

@@ -18,11 +18,10 @@ dev = [
     "pytest >= 7.0",
     "pytest-xdist >= 3.0",
     "mypy >= 1.0",
-    # Pinned in lockstep with the scaffold's own ruff hook
-    # (src/mintd/files/pre-commit-config.yaml.j2 `rev:`). The scaffold's
-    # templates are formatted with exactly this version, so a one-sided
-    # bump makes a fresh scaffold fail its own first commit again.
-    # test_c8_scaffold_ruff_pin_matches_installed is what catches that.
+    # Pinned: the scaffold's templates are formatted with exactly this
+    # version, and test_c7_rendered_python_is_ruff_clean checks the rendered
+    # Python with it, so a bump means re-running
+    # `uv run ruff format --isolated src/mintd/files/*.py.j2` in the same commit.
     "ruff == 0.15.13",
     "types-PyYAML",
     "moto[s3] ~= 5.0",
