@@ -50,6 +50,16 @@ def test_streaming_stdout_forwarding():
     assert result.stdout_lines == ["line1", "line2"]
 
 
+def test_a_childs_last_line_without_a_newline_is_still_printed(capsys):
+    """The reporter prints only whole lines, so the end of the child's output
+    flushes what's left. Mutation: drop that flush -> "tail" is lost, red."""
+    from mintd._console import Reporter
+
+    run_streaming(["dvc"], reporter=Reporter(no_color=True),
+                  popen_factory=lambda *a, **k: FakeProcess(stdout_text="first\ntail"))
+    assert capsys.readouterr().out == "first\ntail"
+
+
 def test_streaming_captures_post_cr_lines_for_parsing():
     """captured_lines (StreamResult.stderr_lines) gets the post-\\r-clean
     final state of each \\n-terminated line — useful for JSON parsing
@@ -167,3 +177,51 @@ def test_a_second_ctrl_c_during_the_wait_still_kills_and_reaps_the_child(first):
     with pytest.raises(KeyboardInterrupt):
         run_streaming(["dvc", "push"], wall_timeout=1.0, popen_factory=lambda *a, **k: InterruptedInTheLadder())
     assert calls == [("wait", 1.0), "terminate", ("wait", 5), "kill", ("wait", None), "reaped"]
+
+
+def test_a_childs_last_stderr_line_without_a_newline_is_still_printed(capsys):
+    from mintd._console import Reporter
+
+    run_streaming(["dvc"], reporter=Reporter(no_color=True),
+                  popen_factory=lambda *a, **k: FakeProcess(stderr_text="first\nERROR: from http://u:tok@h/r", returncode=1))
+    err = capsys.readouterr().err
+    assert "first" in err and "ERROR: from http://h/r" in err and "tok" not in err
+
+
+def test_a_timed_out_childs_last_words_are_still_printed(capsys):
+    """Mutation: raise WallTimeoutExceeded before flushing -> red."""
+    from mintd._console import Reporter
+    from mintd._subprocess import WallTimeoutExceeded
+
+    class Hung(FakeProcess):
+        waited = False
+
+        def wait(self, timeout=None):
+            if timeout is not None and not self.waited:
+                self.waited = True
+                raise subprocess.TimeoutExpired("dvc", timeout)
+            return self.returncode
+
+    with pytest.raises(WallTimeoutExceeded):
+        run_streaming(["dvc"], reporter=Reporter(no_color=True), wall_timeout=0.1,
+                      popen_factory=lambda *a, **k: Hung(stdout_text="last words without newline"))
+    assert "last words without newline" in capsys.readouterr().out
+
+
+def test_an_interrupted_childs_last_words_are_still_printed(capsys):
+    """Mutation: re-raise KeyboardInterrupt before flushing -> red."""
+    from mintd._console import Reporter
+
+    class Interrupted(FakeProcess):
+        waited = False
+
+        def wait(self, timeout=None):
+            if not self.waited:
+                self.waited = True
+                raise KeyboardInterrupt
+            return self.returncode
+
+    with pytest.raises(KeyboardInterrupt):
+        run_streaming(["dvc"], reporter=Reporter(no_color=True),
+                      popen_factory=lambda *a, **k: Interrupted(stdout_text="last words without newline"))
+    assert "last words without newline" in capsys.readouterr().out

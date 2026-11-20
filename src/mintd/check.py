@@ -35,7 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -44,7 +44,8 @@ from pydantic import ValidationError
 
 # `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
-from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers, unlisted_on_disk
+from ._push_verify import pushed_lockfiles
 from ._fast_sync_ops import (
     PointerCutShort,
     check_dvc_file,
@@ -57,6 +58,7 @@ from ._fast_sync_ops import (
 )
 from ._registry_git_ops import GitOpError
 from .catalog import CatalogClient, CatalogNotFound
+from .errors import unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
@@ -141,6 +143,7 @@ class CheckFinding:
         "data_products_output_unpinned",
         "data_products_output_missing_from_manifest",
         "dvc_state_unreadable",
+        "dvc_folder_unlisted",
         "repository_github_url_missing",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
@@ -328,6 +331,21 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                 for rel, why in unreadable
             )
             if not unreadable:
+                # A folder pointer's list read against the folder on disk:
+                # the only reference that shows a list cut at an entry, or
+                # recorded before files were added. Publish refuses it too.
+                findings.extend(
+                    CheckFinding(
+                        severity="error",
+                        section="producer",
+                        message=u.message(),
+                        source=project_path / u.pointer,
+                        kind="dvc_folder_unlisted",
+                        hint=u.hint() + ", then re-run 'mintd check'.",
+                    )
+                    for u in unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
+                                              remote=inspection.dvc_remote_name or "")
+                )
                 try:
                     findings.extend(
                         _check_data_products_delivery(
@@ -917,12 +935,12 @@ def _consumer_findings_from_enclave_manifest(
         result_pin = _resolve_once(repo_url, ap.pin)
         if isinstance(result_pin, ProducerError):
             findings.append(
-                _error_finding_for(
+                _pin_read_finding(_error_finding_for(
                     manifest_path,
                     field_path,
                     result_pin,
                     label=subscription_label(ap),
-                )
+                ))
             )
             continue
 
@@ -1602,10 +1620,12 @@ def _error_finding_for(
         "metadata_invalid",
         "schema_too_old",
     ] | None
+    hint = None
     if err.reason == ProducerError.Reason.UNREACHABLE:
         severity: Literal["error", "warning", "info"] = "warning"
         message = f"producer unreachable: {err.detail}"
         kind = "unreachable"
+        hint = unreachable_repo_hint(err.repo)
     elif err.reason == ProducerError.Reason.PIN_MISSING:
         severity = "error"
         message = f"producer pin missing: {err.pin[:7]} not found in {err.repo}"
@@ -1638,8 +1658,17 @@ def _error_finding_for(
         source=source,
         field_path=field_path,
         kind=kind,
+        hint=hint,
     )
 
 
+def _pin_read_finding(finding: CheckFinding) -> CheckFinding:
+    """A producer read at the pin, which only `--upgrades` does (imports and
+    enclave rows). A pin the producer's history no longer has is a warning
+    there, as an unreachable producer is: the consumer can't fix it, so it
+    mustn't turn CI red."""
+    return replace(finding, severity="warning") if finding.kind == "pin_missing" else finding
+
+
 def _error_finding(dep: DataDependency, err: ProducerError) -> CheckFinding:
-    return _error_finding_for(source=dep.source, field_path=None, err=err)
+    return _pin_read_finding(_error_finding_for(source=dep.source, field_path=None, err=err))

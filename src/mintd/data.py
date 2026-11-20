@@ -36,6 +36,7 @@ from .check import CheckFinding, _head_unreadable_finding, check_project, consum
 from .data_ops import _default_dvc_remote, data_pull
 from .errors import MintdError
 from .imports import DataDependency, NotAnImportError
+from ._producer_git_ops import _classify_stderr
 from .producer import (
     FetchError,
     GitArchiveFetcher,
@@ -778,6 +779,16 @@ def _resolve_clone_dest(
     return Path.cwd() / project_full_name(project_type, base)
 
 
+def _clone_failure(exc: GitOpError, *, repo_url: str, rev: str | None, dest: Path) -> ProducerError:
+    """A failed `git clone`, sorted the way every other producer read is: a
+    branch, tag or SHA the reachable repo lacks is a missing pin; anything
+    else is an unreachable producer."""
+    detail = f"clone to {dest} failed; partial clone left in place: {exc}"
+    if _classify_stderr(exc.stderr) is FetchError.Reason.PIN_MISSING:
+        return ProducerError.pin_missing(repo_url, rev or "HEAD", detail)
+    return ProducerError.unreachable(repo_url, rev or "HEAD", detail)
+
+
 def clone_and_pull_product(
     client: CatalogClient,
     dvc_ops: DvcOps,
@@ -888,14 +899,7 @@ def clone_and_pull_product(
                 repo_url, resolved_dest, shallow=False, branch=rev,
             )
     except GitOpError as exc:
-        raise ProducerError.unreachable(
-            repo=repo_url,
-            pin=rev or "HEAD",
-            detail=(
-                f"clone to {resolved_dest} failed; "
-                f"partial clone left in place: {exc}"
-            ),
-        ) from exc
+        raise _clone_failure(exc, repo_url=repo_url, rev=rev, dest=resolved_dest) from exc
 
     # `--rev` + `--primary`: the primary came from the HEAD catalog while the
     # clone is at an older rev that may simply predate it — both rejection

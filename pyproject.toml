@@ -11,6 +11,8 @@ dependencies = [
     "jinja2 ~= 3.1",
     "dvc >= 3.66, < 4.0",
     "dvc-s3 >= 3.3, < 4",
+    # dvc's own .dvcignore engine; mintd reads .dvcignore to compare a folder pointer's list with the folder.
+    "pathspec >= 0.10.3, < 2",
 ]
 
 [project.optional-dependencies]

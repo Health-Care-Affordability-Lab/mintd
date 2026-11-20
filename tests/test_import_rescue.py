@@ -36,6 +36,8 @@ from mintd._import_rescue_ops import (
     _resolve_producer,
 )
 from mintd._producer_git_ops import FetchError
+from mintd._import_rescue_ops import _fetch_error_reason
+from mintd.errors import unreachable_repo_hint
 from mintd.data_ops import data_pull
 from mintd.model import FastPullResult
 from tests._fakes.dvc_ops import _FakeDvcOps
@@ -741,3 +743,9 @@ def test_rescue_reports_a_missing_named_profile_with_its_hint(producer_bucket, t
     errors = " ".join(" ".join(map(str, e)) for e in rep.events_of("error"))
     assert "AWS profile 'nope' (named by AWS_PROFILE)" in errors
     assert "unset AWS_PROFILE" in errors
+
+
+def test_an_unreachable_producer_gets_the_shared_hint() -> None:
+    """Mutation: put back "check git access to <url>" -> red."""
+    _reason, hint = _fetch_error_reason(FetchError.unreachable("https://h/r", "abc"), "https://h/r")
+    assert hint == unreachable_repo_hint("https://h/r")
