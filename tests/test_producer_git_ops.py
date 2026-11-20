@@ -316,6 +316,32 @@ def test_fetch_fails_pin_missing_maps_to_pin_missing(
     assert ei.value.reason == FetchError.Reason.PIN_MISSING
 
 
+@pytest.mark.parametrize("stderr", [
+    "fatal: couldn't find remote ref v9",  # git 2.48 prints it lowercase
+    "fatal: remote error: upload-pack: not our ref 0000000000000000000000000000000000000000",
+])
+def test_a_rev_the_reachable_producer_lacks_is_pin_missing(
+    monkeypatch: pytest.MonkeyPatch, stderr: str,
+) -> None:
+    """Not `unreachable`, which would send the user to check the network.
+    Mutation: match case-sensitively, or drop "not our ref" -> red."""
+    _install(
+        monkeypatch,
+        _Dispatcher(
+            {
+                "archive": {"returncode": 128, "stderr": b"Operation not supported"},
+                "clone": {"returncode": 0},
+                "fetch": {"returncode": 128, "stderr": stderr},
+            }
+        ),
+    )
+
+    with pytest.raises(FetchError) as ei:
+        GitArchiveFetcher().fetch_metadata_at(REPO, PIN)
+
+    assert ei.value.reason == FetchError.Reason.PIN_MISSING
+
+
 def test_show_path_missing_maps_to_metadata_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

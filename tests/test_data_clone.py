@@ -1254,3 +1254,47 @@ def test_clone_and_pull_product_clean_pull_error_count_zero(
 
     result = clone_and_pull_product(client, dvc, git, _fast(), name="demo-xw")
     assert result.pull_error_count == 0
+
+
+def _git(*args: str, cwd: Path) -> None:
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("rev", ["nosuch", "0123456789abcdef0123456789abcdef01234567"])
+def test_a_clone_at_a_rev_the_reachable_producer_lacks_is_a_missing_pin(tmp_path: Path, rev: str) -> None:
+    """Real git: `git clone --branch` on a branch or SHA the remote lacks says
+    "Remote branch ... not found in upstream origin". Not an unreachable producer,
+    whose hint would send the user to check the network.
+
+    Mutation: drop "not found in upstream" from the classifier -> red."""
+    from mintd._registry_git_ops import SubprocessRegistryGitOps
+    from mintd.data import _clone_failure
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", "-b", "main", cwd=src)
+    _git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init", cwd=src)
+    url, dest = f"file://{src}", tmp_path / "dst"
+    with pytest.raises(GitOpError) as ei:
+        SubprocessRegistryGitOps().clone(url, dest, shallow=False, branch=rev)
+
+    err = _clone_failure(ei.value, repo_url=url, rev=rev, dest=dest)
+    assert err.reason == ProducerError.Reason.PIN_MISSING, err
+
+
+def test_a_clone_of_a_producer_that_refuses_connections_is_unreachable(tmp_path: Path) -> None:
+    import socket
+
+    from mintd._registry_git_ops import SubprocessRegistryGitOps
+    from mintd.data import _clone_failure
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{s.getsockname()[1]}/r.git"
+    with pytest.raises(GitOpError) as ei:
+        SubprocessRegistryGitOps().clone(url, tmp_path / "dst", shallow=False, branch="main")
+
+    assert _clone_failure(ei.value, repo_url=url, rev="main", dest=tmp_path / "dst").reason \
+        == ProducerError.Reason.UNREACHABLE
