@@ -1941,8 +1941,9 @@ def test_a_lock_stage_dvc_does_not_list_is_never_listed(tmp_path: Path) -> None:
 def test_a_pull_keeps_every_lock_out_when_dvc_cannot_list_stages(tmp_path: Path) -> None:
     """If `dvc stage list` fails, the pull goes on as before stage names were
     read: every lock out is kept, and dvc's own checkout says what's wrong.
-    With no dvc.lock, dvc isn't asked. Mutation that must redden this: read a
-    failed list as "no stages"."""
+    With no dvc.lock, dvc isn't asked; a list with no stages keeps them all too.
+    Mutations that must redden this: read a failed list as "no stages"; skip
+    every lock out when dvc lists none."""
     from mintd._dvc_ops import DvcStageListError
     from mintd._subprocess import WallTimeoutExceeded
     from mintd.data_ops import _dvc_stage_names
@@ -1952,6 +1953,9 @@ def test_a_pull_keeps_every_lock_out_when_dvc_cannot_list_stages(tmp_path: Path)
     assert _dvc_stage_names(tmp_path, dvc) is None  # no dvc.lock
     _lock_with_fan(tmp_path)
     assert _dvc_stage_names(tmp_path, dvc) == {"fan@p"}
+    dvc.stage_names_by_cwd[tmp_path] = []
+    assert _dvc_stage_names(tmp_path, dvc) is None  # dvc lists none: an empty dvc.yaml teaches nothing
+    dvc.stage_names_by_cwd[tmp_path] = ["fan@p"]
     failing = _FakeDvcOps()
     failing.stage_names_raises = DvcStageListError("dvc stage list failed (exit 255): './dvc.yaml' is invalid")
     assert _dvc_stage_names(tmp_path, failing) is None  # dvc can't list them
@@ -2004,3 +2008,24 @@ def test_stage_names_are_dvcs_own_with_foreach_expanded(real_dvc, tmp_path: Path
         "  make:\n    cmd: y\n    outs: [m.csv]\n"
     )
     assert SubprocessDvcOps(timeouts=Timeouts()).stage_names(cwd=tmp_path) == ["fan@p", "fan@q", "make"]
+
+
+def test_a_step_whose_item_ends_in_a_space_is_kept(real_dvc, tmp_path: Path) -> None:
+    """dvc writes a foreach item's trailing space into the lock key (`fan@t `)
+    but lists the step as `fan@t`, so a live step must not read as a leftover.
+    Mutation that must redden this: match lock keys to dvc's names exactly."""
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from mintd._fast_sync_ops import parse_dvc_lock_outs
+
+    real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
+    (tmp_path / "dvc.yaml").write_text(
+        "stages:\n  fan:\n    foreach: [p, 't ']\n    do:\n"
+        "      cmd: echo ${item} > 'fan_${item}.csv'\n      outs: ['fan_${item}.csv']\n"
+    )
+    real_dvc(["repro", "-q"], cwd=tmp_path, check=True)
+    assert "'fan@t ':" in (tmp_path / "dvc.lock").read_text()
+    names = SubprocessDvcOps(timeouts=Timeouts()).stage_names(cwd=tmp_path)
+    skipped: list[str] = []
+    outs = parse_dvc_lock_outs(tmp_path, "storage", declared=set(names), skipped=skipped)
+    assert sorted(o.path for o in outs) == ["fan_p.csv", "fan_t .csv"] and skipped == []

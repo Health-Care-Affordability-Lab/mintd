@@ -770,12 +770,13 @@ def _materialize_fast_sync_result(
 
 def _dvc_stage_names(project_path: Path, dvc_ops: DvcOps) -> set[str] | None:
     """The stages dvc lists for the root ``dvc.yaml`` (``DvcOps.stage_names``),
-    or None when there's no ``dvc.lock`` to sort or dvc can't list them: every
-    lock out is then kept, and dvc's own checkout says what's wrong."""
+    or None when there's no ``dvc.lock`` to sort, dvc can't list them, or it
+    lists none (an empty or vars-only ``dvc.yaml`` teaches nothing): every lock
+    out is then kept, and dvc's own checkout says what's wrong."""
     if not (project_path / "dvc.lock").is_file():
         return None
     try:
-        return set(dvc_ops.stage_names(cwd=project_path))
+        return set(dvc_ops.stage_names(cwd=project_path)) or None
     except (DvcOpError, WallTimeoutExceeded):
         return None
 

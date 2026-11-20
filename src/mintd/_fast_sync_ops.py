@@ -651,10 +651,13 @@ def parse_dvc_lock_outs(
             raise
         return []
 
+    # dvc keeps a foreach item's trailing space in the lock key (`fan@t `) but prints the
+    # step as `fan@t` in `dvc stage list`, so the two are matched without it.
+    listed = None if declared is None else {name.rstrip() for name in declared}
     outs: list[DvcOut] = []
     for key, stage_data in lock_data["stages"].items():
         stage = str(key)  # dvc writes a name like `on` bare; YAML 1.1 reads it as a boolean
-        if declared is not None and stage not in declared:
+        if listed is not None and stage.rstrip() not in listed:
             logger.info("dvc.lock stage %s is not a stage dvc lists; skipping", stage)
             if skipped is not None:
                 skipped.append(stage)
