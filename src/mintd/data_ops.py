@@ -1107,6 +1107,7 @@ def data_push(
         {y for k in stage_targets if (project_path / (y := k.split(":", 1)[0])).is_file()})
     behind: list[str] = []
     others: list[str] = []
+    unrun: list[str] = []  # pipelines with no dvc.lock: none of their stages has run
     for pipeline in pipelines:
         try:
             names = dvc_ops.stage_names(cwd=project_path / Path(pipeline).parent)
@@ -1118,6 +1119,8 @@ def data_push(
             k.split(":", 1)[1] for k in stage_targets if k.split(":", 1)[0] == pipeline}
         late = stages_behind(project_path, Path(pipeline).with_name("dvc.lock").as_posix(), names, stages=named)
         behind += [f"{pipeline}:{s}" for s in late]
+        if late and not (project_path / Path(pipeline).with_name("dvc.lock")).is_file():
+            unrun.append(pipeline)
         others += [f"{pipeline}:{s}" for s in with_outputs(project_path / pipeline, names) if s not in late]
     if behind:
         rest = [] if stage_targets is not None else [*others, *(p for p in scope if p.endswith(".dvc"))]
@@ -1127,14 +1130,18 @@ def data_push(
             path, colon, stage = (target, "", "") if target.endswith(".dvc") else target.partition(":")
             return f"{Path(os.path.relpath(Path(project_path) / path, here)).as_posix()}{colon}{stage}"
 
+        stale = [k for k in behind if k.split(":", 1)[0] not in unrun]
+        why = [*(f"the pipeline {p} hasn't run yet (there's no dvc.lock beside it), so DVC would push nothing "
+                 "for its stages" for p in unrun),
+               *([f"dvc.lock records fewer outputs than dvc.yaml declares for {abbreviate(stale)}, so DVC would "
+                  "push nothing for the missing ones: each stage hasn't run since, or dvc.lock was cut short"]
+                 if stale else [])]
         raise PushRefused(
-            f"nothing was written or pushed: dvc.lock records fewer outputs than dvc.yaml declares for "
-            f"{abbreviate(behind)}, so DVC would push nothing for the missing ones: each stage hasn't run "
-            "since, or dvc.lock was cut short",
+            "nothing was written or pushed: " + "; ".join(why),
             hint=f"run dvc repro {shlex.join(map(from_here, behind))}, then push"
             + (f"; or push the rest by naming it, for example mintd data push {shlex.join(map(from_here, rest[:3]))}"
                if rest else "")
-            + "; if dvc.lock was cut short, restore it from git",
+            + ("; if dvc.lock was cut short, restore it from git" if stale else ""),
         )
     # A folder pointer lists no count, so one cut at the end of an entry, or
     # recorded before files were added, reads as a smaller folder; DVC would
