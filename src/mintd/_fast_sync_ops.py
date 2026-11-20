@@ -1468,9 +1468,9 @@ def fetch_to_cache(
     thread-safe — boto3's transfer manager runs multipart parts on its own
     internal pool.
 
-    Retry: transient S3/network errors are retried via :func:`retry_transient`
-    (3 attempts, capped backoff); the tmp file is unlinked between attempts.
-    Non-transient errors (incl. md5 mismatch) propagate immediately.
+    Retry: ``_s3.download`` retries transient S3/network errors (3 attempts,
+    capped backoff), a 5xx botocore mislabels among them. Non-transient errors
+    (incl. md5 mismatch) propagate immediately, and the tmp file is unlinked.
     """
     tmp_path = cache_path.with_suffix(".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1495,7 +1495,7 @@ def fetch_to_cache(
             tmp_path.unlink(missing_ok=True)
             raise
 
-    return retry_transient(_attempt)
+    return _attempt()
 
 
 def fetch_dir_manifest(
