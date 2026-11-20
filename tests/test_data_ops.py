@@ -1459,13 +1459,17 @@ def test_data_pull_incomplete_targets_error_count_without_reporter(
 # ---------- malformed .dvc must not crash the cache probe ----------
 
 
-def test_data_pull_malformed_dvc_does_not_crash_cache_probe(
+def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_cache_probe(
     tmp_path: Path,
 ) -> None:
-    """A YAML-valid but wrong-typed .dvc (e.g. mapping `size:`) makes
-    parse_dvc_outs raise. The degraded branch's cache probe must swallow it
-    (target simply isn't cached) so the run still degrades to the fallback
-    dvc pull instead of dying with a raw TypeError traceback."""
+    """A YAML-valid but wrong-typed .dvc (e.g. mapping `size:`) used to make
+    parse_dvc_outs raise a TypeError the degraded branch's cache probe
+    swallowed, handing the pointer to dvc pull. It is a damaged pointer by
+    the parsers' own rule: the pull stops naming it, no traceback, before
+    any dvc pull or checkout.
+
+    Mutation: drop the count's type check in `_scalars_ok` -> dvc pull runs,
+    red."""
     dvc = tmp_path / "data" / "bad.csv.dvc"
     dvc.parent.mkdir(parents=True)
     dvc.write_text(
@@ -1474,20 +1478,21 @@ def test_data_pull_malformed_dvc_does_not_crash_cache_probe(
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     fast_fake.raises = RuntimeError("boom mid-sync")
-    data_pull(
-        tmp_path, targets=["data/bad.csv.dvc"], dvc_ops=fake, fast_sync_ops=fast_fake,
-    )
+    from mintd._fast_sync_ops import PointerCutShort
+
+    with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged: a value of bad.csv"):
+        data_pull(
+            tmp_path, targets=["data/bad.csv.dvc"], dvc_ops=fake, fast_sync_ops=fast_fake,
+        )
     assert fake.checkout_calls == []
-    assert len(fake.pull_calls) == 1
-    assert fake.pull_calls[0].targets == ["data/bad.csv.dvc"]
+    assert fake.pull_calls == []
 
 
-def test_data_pull_malformed_dvc_in_blocked_targets_probe_does_not_crash(
+def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_blocked_targets_probe(
     tmp_path: Path,
 ) -> None:
-    """Same guard on the result-branch probe over blocked_targets: a malformed
-    .dvc named as an error target is 'not cached', so it errors loudly
-    instead of crashing the pull."""
+    """Same on the result-branch probe over blocked_targets: a malformed .dvc
+    named as an error target stops the pull naming it, no traceback."""
     dvc = tmp_path / "data" / "bad.csv.dvc"
     dvc.parent.mkdir(parents=True)
     dvc.write_text(
@@ -1499,10 +1504,12 @@ def test_data_pull_malformed_dvc_in_blocked_targets_probe_does_not_crash(
         blocked_reasons={"data/bad.csv.dvc": "unparseable"},
         reason="unparseable",
     )
-    summary = data_pull(
-        tmp_path, targets=["data/bad.csv.dvc"], dvc_ops=fake, fast_sync_ops=fast_fake,
-    )
-    assert summary.error_count == 1
+    from mintd._fast_sync_ops import PointerCutShort
+
+    with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged"):
+        data_pull(
+            tmp_path, targets=["data/bad.csv.dvc"], dvc_ops=fake, fast_sync_ops=fast_fake,
+        )
     assert fake.checkout_calls == []
     assert fake.pull_calls == []
 
@@ -1898,6 +1905,9 @@ def test_a_bare_stage_name_is_pushed_even_beside_a_skipped_pointer_of_that_name(
     the project root's dvc.yaml instead of cwd's -> subdirectory red."""
     root = _skipped_pointer_project(tmp_path)
     (root / here / "dvc.yaml").write_text("stages:\n  build:\n    cmd: make\n    outs:\n      - out.csv\n")
+    (root / here / "dvc.lock").write_text(  # the stage ran
+        "schema: '2.0'\nstages:\n  build:\n    cmd: make\n    outs:\n    - path: out.csv\n      hash: md5\n"
+        f"      md5: {'e' * 32}\n      size: 1\n")
     (root / ".gitignore").write_text("build.dvc\n")
     (root / here / "build.dvc").write_text("outs:\n- md5: " + "f" * 32 + "\n  size: 1\n  hash: md5\n  path: build.csv\n")
     dvc = _FakeDvcOps()

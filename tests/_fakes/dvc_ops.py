@@ -133,6 +133,11 @@ class _FakeDvcOps:
         self.status_calls: list[DvcStatusCall] = []
         self.status_raises: Exception | None = None
         self.status_result: dict[str, str] = {}
+        #: `stage_names`: per folder when set, else the dvc.yaml's stage keys
+        #: as written (no foreach/matrix expansion: real dvc's names are
+        #: tested with real dvc).
+        self.stage_names_by_cwd: dict[Path, list[str]] = {}
+        self.stage_names_raises: Exception | None = None
         self.remove_calls: list[DvcRemoveCall] = []
         self.remove_raises: Exception | None = None
         self.checkout_calls: list[DvcCheckoutCall] = []
@@ -331,6 +336,18 @@ class _FakeDvcOps:
             raise self.status_raises
         self.status_calls.append(DvcStatusCall(cwd=cwd, targets=targets))
         return self.status_result.copy()
+
+    def stage_names(self, *, cwd: Path) -> list[str]:
+        if self.stage_names_raises:
+            raise self.stage_names_raises
+        for folder, names in self.stage_names_by_cwd.items():
+            if Path(folder).resolve() == Path(cwd).resolve():
+                return list(names)
+        import yaml
+
+        doc = yaml.safe_load((cwd / "dvc.yaml").read_text(encoding="utf-8")) if (cwd / "dvc.yaml").is_file() else None
+        stages = doc.get("stages") if isinstance(doc, dict) else None
+        return [str(s) for s in stages] if isinstance(stages, dict) else []
 
     def remove(self, name: str, *, cwd: Path) -> None:
         if self.remove_raises:

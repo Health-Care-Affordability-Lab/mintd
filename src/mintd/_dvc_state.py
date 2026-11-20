@@ -26,24 +26,30 @@ from __future__ import annotations
 import configparser
 import dataclasses
 import os
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 
 from ._fast_sync_ops import (
     EMPTY_DIR_MD5,
     DvcOut,
+    PointerCutShort,
     cache_path_for,
+    check_dvc_file,
+    check_lock,
     dir_manifest_md5,
     discover_all_outs,
+    load12,
+    load_pointer,
     normalize_target,
     out_pins_no_files,
     outs_for_target,
     parse_dvc_lock_outs,
     parse_dvc_outs,
     partition_pipeline_outs,
+    pipeline_files,
     workspace_path_for,
 )
 
@@ -161,13 +167,25 @@ def outs_matching(
 
 
 def _names_a_stage(dvc_yaml: Path, name: str) -> bool:
-    """Is ``name`` (``build``, or a ``fan@a`` instance) a stage ``dvc_yaml`` declares?"""
-    try:
-        doc = yaml.safe_load(dvc_yaml.read_text(encoding="utf-8")) if dvc_yaml.is_file() else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return False
+    """Is ``name`` (``build``, or a ``fan@a`` instance) a stage ``dvc_yaml``
+    declares, its keys read as DVC reads them (``load12``)?"""
+    doc = _load(dvc_yaml.read_text(encoding="utf-8", errors="replace")) if dvc_yaml.is_file() else None
     stages = doc.get("stages") if isinstance(doc, dict) else None
     return isinstance(stages, dict) and name.split("@", 1)[0] in stages
+
+
+def _nested_pipeline_outs(root: Path, remote_name: str) -> list[DvcOut]:
+    """The stage outs of each pipeline below the root (a ``dvc.yaml`` DVC
+    reads, not in a subrepo), their paths project-relative."""
+    found = []
+    for yaml_rel in pipeline_files(root):
+        parts = Path(yaml_rel).parent.parts
+        if not parts or any((root.joinpath(*parts[:k]) / ".dvc").is_dir() for k in range(1, len(parts) + 1)):
+            continue
+        base = Path(*parts).as_posix()
+        found += [dataclasses.replace(o, path=f"{base}/{o.path}", target=f"{base}/{o.target}")
+                  for o in parse_dvc_lock_outs(root.joinpath(*parts), remote_name)]
+    return found
 
 
 def push_targets(
@@ -212,11 +230,11 @@ def push_targets(
         if rel.endswith(".dvc"):
             dvc_files[rel] = None
             continue
-        if rel.startswith("dvc.yaml:"):
+        if re.fullmatch(r"(?:.+/)?dvc\.yaml:.+", rel):  # a stage of the root or a nested pipeline
             stages[rel] = None
             continue
         if all_outs is None:
-            all_outs = _all_dvc_outs(root, remote_name)
+            all_outs = [*_all_dvc_outs(root, remote_name), *_nested_pipeline_outs(root, remote_name)]
         matched = outs_matching(root, rel, remote_name, outs=all_outs)
         if not matched and here == root and _names_a_stage(root / "dvc.yaml", t):
             stages[f"dvc.yaml:{t}"] = None
@@ -228,7 +246,8 @@ def push_targets(
             rest[t if here == root else rel] = None
         for o in matched:
             if o.stage is not None:
-                stages[f"dvc.yaml:{o.stage}"] = None
+                lock = Path(os.path.relpath(o.dvc_file, root)) if o.dvc_file is not None else Path("dvc.lock")
+                stages[f"{lock.with_name('dvc.yaml').as_posix()}:{o.stage}"] = None
             elif o.dvc_file is not None:
                 dvc_files[Path(os.path.relpath(root / o.dvc_file, root)).as_posix()] = None
     groups = [list(g) for g in (dvc_files, stages, rest) if g]
@@ -471,9 +490,12 @@ class PointerJudgement:
 
 
 def _load(text: str | None) -> Any:
+    """``text`` read as DVC reads it (``load12``); None when absent or not YAML."""
+    from ruamel.yaml import YAMLError
+
     try:
-        return yaml.safe_load(text) if text else None
-    except yaml.YAMLError:
+        return load12(text) if text else None
+    except YAMLError:
         return None
 
 
@@ -483,6 +505,66 @@ def _hashed(raw_outs: Any) -> list[dict] | None:
     if not isinstance(raw_outs, list) or not all(isinstance(r, dict) for r in raw_outs):
         return None
     return [r for r in raw_outs if r.get("md5") or "files" in r]
+
+
+def does_not_parse(root: Path, rel: str) -> bool:
+    """Whether the pointer file ``rel`` is cut short by the rule every reader
+    applies (``check_dvc_file`` / ``check_lock``). DVC reads one as tracking
+    less than it records, and pushes nothing for the rest at exit 0."""
+    path = root / rel
+    if not path.is_file():
+        return False
+    try:
+        (check_lock if Path(rel).name == "dvc.lock" else check_dvc_file)(rel, load_pointer(path))
+    except PointerCutShort:
+        return True
+    return False
+
+
+def stages_behind(root: Path, lock: str, names: Sequence[str], *, stages: Collection[str] | None = None) -> list[str]:
+    """The stages of ``lock``'s ``dvc.yaml`` that a push would find behind:
+    of ``names`` (dvc's own list, ``DvcOps.stage_names``, foreach and matrix
+    instances expanded), each declaring outputs whose lock entry is missing
+    (never run, as ``dvc repro <one>`` leaves the others, or no ``dvc.lock``
+    at all) or records fewer hashed outs than it declares (an out with no
+    hash doesn't count: a version-aware push writes a stage that never ran
+    that way). Only the ``stages`` being pushed count, by name or
+    foreach/matrix base, all when None. DVC pushes nothing for the missing
+    outs, at exit 0. The push's check alone: a pull must not refuse a stage
+    that simply hasn't run."""
+    path = root / lock
+    declared = _declared_outs(path.with_name("dvc.yaml"))
+    named = None if stages is None else set(stages)
+    entries = {str(n): e for n, e in load_pointer(path)["stages"].items()} if path.is_file() else {}
+    return [n for n in names
+            if (base := n.split("@")[0]) in declared
+            and (named is None or n in named or base in named)
+            and len(_hashed((entries.get(n) or {}).get("outs") or []) or []) < declared[base]]
+
+
+def with_outputs(dvc_yaml: Path, names: Sequence[str]) -> list[str]:
+    """The stages of ``names`` that declare outputs in ``dvc_yaml``: the ones
+    a push of their name uploads anything for."""
+    declared = _declared_outs(dvc_yaml)
+    return [n for n in names if n.split("@")[0] in declared]
+
+
+def _declared_outs(dvc_yaml: Path) -> dict[str, int]:
+    """How many outputs each ``dvc.yaml`` stage declares, counting outs,
+    metrics and plots, which DVC all records under the lock entry's ``outs``
+    (a foreach stage's under ``do:``). Stages declaring none are left out."""
+    doc = _load(dvc_yaml.read_text(encoding="utf-8", errors="replace")) if dvc_yaml.is_file() else None
+    stages = doc.get("stages") if isinstance(doc, dict) else None
+    if not isinstance(stages, dict):
+        return {}
+    found = {}
+    for name, stage in stages.items():
+        body = stage.get("do") if isinstance(stage, dict) and isinstance(stage.get("do"), dict) else stage
+        if isinstance(body, dict):
+            n = sum(len(body[k]) for k in ("outs", "metrics", "plots") if isinstance(body.get(k), list))
+            if n:
+                found[str(name)] = n
+    return found
 
 
 def _by_path(raw_outs: Any) -> dict[str, dict]:
@@ -609,16 +691,15 @@ def judge_pointers(
         if Path(p).name == "dvc.lock" and p != "dvc.lock":
             soft.append(f"{p} is not the project's root dvc.lock")
             continue
-        doc = _load(path.read_text(encoding="utf-8", errors="replace"))
-        head_doc = _load(head.get(p))
-        if not isinstance(doc, dict):
-            soft.append(f"{p} does not parse")
+        try:
+            doc = load_pointer(path)
+            (check_lock if p == "dvc.lock" else check_dvc_file)(p, doc)
+        except PointerCutShort as exc:
+            blocked.append(f"{p} is cut short or damaged: {exc.detail}")
             continue
+        head_doc = _load(head.get(p))
         if p == "dvc.lock":
-            stages = doc.get("stages")
-            if not isinstance(stages, dict):
-                soft.append(f"{p} does not parse")
-                continue
+            stages = doc["stages"]
             head_stages = head_doc.get("stages") if isinstance(head_doc, dict) else None
             head_stages = head_stages if isinstance(head_stages, dict) else {}
             parsed: dict[str | None, list[DvcOut]] = {}
@@ -636,7 +717,7 @@ def judge_pointers(
                     )
                     continue
                 raw_outs = _hashed((entry.get("outs") or []) if isinstance(entry, dict) else None)
-                outs = parsed.get(stage, [])
+                outs = parsed.get(str(stage), [])
                 if raw_outs is None or len(raw_outs) != len(outs):
                     soft.append(f"dvc.lock stage '{stage}' has outs mintd cannot resolve (an orphan stage, or an out outside the project)")
                     continue
@@ -647,20 +728,11 @@ def judge_pointers(
         if "deps" in doc:
             soft.append(f"{p} is a dvc import")
             continue
-        raw_outs = _hashed(doc.get("outs"))
-        if raw_outs is None:
-            soft.append(f"{p} does not parse")
-            continue
-        if any(isinstance(r, dict) and not r.get("md5") and "files" not in r for r in doc.get("outs") or []):
-            blocked.append(f"{p} records an output with no hash; re-record it with `dvc commit {p}`")
-            continue
+        raw_outs = doc["outs"]  # whole: every out has a path and a hash (check_dvc_file)
         if not version_aware and selection is not None and p not in selection:
             soft.append(f"on an md5-layout remote nothing shows {p} reached S3, and this push did not upload it")
             continue
         outs = parse_dvc_outs(path, remote_name)
-        if len(outs) != len(raw_outs):
-            soft.append(f"{p} does not parse")
-            continue
         head_by_path = _by_path(head_doc.get("outs") if isinstance(head_doc, dict) else None)
         for raw, o in zip(raw_outs, outs, strict=True):
             judge(o, raw, head_by_path.get(str(raw.get("path"))), p)

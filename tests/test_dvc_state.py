@@ -706,7 +706,24 @@ def test_judge_blocks_a_dvc_out_with_no_hash(tmp_path: Path) -> None:
     write_dvc_config(tmp_path)
     (tmp_path / "x.csv.dvc").write_text("outs:\n- path: x.csv\n")
     (j,) = _judge(tmp_path, ["x.csv.dvc"], {"x.csv.dvc": None}).blocked
-    assert "no hash" in j and "dvc commit x.csv.dvc" in j
+    assert j == "x.csv.dvc is cut short or damaged: x.csv records no hash"
+
+
+@pytest.mark.parametrize("pointer, text", [
+    ("bad.dvc", "outs: [\n"),
+    ("bad.dvc", "outs:\n- path: x\n  hash: md5\n  files:\n"),
+    ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n"),
+], ids=["not-yaml", "files-null", "lock-stage-null"])
+def test_judge_blocks_a_pointer_cut_short(tmp_path: Path, pointer: str, text: str) -> None:
+    """A changed pointer that isn't whole is never committed: blocked, not
+    left with a soft note, by the rule every reader applies.
+
+    Mutation: catch `PointerCutShort` as a soft note again -> red.
+    """
+    write_dvc_config(tmp_path)
+    (tmp_path / pointer).write_text(text)
+    (j,) = _judge(tmp_path, [pointer], {pointer: None}).blocked
+    assert j.startswith(f"{pointer} is cut short or damaged: ")
 
 
 @pytest.mark.parametrize(
@@ -720,7 +737,6 @@ def test_judge_blocks_a_dvc_out_with_no_hash(tmp_path: Path) -> None:
         (lambda r: ((r / "sub").mkdir(), (r / "sub" / "out.dvc").write_text(
             f"outs:\n- path: ../../outside.csv\n  md5: {'a' * 32}\n")),
          "sub/out.dvc", "records an output outside the project"),
-        (lambda r: (r / "bad.dvc").write_text("outs: [\n"), "bad.dvc", "bad.dvc does not parse"),
         (lambda r: ((r / "sub").mkdir(), (r / "sub" / "dvc.lock").write_text("stages: {}\n")),
          "sub/dvc.lock", "not the project's root dvc.lock"),
         (lambda r: ((r / "dvc.yaml").write_text("stages:\n  other:\n    cmd: run\n"),
@@ -728,7 +744,7 @@ def test_judge_blocks_a_dvc_out_with_no_hash(tmp_path: Path) -> None:
                                                 "    - path: data/g.csv\n      md5: " + "b" * 32 + "\n")),
          "dvc.lock", "dvc.lock stage 'gone' has outs mintd cannot resolve"),
     ],
-    ids=["deleted", "dvc-import", "import-url", "escaped-out", "unparseable", "nested-lock", "orphan-stage"],
+    ids=["deleted", "dvc-import", "import-url", "escaped-out", "nested-lock", "orphan-stage"],
 )
 def test_judge_leaves_what_it_cannot_judge(tmp_path: Path, build, pointer: str, reason: str) -> None:
     write_dvc_config(tmp_path)
@@ -806,3 +822,28 @@ def test_judge_exempts_outs_dvc_never_pushes(tmp_path: Path, shape: str) -> None
         (tmp_path / "x.csv.dvc").write_text(f"outs:\n- path: x.csv\n  md5: {'a' * 32}\n  push: false\n")
         pointer = "x.csv.dvc"
     assert _judge(tmp_path, [pointer], {pointer: None}) == PointerJudgement()
+
+
+_A_OUT = "    outs:\n    - path: data/a.csv\n      hash: md5\n      md5: 0cc175b9c0f1b6a831c399e269772661\n      size: 1\n"
+
+
+@pytest.mark.parametrize("dvc_yaml", [
+    "stages:\n  build:\n    foreach: [a, b]\n    do:\n      cmd: run ${item}\n      outs:\n      - data/${item}.csv\n",
+    "stages:\n  build:\n    matrix:\n      x: [a, b]\n    cmd: run ${item.x}\n    outs:\n    - data/${item.x}.csv\n",
+], ids=["foreach", "matrix"])
+def test_a_lock_entry_of_a_foreach_or_matrix_stage_is_checked_against_its_stage(tmp_path: Path, dvc_yaml: str) -> None:
+    """A foreach or matrix stage `build` records one lock entry per item,
+    `build@a`, `build@b`; a foreach stage declares its outs under `do:`.
+    An entry cut before its outs is behind its stage; whole entries are not.
+
+    Mutations: drop the `name@key` split -> both cases pass the cut lock,
+    red; drop the `do:` unwrapping -> foreach passes it, red.
+    """
+    from mintd._dvc_state import stages_behind
+
+    (tmp_path / "dvc.yaml").write_text(dvc_yaml)
+    lock = "schema: '2.0'\nstages:\n  build@a:\n    cmd: run a\n" + _A_OUT + "  build@b:\n    cmd: run b\n"
+    (tmp_path / "dvc.lock").write_text(lock)
+    assert stages_behind(tmp_path, "dvc.lock", ["build@a", "build@b"]) == ["build@b"]
+    (tmp_path / "dvc.lock").write_text(lock + _A_OUT.replace("a.csv", "b.csv"))
+    assert stages_behind(tmp_path, "dvc.lock", ["build@a", "build@b"]) == []

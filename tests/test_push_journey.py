@@ -340,3 +340,53 @@ def test_a_pointer_gitignore_excludes_is_skipped_as_dvc_skips_it(producer, s3_se
     assert "data/ext" not in _git(["show", "--name-only", "--format=", "HEAD"], cwd=producer)
     status = [s.strip() for s in _git(["status", "--porcelain"], cwd=producer).split("\n") if s.strip()]
     assert status == ([f"M {name}"] if kind == "modified-forced" else [])
+
+
+
+def _cut_after_entry(pointer: Path, k: int) -> None:
+    """Cut ``pointer`` at the end of its folder's ``k``-th file entry, where
+    a write that stopped partway leaves valid YAML."""
+    text = pointer.read_text()
+    starts = [i for i in range(len(text)) if text.startswith("  - relpath:", i)]
+    pointer.write_text(text[:starts[k]])
+
+
+def test_a_folder_pointer_cut_between_file_entries_commits_nothing(producer, s3_server, real_dvc, capsys):  # noqa: F811
+    """dvc writes no file count beside a folder's list, so a pointer cut at
+    the end of a file entry is valid YAML and reads as a smaller folder.
+    The pre-upload check can't see it. The commit step does when, as here,
+    the shorter list is a tree this project's cache never saved: nothing is
+    committed and the push exits 1, naming the pointer.
+
+    Mutation: drop the tree check in `_judge_out` -> the cut list is
+    committed, red.
+    """
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    head = _git(["show", "HEAD:data/raw.dvc"], cwd=producer)
+    _cut_after_entry(producer / "data" / "raw.dvc", 1)
+
+    assert cli.main(["data", "push"]) == 1
+    assert "data/raw.dvc: data/raw lists 1 file(s), a tree DVC never saved" in _out(capsys)
+    assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
+
+
+@pytest.mark.xfail(strict=True, reason="a folder pointer cut to a prefix of its file list passes the push's tree "
+                   "check whenever that shorter tree is in the cache from any source (here an earlier version of the "
+                   "folder), and the check is skipped once the cut is committed; the push doesn't yet compare the "
+                   "list with the folder on disk")
+def test_a_folder_pointer_cut_back_to_a_list_it_once_had_commits_nothing(producer, s3_server, real_dvc, capsys):  # noqa: F811
+    """The folder grew from two files to three. A cut after its second entry
+    reads as the two-file folder, whose tree the cache still holds, so the
+    commit step's tree check passes it. The third file is on disk: the push
+    must refuse before it commits the shorter list.
+    """
+    (producer / "data" / "raw" / "z.csv").write_text("z\n")
+    real_dvc(["add", "-q", "data/raw"], cwd=producer, check=True)
+    _git(["commit", "-q", "-am", "z"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    head = _git(["show", "HEAD:data/raw.dvc"], cwd=producer)
+    _cut_after_entry(producer / "data" / "raw.dvc", 2)
+
+    assert cli.main(["data", "push"]) == 1, _out(capsys)
+    assert "data/raw.dvc" in _out(capsys)
+    assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head

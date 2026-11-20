@@ -27,7 +27,7 @@ from typing import Any
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
-from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url
+from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url, pipeline_files
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
@@ -273,8 +273,7 @@ def prepare(
         )
     if not str(cfg.get("url", "")).startswith("s3://"):
         return None
-    dvc_files = [f for f in discover_all_outs(root)  # DVC skips subrepos (their own .dvc/)
-                 if not any((root / d / ".dvc").is_dir() for d in Path(f).parents if d != Path("."))]
+    dvc_files = pushed_dvc_files(root)
     own = _own_remotes(root, dvc_files, name)
     if own:
         raise PushRefused(
@@ -331,6 +330,31 @@ def prepare(
         before={_identity(e): (e.version_id, e.etag) for e in scope.entries},
         env={"DVC_SITE_CACHE_DIR": tmp.name}, _tmp=tmp, memo=memo,
     )
+
+
+def _in_subrepo(root: Path, rel: str) -> bool:
+    """Whether ``rel`` is inside a subrepo (a folder with its own ``.dvc/``), which DVC skips."""
+    return any((root / d / ".dvc").is_dir() for d in Path(rel).parents if d != Path("."))
+
+
+def pushed_dvc_files(root: Path) -> list[str]:
+    """The ``.dvc`` files a push from ``root`` reads."""
+    return [f for f in discover_all_outs(root) if not _in_subrepo(root, f)]
+
+
+def pushed_pipelines(root: Path) -> list[str]:
+    """The ``dvc.yaml`` files a push from ``root`` reads (not in a folder
+    ``.gitignore`` excludes, nor in a subrepo), with or without a
+    ``dvc.lock`` beside them."""
+    return [y for y in pipeline_files(root) if not _in_subrepo(root, y)]
+
+
+def pushed_lockfiles(root: Path) -> list[str]:
+    """The ``dvc.lock`` files a push from ``root`` reads: each beside a
+    ``dvc.yaml`` it reads. DVC never opens one with no ``dvc.yaml`` beside
+    it."""
+    locks = [Path(y).with_name("dvc.lock").as_posix() for y in pushed_pipelines(root)]
+    return [lock for lock in locks if (root / lock).is_file()]
 
 
 def _lockfiles(root: Path) -> list[str]:
