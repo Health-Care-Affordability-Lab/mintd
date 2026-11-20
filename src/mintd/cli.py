@@ -400,6 +400,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p_check = subs.add_parser("check", help="Validate a mintd project")
     p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
     p_check.add_argument("--upgrades", action="store_true")
+    remote_or_staged = p_check.add_mutually_exclusive_group()
+    remote_or_staged.add_argument(
+        "--remote", action="store_true",
+        help="also ask S3 whether every pinned file version the working tree and HEAD record is there",
+    )
+    remote_or_staged.add_argument(
+        "--staged", action="store_true",
+        help="only check the staged .dvc and dvc.lock files for version IDs dropped from unchanged files",
+    )
+    p_check.add_argument(
+        "--all", action="store_true", dest="all_outs",
+        help="with --remote, check every output dvc pushes, not only the declared ones",
+    )
     p_check.set_defaults(_handler=_handle_check)
 
     p_data = subs.add_parser("data", help="Data commands")
@@ -870,6 +883,10 @@ def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> Reg
 
 
 def _handle_check(args: argparse.Namespace) -> int:
+    if args.staged:  # offline and fast: no catalog, no S3, no dvc
+        from .check import check_staged
+
+        return _render_findings(check_staged(args.path), json_out=args.json_out)
     config = Config.load()
     client: CatalogClient | None = None
     # Resolved for every check, not just --upgrades: an enclave consumer's
@@ -882,7 +899,10 @@ def _handle_check(args: argparse.Namespace) -> int:
         # Let the manifest walker emit `catalog_unresolved` findings —
         # surface what's missing without pre-validating.
         client = None
-    findings = check_project(args.path, upgrades=args.upgrades, client=client)
+    if args.all_outs and not args.remote:
+        raise SystemExit("mintd check: --all goes with --remote")
+    findings = check_project(args.path, upgrades=args.upgrades, client=client, remote=args.remote,
+                             all_outs=args.all_outs, aws_profile=config.aws_profile_name)
     return _render_findings(findings, json_out=args.json_out)
 
 

@@ -137,3 +137,18 @@ def _atomic_write_text(
         tmp.unlink(missing_ok=True)
         raise
     _try_fsync_parent_dir(path)
+
+
+def write_tree(root: Path, files: dict[str, str]) -> None:
+    """Write each text at its relative path under ``root``, exactly as given
+    (no line-ending translation), making folders as needed: a scratch copy
+    of pointer files, such as ``check`` builds from HEAD and the index.
+    Refuses a path that would land outside ``root``."""
+    root.mkdir(parents=True, exist_ok=True)
+    base = root.resolve()
+    for rel, text in files.items():
+        target = root / rel
+        if not target.resolve().is_relative_to(base):
+            raise ValueError(f"{rel} is outside {root}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(target, text, newline="")

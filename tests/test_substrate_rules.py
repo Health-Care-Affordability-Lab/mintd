@@ -80,7 +80,7 @@ BANNED_TARGETS: dict[str, int] = {
 }
 
 # PERMITTED: the other half of the same census — composition root (33 sites /
-# 8 targets) plus process/network boundary (31 sites / 11 targets). Pinned so
+# 8 targets) plus process/network boundary (32 sites / 12 targets). Pinned so
 # the classifier above cannot be widened to launder a banned target.
 # `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
 # captures the config the factory receives, at the already-permitted site.
@@ -96,6 +96,9 @@ BANNED_TARGETS: dict[str, int] = {
 # `GitCatalogClient` 2 → 3: the README produce-flow journey runs `registry
 # register` through the real CLI with real dvc and git, and `gh` can only be
 # faked at the catalog client's constructor, as the `journey` fixture does.
+# `check._create_s3_client` 0 → 1: `check --remote` asks S3 through its own
+# client, and one fixture (`tests/test_check_remote_and_staged.py`, `s3`) hands
+# in the moto client, or a wrapper that rewrites or refuses HEAD, at that seam.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -114,6 +117,7 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd._s3.time.sleep": 9,
     "mintd._producer_git_ops.subprocess.run": 6,
     "mintd._share_ops._create_s3_client": 2,
+    "mintd.check._create_s3_client": 1,
     "mintd._templates._render.importlib.metadata.version": 1,
     "mintd.cli.GitCatalogClient": 3,
     "mintd.cli.SubprocessDvcOps": 2,
@@ -270,7 +274,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (210 sites / 49 targets), not
+    """The literals above are the *whole* census (211 sites / 50 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -281,14 +285,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (210 → 209), or drop ``patch`` (210 → 180).
+    ``monkeypatch``-receiver calls (211 → 210), or drop ``patch`` (211 → 181).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 210
+    assert sum(scanned.values()) == 211
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

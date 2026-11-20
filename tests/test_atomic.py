@@ -294,3 +294,22 @@ def test_the_default_temp_tail_is_one_a_scaffolded_repo_already_ignores() -> Non
         rules = (files / template).read_text(encoding="utf-8").split()
         matched = [r for r in rules if fnmatch(orphan, r)]
         assert matched, f"{template} ignores no part of {orphan}; rules were {rules}"
+
+
+def test_write_tree_writes_each_text_exactly_and_refuses_a_path_outside_its_root(tmp_path: Path) -> None:
+    """`check` copies pointers from HEAD and the index into a scratch tree:
+    each lands at its relative path with its bytes as given (CRLF kept),
+    and a path that would climb out of the root is refused before anything
+    is written there.
+
+    Mutations: drop the containment check -> `../escape` is written, red;
+    write with the platform's newline -> the CRLF case changes, red on
+    Windows.
+    """
+    root = tmp_path / "tree"
+    _atomic.write_tree(root, {"data/x.dvc": "outs:\r\n- path: x\n", "dvc.lock": "schema: '2.0'\n"})
+    assert (root / "data" / "x.dvc").read_bytes() == b"outs:\r\n- path: x\n"
+    assert (root / "dvc.lock").read_bytes() == b"schema: '2.0'\n"
+    with pytest.raises(ValueError, match="outside"):
+        _atomic.write_tree(root, {"../escape.dvc": "x"})
+    assert not (tmp_path / "escape.dvc").exists()
