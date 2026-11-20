@@ -748,7 +748,12 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
         read = {"staged": lambda rel: git.index_text(project_path, rel),
                 "head": lambda rel: git.head_text(project_path, f"./{rel}")}
         for which, rels in (("staged", staged), ("head", changed)):
-            texts = {rel: read[which](rel) for rel in [*rels, "dvc.yaml"]}  # each tree's own dvc.yaml: its wdirs
+            # Each tree's own dvc.yaml, for its lock's wdirs and stages. HEAD's
+            # matters only beside HEAD's lock: screened without one, a broken
+            # dvc.yaml the commit fixes would refuse it for nothing.
+            if which == "staged" or "dvc.lock" in changed:
+                rels = [*rels, "dvc.yaml"]
+            texts = {rel: read[which](rel) for rel in rels}
             write_tree(roots[which], {rel: text for rel, text in texts.items() if text is not None})
         unreadable = _unreadable_at(roots["staged"], dvc_files, "in the staged commit", project_path)
         if unreadable:  # read as "no outs", a damaged pointer would look like one dropped on purpose

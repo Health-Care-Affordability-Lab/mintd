@@ -1001,6 +1001,62 @@ def test_staged_names_a_head_copy_it_cant_read(tmp_path: Path, head: str) -> Non
         assert finding.message.endswith("), so the IDs it records can't be compared")
 
 
+@pytest.mark.parametrize("head", ["a-conflicted-pointer", "a-conflicted-lock-under-a-bare-tree",
+                                  "a-broken-dvc-yaml-and-no-lock-in-the-commit"])
+def test_staged_screens_the_head_copies_its_comparison_reads(tmp_path: Path, head: str) -> None:
+    """HEAD's screen covers what the comparison reads: a changed `.dvc`
+    file's HEAD copy, and HEAD's lock under a folder out `dvc commit -f`
+    rewrote as a bare tree hash. HEAD's dvc.yaml is read only beside HEAD's
+    lock, so a broken one the commit fixes, with no lock in the commit,
+    refuses nothing.
+
+    Mutations: screen no `.dvc` file at HEAD -> a-conflicted-pointer passes,
+    red; leave a bare tree out of "the commit records a file with no ID" ->
+    the bare-tree case passes, red; write HEAD's dvc.yaml into every HEAD
+    tree -> the dvc.yaml case refused, red.
+    """
+    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+
+    def conflicted(text: str) -> str:
+        return f"<<<<<<< ours\n{text}=======\n{text}>>>>>>> theirs\n"
+
+    proj = _repo(tmp_path)
+    files = {"a.csv": _md5(b"a\n"), "b.csv": _md5(b"b\n")}
+    if head == "a-conflicted-pointer":
+        _folder_pointer(proj, "final", {rel: (md5, f"v{rel}") for rel, md5 in files.items()})
+        (proj / "data" / "final.dvc").write_text(conflicted((proj / "data" / "final.dvc").read_text()))
+        _commit(proj)
+        _folder_pointer(proj, "final", {rel: (md5, None) for rel, md5 in files.items()})
+        want = "data/final.dvc"
+    elif head == "a-conflicted-lock-under-a-bare-tree":
+        (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - data/out\n")
+        lock = ["schema: '2.0'", "stages:", "  build:", "    cmd: run", "    outs:", "    - path: data/out",
+                "      hash: md5", "      files:"]
+        for rel, md5 in files.items():
+            lock += [f"      - relpath: {rel}", f"        md5: {md5}", "        size: 2", "        cloud:",
+                     f"          {REMOTE}:", f"            etag: {md5}", f"            version_id: v{rel}"]
+        (proj / "dvc.lock").write_text(conflicted("\n".join(lock) + "\n"))
+        _commit(proj)
+        tree = dir_manifest_md5([DvcFileEntry(md5=m, relpath=r, size=2) for r, m in files.items()])
+        (proj / "dvc.lock").write_text("schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n"
+                                       f"    - path: data/out\n      hash: md5\n      md5: {tree}\n      size: 4\n"
+                                       "      nfiles: 2\n")
+        want = "dvc.lock"
+    else:
+        (proj / "dvc.yaml").write_text(conflicted("stages: {}\n"))
+        _folder_pointer(proj, "a", {"x.csv": (files["a.csv"], "va")})
+        _commit(proj)
+        (proj / "dvc.yaml").write_text("stages: {}\n")
+        _folder_pointer(proj, "b", {"x.csv": (files["b.csv"], None)})  # new data, not pushed yet
+        want = None
+    _git(proj, "add", "-A")
+    got = check_staged(proj)
+    if want is None:
+        assert got == []
+    else:
+        assert [f.message.split(" can't be read")[0] for f in got] == [f"can't check the staged commit: HEAD's {want}"]
+
+
 @pytest.mark.parametrize("setting", ['version_aware = "true"', "worktree = true"])
 def test_staged_reads_version_aware_as_dvc_does(tmp_path: Path, setting: str) -> None:
     """A quoted `version_aware`, or `worktree = true` with no
