@@ -251,6 +251,7 @@ def test_child_stdout_leaves_fd1_only_when_it_would_splice(
         # Chunks, not lines: split mid-path, and a last line with no newline.
         reporter.passthrough_stdout(LINE[:15])
         reporter.passthrough_stdout(LINE[15:] + "\nno newline")
+        reporter.flush_child_output()  # run_streaming's call once the child's output ends
     out, err = capsys.readouterr()
     if to_stderr:
         assert out == ""
@@ -259,3 +260,44 @@ def test_child_stdout_leaves_fd1_only_when_it_would_splice(
     else:
         assert out == LINE + "\nno newline"
         assert "data/imports" not in err
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_child_output_never_prints_a_urls_credentials(capsys, stream):
+    """dvc echoes the catalog URL it was given. Reads come in 256-byte chunks,
+    so the token can straddle two of them. Mutation: print a child's line
+    without `strip_userinfo` -> red."""
+    reporter = Reporter(no_color=True)
+    line = "ERROR: failed to import - SCM error: Failed to clone repo 'http://alice:s3cr3tTOKEN@host/priv.git'\n"
+    cut = line.index("s3cr3t") + 3
+    send = getattr(reporter, f"passthrough_{stream}")
+    send(line[:cut])
+    send(line[cut:])
+    reporter.flush_child_output()
+    out, err = capsys.readouterr()
+    assert "s3cr3t" not in out + err
+    assert "http://host/priv.git" in out + err
+
+
+def test_results_never_print_a_urls_credentials(capsys):
+    """`data list --imported` and `data import --json` show the pointer's repo URL."""
+    payload = {"producer_repo": "https://x-access-token:s3cr3tTOKEN@github.com/org/r"}
+    Reporter(json_mode=True).result(payload)
+    Reporter().result(payload, pretty=lambda p: f"from {p['producer_repo']}")
+    out = capsys.readouterr().out
+    assert "s3cr3t" not in out and out.count("https://github.com/org/r") == 2
+
+
+def test_under_a_spinner_child_output_is_stripped_and_flushed_on_exit(capsys, monkeypatch):
+    """The default interactive run: dvc's stdout goes through the spinner's own
+    console, and its last line (no newline) is printed when the spinner stops.
+    Mutation: drop `strip_userinfo` from `_print_child_line`, or the spinner
+    exit's flush -> red."""
+    reporter = Reporter(no_color=True)
+    monkeypatch.setattr(reporter._stdout, "_force_terminal", True)
+    monkeypatch.setattr(reporter._stderr, "_force_terminal", True)
+    with reporter.status("Importing..."):
+        reporter.passthrough_stdout("Importing 'data/final (http://alice:s3cr3tTOKEN@host/priv.git)'")
+    out, err = capsys.readouterr()
+    assert "s3cr3tTOKEN" not in out + err
+    assert "Importing 'data/final (http://host/priv.git)'" in err

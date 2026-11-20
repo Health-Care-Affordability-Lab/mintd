@@ -15,6 +15,8 @@ from rich.progress import (
 from rich.status import Status
 from rich.text import Text
 
+from .errors import strip_userinfo
+
 
 class _ProgressHandle:
     """What :meth:`Reporter.progress` yields. Callable as ``advance(n_bytes)``
@@ -85,7 +87,7 @@ class Reporter:
         # calls Text.from_markup UNCONDITIONALLY -- it does not consult the
         # console's markup setting, so markup=False above does not cover this
         # path. A Text instance is used as-is.
-        rich_status = self._stderr.status(Text(msg))
+        rich_status = self._stderr.status(Text(strip_userinfo(msg)))
         self._active_status = rich_status
         # Wrap rich.Status in a context manager that ALSO resets
         # ``self._active_status`` on exit. Without the reset, a later
@@ -104,13 +106,11 @@ class Reporter:
                 try:
                     rich_status.__exit__(exc_type, exc, tb)
                 finally:
+                    # Before the spinner state clears, so the line goes where
+                    # the spinner's lines went.
+                    outer_self.flush_child_output()
                     outer_self._active_status = None
                     outer_self._status_base = ""
-                    # A child's last stdout line with no newline: print it
-                    # now, rather than drop it or glue it to the next one.
-                    if outer_self._stdout_buf:
-                        outer_self._print_child_line(outer_self._stdout_buf)
-                        outer_self._stdout_buf = ""
 
         return _StatusCM()
 
@@ -137,7 +137,7 @@ class Reporter:
         found the other two.
         """
         if self._active_status is not None:
-            self._active_status.update(Text(text))
+            self._active_status.update(Text(strip_userinfo(text)))
 
     def update_progress_desc(self, msg: str) -> None:
         """Update the active progress widget's description prefix. No-op when
@@ -149,35 +149,35 @@ class Reporter:
 
     def info(self, msg: str) -> None:
         if self.level >= 1 and not self.json_mode:
-            self._stderr.print(msg)
+            self._stderr.print(strip_userinfo(msg))
 
     def success(self, msg: str, *, elapsed_s: Optional[float] = None) -> None:
         if self.json_mode:
             return
         if elapsed_s is not None:
             msg += f" (elapsed: {elapsed_s:.2f}s)"
-        self._stderr.print(msg)
+        self._stderr.print(strip_userinfo(msg))
 
     def warn(self, msg: str) -> None:
         if not self.json_mode:
-            self._stderr.print(f"warning: {msg}")
+            self._stderr.print(strip_userinfo(f"warning: {msg}"))
 
     def error(self, msg: str, *, hint: Optional[str] = None) -> None:
-        self._stderr.print(f"error: {msg}")
+        self._stderr.print(strip_userinfo(f"error: {msg}"))
         if hint:
             for line in hint.splitlines():
-                self._stderr.print(f"  hint: {line}")
+                self._stderr.print(strip_userinfo(f"  hint: {line}"))
 
     def result(self, payload: Any, *, pretty: Optional[Callable[[Any], str]] = None) -> None:
         if self.json_mode:
             import json
-            sys.stdout.write(json.dumps(payload, separators=(",", ":")) + "\n")
+            sys.stdout.write(strip_userinfo(json.dumps(payload, separators=(",", ":"))) + "\n")
             sys.stdout.flush()
         else:
             # Pretty mode: write to stdout directly (no rich wrapping). The
             # pretty callable has already formatted its output; rich.Console
             # would terminal-width-wrap long lines, breaking --detailed mode.
-            text = pretty(payload) if pretty else str(payload)
+            text = strip_userinfo(pretty(payload) if pretty else str(payload))
             sys.stdout.write(text)
             if not text.endswith("\n"):
                 sys.stdout.write("\n")
@@ -185,11 +185,11 @@ class Reporter:
 
     def debug(self, msg: str) -> None:
         if self.level >= 2 and not self.json_mode:
-            self._stderr.print(f"debug: {msg}")
+            self._stderr.print(strip_userinfo(f"debug: {msg}"))
 
     def trace(self, msg: str) -> None:
         if self.level >= 3 and not self.json_mode:
-            self._stderr.print(f"trace: {msg}")
+            self._stderr.print(strip_userinfo(f"trace: {msg}"))
 
     def passthrough_stdout(self, chunk: str) -> None:
         """Route a raw stdout chunk from a child subprocess.
@@ -198,27 +198,45 @@ class Reporter:
         spinner is drawing on the same terminal. rich's Live owns that row,
         so a second writer on fd 1 splices into it and the next repaint
         erases what the child wrote. Then complete lines go through the
-        spinner's own console instead, and a partial line waits for its
-        newline or for the spinner to stop.
+        spinner's own console instead.
+
+        Either way only whole lines are printed, with credentials stripped: a
+        URL can straddle two reads. A partial line waits for its newline, the
+        spinner's stop, or the end of the child's output (`flush_child_output`).
         """
         if not chunk or self.json_mode:
             return
+        self._stdout_buf += chunk
+        *lines, self._stdout_buf = self._stdout_buf.split("\n")
+        for line in lines:
+            self._emit_child_stdout(line + "\n")
+
+    def _emit_child_stdout(self, text: str) -> None:
         if (
             self._active_status is None
             or not self._stdout.is_terminal
             or not self._stderr.is_terminal
         ):
-            self._stdout.print(chunk, end="", soft_wrap=True, highlight=False, markup=False)
-            return
-        self._stdout_buf += chunk
-        *lines, self._stdout_buf = self._stdout_buf.split("\n")
-        for line in lines:
-            self._print_child_line(line)
+            self._stdout.print(strip_userinfo(text), end="", soft_wrap=True, highlight=False, markup=False)
+        else:
+            self._print_child_line(text.rstrip("\n"))
+
+    def flush_child_output(self) -> None:
+        """A child's last line with no newline, on either stream: print it
+        now, rather than drop it or glue it to the next child's output."""
+        if self._stdout_buf:
+            text, self._stdout_buf = self._stdout_buf, ""
+            self._emit_child_stdout(text)
+        if self._stderr_buf:
+            tail, self._stderr_buf = self._stderr_buf, ""
+            visible = strip_userinfo(tail[tail.rfind("\r") + 1:].rstrip())
+            if visible and not self.json_mode:
+                self._stderr.print(visible)
 
     def _print_child_line(self, line: str) -> None:
         # Final state of any \r-overwritten ticks. soft_wrap/highlight off
         # keep a long path on one copy-pasteable row with no color inside it.
-        visible = line[line.rfind("\r") + 1:].rstrip()
+        visible = strip_userinfo(line[line.rfind("\r") + 1:].rstrip())
         if visible:
             self._stderr.print(visible, soft_wrap=True, highlight=False)
 
@@ -248,7 +266,7 @@ class Reporter:
         while "\n" in self._stderr_buf:
             line, _, self._stderr_buf = self._stderr_buf.partition("\n")
             visible = line[line.rfind("\r") + 1:] if "\r" in line else line
-            visible = visible.rstrip()
+            visible = strip_userinfo(visible.rstrip())
             if visible:
                 self._stderr.print(visible)
         # Now buffer has the in-flight tail (no \n). Find the last

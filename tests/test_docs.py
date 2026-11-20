@@ -106,3 +106,31 @@ def test_vocab_headings_name_code_that_exists() -> None:
         if not re.search(rf"(?m)^\s*(?:class|def)\s+{n}\b|^\s*{n}\s*[:=]|\bimport\b.*\b{n}\b", src)
     )
     assert not missing, "vocab.md headings name code that is not in src/: " + ", ".join(missing)
+
+
+def _subparser(*path: str) -> argparse.ArgumentParser:
+    parser: argparse.ArgumentParser = _build_parser()
+    for name in path:
+        action = next(a for a in parser._actions if isinstance(a, argparse._SubParsersAction))
+        parser = action.choices[name]
+    return parser
+
+
+def test_import_and_clone_help_say_what_each_form_brings_as_the_readme_does() -> None:
+    """`data import --help` and `data clone --help` carry README's "Command |
+    Brings" rows word for word, and no others, so the two can't drift apart.
+
+    Mutation: change a word in one README "Brings" cell, or add a row to one
+    help table only -> red."""
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    for verb in ("import", "clone"):
+        rows = re.findall(rf"^\| `(mintd data {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
+        assert len(rows) >= 2, verb
+        documented = {" ".join(f"{command} {brings.replace('`', '')}".split()) for command, brings in rows}
+        epilog = _subparser("data", verb).epilog or ""
+        # The table is the epilog's first paragraph; each row starts at "  mintd data".
+        table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
+        shown = {" ".join(row.split()) for row in re.split(rf"\s(?=mintd data {verb}\b)", " " + table) if row.strip()}
+        assert shown == documented, verb
+        # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
+        assert max(map(len, epilog.splitlines())) <= 80, verb
