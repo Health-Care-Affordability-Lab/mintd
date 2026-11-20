@@ -6,9 +6,11 @@ without real storage.
 from __future__ import annotations
 
 import configparser
+import contextlib
 import dataclasses
 import json
 import os
+import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -59,17 +61,29 @@ def read_only(argv: Sequence[str]) -> None:
         )
 
 
+#: Every mintd, git and plain dvc the live tier started, each in a session of
+#: its own, so a SIGTERM or SIGHUP can kill the groups still running.
+STARTED: list[subprocess.Popen[str]] = []
+
+
 def run_read_only(argv: Sequence[str], *, cwd: Path | None = None, env: Mapping[str, str]) -> subprocess.CompletedProcess[str]:
-    """git or plain dvc, through the same allowlist. It stays in pytest's
-    process group, so the operator's Ctrl-C reaches it."""
+    """git or plain dvc, through the same allowlist. Like mintd it runs in a
+    session of its own, which the signal handler can kill whole; a Ctrl-C
+    kills its group here."""
     read_only(argv)
-    return subprocess.run(
-        list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False,
+    proc = subprocess.Popen(
+        list(argv), cwd=cwd, env=dict(env), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
     )
-
-
-#: Every mintd the live tier started, so a SIGTERM or SIGHUP can kill those still running.
-STARTED: list[Run] = []
+    STARTED.append(proc)
+    try:
+        out, err = proc.communicate()
+    except BaseException:  # a Ctrl-C, which its own session never sees: nothing it started outlives the call
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
 
 class LiveMintd(Mintd):
@@ -79,7 +93,7 @@ class LiveMintd(Mintd):
     def start(self, *args: str, cwd: Path, json: bool = True) -> Run:
         read_only(("mintd", *args))
         run = super().start(*args, cwd=cwd, json=json)
-        STARTED.append(run)
+        STARTED.append(run.proc)
         return run
 
 
@@ -90,7 +104,8 @@ def _named_file(operator_env: Mapping[str, str], var: str) -> tuple[Path, config
         raise HarnessError(f"the live tier runs only with the lab's read-only key: set {var} to its file, the one "
                            f"holding the {READONLY_PROFILE} profile")
     src = Path(named).expanduser()
-    found = configparser.ConfigParser(interpolation=None)
+    # No default section: a [DEFAULT] is a section like any other, so no key falls through from it.
+    found = configparser.ConfigParser(interpolation=None, default_section="\n")
     try:
         read = found.read(src, encoding="utf-8")
     except configparser.Error as e:  # its message can quote a line, so only its type is shown
@@ -116,6 +131,9 @@ def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
     if found.has_section("mintd"):
         raise HarnessError(f"{src} holds [mintd], the lab's key, which can write; give the live tier a file with only "
                            f"[{READONLY_PROFILE}]")
+    if found.has_section("DEFAULT"):  # botocore lets every profile inherit its keys
+        raise HarnessError(f"{src} has a [DEFAULT] section, whose keys every profile inherits; give the live tier a "
+                           f"file with only [{READONLY_PROFILE}]")
     if not found.has_section(READONLY_PROFILE):
         raise HarnessError(f"{src} has no [{READONLY_PROFILE}] section")
     key = {k: found[READONLY_PROFILE].get(k, "").strip() for k in ("aws_access_key_id", "aws_secret_access_key")}

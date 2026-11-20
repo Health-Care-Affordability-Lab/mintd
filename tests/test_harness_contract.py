@@ -17,10 +17,12 @@ import json
 import os
 import re
 import select
+import shutil
 import signal
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1799,11 +1801,12 @@ def test_a_hidden_products_failure_says_counts_only(tmp_path: Path) -> None:
 
 def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
     """Mutations that turn it red: accepting a credentials file that also holds
-    `[mintd]`, or a section without both halves of a key; running without
+    `[mintd]` or `[DEFAULT]`, or a section without both halves of a key, or
+    reading it with configparser's defaults (it inherits [DEFAULT]'s); running without
     `AWS_CONFIG_FILE`; copying more of the read-only section than its key, or
     of the profile than its region and endpoint."""
     secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret",
-               "AKIACONFIG", "config-secret")
+               "AKIACONFIG", "config-secret", "AKIADEFAULT", "default-secret")
     good = tmp_path / "readonly"
     good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n"
                     "credential_process = /bin/false\n", encoding="utf-8")
@@ -1811,6 +1814,11 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
     halves.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key =\n", encoding="utf-8")
     keyless = tmp_path / "keyless"
     keyless.write_text("[mintd-live-readonly]\nregion = us-east-1\n", encoding="utf-8")
+    inherited = tmp_path / "inherited"  # configparser and botocore let the section inherit [DEFAULT]'s key
+    inherited.write_text("[DEFAULT]\naws_access_key_id = AKIADEFAULT\naws_secret_access_key = default-secret\n"
+                         "[mintd-live-readonly]\n", encoding="utf-8")
+    beside = tmp_path / "beside"
+    beside.write_text(good.read_text(encoding="utf-8") + "[DEFAULT]\naws_access_key_id = AKIADEFAULT\n", encoding="utf-8")
     both = tmp_path / "both"
     both.write_text(good.read_text(encoding="utf-8")
                     + "[mintd]\naws_access_key_id = AKIAWRITE\naws_secret_access_key = write-secret\n", encoding="utf-8")
@@ -1826,6 +1834,7 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
         {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
         {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(both)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(other)},
         {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(halves)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(keyless)},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(inherited)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(beside)},
         {"AWS_SHARED_CREDENTIALS_FILE": str(good)}, {**ok, "AWS_CONFIG_FILE": ""},
         {**ok, "AWS_CONFIG_FILE": str(tmp_path / "missing")}, {**ok, "AWS_CONFIG_FILE": str(other)},
     ):
@@ -1939,8 +1948,8 @@ elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file") and
     (dest / "notes.md").write_bytes(b"notes\\n")  # kept in git, no pointer
     track(dest, "data/x.csv", b"x\\n", cached=False)
     (dest / "data" / ".gitignore").write_bytes(b"/x.csv\\n")
-    if name == "made-up-wide":
-        track(dest, "raw/y.csv", b"y\\n", cached=False)
+    if name == "made-up-wide":  # a sibling of the primary whose name starts with the primary's
+        track(dest, "data2/y.csv", b"y\\n", cached=False)
     if name == "made-up-odd" and killed:
         sys.exit("the clone failed after every file landed")
 elif name == "made-up-file" and cmd == "import":  # its one-file primary, kept in git
@@ -1950,7 +1959,7 @@ elif name in ("made-up-tiny", "made-up-wide", "made-up-odd") and cmd == "import"
     ignore = b"other\\n" if name == "made-up-odd" else b"/x.csv\\n"
     track_folder(dest, f"{root}/data", {"x.csv": b"x\\n", ".gitignore": ignore})
     if name == "made-up-wide":  # more than the primary
-        track(dest, f"{root}/raw/y.csv", b"y\\n", cached=False)
+        track(dest, f"{root}/data2/y.csv", b"y\\n", cached=False)
 elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty") and cmd == "pull":
     pass  # changes nothing
 elif name == "made-up-empty" and cmd == "clone":  # its pointer's file never lands
@@ -1968,12 +1977,36 @@ elif name == "made-up-small" and cmd == "pull":  # lands what is missing, touchi
         (dest / "data" / "x.csv").write_bytes(b"x\\n")
 elif name == "made-up-small" and cmd == "import":  # bytes the producer never tracked
     track(dest, "data/imports/data_made-up-small/data/x.csv", b"other\\n", cached=False)
+elif name == "made-up-held-git" and cmd == "clone":  # works, so the time check's plain git clone runs (and holds)
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n")
 elif name == "made-up-held":  # says it started, through a FIFO, and holds a second one open until it dies
     held = os.open(world / "held", os.O_WRONLY)
     (world / "started").write_text(f"{os.getpid()}\\n")
     time.sleep(300)
 else:
     sys.exit("PLANTED-STDERR: mintd failed on data/secret.csv")
+"""
+
+#: The fake git's hold: says it started, through a FIFO, and holds a second one open until it dies.
+_HOLD = """
+import os, pathlib, time
+world = pathlib.Path(__file__).parent
+held = os.open(world / "held", os.O_WRONLY)
+(world / "started").write_text(f"{os.getpid()}\\n")
+time.sleep(300)
+"""
+
+#: A pytest plugin for the tier's own run: whether the signal handlers it
+#: found at the start are back at the end, written beside it.
+_SIGNAL_CHECK = """
+import pathlib, signal
+_found = {}
+def pytest_configure(config):
+    _found.update({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)})
+def pytest_unconfigure(config):
+    back = all(signal.getsignal(s) == h for s, h in _found.items())
+    (pathlib.Path(__file__).parent / "restored").write_text(str(back))
 """
 
 #: What the operator's environment holds that must never reach mintd.
@@ -2003,7 +2036,7 @@ def _live_world(tmp_path: Path, names: list[str]) -> SimpleNamespace:
       which the import brings. Every check passes or skips (too small to
       interrupt).
     - made-up-wide: as tiny, but public, and its import also brings a file of
-      the clone's from outside the primary.
+      the clone's from outside the primary, in `data2/` beside `data/`.
     - made-up-odd: as tiny, but public; its import's .gitignore has other
       bytes, and its killed clone exits 1 once every file has landed.
     - made-up-file: as tiny, but public, and its primary is one file kept in
@@ -2013,11 +2046,14 @@ def _live_world(tmp_path: Path, names: list[str]) -> SimpleNamespace:
     - made-up-small: public; one file, which the killed clone has wholly
       cached when it is interrupted; its import lands other bytes.
     - made-up-held: its clone says it started, then waits (the signal tests).
+    - made-up-held-git: its clone works; the plain `git clone` of the time
+      check says it started, then waits (the signal tests). Every other git
+      call is the real git.
     """
     registry = tmp_path / "registry"
     (registry / "catalog" / "data").mkdir(parents=True)
     for name in ("made-up-licensed", "made-up-public", "made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file",
-                 "made-up-empty", "made-up-small", "made-up-held"):
+                 "made-up-empty", "made-up-small", "made-up-held", "made-up-held-git"):
         classification = "licensed" if name == "made-up-licensed" else "public"
         (registry / "catalog" / "data" / f"{name}.yaml").write_text(
             f"governance: {{classification: {classification}}}\nrepository: {{github_url: https://example.invalid/{name}}}\n",
@@ -2039,6 +2075,13 @@ def _live_world(tmp_path: Path, names: list[str]) -> SimpleNamespace:
     fake = world / "mintd"
     fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{world / "mintd.py"}" "$@"\n', encoding="utf-8")
     fake.chmod(0o755)
+    (world / "hold.py").write_text(_HOLD, encoding="utf-8")
+    git = world / "git"  # first on the tier's PATH, beside the fake mintd
+    git.write_text(f'#!/bin/sh\ncase "$*" in *made-up-held-git*) exec "{sys.executable}" "{world / "hold.py"}" ;; esac\n'
+                   f'exec "{shutil.which("git")}" "$@"\n', encoding="utf-8")
+    git.chmod(0o755)
+    (world / "plugin").mkdir()
+    (world / "plugin" / "live_signal_check.py").write_text(_SIGNAL_CHECK, encoding="utf-8")
     (tmp_path / "products.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
     kept = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "BOTO_", "FSSPEC_", "MINTD_", "DVC_"))}
     env = {**_PLANTED_ENV, **kept,
@@ -2070,7 +2113,8 @@ def test_the_live_tier_gives_mintd_only_its_copy_of_the_key_and_withholds_hidden
     not consulting the repo's metadata.json, or the shared clone consulting it
     only after its exit check; `stricter` always taking the repo's, or keeping
     the catalog's when the repo has none; results lines reading the catalog's
-    classification; the key-copy finalizer dropped; the second pull not
+    classification; the key-copy finalizer, or the one restoring the signal
+    handlers, dropped; the second pull not
     checking what landed; the import not compared with the clone's primary,
     refusing the git-tracked files a folder import brings, accepting a file
     from outside the primary or with other bytes, refusing a one-file primary
@@ -2080,10 +2124,12 @@ def test_the_live_tier_gives_mintd_only_its_copy_of_the_key_and_withholds_hidden
     world = _live_world(tmp_path, ["made-up-licensed", "made-up-broken", "made-up-public", "made-up-tiny",
                                    "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty", "made-up-small"])
     got = subprocess.run(
-        _live_pytest("-k", "not time", f"--basetemp={world.base}"),
-        cwd=Path(__file__).parents[1], env=world.env, capture_output=True, text=True, timeout=300,
+        _live_pytest("-k", "not time", f"--basetemp={world.base}", "-p", "live_signal_check"),
+        cwd=Path(__file__).parents[1], env={**world.env, "PYTHONPATH": str(world.world / "plugin")},
+        capture_output=True, text=True, timeout=300,
     )
     out = got.stdout + got.stderr
+    assert (world.world / "plugin" / "restored").read_text() == "True", "the tier left its signal handlers installed"
     assert "PLANTED" not in out and not any(v in out for v in _PLANTED_ENV.values()), out
     calls = [json.loads(line) for line in (world.world / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len(calls) > 5 and calls[0]["argv"] == ["--version"], calls
@@ -2142,15 +2188,20 @@ def test_the_live_tier_refuses_to_run_without_its_own_basetemp(tmp_path: Path) -
 
 
 @_ON_POSIX
-@pytest.mark.parametrize("sig, nohup", [("SIGTERM", False), ("SIGHUP", False), ("SIGHUP", True)],
-                         ids=["SIGTERM", "SIGHUP", "SIGHUP-under-nohup"])
-def test_a_signal_to_the_live_tier_kills_mintd_and_deletes_the_key_copy(tmp_path: Path, sig: str, nohup: bool) -> None:
-    """mintd runs in a session of its own, which the signal never reaches.
-    Under nohup a hangup stays ignored, so the SIGTERM sent after it is what
-    ends the run. Mutations that turn it red: no handler for the signal (pytest
-    dies at once, leaving mintd running and the key copy on disk); the handler
-    installed over an inherited SIG_IGN (the hangup ends the run)."""
-    world = _live_world(tmp_path, ["made-up-held"])
+@pytest.mark.parametrize("sig, nohup, child", [
+    ("SIGTERM", False, "mintd"), ("SIGHUP", False, "mintd"), ("SIGHUP", True, "mintd"), ("SIGTERM", False, "git"),
+], ids=["SIGTERM", "SIGHUP", "SIGHUP-under-nohup", "SIGTERM-during-plain-git"])
+def test_a_signal_to_the_live_tier_kills_its_children_and_deletes_the_key_copy(
+        tmp_path: Path, sig: str, nohup: bool, child: str) -> None:
+    """mintd, and the time check's plain git clone, each run in a session of
+    their own, which the signal never reaches. Under nohup a hangup stays
+    ignored, so the SIGTERM sent after it is what ends the run. Mutations that
+    turn it red: no handler for the signal (pytest dies at once, leaving the
+    child running and the key copy on disk); the handler installed over an
+    inherited SIG_IGN (the hangup ends the run); `run_read_only`'s child not
+    tracked, or not in a session of its own (it outlives the signal)."""
+    product, check = ("made-up-held", "clone_lands") if child == "mintd" else ("made-up-held-git", "time")
+    world = _live_world(tmp_path, [product])
     os.mkfifo(world.world / "started")
     os.mkfifo(world.world / "held")
     started = os.open(world.world / "started", os.O_RDWR | os.O_NONBLOCK)
@@ -2159,24 +2210,64 @@ def test_a_signal_to_the_live_tier_kills_mintd_and_deletes_the_key_copy(tmp_path
     pid = None
     try:
         with subprocess.Popen(
-            _live_pytest("-k", "clone_lands", f"--basetemp={world.base}"), cwd=Path(__file__).parents[1],
+            _live_pytest("-k", check, f"--basetemp={world.base}"), cwd=Path(__file__).parents[1],
             env=world.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             preexec_fn=lambda: signal.signal(signal.SIGHUP, hangup),
         ) as tier:
             ready, _, _ = select.select([started], [], [], 60)
-            assert ready, "the fake mintd did not start within 60 s"
+            assert ready, f"the fake {child} did not start within 60 s"
             pid = int(os.read(started, 32))
             tier.send_signal(getattr(signal, sig))
-            if nohup:  # pending together, the hangup's handler would run first: SIGHUP sorts before SIGTERM
+            if nohup:  # an ignored hangup changes nothing: the run is still going, and SIGTERM ends it
+                with pytest.raises(subprocess.TimeoutExpired):
+                    tier.wait(2)
                 tier.send_signal(signal.SIGTERM)
             assert tier.wait(30) == -(signal.SIGTERM if nohup else getattr(signal, sig))
         ready, _, _ = select.select([alive], [], [], 10)
-        assert ready, "mintd outlived the signal"
+        assert ready, f"{child} outlived the signal"
         assert not (world.base / "aws" / "credentials").exists(), "the key copy outlived the signal"
     finally:
         if pid is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+        os.close(started)
+        os.close(alive)
+
+
+@_ON_POSIX
+def test_a_ctrl_c_during_plain_git_or_dvc_kills_its_whole_group(tmp_path: Path) -> None:
+    """`run_read_only`'s child runs in a session of its own, which the
+    terminal's Ctrl-C never reaches. Mutation that turns it red: no
+    `except` block killing its group (the held git outlives the Ctrl-C)."""
+    (tmp_path / "hold.py").write_text(_HOLD, encoding="utf-8")
+    git = tmp_path / "git"
+    git.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{tmp_path / "hold.py"}"\n', encoding="utf-8")
+    git.chmod(0o755)
+    os.mkfifo(tmp_path / "started")
+    os.mkfifo(tmp_path / "held")
+    started = os.open(tmp_path / "started", os.O_RDWR | os.O_NONBLOCK)
+    alive = os.open(tmp_path / "held", os.O_RDONLY | os.O_NONBLOCK)  # EOF once the held git has died
+
+    def ctrl_c(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    def press() -> None:  # once the git says it started, to the main thread, which waits on it
+        if select.select([started], [], [], 60)[0]:
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGUSR1)
+
+    previous = signal.signal(signal.SIGUSR1, ctrl_c)
+    presser = threading.Thread(target=press, daemon=True)
+    try:
+        presser.start()
+        with pytest.raises(KeyboardInterrupt):
+            run_read_only(["git", "clone", "anything"],
+                          env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
+        assert select.select([alive], [], [], 10)[0], "git outlived the Ctrl-C"
+    finally:
+        signal.signal(signal.SIGUSR1, previous)
+        presser.join(5)
+        with contextlib.suppress(OSError, ValueError):  # a git the mutation left running
+            os.kill(int(os.read(started, 32)), signal.SIGKILL)
         os.close(started)
         os.close(alive)
 

@@ -53,8 +53,9 @@ running the tier on it.
   mintd finished, with every file landed, before any object was seen; or every
   object had landed when it stopped (with how it stopped). A clone that
   finishes having landed nothing fails.
-- SIGTERM or SIGHUP kills every mintd still running and deletes the key copy.
-  Under `nohup`, a hangup stays ignored.
+- SIGTERM or SIGHUP kills every mintd, git and plain dvc still running and
+  deletes the key copy. Under `nohup`, SIGHUP stays ignored and cleanup
+  happens on SIGTERM.
 - `--live-k K`: fail when mintd's clone takes more than K times plain
   `git clone` + `dvc pull`. Without it the ratio is reported only.
 """
@@ -155,14 +156,15 @@ def live(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactor
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
 
     def stop(signum: int, _frame: object) -> None:
-        """mintd runs in a session of its own, which a SIGTERM to pytest or a
-        closed terminal never reaches: kill each one still running, delete the
-        key copy, then die of the signal as pytest would have. Not installed
-        for a signal the operator ignores (nohup)."""
-        for run in STARTED:
-            if run.proc.poll() is None:
+        """mintd, git and plain dvc each run in a session of their own, which a
+        SIGTERM to pytest or a closed terminal never reaches: kill each group
+        still running, delete the key copy, then die of the signal as pytest
+        would have. Not installed for a signal the operator ignores: under
+        nohup, SIGHUP stays ignored and cleanup happens on SIGTERM."""
+        for proc in STARTED:
+            if proc.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(run.proc.pid, signal.SIGKILL)
+                    os.killpg(proc.pid, signal.SIGKILL)
         credentials.unlink(missing_ok=True)
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
