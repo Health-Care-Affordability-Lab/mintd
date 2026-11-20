@@ -8,7 +8,9 @@ folder. A checkout with uncommitted changes to what the wheel is built from is
 refused rather than quietly tested at HEAD.
 
 Each call gets stdin from /dev/null, a timeout, and an explicit environment.
-A timeout or a Ctrl-C kills mintd's whole process group. The environment is
+A timeout or a Ctrl-C kills mintd's whole process group. `Mintd.start` runs it
+without waiting, for a test that interrupts it partway; calling `Mintd` is
+`start` then `wait`. The environment is
 `PATH` with mintd's bin folder first, a temp `HOME` holding a git identity,
 `TMPDIR`, `MINTD_CONFIG_DIR`, the S3 test keys and region, AWS credential and
 config paths that do not exist, and dvc's config and site-cache dirs. Nothing
@@ -25,7 +27,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import IO
 
 import pytest
 
@@ -36,32 +40,80 @@ TIMEOUT = 300  # seconds, per call
 
 
 @dataclasses.dataclass
+class Run:
+    """A mintd that `Mintd.start` started. Use it in `with`: mintd runs in a
+    session of its own, which the terminal's Ctrl-C never reaches, so leaving
+    the block (a failed assert, an operator's Ctrl-C) kills its process group."""
+
+    proc: subprocess.Popen[str]
+    out: IO[str]
+    err: IO[str]
+
+    def _signal(self, sig: int) -> None:
+        with contextlib.suppress(ProcessLookupError):  # the group already exited
+            os.killpg(self.proc.pid, sig)
+
+    def interrupt(self) -> None:
+        """Ctrl-C, to mintd and every child it started."""
+        self._signal(signal.SIGINT)
+
+    def wait(self, timeout: float | None = TIMEOUT) -> subprocess.CompletedProcess[str]:
+        try:
+            self.proc.wait(timeout)
+        except BaseException:  # a timeout or Ctrl-C: nothing it started outlives the call
+            self._signal(signal.SIGKILL)
+            self.proc.wait()
+            raise
+        self.out.seek(0)
+        self.err.seek(0)
+        return subprocess.CompletedProcess(self.proc.args, self.proc.returncode, self.out.read(), self.err.read())
+
+    def __enter__(self) -> Run:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self.proc.poll() is None:  # only while mintd runs: a reaped leader's group id can be reused
+            self._signal(signal.SIGKILL)
+            self.proc.wait()
+        self.out.close()
+        self.err.close()
+
+
+@dataclasses.dataclass
 class Mintd:
     bin: Path
     env: dict[str, str]
     #: the config.yaml the binary reads; a story writes it
     config: Path
+    #: seconds a call may take; None waits as long as it runs
+    timeout: float | None = TIMEOUT
+
+    def start(self, *args: str, cwd: Path, json: bool = True) -> Run:
+        """Start `mintd [--json] <args>` and return without waiting."""
+        argv = [str(self.bin), *(["--json"] if json else []), *args]
+        # Files, not pipes: nothing reads a pipe while a test waits on a long
+        # run, and mintd streams git's progress to stderr, so a full pipe
+        # would stall it.
+        out = tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace")
+        err = tempfile.TemporaryFile("w+", encoding="utf-8", errors="replace")
+        try:
+            # Its own process group, so a timeout or an interrupt reaches the
+            # dvc and git children too, which would otherwise outlive mintd.
+            proc = subprocess.Popen(
+                argv, cwd=cwd, env=self.env, stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+                text=True, start_new_session=True,
+            )
+        except BaseException:
+            out.close()
+            err.close()
+            raise
+        return Run(proc, out, err)
 
     def __call__(self, *args: str, cwd: Path, json: bool = True) -> subprocess.CompletedProcess[str]:
         """`mintd --json <args>`, or `mintd <args>` with `json=False` for the
         run that shows the ✓ lines, warnings and hints JSON mode leaves out."""
-        argv = [str(self.bin), *(["--json"] if json else []), *args]
-        # Its own process group, so a timeout also kills the dvc and git
-        # children, which would otherwise outlive mintd and hold the run. The
-        # new session also keeps the terminal's Ctrl-C from reaching them, so
-        # an interrupt has to kill the group here too.
-        with subprocess.Popen(
-            argv, cwd=cwd, env=self.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, start_new_session=True,
-        ) as proc:
-            try:
-                out, err = proc.communicate(timeout=TIMEOUT)
-            except BaseException:
-                with contextlib.suppress(ProcessLookupError):  # the group already exited
-                    os.killpg(proc.pid, signal.SIGKILL)
-                proc.communicate()
-                raise
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+        with self.start(*args, cwd=cwd, json=json) as run:
+            return run.wait(self.timeout)
 
 
 def _uv(*args: str) -> None:

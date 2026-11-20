@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests._harness.git import _git
+
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 ENCLAVE_MANIFEST = FIXTURES / "enclave_manifest_v2_minimal.yaml"
@@ -117,5 +119,28 @@ def consumer_project(tmp_path: Path):
         return build_consumer_project(
             tmp_path / f"consumer-{next(counter)}", **kwargs
         )
+
+    return build
+
+
+@pytest.fixture
+def fresh_project(tmp_path: Path):
+    """A project as a researcher has it before any import: metadata.json, git
+    and dvc initialized, all committed. One folder per call.
+
+    `mintd init` would make it, but init refuses to run without a terminal."""
+    from dvc.repo import Repo
+
+    def build(name: str = "project") -> Path:
+        root = build_consumer_project(tmp_path / name)
+        meta = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
+        meta["project"].update(type="project", name="analysis", full_name="prj_analysis")
+        meta["data_products"] = {"primary": None, "outputs": []}  # as `mintd init` writes it
+        (root / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        _git(["init", "-b", "main", str(root)])
+        Repo.init(str(root)).close()
+        _git(["add", "-A"], cwd=root)
+        _git(["commit", "-m", "fresh project"], cwd=root)
+        return root
 
     return build

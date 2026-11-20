@@ -58,9 +58,10 @@ fallback_version = "0.0.1"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-# The stories run the installed binary and have their own job:
-# `pytest tests/stories` (an explicit path is still collected).
-addopts = ["--ignore=tests/stories"]
+# The stories and the live tier run the installed binary in runs of their own:
+# `pytest tests/stories` and `pytest tests/live` (an explicit path is still
+# collected).
+addopts = ["--ignore=tests/stories", "--ignore=tests/live"]
 markers = [
     "integration: requires MINTD_RUN_INTEGRATION=1 and real git",
 ]

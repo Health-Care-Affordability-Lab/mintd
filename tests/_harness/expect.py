@@ -10,6 +10,8 @@ import collections
 import dataclasses
 import hashlib
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import yaml
@@ -27,14 +29,29 @@ def md5(data: bytes) -> str:
     return hashlib.md5(data, usedforsecurity=False).hexdigest()
 
 
+def md5_file(path: Path) -> str:
+    """A file's md5, read in chunks, so a multi-GB file never sits in memory."""
+    with path.open("rb") as fh:
+        return hashlib.file_digest(fh, lambda: hashlib.md5(usedforsecurity=False)).hexdigest()
+
+
+class Mismatch(AssertionError):
+    """Landed files differ from what dvc tracks. `counts` says how without
+    naming a file, for a report that must not show paths or md5s."""
+
+    def __init__(self, detail: str, counts: str) -> None:
+        super().__init__(detail)
+        self.counts = counts
+
+
 def _files_of(project: Path, root: Path, out: dict) -> dict[str, str]:
     """`{path under project: md5}` for each file one pointer out names."""
     base = root.relative_to(project).as_posix()
-    recorded = out["md5"]
-    if not recorded.endswith(".dir"):
-        return {base: recorded}
-    entries = out.get("files")
+    entries = out.get("files")  # a folder out written with its list has no top-level md5
     if entries is None:
+        recorded = out["md5"]
+        if not recorded.endswith(".dir"):
+            return {base: recorded}
         # The tree's manifest, from the project's cache. Its own md5 is the
         # pointer's, so a manifest that does not match the pointer fails here.
         # Read here rather than through mintd's reader: the check shares no
@@ -46,23 +63,65 @@ def _files_of(project: Path, root: Path, out: dict) -> dict[str, str]:
     return {f"{base}/{e['relpath']}": e["md5"] for e in entries}
 
 
-def assert_landed_match_pointers(project: Path) -> dict[str, str]:
-    """Every file each `.dvc` pointer in `project` names is on disk and hashes
-    to the pointer's md5, no other file sits in a pointer's folder, and at
-    least one file landed. Returns `{path under project: md5}`."""
-    expected: dict[str, str] = {}
-    landed: dict[str, str] = {}
+def _path_of(entry: str | dict) -> str:
+    return entry if isinstance(entry, str) else next(iter(entry))
+
+
+def _cached(entry: str | dict) -> bool:
+    return isinstance(entry, str) or (next(iter(entry.values())) or {}).get("cache", True)
+
+
+def _outs(project: Path) -> Iterator[tuple[Path, dict]]:
+    """`(workspace path, out)` for each out dvc pulls: every `.dvc` pointer's,
+    then every cached out a `dvc.lock` records, against its stage's wdir. An
+    out its `dvc.yaml` marks `cache: false` is committed to git, never pulled."""
     for pointer in sorted(project.rglob("*.dvc")):
         if not pointer.is_file():
             continue  # the `.dvc` folder itself
         for out in yaml.safe_load(pointer.read_text(encoding="utf-8"))["outs"]:
-            root = pointer.parent / out["path"]
-            expected.update(_files_of(project, root, out))
-            for f in [root] if root.is_file() else root.rglob("*"):
-                if f.is_file():
-                    landed[f.relative_to(project).as_posix()] = md5(f.read_bytes())
-    assert landed == expected, f"landed files differ from their pointers: {landed} != {expected}"
-    assert landed, f"no file landed in {project}"
+            yield pointer.parent / out["path"], out
+    for lock in sorted(project.rglob("dvc.lock")):
+        spec = lock.parent / "dvc.yaml"
+        stages = (yaml.safe_load(spec.read_text(encoding="utf-8")) or {}).get("stages", {}) if spec.is_file() else {}
+        for name, stage in (yaml.safe_load(lock.read_text(encoding="utf-8")) or {}).get("stages", {}).items():
+            body = stages.get(name.split("@")[0], {})
+            body = body.get("do", body)  # a foreach or matrix stage
+            # ponytail: a ${...} wdir or cache:false path is not expanded; expand it if a product needs it
+            wdir = lock.parent / body.get("wdir", ".")
+            uncached = {
+                os.path.normpath(wdir / _path_of(e))
+                for kind in ("outs", "metrics", "plots") for e in body.get(kind, []) if not _cached(e)
+            }
+            for out in stage.get("outs", []):
+                path = os.path.normpath(wdir / out["path"])
+                if path not in uncached:
+                    yield Path(path), out
+
+
+def assert_landed_match_pointers(project: Path) -> dict[str, str]:
+    """Every file each out in `project` names (`.dvc` pointers and cached
+    `dvc.lock` outs) is on disk and hashes to its recorded md5, no other file
+    sits in an out's folder, and at least one file landed. Returns
+    `{path under project: md5}`. On a difference it raises `Mismatch`, whose
+    `counts` names no file."""
+    expected: dict[str, str] = {}
+    landed: dict[str, str] = {}
+    for root, out in _outs(project):
+        expected.update(_files_of(project, root, out))
+        for f in [root] if root.is_file() else root.rglob("*"):
+            if f.is_file():
+                landed[f.relative_to(project).as_posix()] = md5_file(f)
+    if landed != expected or not landed:
+        both = expected.keys() & landed.keys()
+        counts = (
+            f"{len(expected.keys() - landed.keys())} missing, {sum(expected[k] != landed[k] for k in both)} differ, "
+            f"{len(landed.keys() - expected.keys())} extra, of {len(expected)} tracked"
+        )
+        detail = (
+            f"landed files differ from their pointers: {landed} != {expected}" if landed != expected
+            else f"no file landed in {project}"
+        )
+        raise Mismatch(detail, counts)
     return landed
 
 
