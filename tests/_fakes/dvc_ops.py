@@ -135,13 +135,15 @@ class _FakeDvcOps:
         self.status_result: dict[str, str] = {}
         #: `stage_names`: per folder when set, else the dvc.yaml's stage keys
         #: as written (no foreach/matrix expansion: real dvc's names are
-        #: tested with real dvc).
+        #: tested with real dvc); with no dvc.yaml it raises, as dvc does.
         self.stage_names_by_cwd: dict[Path, list[str]] = {}
         self.stage_names_raises: Exception | None = None
         self.remove_calls: list[DvcRemoveCall] = []
         self.remove_raises: Exception | None = None
         self.checkout_calls: list[DvcCheckoutCall] = []
         self.checkout_raises: Exception | None = None
+        #: targets dvc rejects: any argv naming one is refused whole, as dvc does
+        self.checkout_refuses: set[str] = set()
         # Post-checkout verification (data_pull) stats workspace paths, so a
         # fake checkout must be able to MATERIALIZE its targets. Set
         # ``workspace`` to any non-None value to enable it.
@@ -345,7 +347,11 @@ class _FakeDvcOps:
                 return list(names)
         import yaml
 
-        doc = yaml.safe_load((cwd / "dvc.yaml").read_text(encoding="utf-8")) if (cwd / "dvc.yaml").is_file() else None
+        from mintd._dvc_ops import DvcStageListError
+
+        if not (cwd / "dvc.yaml").is_file():  # as real dvc: exit 255, "dvc.yaml does not exist"
+            raise DvcStageListError(f"dvc stage list failed (exit 255): ERROR: '{cwd / 'dvc.yaml'}' does not exist")
+        doc = yaml.safe_load((cwd / "dvc.yaml").read_text(encoding="utf-8"))
         stages = doc.get("stages") if isinstance(doc, dict) else None
         return [str(s) for s in stages] if isinstance(stages, dict) else []
 
@@ -357,6 +363,12 @@ class _FakeDvcOps:
     def checkout(self, *, cwd: Path, targets: list[str] | None = None) -> None:
         if self.checkout_raises:
             raise self.checkout_raises
+        refused = [t for t in targets or [] if t in self.checkout_refuses]
+        if refused:
+            from mintd._dvc_ops import DvcCheckoutError
+
+            self.checkout_calls.append(DvcCheckoutCall(cwd=cwd, targets=targets))
+            raise DvcCheckoutError(f"dvc checkout failed (exit 255): '{refused[0]}' does not exist as an output")
         self.checkout_calls.append(DvcCheckoutCall(cwd=cwd, targets=targets))
         if (
             self.workspace is not None

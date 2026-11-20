@@ -16,7 +16,7 @@ import subprocess
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Optional, Protocol
 
 
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
@@ -586,7 +586,10 @@ def resolve_out(wdir: str, out_path: str) -> str:
     return posixpath.normpath(posixpath.join(wdir or ".", out_path))
 
 
-def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
+def parse_dvc_lock_outs(
+    project_path: Path, remote_name: str, *, declared: Collection[str] | None = None,
+    skipped: list[str] | None = None,
+) -> list[DvcOut]:
     """Parse ``project_path/dvc.lock`` into ``DvcOut`` entries for pipeline-
     stage outputs (no per-output ``.dvc`` pointer files). Slice 37 — gives
     fast-sync a way to enumerate pipeline products so they bypass DVC's
@@ -604,9 +607,12 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     skip stays off rather than dropping every out on the strength of a
     document that taught us nothing.
 
-    Not caught: a ``foreach``/``matrix`` list that SHRANK. ``fan@b`` left in
-    the lock while ``dvc.yaml`` still declares ``fan`` keeps its base, so it
-    survives here and dvc still rejects it. Closing that needs the instance
+    ``declared``, when given, is dvc's own list of the stages ``dvc.yaml``
+    declares (``DvcOps.stage_names``, foreach and matrix expanded): a lock
+    stage it doesn't hold is skipped too, and its name appended to
+    ``skipped``. Without it, a ``foreach``/``matrix`` list that SHRANK is not
+    caught: ``fan@b`` left in the lock while ``dvc.yaml`` still declares
+    ``fan`` keeps its base, so it survives here and dvc still rejects it. Closing that needs the instance
     names, and ``foreach`` may be a ``${vars}`` reference only dvc's
     templating can expand — guessing it would drop live instances instead.
 
@@ -648,6 +654,11 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     outs: list[DvcOut] = []
     for key, stage_data in lock_data["stages"].items():
         stage = str(key)  # dvc writes a name like `on` bare; YAML 1.1 reads it as a boolean
+        if declared is not None and stage not in declared:
+            logger.info("dvc.lock stage %s is not a stage dvc lists; skipping", stage)
+            if skipped is not None:
+                skipped.append(stage)
+            continue
         if stage_wdirs and stage not in stage_wdirs and stage.split("@", 1)[0] not in stage_wdirs:
             logger.info("dvc.lock stage %s no longer in dvc.yaml; skipping", stage)
             continue
@@ -742,7 +753,8 @@ def _is_fast_syncable_pipeline_out(out: DvcOut) -> bool:
 
 
 def partition_pipeline_outs(
-    project_path: Path, remote_name: str
+    project_path: Path, remote_name: str, *, declared: Collection[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[list[DvcOut], list[DvcOut]]:
     """Parse ``dvc.lock`` once and partition its stage outs.
 
@@ -750,9 +762,9 @@ def partition_pipeline_outs(
     can serve (see ``_is_fast_syncable_pipeline_out``); the second is every
     stage out in the lockfile. Callers diff the two to find the outs that must
     route to ``dvc pull``. One parse, so ``data_pull`` doesn't read the lock
-    twice.
+    twice. ``declared`` and ``skipped``: see :func:`parse_dvc_lock_outs`.
     """
-    all_outs = parse_dvc_lock_outs(project_path, remote_name)
+    all_outs = parse_dvc_lock_outs(project_path, remote_name, declared=declared, skipped=skipped)
     fast_syncable = [o for o in all_outs if _is_fast_syncable_pipeline_out(o)]
     return fast_syncable, all_outs
 
