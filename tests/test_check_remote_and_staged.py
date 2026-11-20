@@ -1002,18 +1002,21 @@ def test_staged_names_a_head_copy_it_cant_read(tmp_path: Path, head: str) -> Non
 
 
 @pytest.mark.parametrize("head", ["a-conflicted-pointer", "a-conflicted-lock-under-a-bare-tree",
-                                  "a-broken-dvc-yaml-and-no-lock-in-the-commit"])
+                                  "a-broken-dvc-yaml-and-no-lock-in-the-commit",
+                                  "a-broken-dvc-yaml-and-the-first-lock"])
 def test_staged_screens_the_head_copies_its_comparison_reads(tmp_path: Path, head: str) -> None:
     """HEAD's screen covers what the comparison reads: a changed `.dvc`
     file's HEAD copy, and HEAD's lock under a folder out `dvc commit -f`
-    rewrote as a bare tree hash. HEAD's dvc.yaml is read only beside HEAD's
-    lock, so a broken one the commit fixes, with no lock in the commit,
-    refuses nothing.
+    rewrote as a bare tree hash. HEAD's dvc.yaml is read only beside a lock
+    HEAD has, so a broken one the commit fixes refuses nothing, whether the
+    commit has no lock or adds the first one (a first `dvc repro`, not
+    pushed yet).
 
     Mutations: screen no `.dvc` file at HEAD -> a-conflicted-pointer passes,
     red; leave a bare tree out of "the commit records a file with no ID" ->
     the bare-tree case passes, red; write HEAD's dvc.yaml into every HEAD
-    tree -> the dvc.yaml case refused, red.
+    tree -> both dvc.yaml cases refused, red; write it whenever the commit
+    changes dvc.lock -> the first-lock case refused, red.
     """
     from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
 
@@ -1042,12 +1045,20 @@ def test_staged_screens_the_head_copies_its_comparison_reads(tmp_path: Path, hea
                                        f"    - path: data/out\n      hash: md5\n      md5: {tree}\n      size: 4\n"
                                        "      nfiles: 2\n")
         want = "dvc.lock"
-    else:
+    elif head == "a-broken-dvc-yaml-and-no-lock-in-the-commit":
         (proj / "dvc.yaml").write_text(conflicted("stages: {}\n"))
         _folder_pointer(proj, "a", {"x.csv": (files["a.csv"], "va")})
         _commit(proj)
         (proj / "dvc.yaml").write_text("stages: {}\n")
         _folder_pointer(proj, "b", {"x.csv": (files["b.csv"], None)})  # new data, not pushed yet
+        want = None
+    else:
+        stage = "stages:\n  build:\n    cmd: run\n    outs:\n    - data/x.csv\n"
+        (proj / "dvc.yaml").write_text(conflicted(stage))
+        _folder_pointer(proj, "a", {"x.csv": (files["a.csv"], "va")})
+        _commit(proj)
+        (proj / "dvc.yaml").write_text(stage)
+        (proj / "dvc.lock").write_text(_lock("build", _md5(b"x\n"), None))  # the first lock, not pushed yet
         want = None
     _git(proj, "add", "-A")
     got = check_staged(proj)
