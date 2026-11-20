@@ -1709,9 +1709,9 @@ def test_s3_server_records_each_object_get_and_the_bytes_it_served(s3_server) ->
 
 
 def test_s3_server_fails_a_named_get_with_a_checksummed_500(s3_server, tmp_path: Path) -> None:
-    """A path in `fail_gets` answers its GET with the 500 real S3 sent,
-    checksum header included, until it is removed; HEAD still answers, and the
-    failed GET is not a download. The canary: through that header botocore
+    """A path in `fail_gets` answers its GET with the 5xx real S3 sent,
+    checksum header included, until it is removed or for a count; HEAD still
+    answers, and a failed GET is recorded in `failed_gets`, not as a download. The canary: through that header botocore
     raises AttributeError from the call mintd's download makes, the failure #68
     fixed; if a botocore upgrade stops that, story 9 can no longer catch it. A
     count fails that many GETs, then the key serves. Mutations that turn it
@@ -1724,7 +1724,7 @@ def test_s3_server_fails_a_named_get_with_a_checksummed_500(s3_server, tmp_path:
 
     s3, key = s3_server.client, "lab/p/a.csv"
     s3.put_object(Bucket=BUCKET, Key=key, Body=b"alpha\n")
-    s3_server.fail_gets[f"/{BUCKET}/{key}"] = None
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (500, None)
     with pytest.raises(urllib.error.HTTPError) as failed:
         urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
     assert failed.value.code == 500 and failed.value.headers["x-amz-checksum-crc32"]
@@ -1734,10 +1734,12 @@ def test_s3_server_fails_a_named_get_with_a_checksummed_500(s3_server, tmp_path:
     assert s3_server.gets == []
     del s3_server.fail_gets[f"/{BUCKET}/{key}"]
     assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
-    s3_server.fail_gets[f"/{BUCKET}/{key}"] = 1  # a one-off 500: the next GET serves
-    with pytest.raises(urllib.error.HTTPError):
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (503, 1)  # a one-off 503: the next GET serves
+    with pytest.raises(urllib.error.HTTPError) as once:
         urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
+    assert once.value.code == 503 and once.value.headers["x-amz-checksum-crc32"]
     assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
+    assert s3_server.failed_gets == [f"/{BUCKET}/{key}"] * 3  # the 500 twice (urlopen, the canary), the 503 once
 
 
 def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_path: Path) -> None:

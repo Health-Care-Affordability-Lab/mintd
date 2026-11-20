@@ -127,7 +127,8 @@ def _on_disk(project: Path) -> tuple[list[str], Reader]:
 
 def _at_rev(repo: Path, rev: str) -> tuple[list[str], Reader]:
     """`repo`'s pointers and locks as git holds them at `rev`, for `_outs`."""
-    tracked = set(_git(["ls-tree", "-r", "--name-only", rev], cwd=repo).splitlines())
+    # -z: a path with non-ASCII or special characters comes back as it is, not quoted
+    tracked = set(filter(None, _git(["ls-tree", "-r", "-z", "--name-only", rev], cwd=repo).split("\0")))
     rels = [r for r in tracked if r.endswith(".dvc") or posixpath.basename(r) == "dvc.lock"]
 
     def read(rel: str) -> str | None:

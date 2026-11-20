@@ -82,7 +82,7 @@ def test_cache_push_then_pull_lands_every_file_outside_dvc(product, mintd, s3_se
 
 def test_one_file_that_fails_fails_alone_and_a_rerun_lands_it(product, mintd, s3_server, tmp_path: Path) -> None:
     clone = _push_and_clone(product, mintd, s3_server, tmp_path)
-    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = None  # every GET, until cleared
+    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = (500, None)  # every GET, until cleared
 
     failed = mintd("cache", "pull", cwd=clone)
 
@@ -105,10 +105,10 @@ def test_one_file_that_fails_fails_alone_and_a_rerun_lands_it(product, mintd, s3
 
 def test_a_one_off_500_is_retried_and_the_pull_lands_everything(product, mintd, s3_server, tmp_path: Path) -> None:
     clone = _push_and_clone(product, mintd, s3_server, tmp_path)
-    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = 1
+    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = (500, 1)
 
     pulled = mintd("cache", "pull", cwd=clone)
 
     assert pulled.returncode == 0, pulled.stderr
     assert _landed(clone) == {rel: md5(body) for rel, body in FILES.items()}
-    assert s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] == 0, "the 500 was never served"
+    assert s3_server.failed_gets == [f"/{BUCKET}/{product.prefix}/cache/{FAILING}"], "the 500 was served once"

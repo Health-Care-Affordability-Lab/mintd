@@ -22,8 +22,9 @@ Notes:
   then refuses the push, so no false ✓ prints either way. `_push_verify`
   matching a foreach group only by its plain name turns the by-name case red;
   a size-only pin judged proven turns that case red; a push that leaves its
-  pointers uncommitted, or an import that reads a pin without its version id,
-  turns the second-release case red; the failed upload, see its test.
+  pointers uncommitted, or that reads every file's pinned version id as absent
+  (`_fast_sync_ops._extract_version_id_from_file_entry`), turns the
+  second-release case red; the failed upload, see its test.
 """
 
 from __future__ import annotations
@@ -92,7 +93,9 @@ def test_push_then_a_teammate_imports_my_bytes(product, mintd, s3_server, fresh_
 
 def test_each_release_brings_the_bytes_it_pinned(product, mintd, s3_server, fresh_project) -> None:
     """A file changed since the last release: its key holds two versions, and
-    each release's pins bring that release's bytes, the old one by `--rev`."""
+    each release's pins bring that release's bytes, the old one by `--rev`.
+    The imports run `dvc import`, so dvc's own transfer fetches each pinned
+    version; mintd's fast lane (clone and pull) is not what serves them."""
     producer = product.producer
     first, old = producer.head_sha, product.outs["data/final"]["a.csv"]  # the product fixture's release
     new = b"alpha, revised\n"
