@@ -278,15 +278,14 @@ def _apply_publish(
     from ._storage_state import inspect_storage
     from .data_ops import _local_redirect
 
-    default = inspect_storage(project_path).dvc_remote_name
-    redirect = _local_redirect(project_path, default, named=False) if default else None
-    if redirect is not None:
-        _atomic_write_json(metadata_path, original_metadata_json)
-        raise DvcPushFailed(redirect, recovery_hint=f"{rolled_back} Remove the override, then rerun `mintd publish`.")
     try:
+        default = inspect_storage(project_path).dvc_remote_name
+        redirect = _local_redirect(project_path, default, named=False) if default else None
+        if redirect is not None:
+            raise PushRefused(redirect, hint="Remove the override, then rerun `mintd publish`.")
         prepared = prepare(project_path, remote_arg=None, selection=None, aws_profile=aws_profile,
                            memo_path=memo_path)
-    except (PushRefused, S3AccessDenied) as exc:
+    except (PushRefused, S3AccessDenied, MintdError) as exc:  # MintdError: a config.local dvc can't read
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
             str(exc), recovery_hint=f"{rolled_back} {getattr(exc, 'hint', None) or ''}".strip(),

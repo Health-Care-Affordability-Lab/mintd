@@ -29,7 +29,6 @@ Boundaries:
 
 from __future__ import annotations
 
-import configparser
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,19 +37,23 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import imports
-from ._fast_sync_ops import (
+from ._dvc_state import (
     _DEFAULT_DVC_CACHE_REL,
-    _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
     DvcFileEntry,
     cache_path_for,
-    ensure_dir_manifest,
+    default_remote_in,
+    default_remote_name,
     is_cached,
     outs_for_target,
     outs_materialized,
     parse_remote_config_text,
     parse_s3_url,
     read_cached_dir_manifest,
+    read_dvc_config_text,
+)
+from ._fast_sync_ops import (
+    ensure_dir_manifest,
     fetch_to_cache,
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
@@ -95,12 +98,9 @@ class _Producer:
 
 def _consumer_remote_name(project_path: Path) -> str:
     """Best-effort default DVC remote name for the consumer project."""
-    cfg = project_path / ".dvc" / "config"
     try:
-        cp = configparser.ConfigParser()
-        cp.read(cfg)
-        return _default_remote_name_from_config(cp) or "origin"
-    except Exception:
+        return default_remote_name(project_path) or "origin"
+    except MintdError:
         return "origin"
 
 
@@ -155,21 +155,20 @@ def _resolve_producer(
         return None, RescueResult(ok=False, reason=reason, hint=hint)
 
     config_text = config_bytes.decode("utf-8", errors="replace")
-    cp = configparser.ConfigParser()
     try:
-        cp.read_string(config_text)
-    except configparser.Error as exc:
+        producer_conf = read_dvc_config_text(config_text, "the producer's .dvc/config")
+    except MintdError as exc:
         return None, RescueResult(
             ok=False,
             reason=f"could not parse the producer's .dvc/config ({exc})",
             hint="ask the producer to check their .dvc/config",
         )
-    remote_name = _default_remote_name_from_config(cp)
+    remote_name = default_remote_in(producer_conf)
     if remote_name is None:
         return None, RescueResult(
             ok=False,
             reason=(
-                f"the producer's .dvc/config ({dep.producer_repo}) has no single "
+                f"the producer's .dvc/config ({dep.producer_repo}) sets no "
                 f"default remote"
             ),
             hint="ask the producer to set a [core] remote in .dvc/config",

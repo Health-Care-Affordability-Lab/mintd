@@ -135,7 +135,7 @@ def test_add_on_a_directory_writes_a_dir_pointer(ops, workspace: Path) -> None:
 
     The suffix is the only dir marker in a `.dvc` file — there is no
     `is_dir` YAML field — and production dispatches on exactly it
-    (`_fast_sync_ops` sets `is_dir=md5.endswith(".dir")`). A fake that
+    (`_dvc_state` sets `is_dir=md5.endswith(".dir")`). A fake that
     writes a plain md5 for a directory add is not laxer, it is
     WRONG-SHAPED: every downstream reader sees a file where the caller
     added a directory. `nfiles` counts FILES, recursively — the nested

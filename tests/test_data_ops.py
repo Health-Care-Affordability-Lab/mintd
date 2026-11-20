@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from mintd._dvc_ops import DvcPullError, pull_retry_hint
-from mintd._fast_sync_ops import EMPTY_DIR_MD5, DvcFileEntry, DvcOut, cache_path_for
+from mintd._dvc_state import EMPTY_DIR_MD5, DvcFileEntry, DvcOut, cache_path_for
 from mintd.model import FastPullResult
 from mintd.data_ops import (
     _out_aggregate_bytes,
@@ -17,6 +17,18 @@ from mintd.data_ops import (
 from tests._fakes.dvc_ops import DvcPullCall, _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.reporter import RecordingReporter
+
+
+@pytest.fixture(autouse=True)
+def _the_project_names_its_default_remote(tmp_path: Path, request: pytest.FixtureRequest) -> None:
+    """dvc pulls and pushes a project's own data only through its default remote, and refuses
+    without one; every lab repo names one. These tests drive data_pull and data_push with
+    doubles, in that shape. A test that runs real dvc makes its own project (`dvc init`
+    refuses a folder that already holds `.dvc`)."""
+    if "real_dvc" in request.fixturenames:
+        return
+    (tmp_path / ".dvc").mkdir(exist_ok=True)
+    (tmp_path / ".dvc" / "config").write_text('[core]\n    remote = origin\n[remote "origin"]\n    url = s3://b/p\n')
 
 
 def test_data_pull_default_never_issues_a_blanket_dvc_pull(tmp_path: Path) -> None:
@@ -112,6 +124,15 @@ def test_data_pull_no_targets_discovers_and_routes_through_fast_sync(
     # Default fast-fake returns success=False, fallback_targets=[] —
     # meaning no fallback dvc pull and no checkout to do.
     assert fake.pull_calls == []
+
+
+def test_data_pull_reads_a_remote_named_in_another_case_as_dvc_does(tmp_path: Path) -> None:
+    """dvc looks remote names up lowercased, and mintd's reader keeps them so: `--remote Origin`
+    is the remote `origin`. Mutation that must redden this: pass the name on as given."""
+    (tmp_path / "a.dvc").write_text("outs:\n- md5: 0123456789abcdef0123456789abcdef\n  path: a\n")
+    fast_fake = _FakeFastSyncOps()
+    data_pull(tmp_path, targets=None, dvc_ops=_FakeDvcOps(), fast_sync_ops=fast_fake, remote="Origin")
+    assert fast_fake.calls[0].remote_name == "origin"
 
 
 def test_data_pull_no_targets_empty_repo_returns_early(
@@ -1478,7 +1499,7 @@ def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_cache_probe(
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     fast_fake.raises = RuntimeError("boom mid-sync")
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged: a value of bad.csv"):
         data_pull(
@@ -1504,7 +1525,7 @@ def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_blocked_targets_probe(
         blocked_reasons={"data/bad.csv.dvc": "unparseable"},
         reason="unparseable",
     )
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged"):
         data_pull(
@@ -1929,7 +1950,7 @@ def test_a_lock_stage_dvc_does_not_list_is_never_listed(tmp_path: Path) -> None:
     still declares. Given dvc's own stage names, the lock reader skips it and
     says so, so it is never downloaded or checked out.
     Mutation that must redden this: keep a stage dvc doesn't list."""
-    from mintd._fast_sync_ops import parse_dvc_lock_outs
+    from mintd._dvc_state import parse_dvc_lock_outs
 
     _lock_with_fan(tmp_path)
     skipped: list[str] = []
@@ -2019,7 +2040,7 @@ def test_a_step_whose_item_ends_in_a_space_is_kept(real_dvc, tmp_path: Path) -> 
 
     from mintd._config import Timeouts
     from mintd._dvc_ops import SubprocessDvcOps
-    from mintd._fast_sync_ops import parse_dvc_lock_outs
+    from mintd._dvc_state import parse_dvc_lock_outs
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
     # Python writes the file, in double quotes, so cmd.exe runs it as a POSIX shell does.

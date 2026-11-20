@@ -64,6 +64,8 @@ class _NoopCloneGitOps(_FakeRegistryGitOps):
         self.clone_calls.append(CloneCall(url, Path(dest), shallow, branch))
         Path(dest).mkdir(parents=True, exist_ok=True)
         (Path(dest) / ".dvc").mkdir()
+        # A product's committed config names its default remote (every catalog repo does), which dvc pulls from.
+        (Path(dest) / ".dvc" / "config").write_text('[core]\n    remote = origin\n[remote "origin"]\n    url = s3://b/p\n')
         for target in self.tracks:
             f = Path(dest) / f"{target}.dvc"
             f.parent.mkdir(parents=True, exist_ok=True)
@@ -80,7 +82,7 @@ def test_clone_stops_on_a_cut_pointer_without_pulling(tmp_path: Path, monkeypatc
     Mutation: let `outs_for_target` swallow `PointerCutShort` -> the fallback
     `dvc pull` runs, red.
     """
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     class _CutCloneGitOps(_NoopCloneGitOps):
         def clone(self, url: str, dest: Path, *, shallow: bool = True, branch: str | None = None) -> None:
