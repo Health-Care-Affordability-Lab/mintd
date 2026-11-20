@@ -915,15 +915,16 @@ def test_staged_names_a_nested_project_s_pointers_from_the_outer_one(tmp_path: P
         assert [f.message for f in check_staged(sub)] == ["x.dvc drops S3 version IDs from 1 unchanged file(s) (x)"]
 
 
-@pytest.mark.parametrize("change", ["ids-dropped", "stage-moved-to-the-root"])
+@pytest.mark.parametrize("change", ["re-run-and-pushed", "ids-dropped", "stage-moved-to-the-root"])
 def test_staged_names_a_nested_dvc_lock_it_doesnt_read(tmp_path: Path, change: str) -> None:
-    """Only the root `dvc.lock` is read: a nested one the commit changes is
-    named, not passed, a deleted one included, since its stages' IDs may
-    have moved (here into the root lock, without them). A commit that only
-    removes a nested pipeline is refused too, an accepted false refusal.
+    """Only the root `dvc.lock` is read: a nested one the commit changes,
+    or deletes (its stages' IDs may have moved, here into the root lock), is
+    named as a warning, not checked. Re-running a nested pipeline and
+    pushing it is everyday work, so the commit isn't refused.
 
-    Mutations: drop the finding -> [], red; name a nested lock only when
-    it isn't deleted -> stage-moved-to-the-root passes, red.
+    Mutations: drop the warning -> [], red; name a nested lock only when
+    it isn't deleted -> stage-moved-to-the-root passes, red; make it an
+    error -> the re-run refused, red.
     """
     proj = _repo(tmp_path)
     md5 = _md5(b"x\n")
@@ -931,7 +932,9 @@ def test_staged_names_a_nested_dvc_lock_it_doesnt_read(tmp_path: Path, change: s
     (proj / "pipe" / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - x.csv\n")
     (proj / "pipe" / "dvc.lock").write_text(_lock("build", md5, "vx", path="x.csv"))
     _commit(proj)
-    if change == "ids-dropped":
+    if change == "re-run-and-pushed":  # new data, every ID present
+        (proj / "pipe" / "dvc.lock").write_text(_lock("build", _md5(b"y\n"), "vy", path="x.csv"))
+    elif change == "ids-dropped":
         (proj / "pipe" / "dvc.lock").write_text(_lock("build", md5, None, path="x.csv"))
     else:
         _git(proj, "rm", "-q", "pipe/dvc.yaml", "pipe/dvc.lock")
@@ -939,9 +942,83 @@ def test_staged_names_a_nested_dvc_lock_it_doesnt_read(tmp_path: Path, change: s
         (proj / "dvc.lock").write_text(_lock("build", md5, None, path="pipe/x.csv"))
     _git(proj, "add", "-A")
     (finding,) = check_staged(proj)
-    assert (finding.severity, finding.kind) == ("error", "staged_unchecked")
-    assert finding.message == ("can't check the staged commit: only the root dvc.lock is read, and the commit "
-                               "changes pipe/dvc.lock")
+    assert (finding.severity, finding.kind) == ("warning", "staged_unchecked")
+    assert finding.message == "only the root dvc.lock is read, so the pins in pipe/dvc.lock aren't checked"
+    assert cli.main(["check", "--staged", str(proj)]) == 0
+
+
+@pytest.mark.parametrize("shape", ["its-stage-dropped-from-dvc-yaml", "dvc-yaml-removed"])
+def test_staged_finds_an_id_moved_out_of_an_unchanged_lock(tmp_path: Path, shape: str) -> None:
+    """An out leaves a stage the commit no longer declares (or a dvc.yaml
+    it removes) for a new `.dvc` file with the same bytes and no ID, while
+    dvc.lock itself is unchanged: HEAD's lock is read whenever a pointer
+    changes, so the dropped ID is found.
+
+    Mutation: read HEAD's lock only when the commit changes it -> [], red.
+    """
+    proj = _repo(tmp_path)
+    md5 = _md5(b"x\n")
+    (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - data/x.csv\n")
+    (proj / "dvc.lock").write_text(_lock("build", md5, "vx"))
+    _commit(proj)
+    if shape == "its-stage-dropped-from-dvc-yaml":
+        (proj / "dvc.yaml").write_text("stages: {}\n")
+    else:
+        _git(proj, "rm", "-q", "dvc.yaml")
+    (proj / "data").mkdir(exist_ok=True)
+    (proj / "data" / "x.csv.dvc").write_text(_file_pointer(md5, None, path="x.csv"))
+    _git(proj, "add", "-A")
+    assert [f.message for f in check_staged(proj)] == [
+        "data/x.csv.dvc drops S3 version IDs from 1 unchanged file(s) (data/x.csv)"]
+
+
+@pytest.mark.parametrize("shape", ["a-file", "a-bare-tree", "a-bare-tree-and-the-other-deleted"])
+def test_staged_lets_through_a_key_another_staged_pointer_still_pins(tmp_path: Path, shape: str) -> None:
+    """Two pointers record one key, one with its ID: a commit touching both
+    drops no ID, since the staged commit still records it for those bytes,
+    whether the other records the file with no ID or as part of a folder
+    out written back as a bare tree hash. When the one with the ID goes
+    too, the bare tree still matches HEAD's files, each counted once, and
+    the drop is refused.
+
+    Mutations: refuse an entry with no ID whatever the others record ->
+    a-file red; the same for a bare tree's files -> a-bare-tree red; count
+    HEAD's files once per pointer -> the tree doesn't match and the last
+    case passes, red.
+    """
+    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+
+    proj = _repo(tmp_path)
+    md5 = _md5(b"x\n")
+    (proj / "data").mkdir()
+    if shape == "a-file":
+        (proj / "data" / "x.csv.dvc").write_text(_file_pointer(md5, "vx", path="x.csv"))
+        (proj / "data" / "copy.dvc").write_text(_file_pointer(md5, None, path="x.csv"))  # same key, never an ID
+        _commit(proj)
+        for rel, vid in (("data/copy.dvc", None), ("data/x.csv.dvc", "vx")):
+            (proj / rel).write_text(_file_pointer(md5, vid, path="x.csv") + "meta:\n  note: hi\n")
+    else:
+        (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - data/out\n")
+        lock = ["schema: '2.0'", "stages:", "  build:", "    cmd: run", "    outs:", "    - path: data/out",
+                "      hash: md5", "      files:", "      - relpath: a.csv", f"        md5: {md5}", "        size: 2",
+                "        cloud:", f"          {REMOTE}:", f"            etag: {md5}", "            version_id: va"]
+        (proj / "dvc.lock").write_text("\n".join(lock) + "\n")
+        _folder_pointer(proj, "out", {"a.csv": (md5, "va")})  # data/out.dvc: the same key, with its ID
+        _commit(proj)
+        tree = dir_manifest_md5([DvcFileEntry(md5=md5, relpath="a.csv", size=2)])
+        (proj / "dvc.lock").write_text("schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n"
+                                       f"    - path: data/out\n      hash: md5\n      md5: {tree}\n      size: 2\n"
+                                       "      nfiles: 1\n")
+        if shape == "a-bare-tree":
+            (proj / "data" / "out.dvc").write_text((proj / "data" / "out.dvc").read_text() + "meta:\n  note: hi\n")
+        else:
+            _git(proj, "rm", "-q", "data/out.dvc")
+    _git(proj, "add", "-A")
+    if shape == "a-bare-tree-and-the-other-deleted":
+        assert [f.message for f in check_staged(proj)] == [
+            "dvc.lock drops S3 version IDs from 1 unchanged file(s) (data/out/a.csv)"]
+    else:
+        assert check_staged(proj) == []
 
 
 @pytest.mark.parametrize("remote", ["not-version-aware", "an-out-s-own"])

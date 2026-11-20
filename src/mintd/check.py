@@ -671,18 +671,20 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     IDs from files whose bytes it doesn't change (``dvc commit -f <stage>``
     does)? Offline: the staged ``.dvc`` files and root ``dvc.lock`` against
     HEAD's copies of every pointer the commit changes, deleted ones
-    included, each tree read with its own ``dvc.yaml`` through
-    ``publishable_scope``, the parsing push uses. A file is matched by its
-    S3 identity, its path, so a pointer or stage renamed, or an out moved
-    between a ``.dvc`` file and a stage, still compares. A folder out
+    included, and HEAD's root ``dvc.lock`` whenever a pointer changes, each
+    tree read with its own ``dvc.yaml`` through ``publishable_scope``, the
+    parsing push uses. A file is matched by its S3 identity, its path, so a
+    pointer or stage renamed, or an out moved between a ``.dvc`` file and a
+    stage, still compares; its ID is dropped only when no staged entry for
+    the same bytes at that key still records one. A folder out
     ``dvc commit -f`` rewrote as a bare ``.dir`` md5 is compared by its tree
     when that tree isn't in the local cache. A changed md5, added IDs, a
     removed out or pointer, a new file and the repository's first commit
     pass, and so do this project's readable pointers on a remote push pins
     nothing on. HEAD's copies are screened too: one dvc couldn't read is
     named when the commit records a file with no ID. Staged pointers it can't read here
-    are named: another DVC project's (whatever this project's remote) and a
-    nested ``dvc.lock``, deleted ones included. Git is read
+    are named: another DVC project's (whatever this project's remote), an
+    error, and a nested ``dvc.lock``, changed or deleted, a warning. Git is read
     relative to the project, so a project below its repository's root reads
     the same; a git failure raises rather than pass.
 
@@ -747,7 +749,10 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
         roots = {"staged": Path(tmp) / "staged", "head": Path(tmp) / "head"}
         read = {"staged": lambda rel: git.index_text(project_path, rel),
                 "head": lambda rel: git.head_text(project_path, f"./{rel}")}
-        for which, rels in (("staged", staged), ("head", changed)):
+        # HEAD's root lock whenever a pointer changes: an out can move from an
+        # unchanged lock into a changed .dvc file.
+        head_rels = changed if "dvc.lock" in changed else [*changed, "dvc.lock"]
+        for which, rels in (("staged", staged), ("head", head_rels)):
             texts = {rel: read[which](rel) for rel in rels}
             # Each tree's own dvc.yaml, for its lock's wdirs and stages. HEAD's
             # matters only beside a lock HEAD has: screened without one, a
@@ -763,11 +768,15 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
                 return findings  # not version-aware: nothing is pinned by version, so nothing to drop
         except PushRefused as exc:  # push refuses it too
             return [*findings, *unchecked(str(exc), hint=exc.hint)]
-        # A nested lock's pins, kept, changed or moved out of it by a deletion, aren't compared.
+        # A nested lock's pins, kept, changed or moved out of it by a deletion,
+        # aren't compared. Re-running a nested pipeline is everyday work, so
+        # the lock is named, not refused.
         nested = sorted(rel for status, rel in ours if rel.endswith("/dvc.lock"))
         if nested:
-            findings += unchecked(f"only the root dvc.lock is read, and the commit changes {abbreviate(nested)}",
-                                  hint="check by hand that its files keep their S3 version IDs, then commit")
+            findings.append(CheckFinding(
+                severity="warning", section="producer", kind="staged_unchecked",
+                message=f"only the root dvc.lock is read, so the pins in {abbreviate(nested)} aren't checked",
+            ))
         scopes = {which: publishable_scope(root, remote=name, prefix="", cache_dir=dvc_cache_dir(project_path),
                                            dvc_files=[p for p in (changed if which == "head" else dvc_files)
                                                       if p.endswith(".dvc")])
@@ -783,19 +792,24 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
             return [*findings, *(f for rel, why in head_unreadable for f in unchecked(
                 f"HEAD's {rel} can't be read ({why}), so the IDs it records can't be compared",
                 hint="run mintd data push, which records the IDs, then commit"))]
+    # A file's ID is dropped when HEAD records one for its bytes and no staged
+    # entry for those bytes at that key still does (two pointers can record one key).
     pinned = {(e.path, e.md5) for e in scopes["head"].entries if e.version_id}  # HEAD's, by S3 identity
+    kept = {(e.path, e.md5) for e in scopes["staged"].entries if e.version_id}
     dropped: dict[str, list[str]] = {}
     for e in scopes["staged"].entries:
-        if not e.version_id and (e.path, e.md5) in pinned:
+        if not e.version_id and (e.path, e.md5) in pinned - kept:
             dropped.setdefault(e.pointer, []).append(e.path)
     # A staged folder out recorded as a bare .dir md5 whose tree isn't cached
     # (dvc commit -f's shape): the same tree as HEAD's file list means the
     # same files, and every ID HEAD recorded for them is gone.
     for (pointer, out), md5 in bare.items():
-        files = [e for e in scopes["head"].entries if e.out == out]
+        # once per file: two of HEAD's pointers can record the same folder
+        files = list({(e.relpath, e.md5): e for e in scopes["head"].entries if e.out == out}.values())
         tree = dir_manifest_md5([DvcFileEntry(md5=e.md5, relpath=e.relpath or "", size=e.size or 0) for e in files])
-        if files and md5 == tree and any(e.version_id for e in files):
-            dropped.setdefault(pointer, []).extend(e.path for e in files if e.version_id)
+        lost = [e.path for e in files if e.version_id and (e.path, e.md5) not in kept]
+        if files and md5 == tree and lost:
+            dropped.setdefault(pointer, []).extend(lost)
     return [*findings, *(CheckFinding(
         severity="error", section="producer", kind="staged_drops_version_ids", source=project_path / pointer,
         message=f"{pointer} drops S3 version IDs from {len(paths)} unchanged file(s) ({abbreviate(sorted(paths))})",
