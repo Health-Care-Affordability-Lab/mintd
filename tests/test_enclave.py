@@ -42,6 +42,7 @@ from mintd.enclave import (
     _records,
     _member,
     _check_against_producer,
+    _hold,
     _Version,
     enclave_package,
 )
@@ -1011,9 +1012,9 @@ def test_the_producer_check_reads_every_pointer_shape(tmp_path: Path) -> None:
     lock = {"stages": {"s": {"outs": [{"path": f"data/final/{r}", "md5": m} for r, m in files]}}}
 
     def anchored(v: _Version, doc: dict, base: str = "data") -> bool:
-        def match(path: str) -> tuple[str | None, str | None]:
-            identity, kind = _match_out(doc, path, base_dir=base)
-            return identity or _POINTER_ABSENT, kind
+        def match(path: str) -> tuple[str | None, str | None, str]:
+            identity, kind, within = _match_out(doc, path, base_dir=base)
+            return identity or _POINTER_ABSENT, kind, within
         return _check_against_producer(v, match, tmp_path / "x.dvc", tmp_path)
 
     folder = _Version("demo", "data/final", "c" * 40, "9" * 32 + ".dir", tmp_path, files)
@@ -1023,11 +1024,16 @@ def test_the_producer_check_reads_every_pointer_shape(tmp_path: Path) -> None:
         anchored(replace(sub, files=(("a.csv", "1" * 32), ("b.csv", "3" * 32))), per_file)
     with pytest.raises(ChecksumMismatch):
         anchored(folder, tree)
+    # The file one folder too deep: the producer lists sub/a.csv, the import
+    # holds it at sub/sub/a.csv. Placed at the base check's matcher returns,
+    # the entries do not match; a guess over every suffix of the path did.
+    with pytest.raises(ChecksumMismatch):
+        anchored(replace(sub, files=(("sub/a.csv", "1" * 32), ("sub/b.csv", "2" * 32))), per_file)
     assert not anchored(sub, tree)
     assert not anchored(folder, lock, base="")
     assert not anchored(folder, {"outs": []})
     with pytest.raises(MintdError, match="could not read"):
-        _check_against_producer(folder, lambda p: (None, None), tmp_path / "x.dvc", tmp_path)
+        _check_against_producer(folder, lambda p: (None, None, ""), tmp_path / "x.dvc", tmp_path)
 
 
 def test_a_files_list_beside_a_tree_md5_is_not_read(world) -> None:
@@ -1104,3 +1110,69 @@ def test_two_paths_inside_a_tree_both_cross_with_a_warning(world) -> None:
     assert [w.split(":")[0] for w in _bundle(archive)[3]["warnings"]] == [
         f"demo data/final/sub at {world.pin1[:7]}", f"demo data/final/sub/é.csv at {world.pin1[:7]}",
     ]
+
+
+def test_a_folder_list_naming_a_file_twice_is_refused_at_its_root(world) -> None:
+    """The producer names data/one.csv exactly. The data import's tree on disk,
+    re-hashed to match its name, lists one.csv twice: the good md5, then an
+    evil one, with the copy holding the evil bytes. Read first-entry, the
+    producer check passed; zipped last-entry, the evil bytes crossed. dvc
+    never lists a path twice, so the tree is not one it wrote."""
+    pin = world.producer.publish({"data/final": FOLDER, "data/one.csv": b"one\n"}, message="one file")
+    _rows_for(world, f"pin: {pin}\n    source_path: data/one.csv")
+    world.ops.init(cwd=world.enclave)
+    import_product(world.client, world.ops, "demo", cwd=world.enclave, dest_root=world.enclave / "data" / "imports",
+                   path="data", rev=pin)
+    (pointer,) = (world.enclave / "data" / "imports").rglob("data.dvc")
+    doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
+    cache = dvc_cache_dir(world.enclave)
+    entries = read_cached_dir_manifest(cache, doc["outs"][0]["md5"]) or []
+    doubled = entries + [replace(e, md5=_md5(b"evil\n")) for e in entries if e.relpath == "one.csv"]
+    doc["outs"][0]["md5"] = ensure_dir_manifest(cache, doubled)
+    pointer.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    copy = pointer.parent / "data" / "one.csv"
+    copy.unlink()
+    copy.write_bytes(b"evil\n")
+
+    with pytest.raises(ChecksumMismatch, match="lists a path twice"):
+        _package(world)
+
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+
+
+def test_a_zip_member_with_two_sources_that_disagree_is_refused(tmp_path: Path) -> None:
+    """Where bytes enter the zip: a second source for one member with another
+    md5 is refused, whatever the source, so a later entry never wins silently."""
+    v = _Version("demo", "data/final", "c" * 40, "9" * 32 + ".dir", tmp_path, (("a.csv", "1" * 32),))
+    members: dict = {}
+    _hold(members, "data/demo/v/data/final/a.csv", (tmp_path / "a.csv", "1" * 32, v), "again")
+    _hold(members, "data/demo/v/data/final/a.csv", (tmp_path / "a.csv", "1" * 32, v), "again")
+
+    with pytest.raises(ChecksumMismatch, match="would be bundled twice") as raised:
+        _hold(members, "data/demo/v/data/final/a.csv", (tmp_path / "a.csv", "2" * 32, v), "again")
+
+    assert raised.value.hint == "again"
+    assert members["data/demo/v/data/final/a.csv"][1] == "1" * 32
+
+
+def test_the_producer_pointer_is_read_as_dvc_writes_it(tmp_path: Path) -> None:
+    """DVC (YAML 1.2) writes a file named `no` unquoted. Read as PyYAML's 1.1
+    reads it, that is the boolean False, and the producer's `.files` digest
+    could never match the import, which every local reader reads as 1.2."""
+    from mintd._producer_git_ops import FetchError
+    from mintd.check import _pointer_match
+
+    m1, m2 = "1" * 32, "2" * 32
+    pointer = f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: {m1}\n  - relpath: no\n    md5: {m2}\n"
+
+    class Producer:
+        def fetch_path_at(self, repo: str, pin: str, path: str) -> bytes:
+            if path == "data/final.dvc":
+                return pointer.encode()
+            raise FetchError.path_missing(repo, pin, path)
+
+    folder = _Version("demo", "data/final", "c" * 40, "9" * 32 + ".dir", tmp_path, (("a.csv", m1), ("no", m2)))
+
+    assert _check_against_producer(
+        folder, lambda p: _pointer_match(Producer(), "demo", "c" * 40, p, {}), tmp_path / "x.dvc", tmp_path
+    )

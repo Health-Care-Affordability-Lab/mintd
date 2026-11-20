@@ -391,6 +391,16 @@ def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = 
             if (not isinstance(fe, dict) or fe.get("md5") is None or fe.get("relpath") is None
                     or not _scalars_ok(fe) or not _cloud_ok(fe)):
                 raise PointerCutShort(pointer, f"a file entry of {name} is incomplete")
+        # A relpath is a name: text, or a bare one that reads as a number or a
+        # boolean (see `_scalars_ok`), never a mapping, list, set, bytes or date.
+        if not all(isinstance(fe["relpath"], (str, int, float)) for fe in files):
+            raise PointerCutShort(pointer, f"a file entry of {name} is not in the shape dvc writes")
+        # dvc lists each path once; a second entry would answer for the same
+        # file with other bytes, depending on which entry a reader takes.
+        # Compared as the readers read it, `str(relpath)`.
+        relpaths = [str(fe["relpath"]) for fe in files]
+        if len(set(relpaths)) != len(relpaths):
+            raise PointerCutShort(pointer, f"the file list of {name} lists a path twice, which dvc never writes")
 
 
 def check_dvc_file(pointer: Path | str, doc: Any) -> None:
@@ -897,29 +907,17 @@ def is_cached(cache_dir: Path, md5: str) -> bool:
     return cache_path_for(cache_dir, md5).exists()
 
 
-def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntry] | None":
-    """Parse a locally-cached ``.dir`` manifest into file entries.
-
-    ``dir_md5`` may arrive with or without the ``.dir`` suffix; the cache
-    filename always carries it (DVC's own layout — see ensure_dir_manifest).
-    Returns ``None`` when the manifest is absent, when its bytes do not hash
-    to ``dir_md5`` (a changed or damaged cache, which can stay valid JSON
-    while dropping a file or swapping an md5), or when it is malformed in any
-    way (bad JSON, non-list payload, non-dict entries): callers treat that as
-    "manifest not usable from cache" and fetch or route accordingly.
-    """
-    full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
-    manifest_path = cache_path_for(cache_dir, full_md5)
-    if not manifest_path.is_file():
-        return None
+def _dir_manifest_entries(raw: bytes) -> "list[DvcFileEntry] | None":
+    """The entries in a ``.dir`` manifest's bytes, or ``None`` when they are
+    not a list of entries as dvc writes one: bad JSON, not a list, an entry
+    that is not a mapping, or a path listed twice (dvc never does, and
+    readers would disagree on which entry counts). The one parse both
+    ``read_cached_dir_manifest`` and ``fetch_dir_manifest`` use."""
     try:
-        raw = manifest_path.read_bytes()
-        if hashlib.md5(raw, usedforsecurity=False).hexdigest() != full_md5.removesuffix(".dir"):
-            return None
         payload = json.loads(raw)
         if not isinstance(payload, list):
             return None
-        return [
+        entries = [
             DvcFileEntry(
                 md5=str(e.get("md5", "")),
                 relpath=str(e.get("relpath", "")),
@@ -929,6 +927,35 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
         ]
     except Exception:
         return None
+    if len({e.relpath for e in entries}) != len(entries):
+        return None
+    return entries
+
+
+def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntry] | None":
+    """Parse a locally-cached ``.dir`` manifest into file entries.
+
+    ``dir_md5`` may arrive with or without the ``.dir`` suffix; the cache
+    filename always carries it (DVC's own layout — see ensure_dir_manifest).
+    Returns ``None`` when the manifest is absent, when its bytes do not hash
+    to ``dir_md5`` (a changed or damaged cache, which can stay valid JSON
+    while dropping a file or swapping an md5), when it lists a path twice
+    (dvc never does, and readers would disagree on which entry counts), or
+    when it is malformed in any way (bad JSON, non-list payload, non-dict
+    entries): callers treat that as "manifest not usable from cache" and
+    fetch or route accordingly.
+    """
+    full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
+    manifest_path = cache_path_for(cache_dir, full_md5)
+    if not manifest_path.is_file():
+        return None
+    try:
+        raw = manifest_path.read_bytes()
+    except OSError:
+        return None
+    if hashlib.md5(raw, usedforsecurity=False).hexdigest() != full_md5.removesuffix(".dir"):
+        return None
+    return _dir_manifest_entries(raw)
 
 
 def ensure_out_cached(cache_dir: Path, out: "DvcOut") -> bool:
@@ -1524,24 +1551,11 @@ def fetch_dir_manifest(
         logger.warning("fast-sync: dir manifest fetch failed for %s: %s", full_md5, exc)
         cache_path.unlink(missing_ok=True)
         return None
-    try:
-        payload = json.loads(cache_path.read_bytes())
-    except Exception as exc:
-        logger.warning("fast-sync: dir manifest JSON parse failed for %s: %s", full_md5, exc)
+    entries = _dir_manifest_entries(cache_path.read_bytes())
+    if entries is None:
+        logger.warning("fast-sync: dir manifest %s is not a list of entries as dvc writes one", full_md5)
         cache_path.unlink(missing_ok=True)
-        return None
-    if not isinstance(payload, list):
-        cache_path.unlink(missing_ok=True)
-        return None
-    return [
-        DvcFileEntry(
-            md5=str(e.get("md5", "")),
-            relpath=str(e.get("relpath", "")),
-            size=int(e.get("size", 0) or 0),
-            version_id=None,
-        )
-        for e in payload
-    ]
+    return entries
 
 
 

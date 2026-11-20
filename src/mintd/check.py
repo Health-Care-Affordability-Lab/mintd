@@ -50,6 +50,7 @@ from ._fast_sync_ops import (
     check_dvc_file,
     check_lock,
     discover_all_outs,
+    load12,
     normalize_target,
     resolve_out,
     stage_wdir,
@@ -842,9 +843,10 @@ def _pointer_match(
     pin: str,
     output_path: str,
     memo: dict[tuple[str, ...], Any],
-) -> tuple[str | None, MatchKind | None]:
-    """The producer's own DVC pointer md5 for `output_path` at `pin`, and how
-    `_match_out` matched it (`MatchKind`; None with no match), memoized.
+) -> tuple[str | None, MatchKind | None, str]:
+    """The producer's own DVC pointer md5 for `output_path` at `pin`, how
+    `_match_out` matched it (`MatchKind`; None with no match) and the path
+    within the out it matched, memoized.
 
     Returns the matching out's `md5` verbatim — `.dir` hashes INCLUDED: a
     directory manifest's hash moves when any file inside it moves, which is
@@ -859,7 +861,7 @@ def _pointer_match(
     """
     key = (repo, pin, output_path)
     if key in memo:
-        return memo[key], memo.get((*key, "kind"))
+        return (memo[key], *memo.get((*key, "kind"), (None, "")))
     clean = output_path.rstrip("/")
     absent_so_far = True  # flipped by any failure that is not PATH_MISSING
     for candidate, base_dir in _pointer_candidates(clean):
@@ -886,21 +888,34 @@ def _pointer_match(
                     absent_so_far = False
                 continue
             try:
-                data = yaml.safe_load(raw)
-            except yaml.YAMLError:
+                data = _producer_yaml(raw)
+            except ValueError:
                 absent_so_far = False
                 continue
-        md5, kind = _match_out(data, clean, base_dir=base_dir)
+        md5, kind, within = _match_out(data, clean, base_dir=base_dir)
         # A `.outs` digest is a SET identity over the outs beneath the path;
         # with a stage dropped the set is incomplete, and a missing member
         # would read as "vanished" — drift that `bump` acts on. An exact or
         # enclosing match is one out's own identity and is unaffected.
         if md5 is not None and not (dropped_a_stage and md5.endswith(".outs")):
-            memo[key], memo[(*key, "kind")] = md5, kind
-            return md5, kind
+            memo[key], memo[(*key, "kind")] = md5, (kind, within)
+            return md5, kind, within
         # A readable document with no matching out is absence evidence.
     memo[key] = verdict = _POINTER_ABSENT if absent_so_far else None
-    return verdict, None
+    return verdict, None, ""
+
+
+def _producer_yaml(raw: bytes) -> Any:
+    """A file fetched from the producer, read as DVC reads it (`load12`, YAML
+    1.2), as every local reader of a pointer does: PyYAML's 1.1 reads a file
+    named `no` or `on` as a boolean, and its digest would never match the
+    import's. ValueError when it is not UTF-8 or not YAML."""
+    from ruamel.yaml import YAMLError
+
+    try:
+        return load12(raw.decode("utf-8"))
+    except (YAMLError, UnicodeDecodeError) as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _pointer_candidates(clean: str) -> list[tuple[str, str]]:
@@ -946,10 +961,10 @@ def _resolved_lock(
         return memo[key]
     result: tuple[Any, bool] | None
     try:
-        data = yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.lock"))
+        data = _producer_yaml(fetcher.fetch_path_at(repo, pin, "dvc.lock"))
     except FetchError as e:
         result = ({}, False) if e.reason == FetchError.Reason.PATH_MISSING else None
-    except yaml.YAMLError:
+    except ValueError:
         result = None
     else:
         # `dvc.lock` records each out relative to its stage's `wdir`, and the
@@ -984,13 +999,15 @@ def _stage_wdirs(
         return memo[key]
     resolved: dict[str, str | None] | None
     try:
-        resolved = wdir_map(yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.yaml")))
+        doc = _producer_yaml(fetcher.fetch_path_at(repo, pin, "dvc.yaml"))
     except FetchError as e:
         # Only "the file is not there" is evidence about the producer; every
         # other reason is evidence about the network.
         resolved = {} if e.reason == FetchError.Reason.PATH_MISSING else None
-    except yaml.YAMLError:
+    except ValueError:
         resolved = None
+    else:
+        resolved = wdir_map(doc)
     memo[key] = resolved
     return resolved
 
@@ -1106,9 +1123,11 @@ def _match_out_md5(data: Any, clean_path: str, *, base_dir: str = "") -> str | N
 MatchKind = Literal["exact", "inside-files", "inside-tree", "beneath"]
 
 
-def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str | None, MatchKind | None]:
+def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str | None, MatchKind | None, str]:
     """The content identity of the out matching `clean_path` in a parsed
-    `.dvc`/`dvc.lock` document, and how it matched (`MatchKind`).
+    `.dvc`/`dvc.lock` document, how it matched (`MatchKind`), and
+    `clean_path` within the out it matched ("" unless inside one), the
+    subpath `_out_identity` scoped the identity to.
 
     Every out is resolved against `base_dir` first, so one rule serves both
     shapes: a `.dvc` records `outs[].path` relative to itself (`data/final.dvc`
@@ -1137,7 +1156,7 @@ def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str |
     catalog on 2026-09-15: none is mixed; the fix must be a listing call.
     """
     if not isinstance(data, dict):
-        return None, None
+        return None, None, ""
     out_lists: list[list[Any]] = []
     if isinstance(data.get("outs"), list):
         out_lists.append(data["outs"])
@@ -1160,7 +1179,7 @@ def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str |
             if resolved == clean_path:
                 identity = _out_identity(out)
                 if identity is not None:
-                    return identity, "exact"
+                    return identity, "exact", ""
             elif clean_path.startswith(resolved + "/"):
                 depth = resolved.count("/")
                 if enclosing is None or depth > enclosing[0]:
@@ -1171,10 +1190,10 @@ def _match_out(data: Any, clean_path: str, *, base_dir: str = "") -> tuple[str |
                     beneath.append((resolved, identity))
     if enclosing is not None:
         kind: MatchKind = "inside-files" if isinstance(enclosing[1].get("files"), list) else "inside-tree"
-        return _out_identity(enclosing[1], enclosing[2]), kind
+        return _out_identity(enclosing[1], enclosing[2]), kind, enclosing[2]
     if beneath:
-        return f"{_digest_pairs(sorted(beneath))}.outs", "beneath"
-    return None, None
+        return f"{_digest_pairs(sorted(beneath))}.outs", "beneath", ""
+    return None, None, ""
 
 
 def _drift_unknown_finding(

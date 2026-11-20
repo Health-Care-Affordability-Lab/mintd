@@ -54,7 +54,7 @@ from ._dvc_state import dvc_cache_dir
 from ._fast_sync_ops import DvcFileEntry, cache_path_for, dir_manifest_md5, parse_dvc_outs, read_cached_dir_manifest
 from ._producer_git_ops import FetchError, GitArchiveFetcher
 from .catalog import CatalogClient
-from .check import _POINTER_ABSENT, MatchKind, _digest_pairs, _pointer_match
+from .check import _POINTER_ABSENT, MatchKind, _out_identity, _pointer_match
 from .data import _import_namespace, _imports_index, _require_repo_url, import_product
 from .errors import MintdError
 from .imports import DataDependency
@@ -298,7 +298,8 @@ def enclave_package(
                             reporter.warn(unanchored[-1])
                     dest = _member(f"data/{repo}/{version}/{path}")
                     for rel, md5 in v.files:
-                        members[_member(f"{dest}/{rel}" if rel else dest)] = (v.src / rel if rel else v.src, md5, v)
+                        _hold(members, _member(f"{dest}/{rel}" if rel else dest), (v.src / rel if rel else v.src, md5, v),
+                              _import_again(dvc_cache_dir(root), repo, v.unit or v.path, pin))
                     contents.append({
                         "repo": repo, "path": path, "version": version, "contract_pin": v.pin,
                         "artifact_pin": v.md5, "dest": dest,
@@ -359,7 +360,7 @@ def _bring_in(
     path: str,
     approved: set[str],
     reporter: "Reporter | None",
-    producer_match: Callable[[str], tuple[str | None, MatchKind | None]],
+    producer_match: Callable[[str], tuple[str | None, MatchKind | None, str]],
 ) -> _Version:
     """Make `path` of `repo` readable from an import at `pin`, and read it.
 
@@ -395,7 +396,7 @@ def _bring_in(
 
 
 def _check_against_producer(
-    v: _Version, producer_match: Callable[[str], tuple[str | None, MatchKind | None]], pointer: Path, cache: Path
+    v: _Version, producer_match: Callable[[str], tuple[str | None, MatchKind | None, str]], pointer: Path, cache: Path
 ) -> bool:
     """Whether `v` is anchored to the producer's own pointer, refusing it
     where that pointer names `v.path` and records other content. The import
@@ -410,7 +411,7 @@ def _check_against_producer(
     tracked as one tree, whose identity is the whole tree's). Where it does
     not, the bytes are checked against the local import only, and False says
     so. A read that fails is never taken for a difference."""
-    want, kind = producer_match(v.path)
+    want, kind, within = producer_match(v.path)
     if want is None:
         raise MintdError(
             f"could not read {v.repo}'s own pointer for {v.path} at {v.pin[:7]}",
@@ -418,7 +419,7 @@ def _check_against_producer(
         )
     if want == _POINTER_ABSENT or kind in ("beneath", "inside-tree"):
         return False
-    if not _same_as_producer(v, want):
+    if not _same_as_producer(v, want, within):
         raise ChecksumMismatch(
             f"{pointer}: the import of {v.path} ({v.md5}) is not what {v.repo}'s own pointer records at {v.pin[:7]} ({want})",
             hint=_import_again(cache, v.repo, v.unit or v.path, v.pin, want, v.md5),
@@ -426,22 +427,16 @@ def _check_against_producer(
     return True
 
 
-def _same_as_producer(v: _Version, want: str) -> bool:
+def _same_as_producer(v: _Version, want: str, within: str) -> bool:
     """Whether `v`'s files are what `want`, the producer's own identity for
     `v.path`, names: an md5 (a file, an entry of a per-file pointer, or a
-    folder's tree) or a `.files` digest (a per-file pointer, or a folder
-    inside one, whose digest pairs carry the path within that pointer)."""
+    folder's tree), or a `.files` digest of a per-file pointer, or of a
+    folder `within` it, computed by check's own `_out_identity` from `v`'s
+    entries placed where that pointer lists them."""
     if want == v.md5:
         return True
-    if not want.endswith(".files"):
-        return False
-    files = sorted(v.files)
-    parts = v.path.split("/")
-    below = ["/".join(parts[i:]) for i in range(1, len(parts))]  # v.path inside each folder above it
-    return any(
-        f"{_digest_pairs(sorted((f'{s}/{r}' if s and r else s or r, m) for r, m in files))}.files" == want
-        for s in ["", *below]
-    )
+    entries = [{"relpath": f"{within}/{r}" if within else r, "md5": m} for r, m in v.files if r]
+    return want.endswith(".files") and _out_identity({"files": entries}, within) == want
 
 
 def _import_again(cache: Path, repo: str, path: str, pin: str, *md5s: str) -> str:
@@ -454,6 +449,16 @@ def _import_again(cache: Path, repo: str, path: str, pin: str, *md5s: str) -> st
     })
     first = f"delete {', '.join(stale)}, then " if stale else ""
     return f"{first}import it again at the pin: 'mintd data import {repo} --force --path {path} --rev {pin}'"
+
+
+def _hold(members: dict[str, tuple[Path, str, _Version]], member: str, entry: tuple[Path, str, _Version], again: str) -> None:
+    """Hold `entry` as the source of zip member `member`, refusing a second
+    source with another md5: keeping either would bundle bytes the other
+    says are wrong, and a dict keeps the last silently."""
+    held = members.get(member)
+    if held is not None and held[1] != entry[1]:
+        raise ChecksumMismatch(f"{member} would be bundled twice, with md5 {held[1]} and {entry[1]}", hint=again)
+    members[member] = entry
 
 
 def _inside(folder: _Version, path: str) -> _Version:
@@ -497,7 +502,8 @@ def _read_version(root: Path, repo: str, path: str, pointer: Path) -> _Version:
         entries = read_cached_dir_manifest(dvc_cache_dir(root), out.md5)
         if entries is None:
             raise ChecksumMismatch(
-                f"{pointer}: the folder's file list ({out.md5}) is not in the DVC cache, or does not hash to it",
+                f"{pointer}: the folder's file list ({out.md5}) is not in the DVC cache, or is not the list dvc "
+                "wrote (it does not hash to it, or lists a path twice)",
                 hint=_import_again(
                     dvc_cache_dir(root), repo, path, DataDependency.from_dvc_file(pointer).contract_pin, out.md5
                 ),

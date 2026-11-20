@@ -638,7 +638,7 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
     "src/mintd/_atomic.py": {"open-for-write": 1, "unlink": 1},
     "src/mintd/_aws_credentials.py": {"open-for-write": 1, "unlink": 2},
     "src/mintd/_catalog_cache.py": {"write_text": 1},
-    "src/mintd/_fast_sync_ops.py": {"unlink": 6, "write_bytes": 1},
+    "src/mintd/_fast_sync_ops.py": {"unlink": 5, "write_bytes": 1},
     "src/mintd/_share_ops.py": {"unlink": 3},
     "src/mintd/_templates/_render.py": {"unlink": 1, "write_text": 3},
     "src/mintd/data.py": {"rename": 2, "rmdir": 1, "unlink": 3, "write_bytes": 2},

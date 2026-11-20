@@ -38,7 +38,7 @@ from mintd._fast_sync_ops import (
 )
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import check_project
-from mintd.data_ops import data_pull
+from mintd.data_ops import PullSummary, data_pull
 from mintd.imports import scan_imports
 from mintd.model import Metadata
 from mintd.producer import ProducerError, ProducerView
@@ -229,7 +229,7 @@ def _clone(producer: LocalProducer, dest: Path) -> Path:
     return dest
 
 
-def _pull(project: Path, targets: list[str] | None = None) -> None:
+def _pull(project: Path, targets: list[str] | None = None) -> PullSummary:
     """Production's own pull, through the real dvc seam, with the REAL
     `SubprocessFastSyncOps` — not a double and no longer `fast_sync_ops=None`,
     which issue18 removed from the signature. The route is unchanged:
@@ -245,13 +245,47 @@ def _pull(project: Path, targets: list[str] | None = None) -> None:
     is the strongest gate in that unit: with `data_pull` no longer passing
     `cwd`, the three real-dvc tests below fail outright rather than quietly
     passing on ambient process state."""
-    data_pull(
+    return data_pull(
         project_path=project,
         targets=targets,
         dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
         fast_sync_ops=SubprocessFastSyncOps(),
     )
 
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="DVC's trust of a read-only cache object, reproduced on POSIX")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Target: a cached .dir that does not hash to its name, left read-only as DVC leaves its cache objects, "
+    "is trusted by the fallback dvc pull, so pull returns normally with p2.csv missing; it should land both "
+    "files or exit non-zero. Predates the enclave change; the fix is follow-up work"
+))
+def test_a_pull_never_returns_normally_with_a_file_its_cached_tree_dropped(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """A changed .dir in the clone's cache (valid JSON, p2.csv dropped, read-only
+    again): pull must repair it, so both files land, or fail. Either fix flips
+    this Target."""
+    from mintd._dvc_state import dvc_cache_dir
+    from mintd.errors import MintdError
+
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+    _pull(clone)
+    (listing,) = dvc_cache_dir(clone).rglob("*.dir")
+    listing.chmod(0o644)
+    entries = [e for e in json.loads(listing.read_text(encoding="utf-8")) if e["relpath"] != "p2.csv"]
+    listing.write_text(json.dumps(entries), encoding="utf-8")
+    listing.chmod(0o444)
+    shutil.rmtree(clone / "data" / "parts")
+
+    try:
+        summary = _pull(clone)
+    except MintdError:
+        return  # pull failed, which the CLI turns into exit 1
+    if summary.error_count:
+        return  # reported as not delivered, which the CLI turns into exit 1
+    assert sorted(p.name for p in (clone / "data" / "parts").iterdir()) == ["p1.csv", "p2.csv"]
 
 def test_clone_from_local_producer_lands_payload_bytes(
     local_producer: LocalProducer, tmp_path: Path
