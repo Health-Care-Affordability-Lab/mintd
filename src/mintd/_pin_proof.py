@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -174,13 +175,15 @@ def _escapes(repo_path: str) -> bool:
 
 def publishable_scope(
     root: Path, *, remote: str, prefix: str, cache_dir: Path, dvc_files: list[str],
+    locks: Sequence[str] = ("dvc.lock",),
 ) -> Scope:
     """Every entry a ``dvc push`` to ``remote`` uploads and records.
 
     DVC's push predicate: outs in the repo, cached, not ``push: false``, from
     stages that are not repo imports (``deps[].repo``). Stages declared in
     ``dvc.yaml`` but never run have no lock entry, so they never appear.
-    Only the root ``dvc.lock`` is read; nested lock files are out of scope.
+    ``locks`` are the lockfiles read, each beside its ``dvc.yaml``: only the
+    root one by default, which is what push verification checks.
     """
     entries: list[Entry] = []
     unrecoverable: list[Out] = []
@@ -207,41 +210,44 @@ def publishable_scope(
             elif not got:
                 empty.append(Out(rel, None, i, out_path))
 
-    lock = _load(root / "dvc.lock")
-    stages = lock.get("stages") if isinstance(lock, dict) else None
-    if isinstance(stages, dict):
-        yaml_doc = _load(root / "dvc.yaml")
-        wdirs = wdir_map(yaml_doc)
-        skip = flagged_outs(yaml_doc, "cache")
-        for stage, paths in flagged_outs(yaml_doc, "push").items():
-            skip.setdefault(stage, set()).update(paths)
-        declared = set((yaml_doc.get("stages") or {}) if isinstance(yaml_doc, dict) else ())
-        for stage, data in stages.items():
-            # DVC pushes from dvc.yaml: a lock stage it no longer declares
-            # (renamed, removed) is never uploaded or re-pinned.
-            if declared and str(stage) not in declared and str(stage).split("@", 1)[0] not in declared:
-                continue
-            outs = data.get("outs") if isinstance(data, dict) else None
-            wdir = stage_wdir(wdirs, str(stage))
-            if wdir is None:  # an absolute wdir: outside the project
-                continue
-            declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
-            for i, raw in enumerate(outs if isinstance(outs, list) else []):
-                if not isinstance(raw, dict):
+    for lock_rel in locks:
+        base = posixpath.dirname(lock_rel) or "."
+        lock = _load(root / lock_rel)
+        stages = lock.get("stages") if isinstance(lock, dict) else None
+        if isinstance(stages, dict):
+            yaml_doc = _load(root / base / "dvc.yaml")
+            wdirs = wdir_map(yaml_doc)
+            skip = flagged_outs(yaml_doc, "cache")
+            for stage, paths in flagged_outs(yaml_doc, "push").items():
+                skip.setdefault(stage, set()).update(paths)
+            declared = set((yaml_doc.get("stages") or {}) if isinstance(yaml_doc, dict) else ())
+            for stage, data in stages.items():
+                # DVC pushes from dvc.yaml: a lock stage it no longer declares
+                # (renamed, removed) is never uploaded or re-pinned.
+                if declared and str(stage) not in declared and str(stage).split("@", 1)[0] not in declared:
                     continue
-                written = posixpath.normpath(str(raw.get("path", "")))
-                if written in declared_skip:
+                outs = data.get("outs") if isinstance(data, dict) else None
+                wdir = stage_wdir(wdirs, str(stage))
+                wdir = None if wdir is None else posixpath.join(base, wdir)
+                if wdir is None:  # an absolute wdir: outside the project
                     continue
-                out_path = resolve_out(wdir, written)
-                if _escapes(out_path):
-                    continue
-                got, ok = _out_entries(raw, pointer="dvc.lock", stage=str(stage), out_path=out_path,
-                                       remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
-                entries.extend(got)
-                if not ok:
-                    unrecoverable.append(Out("dvc.lock", str(stage), i, out_path))
-                elif not got:
-                    empty.append(Out("dvc.lock", str(stage), i, out_path))
+                declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
+                for i, raw in enumerate(outs if isinstance(outs, list) else []):
+                    if not isinstance(raw, dict):
+                        continue
+                    written = posixpath.normpath(str(raw.get("path", "")))
+                    if written in declared_skip:
+                        continue
+                    out_path = resolve_out(wdir, written)
+                    if _escapes(out_path):
+                        continue
+                    got, ok = _out_entries(raw, pointer=lock_rel, stage=str(stage), out_path=out_path,
+                                           remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
+                    entries.extend(got)
+                    if not ok:
+                        unrecoverable.append(Out(lock_rel, str(stage), i, out_path))
+                    elif not got:
+                        empty.append(Out(lock_rel, str(stage), i, out_path))
     return Scope(tuple(entries), tuple(unrecoverable), tuple(empty))
 
 

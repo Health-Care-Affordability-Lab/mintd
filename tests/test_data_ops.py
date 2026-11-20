@@ -341,7 +341,7 @@ def test_data_pull_fast_sync_raises_pull_all_includes_stage_outs_in_fallback(
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: ["a.dvc"])
     monkeypatch.setattr(
         "mintd.data_ops.partition_pipeline_outs",
-        lambda _p, _r: ([], [stage_out]),
+        lambda _p, _r, **_kw: ([], [stage_out]),
     )
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -478,7 +478,7 @@ def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
         "        cloud:\n          origin:\n            version_id: v3\n"
     )
 
-    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r: ([], []))
+    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r, **_kw: ([], []))
 
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -511,7 +511,7 @@ def test_data_pull_total_bytes_counts_denormalized_targets(
         "outs:\n  - path: foo.csv\n    md5: cafe\n    size: 1234\n"
     )
 
-    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r: ([], []))
+    monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r, **_kw: ([], []))
 
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -571,7 +571,7 @@ def test_data_pull_catch_all_pulls_only_uncovered_pipeline_outs(
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     monkeypatch.setattr(
         "mintd.data_ops.partition_pipeline_outs",
-        lambda _p, _r: ([covered], [covered, uncovered]),
+        lambda _p, _r, **_kw: ([covered], [covered, uncovered]),
     )
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -595,7 +595,7 @@ def test_data_pull_catch_all_excludes_fallback_targets(
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     monkeypatch.setattr(
         "mintd.data_ops.partition_pipeline_outs",
-        lambda _p, _r: ([out], [out]),
+        lambda _p, _r, **_kw: ([out], [out]),
     )
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
@@ -881,7 +881,7 @@ def test_data_pull_fast_sync_raises_pull_all_checks_out_cached_pipeline_outs(
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     monkeypatch.setattr(
         "mintd.data_ops.partition_pipeline_outs",
-        lambda _p, _r: ([pipe_out], [pipe_out]),
+        lambda _p, _r, **_kw: ([pipe_out], [pipe_out]),
     )
     fake = _FakeDvcOps()
     fake.workspace = tmp_path
@@ -1913,3 +1913,125 @@ def test_a_bare_stage_name_is_pushed_even_beside_a_skipped_pointer_of_that_name(
     dvc = _FakeDvcOps()
     data_push(root, targets=["build"], dvc_ops=dvc, cwd=root / here)
     assert [c.targets for c in dvc.push_calls] == [[stage_key]]
+
+
+def _lock_with_fan(root: Path) -> None:
+    (root / "dvc.yaml").write_text("stages:\n  fan:\n    foreach: [p]\n    do:\n      cmd: x\n      outs: ['data/fan_${item}.csv']\n")
+    (root / "dvc.lock").write_text(
+        "schema: '2.0'\nstages:\n"
+        + "".join(f"  fan@{i}:\n    cmd: x\n    outs:\n    - path: data/fan_{i}.csv\n      md5: {i * 32}\n      size: 2\n"
+                  for i in "pq")
+    )
+
+
+def test_a_lock_stage_dvc_does_not_list_is_never_listed(tmp_path: Path) -> None:
+    """A foreach that shrank leaves `fan@q` in dvc.lock under a base dvc.yaml
+    still declares. Given dvc's own stage names, the lock reader skips it and
+    says so, so it is never downloaded or checked out.
+    Mutation that must redden this: keep a stage dvc doesn't list."""
+    from mintd._fast_sync_ops import parse_dvc_lock_outs
+
+    _lock_with_fan(tmp_path)
+    skipped: list[str] = []
+    outs = parse_dvc_lock_outs(tmp_path, "storage", declared={"fan@p"}, skipped=skipped)
+    assert [o.path for o in outs] == ["data/fan_p.csv"] and skipped == ["fan@q"]
+    assert [o.path for o in parse_dvc_lock_outs(tmp_path, "storage")] == ["data/fan_p.csv", "data/fan_q.csv"]
+
+
+def test_a_pull_keeps_every_lock_out_when_dvc_cannot_list_stages(tmp_path: Path) -> None:
+    """If `dvc stage list` fails, the pull goes on as before stage names were
+    read: every lock out is kept, and dvc's own checkout says what's wrong.
+    With no dvc.lock, dvc isn't asked; a list with no stages keeps them all too.
+    Mutations that must redden this: read a failed list as "no stages"; skip
+    every lock out when dvc lists none."""
+    from mintd._dvc_ops import DvcStageListError
+    from mintd._subprocess import WallTimeoutExceeded
+    from mintd.data_ops import _dvc_stage_names
+
+    dvc = _FakeDvcOps()
+    dvc.stage_names_by_cwd[tmp_path] = ["fan@p"]
+    assert _dvc_stage_names(tmp_path, dvc) is None  # no dvc.lock
+    _lock_with_fan(tmp_path)
+    assert _dvc_stage_names(tmp_path, dvc) == {"fan@p"}
+    dvc.stage_names_by_cwd[tmp_path] = []
+    assert _dvc_stage_names(tmp_path, dvc) is None  # dvc lists none: an empty dvc.yaml teaches nothing
+    dvc.stage_names_by_cwd[tmp_path] = ["fan@p"]
+    failing = _FakeDvcOps()
+    failing.stage_names_raises = DvcStageListError("dvc stage list failed (exit 255): './dvc.yaml' is invalid")
+    assert _dvc_stage_names(tmp_path, failing) is None  # dvc can't list them
+    dvc.stage_names_raises = WallTimeoutExceeded("command exceeded wall timeout")
+    assert _dvc_stage_names(tmp_path, dvc) is None  # nor in time
+
+
+def test_a_failed_checkout_still_lets_the_pull_run_and_is_raised_after(tmp_path: Path) -> None:
+    """One bad step must not sink the batch: a checkout dvc fails still lets the
+    pull's other steps run (an import among them would land), and the failure
+    is raised after them, so the exit is non-zero.
+    Mutation that must redden this: let the checkout raise before the pull."""
+    from mintd._dvc_ops import DvcCheckoutError
+    from mintd.data_ops import _checkout_pull_verify
+
+    target = _write_single_file_dvc(tmp_path, "data/a.csv", _MD5_MISSING)
+    fake = _FakeDvcOps()
+    fake.checkout_refuses = {"data/b.csv"}  # dvc refuses the argv, exit 255
+    with pytest.raises(DvcCheckoutError, match="data/b.csv"):
+        _checkout_pull_verify(tmp_path, ["data/b.csv"], [target], [], "origin", dvc_ops=fake, remote=None,
+                              jobs=None, extra_dvc_args=None, reporter=None)
+    assert [c.targets for c in fake.pull_calls] == [[target]]
+
+
+def test_a_pull_all_never_lists_a_lock_step_dvc_does_not_list(tmp_path: Path) -> None:
+    """The wiring: pull-all hands dvc's stage names to the lock reader, so a
+    leftover step is never pulled, and one warning names it.
+    Mutation that must redden this: don't pass the names (`declared=None`)."""
+    _lock_with_fan(tmp_path)
+    fake = _FakeDvcOps()
+    fake.stage_names_by_cwd[tmp_path] = ["fan@p"]
+    rep = RecordingReporter()
+    data_pull(tmp_path, targets=None, dvc_ops=fake, fast_sync_ops=_FakeFastSyncOps(), reporter=rep)
+    pulled = [t for c in fake.pull_calls for t in c.targets or []]
+    assert "data/fan_p.csv" in pulled and "data/fan_q.csv" not in pulled
+    assert [e[1] for e in rep.events_of("warn")] == [
+        "skipped dvc.lock entries for 1 stage(s) dvc.yaml no longer declares, as dvc pull does: fan@q"
+    ]
+
+
+def test_stage_names_are_dvcs_own_with_foreach_expanded(real_dvc, tmp_path: Path) -> None:
+    """`stage_names` reads `dvc stage list --name-only` as dvc prints it, one
+    stage per line, a foreach expanded to its steps."""
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+
+    real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
+    (tmp_path / "dvc.yaml").write_text(
+        "stages:\n  fan:\n    foreach: [p, q]\n    do:\n      cmd: x\n      outs: ['fan_${item}.csv']\n"
+        "  make:\n    cmd: y\n    outs: [m.csv]\n"
+    )
+    assert SubprocessDvcOps(timeouts=Timeouts()).stage_names(cwd=tmp_path) == ["fan@p", "fan@q", "make"]
+
+
+def test_a_step_whose_item_ends_in_a_space_is_kept(real_dvc, tmp_path: Path) -> None:
+    """dvc writes a foreach item's trailing space into the lock key (`fan@t `)
+    but lists the step as `fan@t`, so a live step must not read as a leftover.
+    Mutation that must redden this: match lock keys to dvc's names exactly."""
+    import json
+    import sys
+
+    from mintd._config import Timeouts
+    from mintd._dvc_ops import SubprocessDvcOps
+    from mintd._fast_sync_ops import parse_dvc_lock_outs
+
+    real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
+    # Python writes the file, in double quotes, so cmd.exe runs it as a POSIX shell does.
+    write = "import pathlib; pathlib.Path('fan_${item}.csv').write_text('${item}')"
+    cmd = json.dumps(f'"{sys.executable}" -c "{write}"')
+    (tmp_path / "dvc.yaml").write_text(
+        "stages:\n  fan:\n    foreach: [p, 't ']\n    do:\n"
+        f"      cmd: {cmd}\n      outs: ['fan_${{item}}.csv']\n"
+    )
+    real_dvc(["repro", "-q"], cwd=tmp_path, check=True)
+    assert "'fan@t ':" in (tmp_path / "dvc.lock").read_text()
+    names = SubprocessDvcOps(timeouts=Timeouts()).stage_names(cwd=tmp_path)
+    skipped: list[str] = []
+    outs = parse_dvc_lock_outs(tmp_path, "storage", declared=set(names), skipped=skipped)
+    assert sorted(o.path for o in outs) == ["fan_p.csv", "fan_t .csv"] and skipped == []

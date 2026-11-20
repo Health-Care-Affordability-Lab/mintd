@@ -164,18 +164,27 @@ def run_streaming(
         stall_thread = threading.Thread(target=_stall_watchdog, daemon=True)
         stall_thread.start()
 
+    def _finish_output() -> None:
+        # The reporter prints whole lines; the child's last one may have no
+        # newline, and a hung child's last words are worth showing too.
+        t1.join(timeout=2.0)
+        t2.join(timeout=2.0)
+        if reporter is not None:
+            reporter.flush_child_output()
+
     try:
         proc.wait(timeout=wall_timeout)
     except subprocess.TimeoutExpired as exc:
         _kill_ladder()
+        _finish_output()
         # wall_timeout cannot be None here — TimeoutExpired only fires when set.
         raise WallTimeoutExceeded(wall_timeout if wall_timeout is not None else 0.0) from exc
     except KeyboardInterrupt:
         _kill_ladder()
+        _finish_output()
         raise
 
-    t1.join(timeout=2.0)
-    t2.join(timeout=2.0)
+    _finish_output()
 
     return StreamResult(
         returncode=proc.returncode,

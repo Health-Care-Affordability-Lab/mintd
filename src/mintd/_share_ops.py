@@ -39,9 +39,9 @@ from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
 # retry_transient classify against, so behaviour cannot drift, and inert
 # placeholders on a broken install. _s3 says why each extra class is caught:
 # FlexibleChecksumError (a checksum mismatch that is no ClientError),
-# StreamingChecksumBody (botocore's 5xx-body wrapping), S3UploadFailedError
-# (upload_file's wrapper around ClientError) and RetriesExceededError
-# (s3transfer's own exhausted retry loop).
+# S3UploadFailedError (upload_file's wrapper around ClientError) and
+# RetriesExceededError (s3transfer's own exhausted retry loop). Downloads go
+# through _s3.download, which retries and knows botocore's mislabelled 5xx.
 from mintd._s3 import (
     ClientError,
     ConnectionClosedError,
@@ -52,8 +52,8 @@ from mintd._s3 import (
     RetriesExceededError,
     S3UploadFailedError,
     SSLError,
-    StreamingChecksumBody,
     create_client as _create_s3_client,
+    download,
     retry_transient,
 )
 from mintd._s3_listing_ops import _normalise_sub_path
@@ -351,18 +351,17 @@ def download_object(
        ``ChecksumMode="ENABLED"`` (botocore verifies the stored SHA256 on the
        response, raising on mismatch). ``verify_tmp`` is the policy-free
        pre-``replace`` hook cache uses for its metadata-SHA256 check (R2): if
-       it raises, the tmp is unlinked and the error propagates. A GetObject
-       5xx that botocore raises as ``AttributeError`` (see
-       ``StreamingChecksumBody`` above) is re-raised as the 5xx
-       ``ClientError`` it was, so it is retried and mapped like any 500;
+       it raises, the tmp is unlinked and the error propagates. The download
+       itself is ``_s3.download``'s, which retries a transient error (a 5xx
+       botocore raises as ``AttributeError`` among them), and the error that
+       outlasts it is mapped like any 500;
     3. cleanup is ``except BaseException`` (vs fetch_to_cache's ``Exception``)
        so Ctrl-C — caught later in ``cli.main`` → exit 130 — also leaves no
        orphan tmp.
 
     Returns the downloaded byte count."""
-    # Generated ONCE here, not inside _attempt: retry_transient re-invokes
-    # _attempt, and a per-attempt token would leave the earlier attempts' temps
-    # orphaned in the user's directory (the cleanup below unlinks only ``tmp``).
+    # Generated ONCE per call: ``_s3.download`` retries into this same tmp, and
+    # the cleanup below unlinks only ``tmp``.
     suffix = tmp_suffix if tmp_suffix is not None else f".{uuid4().hex}.mintd-tmp"
     tmp = dest.with_name(dest.name + suffix)
     tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -375,28 +374,7 @@ def download_object(
         # overwrite its target. Unlinking first forces a fresh regular file.
         tmp.unlink(missing_ok=True)
         try:
-            try:
-                s3.download_file(
-                    Bucket=bucket,
-                    Key=key,
-                    Filename=str(tmp),
-                    ExtraArgs={"ChecksumMode": "ENABLED"},
-                    Callback=progress,
-                )
-            except AttributeError as exc:
-                if not isinstance(exc.obj, StreamingChecksumBody):
-                    raise  # a real bug: propagate verbatim
-                raise ClientError(
-                    {
-                        "Error": {
-                            "Code": "InternalError",
-                            "Message": "S3 returned a server error (5xx) whose body botocore could not parse",
-                        },
-                        # The stubs want every metadata key; only the status is read.
-                        "ResponseMetadata": {"HTTPStatusCode": 500},  # type: ignore[typeddict-item]
-                    },
-                    "GetObject",
-                ) from exc
+            download(s3, bucket, key, tmp, checksum=True, progress=progress)  # retries a transient error
             # Enforce the HEAD ContentLength: for a checksummed object botocore
             # already validated the SHA256, but for an un-checksummed one this
             # size check is the ONLY integrity guarantee — it makes share_get's
@@ -420,7 +398,7 @@ def download_object(
             raise
 
     try:
-        retry_transient(_attempt)
+        _attempt()
     except _MAPPED_TRANSPORT_ERRORS as exc:
         raise _map_transport_error(exc, key) from exc
     return dest.stat().st_size

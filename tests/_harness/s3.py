@@ -47,6 +47,12 @@ class S3Server:
     #: for a count n, every GET until removed for None. HEAD still answers; a
     #: failed GET is not recorded in `gets`.
     fail_gets: dict[str, int | None] = dataclasses.field(default_factory=dict)
+    #: `{path: n}`: answer the next n GETs of that object with a 503 whose body
+    #: carries an `x-amz-checksum-*` header, as Wasabi sent. botocore wraps such a
+    #: body in StreamingChecksumBody and raises `AttributeError` instead of the 5xx.
+    #: Each one served is recorded in `hiccups`.
+    hiccup_gets: dict[str, int] = dataclasses.field(default_factory=dict)
+    hiccups: list[str] = dataclasses.field(default_factory=list)
 
 
 @pytest.fixture
@@ -86,6 +92,14 @@ def s3_server():
                 start_response("500 Internal Server Error",
                                [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", _CRC_500)])
                 return [_ERROR_500]
+        if method == "GET" and is_object and recorder.hiccup_gets.get(path, 0) > 0:
+            with put_lock:
+                recorder.hiccup_gets[path] -= 1
+                recorder.hiccups.append(path)
+            body = b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>hiccup</Message></Error>'
+            crc = base64.b64encode(zlib.crc32(body).to_bytes(4, "big")).decode()
+            start_response("503 Slow Down", [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", crc)])
+            return [body]
         if method == "GET" and is_object:
             status: list[str] = []
 
