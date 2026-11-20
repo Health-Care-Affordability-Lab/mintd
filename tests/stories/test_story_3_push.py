@@ -21,8 +21,9 @@ Notes:
   in `data_push`) turns `remote-moved` red; on main the commit's pointer check
   then refuses the push, so no false ✓ prints either way. `_push_verify`
   matching a foreach group only by its plain name turns the by-name case red;
-  a size-only pin judged proven turns that case red; the failed upload, see
-  its test.
+  a size-only pin judged proven turns that case red; a push that leaves its
+  pointers uncommitted, or an import that reads a pin without its version id,
+  turns the second-release case red; the failed upload, see its test.
 """
 
 from __future__ import annotations
@@ -87,6 +88,32 @@ def test_push_then_a_teammate_imports_my_bytes(product, mintd, s3_server, fresh_
     # data/raw, tracked but declared by no output, does not land: --all brings declared outputs today; add it
     # when story 1's `[all]` Target passes
     assert assert_landed_match_pointers(project) == {f"{root}/{k}": md5(v) for k, v in mine.items()}
+
+
+def test_each_release_brings_the_bytes_it_pinned(product, mintd, s3_server, fresh_project) -> None:
+    """A file changed since the last release: its key holds two versions, and
+    each release's pins bring that release's bytes, the old one by `--rev`."""
+    producer = product.producer
+    first, old = producer.head_sha, product.outs["data/final"]["a.csv"]  # the product fixture's release
+    new = b"alpha, revised\n"
+    publish_payload(producer.work, producer.remote, {"data/final": {**product.outs["data/final"], "a.csv": new}},
+                    push=False)
+    producer._commit_and_push("revise a.csv")
+    if s3_server.puts:  # the product fixture cleared them: mintd must be the one to upload the revision
+        raise HarnessError(f"the Given uploaded {s3_server.puts}: the revision must start unpushed")
+
+    run, ticked = _push(mintd, product)
+
+    assert run.returncode == 0 and ticked, run.stderr
+    for rev in (first, "main"):  # storage still holds the first release's version too
+        assert assert_storage_holds_pins(s3_server, producer.bare, product.prefix, rev=rev) == 4
+    root = f"data/imports/data_{product.name}/data/final"
+    for name, args, body in (("teammate-new", (), new), ("teammate-old", ("--rev", first), old)):
+        project = fresh_project(name)
+        got = mintd("data", "import", product.name, *args, cwd=project)
+        assert got.returncode == 0, got.stderr
+        landed = assert_landed_match_pointers(project)
+        assert landed[f"{root}/a.csv"] == md5(body), (name, landed)
 
 
 def test_a_stage_pushed_by_name_is_held_and_reaches_the_teammate(product, mintd, s3_server, fresh_project) -> None:

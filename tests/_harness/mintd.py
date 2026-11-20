@@ -132,7 +132,7 @@ def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
         if found is None:
             pytest.fail(f"MINTD_BIN={given!r} is not on PATH")
         return Path(found).resolve()
-    dirty = _git(["status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock"], cwd=REPO)
+    dirty = _git(["status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock"], cwd=REPO, host=True)
     if dirty:
         pytest.fail(
             "the stories build mintd from HEAD, which lacks these changes:\n"

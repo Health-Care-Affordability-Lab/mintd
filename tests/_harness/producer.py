@@ -258,8 +258,9 @@ def register(registry: Path, meta: dict, work: Path) -> None:
     entry.parent.mkdir(parents=True, exist_ok=True)  # git keeps no empty folder
     entry.write_text(yaml.safe_dump(meta, sort_keys=False), encoding="utf-8")
     _git(["add", "-A"], cwd=work)
-    _git(["commit", "-m", f"register {meta['project']['name']}"], cwd=work)
-    _git(["push", "origin", "main"], cwd=work)
+    if _git(["status", "--porcelain"], cwd=work):  # a change that leaves the entry as it was commits nothing
+        _git(["commit", "-m", f"register {meta['project']['name']}"], cwd=work)
+        _git(["push", "origin", "main"], cwd=work)
 
 
 @pytest.fixture

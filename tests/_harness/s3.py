@@ -43,9 +43,10 @@ class S3Server:
     hold_puts_after: int | None = None
     holding: threading.Event = dataclasses.field(default_factory=threading.Event)
     release: threading.Event = dataclasses.field(default_factory=threading.Event)
-    #: paths `/<bucket>/<key>` whose object GET answers 500 until removed; HEAD
-    #: still answers; a failed GET is not recorded in `gets`.
-    fail_gets: set[str] = dataclasses.field(default_factory=set)
+    #: paths `/<bucket>/<key>` whose object GET answers 500: the next n GETs
+    #: for a count n, every GET until removed for None. HEAD still answers; a
+    #: failed GET is not recorded in `gets`.
+    fail_gets: dict[str, int | None] = dataclasses.field(default_factory=dict)
 
 
 @pytest.fixture
@@ -77,9 +78,14 @@ def s3_server():
                 start_response("503 Slow Down", [("Content-Type", "application/xml")])
                 return [b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>held</Message></Error>']
         if method == "GET" and is_object and path in recorder.fail_gets:
-            start_response("500 Internal Server Error",
-                           [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", _CRC_500)])
-            return [_ERROR_500]
+            with put_lock:
+                left = recorder.fail_gets.get(path, 0)
+                if left:
+                    recorder.fail_gets[path] = left - 1
+            if left is None or left > 0:
+                start_response("500 Internal Server Error",
+                               [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", _CRC_500)])
+                return [_ERROR_500]
         if method == "GET" and is_object:
             status: list[str] = []
 

@@ -16,6 +16,9 @@
 - Catches: one S3 5xx aborting the whole `cache pull` with a botocore
   traceback (the bug fixed in #68).
 
+Beyond the story's text (the coordinator's gate, 2026-11-20): a 500 that
+happens once is retried, so the first pull lands every file.
+
 The 500 is the one real S3 sent, checksum header included (`fail_gets` in
 `tests/_harness/s3.py`): through it botocore raises AttributeError, #68's
 failure. Mutations that turn it red: undoing #68's two layers (the
@@ -23,7 +26,9 @@ AttributeError conversion in `_share_ops.download_object` and the per-file
 catch in `_cache_ops.cache_pull`; either alone stays green) turns the 500 case
 red with a traceback; `_cache_ops._pull_one` returning before its download
 turns the clean case red; `_pull_one` also writing `<dest>.dvc` turns the
-no-pointer check red.
+no-pointer check red; a pull that stops at its first failure turns the 500
+case red (the failing key is pulled first); a ✓ or exit 0 over a failure, in
+either output mode, turns it red; no retry turns the one-off case red.
 """
 
 from __future__ import annotations
@@ -31,12 +36,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from tests._harness import HarnessError
-from tests._harness.expect import md5, s3_state
+from tests._harness.expect import md5, result, s3_state
 from tests._harness.git import _git
 from tests._harness.s3 import BUCKET
 
 FILES = {"results/a.txt": b"alpha\n", "results/sub/b.txt": b"beta\n", "results/c.txt": b"gamma\n"}
-FAILING = "results/sub/b.txt"
+FAILING = "results/a.txt"  # the first key pulled: a pull that stops at its first failure lands nothing else
 
 
 def _new_pointers(project: Path) -> set[str]:
@@ -77,15 +82,18 @@ def test_cache_push_then_pull_lands_every_file_outside_dvc(product, mintd, s3_se
 
 def test_one_file_that_fails_fails_alone_and_a_rerun_lands_it(product, mintd, s3_server, tmp_path: Path) -> None:
     clone = _push_and_clone(product, mintd, s3_server, tmp_path)
-    s3_server.fail_gets.add(f"/{BUCKET}/{product.prefix}/cache/{FAILING}")
+    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = None  # every GET, until cleared
 
     failed = mintd("cache", "pull", cwd=clone)
 
     assert "Traceback" not in failed.stdout + failed.stderr, failed.stderr
     assert failed.returncode != 0, failed.stderr
+    assert {k: result(failed.stdout)[k] for k in ("failed", "pulled")} == {"failed": 1, "pulled": len(FILES) - 1}
     assert _landed(clone) == {rel: md5(body) for rel, body in FILES.items() if rel != FAILING}
-    said = "".join(failed.stderr.split())  # the console wraps at 80 columns, mid-word too
-    assert FAILING in said and "retry:mintdcachepull" in said, failed.stderr
+    shown = mintd("cache", "pull", cwd=clone, json=False)  # the ✓ and "pull incomplete" exist only here
+    said = "".join((shown.stdout + shown.stderr).split())  # the console wraps at 80 columns, mid-word too
+    assert shown.returncode != 0 and "✓" not in said and "pullincomplete" in said, shown.stderr
+    assert FAILING in said and "retry:mintdcachepull" in said, shown.stderr
 
     s3_server.fail_gets.clear()
     rerun = mintd("cache", "pull", cwd=clone)
@@ -93,3 +101,14 @@ def test_one_file_that_fails_fails_alone_and_a_rerun_lands_it(product, mintd, s3
     assert rerun.returncode == 0, rerun.stderr
     assert _landed(clone) == {rel: md5(body) for rel, body in FILES.items()}
     assert _new_pointers(clone) == set()
+
+
+def test_a_one_off_500_is_retried_and_the_pull_lands_everything(product, mintd, s3_server, tmp_path: Path) -> None:
+    clone = _push_and_clone(product, mintd, s3_server, tmp_path)
+    s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] = 1
+
+    pulled = mintd("cache", "pull", cwd=clone)
+
+    assert pulled.returncode == 0, pulled.stderr
+    assert _landed(clone) == {rel: md5(body) for rel, body in FILES.items()}
+    assert s3_server.fail_gets[f"/{BUCKET}/{product.prefix}/cache/{FAILING}"] == 0, "the 500 was never served"
