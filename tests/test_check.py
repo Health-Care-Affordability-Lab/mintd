@@ -397,8 +397,21 @@ def test_upgrades_reports_pin_missing(tmp_path: Path):
     consumer_findings = [f for f in findings if f.section == "consumer"]
 
     assert len(consumer_findings) == 1
-    assert consumer_findings[0].severity == "error"
+    # A warning: the consumer can't restore the producer's history, so CI
+    # stays green. Mutation: drop the downgrade in `_error_finding` -> red.
+    assert consumer_findings[0].severity == "warning"
     assert "producer pin missing" in consumer_findings[0].message
+
+
+def test_upgrades_gives_an_unreachable_producer_the_shared_hint(tmp_path: Path):
+    _write_metadata(tmp_path)
+    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
+    factory = _factory_returning(ProducerError.unreachable("https://example.org/p.git", _PIN, "timeout"))
+
+    [finding] = [f for f in check_project(tmp_path, upgrades=True, producer_view_factory=factory) if f.section == "consumer"]
+    assert finding.hint and finding.hint.startswith(
+        "could not reach the producer's repository https://example.org/p.git: "
+    )
 
 
 def test_upgrades_reports_metadata_missing(tmp_path: Path):
@@ -611,7 +624,7 @@ _PIN = "4f7c2a1abcd1234567890abcdef0123456789abc"
     "result,expected_kind,expected_severity,message_fragment",
     [
         (ProducerError.unreachable("repo", _PIN, "timeout"), "unreachable", "warning", "producer unreachable"),
-        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "error", "producer pin missing"),
+        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "warning", "producer pin missing"),
         (ProducerError.metadata_missing("repo", _PIN), "metadata_missing", "error", "producer has no metadata.json"),
         (ProducerError.metadata_invalid("repo", _PIN, "bad"), "metadata_invalid", "error", "producer metadata invalid"),
         (ProducerError.schema_too_old("repo", _PIN, "1.5"), "schema_too_old", "warning", "uses schema_version"),
@@ -638,7 +651,8 @@ def test_consumer_dvc_error_findings_assign_correct_kinds(
     "result,expected_kind,expected_severity",
     [
         (ProducerError.unreachable("repo", _PIN, "timeout"), "unreachable", "warning"),
-        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "error"),
+        # A warning, as for imports: the consumer can't restore the producer's history.
+        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "warning"),
         (ProducerError.metadata_missing("repo", _PIN), "metadata_missing", "error"),
         (ProducerError.metadata_invalid("repo", _PIN, "bad"), "metadata_invalid", "error"),
         (ProducerError.schema_too_old("repo", _PIN, "1.5"), "schema_too_old", "warning"),

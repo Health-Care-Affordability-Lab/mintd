@@ -1041,6 +1041,22 @@ def test_import_from_an_unreachable_producer_names_the_url_it_tried(tmp_path: Pa
     assert "Connection refused" in str(ei.value)  # dvc's own words stay in the error
 
 
+@pytest.mark.parametrize(("text", "shown"), [
+    ("http://alice:s3cr3t@host/r.git", "http://host/r.git"),
+    ("https://s3cr3t@github.com/org/r.git", "https://github.com/org/r.git"),  # a token as the user
+    ("ssh://git:s3cr3t@host/r.git", "ssh://git@host/r.git"),  # ssh keeps its login name
+    ("ssh://git@host/r.git", "ssh://git@host/r.git"),
+    ("git@github.com:org/r.git", "git@github.com:org/r.git"),
+    ("git+https://ghp_s3cr3t@github.com/o/r.git", "git+https://github.com/o/r.git"),  # pip-style
+    ("git+https://u:s3cr3t@h/r", "git+https://h/r"),
+    ("clone 'https://u:s3cr3t@a/r' then 'http://b/r'", "clone 'https://a/r' then 'http://b/r'"),
+])
+def test_strip_userinfo_takes_credentials_out_of_every_url(text: str, shown: str) -> None:
+    from mintd.errors import strip_userinfo
+
+    assert strip_userinfo(text) == shown
+
+
 def test_the_unreachable_hint_quotes_the_url_inside_its_command(tmp_path: Path) -> None:
     """The producer controls the catalog URL; pasting the suggested command must
     not run anything else. Mutation: drop `shlex.quote` -> red."""
@@ -1076,3 +1092,44 @@ def test_any_other_import_failure_keeps_no_hint_of_its_own(tmp_path: Path) -> No
             repo_url="https://example.org/repo", path="data/final", dest=tmp_path / "d", cwd=tmp_path,
         )
     assert type(ei.value) is DvcOpError and ei.value.hint is None
+
+
+def test_a_real_dvc_import_never_prints_the_catalog_urls_token(tmp_path: Path, capsys) -> None:
+    """dvc's own live output echoes the URL it was given; the reporter's
+    passthrough strips it. A real `dvc import` against a port that refuses at
+    once (bound and closed again)."""
+    import socket
+    import subprocess as sp
+
+    from mintd._config import Timeouts
+    from mintd._console import Reporter
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://alice:s3cr3tTOKEN@127.0.0.1:{s.getsockname()[1]}/priv.git"
+    sp.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    SubprocessDvcOps(timeouts=Timeouts()).init(cwd=tmp_path)
+    reporter = Reporter(no_color=True)
+    with pytest.raises(DvcImportRepoUnreachable) as ei:
+        SubprocessDvcOps(timeouts=Timeouts(), reporter=reporter).import_(
+            repo_url=url, path="data/final", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    reporter.error(str(ei.value), hint=ei.value.hint)
+    out, err = capsys.readouterr()
+    assert "Failed to clone repo" in err  # dvc's own line was shown...
+    assert "s3cr3tTOKEN" not in out + err  # ...without the token
+
+
+def test_strip_userinfo_stays_linear_on_long_tokens() -> None:
+    """It runs over every printed line and every `--json` result, and a
+    producer controls descriptions. Mutation: start a match at `\\b` -> slow, red."""
+    import time
+
+    from mintd.errors import strip_userinfo
+
+    # Quadratic, this size takes tens of seconds; linear, about a millisecond.
+    text = "see-also-" * 20000 + " https://u:p@h/r a@b"
+    start = time.perf_counter()
+    assert strip_userinfo(text).endswith(" https://h/r a@b")
+    assert time.perf_counter() - start < 1.0

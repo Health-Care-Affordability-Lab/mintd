@@ -38,7 +38,6 @@ from ._dvc_ops import (
     DvcOpError,
     DvcOps,
     SubprocessDvcOps,
-    unreachable_repo_hint,
 )
 from ._registry_git_ops import (
     GhAuthError,
@@ -50,7 +49,7 @@ from ._registry_git_ops import (
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
-from .errors import MintdError
+from .errors import MintdError, strip_userinfo, unreachable_repo_hint
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from .catalog import (
@@ -266,10 +265,10 @@ def _hint(
 
 
 def _producer_unreachable(e: ProducerError) -> str | None:
-    """Import's advice when reading the producer's metadata (`--rev` with no
-    `--path`) fails because its repository can't be reached; other reasons get
-    none. `data clone` keeps its own. `--bump` meets an unreachable producer in
-    its `check` preflight, and `BumpBlocked` carries that hint."""
+    """The shared advice when a producer's repository can't be reached: for
+    `data import --rev` with no `--path` (reading its metadata) and `data clone`.
+    Other reasons get none. `--bump` meets an unreachable producer in its
+    `check` preflight, whose finding carries the same hint."""
     return unreachable_repo_hint(e.repo) if e.reason == ProducerError.Reason.UNREACHABLE else None
 
 
@@ -1812,7 +1811,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             "or drop --path/--primary to pull everything",
         ),
         _hint(ImportDestinationExists, "pass --dest <path> or remove the existing directory"),
-        _hint(ProducerError, "check git auth (gh auth status / ssh -T git@github.com)"),
+        _hint(ProducerError, _producer_unreachable),
     ):
         clone_result = clone_and_pull_product(
             client, dvc_ops, registry_git_ops, fast_sync_ops,
@@ -2858,11 +2857,11 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
                     {
                         "severity": f.severity,
                         "section": f.section,
-                        "message": f.message,
+                        "message": strip_userinfo(f.message),
                         "field_path": f.field_path,
                         "source": str(f.source) if f.source else None,
                         "kind": f.kind,
-                        "hint": f.hint,
+                        "hint": strip_userinfo(f.hint) if f.hint else None,
                     }
                 )
             )
@@ -2870,9 +2869,9 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
         for f in findings:
             prefix = _resolve_prefix(f.kind)
             loc = f.source if f.source else "<project>"
-            print(f"{prefix} [{f.severity}] {loc}: {f.message}")
+            print(strip_userinfo(f"{prefix} [{f.severity}] {loc}: {f.message}"))
             if f.hint:
-                print(f"    💡 {f.hint}")
+                print(strip_userinfo(f"    💡 {f.hint}"))
         if not findings:
             print("no issues found")
         else:
@@ -2892,20 +2891,31 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
     read ``kind``. If a future error class wants different UX, add a
     ``kind`` value — don't parse messages.
     """
-    print(f"error: {exc}", file=sys.stderr)
+    print(strip_userinfo(f"error: {exc}"), file=sys.stderr)
     kind = exc.finding.kind
-    if kind == "unreachable":
-        print("hint: retry when the network is available", file=sys.stderr)
+    if kind == "unreachable" and exc.finding.hint:
+        # check's finding carries the shared unreachable-producer hint.
+        print(strip_userinfo(f"hint: {exc.finding.hint}"), file=sys.stderr)
+    elif kind == "pin_missing":
+        # An empty pin in the user's own file carries its own fix.
+        print(
+            strip_userinfo("hint: " + (
+                exc.finding.hint
+                or "the producer's history no longer has your pinned commit; "
+                "ask the producer, or re-import at a commit that exists"
+            )),
+            file=sys.stderr,
+        )
     elif kind == "drift_unknown":
         # Five states reach this kind and only two are transport failures, so
         # a fixed "check the network" misdiagnosed three of them at a network
         # that was working. Prefer the finding's own hint, as
         # `catalog_unresolved` below already does. Still `kind` dispatch.
         print(
-            "hint: " + (
+            strip_userinfo("hint: " + (
                 exc.finding.hint
                 or "'mintd check --upgrades' shows the row and the reason"
-            ),
+            )),
             file=sys.stderr,
         )
     elif kind == "schema_too_old":
@@ -2920,10 +2930,10 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
         # at a setting that is already correct. Still `kind` dispatch, not
         # message parsing.
         print(
-            "hint: " + (
+            strip_userinfo("hint: " + (
                 exc.finding.hint
                 or "check that registry_url is set in ~/.config/mintd/config.yaml"
-            ),
+            )),
             file=sys.stderr,
         )
     if kind in _RECOVERABLE_KINDS:

@@ -118,16 +118,19 @@ def _subparser(*path: str) -> argparse.ArgumentParser:
 
 def test_import_and_clone_help_say_what_each_form_brings_as_the_readme_does() -> None:
     """`data import --help` and `data clone --help` carry README's "Command |
-    Brings" rows word for word, so the two can't drift apart.
+    Brings" rows word for word, and no others, so the two can't drift apart.
 
-    Mutation: change a word in one README "Brings" cell -> red."""
+    Mutation: change a word in one README "Brings" cell, or add a row to one
+    help table only -> red."""
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     for verb in ("import", "clone"):
         rows = re.findall(rf"^\| `(mintd data {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
         assert len(rows) >= 2, verb
-        parser = _subparser("data", verb)
-        shown = " ".join(parser.format_help().split())
-        for command, brings in rows:
-            assert " ".join(f"{command} {brings.replace('`', '')}".split()) in shown, (verb, command)
+        documented = {" ".join(f"{command} {brings.replace('`', '')}".split()) for command, brings in rows}
+        epilog = _subparser("data", verb).epilog or ""
+        # The table is the epilog's first paragraph; each row starts at "  mintd data".
+        table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
+        shown = {" ".join(row.split()) for row in re.split(rf"\s(?=mintd data {verb}\b)", " " + table) if row.strip()}
+        assert shown == documented, verb
         # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
-        assert max(map(len, (parser.epilog or "").splitlines())) <= 80, verb
+        assert max(map(len, epilog.splitlines())) <= 80, verb

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ast
 import re
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Protocol
@@ -19,7 +18,7 @@ from ._config import Timeouts
 from ._console import Reporter
 from ._dvc_invoke import dvc_cmd, dvc_env
 from ._subprocess import StreamResult, run_streaming
-from .errors import MintdError
+from .errors import MintdError, unreachable_repo_hint
 
 
 class DvcOpError(MintdError):
@@ -134,15 +133,6 @@ class DvcImportPathNotFound(DvcOpError):
     hint: str | None = (
         "if that path exists only on a branch or tag, name it: "
         "retry with --rev <branch-or-tag>"
-    )
-
-
-def unreachable_repo_hint(repo_url: str) -> str:
-    """What to do when the producer's repository can't be reached. The URL is
-    quoted where it sits in a command, since the producer controls it."""
-    return (
-        f"could not reach the producer's repository {repo_url}: check your network and git access "
-        f"(git ls-remote {shlex.quote(repo_url)}); if it moved, the catalog entry is out of date, so tell the producer"
     )
 
 
