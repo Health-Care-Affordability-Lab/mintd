@@ -1,12 +1,16 @@
-schema_version: "2.0"
 enclave_name: "{{ full_project_name }}"
-registry_url: "{{ registry_url }}"
 
-# Data products approved for this enclave (from registry)
+# The data products approved to cross into this enclave: one row per product,
+# each at a full producer commit SHA. Edit by hand. `mintd enclave package`
+# imports exactly these versions and bundles the ones not yet sent.
+#
+#   - repo: <name in `mintd data list`>
+#     pin: <40-character commit>     # `mintd check --upgrades` shows newer ones
+#     source_path: data/final/x.csv  # optional: one output; omit for the primary
+#     all: true                      # optional: every output at that pin
 approved_products: []
 
-# Versions downloaded to networked repo (ready for transfer)
-downloaded: []
-
-# Versions verified on enclave
+# Append-only audit log. `mintd enclave package` adds a `packaged` row for each
+# version it bundles. Keep this section last: rows are appended to the end of
+# the file.
 transferred: []

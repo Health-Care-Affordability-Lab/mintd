@@ -350,52 +350,6 @@ def _catalog_for(url: str):
     return client
 
 
-def test_an_empty_manifest_pin_is_refused_not_resolved_to_head(
-    local_producer, tmp_path
-) -> None:
-    """A hand-edited `pin: ''` must fail loudly, not silently mean HEAD.
-
-    `try_at(repo, "")` resolves HEAD — that is the sentinel `_consumer_findings`
-    uses to ask "where is the producer now?". `ApprovedProduct.pin` is a bare
-    `str` with no validator, and `mintd enclave add <repo> --pin=""` (say,
-    `--pin="$SHA"` with `SHA` unset) writes an empty one. Without the guard at
-    `check.py`, the two meanings collide and an enclave pinned at nothing
-    reports a clean "up to date" while `enclave_bump` silently no-ops.
-
-    Caught in review of the `""`-means-HEAD fix itself — the fix that made
-    drift detection work at all also widened `""` past its intended caller.
-    """
-    from mintd.check import _consumer_findings_from_enclave_manifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    manifest.write_text(
-        "schema_version: '2.0'\n"
-        "enclave_name: probe\n"
-        "approved_products:\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
-        "    pin: ''\n"
-        "    source_path: data/final/\n"
-        "downloaded: []\n"
-        "transferred: []\n",
-        encoding="utf-8",
-    )
-
-    findings = _consumer_findings_from_enclave_manifest(
-        tmp_path,
-        upgrades=True,
-        producer_view_factory=None,
-        client=_catalog_for(local_producer.url),
-    )
-
-    kinds = {f.kind for f in findings if f.section == "consumer"}
-    assert "up_to_date" not in kinds, (
-        "an empty pin resolved to HEAD and reported clean — the HEAD sentinel "
-        "swallowed user data"
-    )
-    assert "pin_missing" in kinds
-
-
 def test_an_empty_dvc_rev_lock_is_refused_not_resolved_to_head(
     local_producer, tmp_path
 ) -> None:

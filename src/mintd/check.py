@@ -13,9 +13,8 @@ Findings are split into two sections, by which artifact they read
     output must be one `mintd data import` can actually land. This is what
     a project owner is responsible for getting right before publishing.
   - consumer: derivable from the project's imports (the `.dvc` pointers
-    under data/imports/ and dvc.lock deps with a `repo:` block) and
-    enclave_manifest.yaml (each row's producer URL read from the catalog),
-    plus — with `upgrades` — each upstream producer at the pin and at HEAD:
+    under data/imports/ and dvc.lock deps with a `repo:` block), plus —
+    with `upgrades` — each upstream producer at the pin and at HEAD:
     pin resolvability, version compatibility, drift.
     This is what a project owner is responsible for keeping current as
     upstreams move.
@@ -37,7 +36,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import ValidationError
@@ -56,16 +55,9 @@ from ._fast_sync_ops import (
     wdir_map,
 )
 from ._registry_git_ops import GitOpError
-from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
-
-if TYPE_CHECKING:
-    # Avoid module-level import of enclave.py — enclave.py imports from this
-    # module (CheckFinding) and from data.py, which imports this module too.
-    # Lazy import inside the manifest walker breaks the cycle for runtime.
-    from .enclave import ApprovedProduct
 
 ProducerViewFactory = Callable[[str, str], "ProducerView | ProducerError"]
 
@@ -156,7 +148,6 @@ def check_project(
     *,
     upgrades: bool = False,
     producer_view_factory: ProducerViewFactory | None = None,
-    client: CatalogClient | None = None,
     fetcher: Fetcher | None = None,
 ) -> list[CheckFinding]:
     """Validate a mintd project at `path` (the project directory).
@@ -171,8 +162,7 @@ def check_project(
       - valid → data_products.primary, repository.github_url and, when `.dvc/`
         exists, DVC delivery of every declared output
 
-    Consumer section: the project's imports and enclave approved products;
-    `upgrades=True` also resolves each producer at its pin and at HEAD and
+    Consumer section: the project's imports; `upgrades=True` also resolves each producer at its pin and at HEAD and
     reports drift.
     """
     findings = _producer_findings(path)
@@ -182,7 +172,6 @@ def check_project(
                 path,
                 upgrades=upgrades,
                 producer_view_factory=producer_view_factory,
-                client=client,
                 fetcher=fetcher,
             )
         )
@@ -649,14 +638,12 @@ def _consumer_findings(
     *,
     upgrades: bool,
     producer_view_factory: ProducerViewFactory | None,
-    client: CatalogClient | None = None,
     imports_under: str = "data/imports",
     fetcher: Fetcher | None = None,
 ) -> list[CheckFinding]:
     active_fetcher: Fetcher = fetcher if fetcher is not None else GitArchiveFetcher()
     # D-C reads the producer's DVC pointer at both pin and HEAD, per row.
-    # `_resolve_once` in the enclave walker memoizes VIEWS only; pointer reads
-    # and `dvc.yaml` reads share this one across both arms of a single walk.
+    # Pointer reads and `dvc.yaml` reads share this memo across one walk.
     # Keyed `(repo, rev, path)` for a pointer, `(repo, rev)` for a wdir map --
     # different arity, so one dict holds both without collision.
     memo: dict[tuple[str, ...], Any] = {}
@@ -667,16 +654,6 @@ def _consumer_findings(
         imports_under=imports_under,
         fetcher=active_fetcher,
         memo=memo,
-    )
-    findings.extend(
-        _consumer_findings_from_enclave_manifest(
-            project_path,
-            upgrades=upgrades,
-            producer_view_factory=producer_view_factory,
-            client=client,
-            fetcher=active_fetcher,
-            memo=memo,
-        )
     )
     return findings
 
@@ -702,9 +679,7 @@ def _consumer_findings_from_dvc(
     factory = producer_view_factory if producer_view_factory is not None else ProducerView.try_at
 
     for dep in deps:
-        # An EMPTY `rev_lock` is user data, not the HEAD sentinel — the same
-        # collision the enclave-manifest branch guards below, on the lane the
-        # first cut of that guard missed. Without it BOTH `factory` calls
+        # An EMPTY `rev_lock` is user data, not the HEAD sentinel. Without it BOTH `factory` calls
         # resolve HEAD, the two views are identical, `_drift_finding` sees no
         # drift, and an import with no pin at all renders as `✓ up to date`
         # where it used to render as `[warning] producer unreachable`. That
@@ -761,202 +736,6 @@ def _consumer_findings_from_dvc(
     return findings
 
 
-def _consumer_findings_from_enclave_manifest(
-    project_path: Path,
-    *,
-    upgrades: bool,
-    producer_view_factory: ProducerViewFactory | None,
-    client: CatalogClient | None,
-    fetcher: Fetcher | None = None,
-    memo: dict[tuple[str, ...], Any] | None = None,
-) -> list[CheckFinding]:
-    if fetcher is None:
-        fetcher = GitArchiveFetcher()
-    if memo is None:
-        memo = {}
-    manifest_path = project_path / "enclave_manifest.yaml"
-    if not manifest_path.is_file():
-        return []
-
-    # Lazy import to break the check.py ↔ enclave.py cycle.
-    from .enclave import EnclaveManifest, subscription_label
-
-    try:
-        manifest = EnclaveManifest.load(manifest_path)
-    except (ValidationError, yaml.YAMLError) as e:
-        return [
-            CheckFinding(
-                severity="error",
-                section="consumer",
-                message=f"enclave_manifest.yaml invalid: {e}",
-                source=manifest_path,
-                kind="invalid_manifest",
-            )
-        ]
-
-    findings: list[CheckFinding] = []
-    factory = (
-        producer_view_factory
-        if producer_view_factory is not None
-        else ProducerView.try_at
-    )
-
-    # Memoized per (repo_url, pin) FOR THIS CALL ONLY. Before P5 a repo held
-    # exactly one row, so each producer cost one HEAD round-trip; now a repo
-    # with three subscriptions would pay three, and `enclave bump` (which runs
-    # check_project(upgrades=True)) pays them again. `ProducerView.try_at`
-    # disk-caches the pinned read but the HEAD read "always pays the
-    # round-trip" by its own docstring. Same inputs give the same view within
-    # one walk, so this is identical in meaning and strictly cheaper.
-    _views: dict[tuple[str, str], "ProducerView | ProducerError"] = {}
-
-    def _resolve_once(repo_url: str, pin: str) -> "ProducerView | ProducerError":
-        key = (repo_url, pin)
-        if key not in _views:
-            _views[key] = factory(repo_url, pin)
-        return _views[key]
-
-    for ap in manifest.approved_products:
-        field_path = f"approved_products[{ap.repo}]"
-        if client is None:
-            findings.append(
-                CheckFinding(
-                    severity="error",
-                    section="consumer",
-                    message=f"catalog client not provided; cannot resolve producer"
-                    f" URL for {ap.repo} ({subscription_label(ap)})",
-                    source=manifest_path,
-                    field_path=field_path,
-                    kind="catalog_unresolved",
-                )
-            )
-            continue
-
-        try:
-            repo_url = _resolve_approved_product_url(client, ap)
-        except (ValueError, CatalogNotFound, GitOpError) as e:
-            # A GitOpError means the catalog read itself failed — the cache is
-            # cloned/refreshed on every fetch. That is a documented path, not a
-            # traceback, and since plain `check` resolves a client too, every
-            # enclave consumer is on it. An unreachable remote and a corrupt
-            # local cache are indistinguishable here, so report git's own words
-            # rather than asserting a cause; the other two already carry a
-            # user-facing message.
-            if isinstance(e, GitOpError):
-                message = (
-                    f"cannot read the catalog to resolve producer URL for "
-                    f"{ap.repo}: {_git_error_summary(e)}"
-                )
-                hint = (
-                    "check your network and `registry_url` in "
-                    "~/.config/mintd/config.yaml; if both are fine, delete the "
-                    "local registry cache (~/.cache/mintd/registry by default) "
-                    "and retry"
-                )
-            else:
-                message, hint = str(e), None
-            findings.append(
-                CheckFinding(
-                    severity="error",
-                    section="consumer",
-                    message=f"{message} ({subscription_label(ap)})",
-                    source=manifest_path,
-                    field_path=field_path,
-                    kind="catalog_unresolved",
-                    hint=hint,
-                )
-            )
-            continue
-
-        # An EMPTY pin here is user data, not the HEAD sentinel. `try_at`
-        # treats `""` as "resolve HEAD" so that `factory(repo_url, "")` below
-        # can ask that question, but `ap.pin` comes from a hand-editable
-        # manifest and `mintd enclave add <repo> --pin=""` (e.g. `--pin="$SHA"`
-        # with SHA unset) writes it. Without this guard such a manifest would
-        # resolve to HEAD and report a clean "up to date" for a pin that does
-        # not exist, and `enclave_bump` would silently no-op instead of
-        # blocking. Refuse it explicitly rather than letting the sentinel
-        # swallow it.
-        #
-        # Above the `upgrades` gate for the same reason as the `.dvc` lane:
-        # the pin is read from the manifest, not the wire.
-        if not ap.pin.strip():
-            findings.append(
-                CheckFinding(
-                    severity="error",
-                    section="consumer",
-                    message=f"approved product {ap.repo!r} has an empty pin"
-                    f" ({subscription_label(ap)})",
-                    source=manifest_path,
-                    field_path=field_path,
-                    kind="pin_missing",
-                    hint=(
-                        f"set the pin for this row: `mintd enclave add {ap.repo} "
-                        "--pin=<commit>`, or edit approved_products[].pin in the "
-                        "manifest. An unset shell variable (`--pin=\"$SHA\"`) writes "
-                        "an empty one."
-                    ),
-                )
-            )
-            continue
-
-        if not upgrades:
-            # Summary-only finding (no upgrades path); kind stays None — never reaches a write command.
-            msg = f"approved {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})"
-            findings.append(
-                CheckFinding(
-                    severity="info",
-                    section="consumer",
-                    message=msg,
-                    source=manifest_path,
-                    field_path=field_path,
-                )
-            )
-            continue
-
-        result_pin = _resolve_once(repo_url, ap.pin)
-        if isinstance(result_pin, ProducerError):
-            findings.append(
-                _error_finding_for(
-                    manifest_path,
-                    field_path,
-                    result_pin,
-                    label=subscription_label(ap),
-                )
-            )
-            continue
-
-        result_head = _resolve_once(repo_url, "")
-        if isinstance(result_head, ProducerError):
-            # Labelled (D-D): without it a multi-row repo prints N identical
-            # lines here.
-            findings.append(
-                _head_unreadable_finding(
-                    source=manifest_path,
-                    field_path=field_path,
-                    pin=ap.pin,
-                    err=result_head,
-                    label=subscription_label(ap),
-                )
-            )
-            continue
-
-        findings.append(
-            _drift_finding_from_views(
-                source=manifest_path,
-                field_path=field_path,
-                pin_view=result_pin,
-                head_view=result_head,
-                expected_output_path=ap.source_path,
-                fetcher=fetcher,
-                memo=memo,
-                all_outputs=ap.all,
-                label=subscription_label(ap),
-            )
-        )
-    return findings
-
-
 def _git_error_summary(exc: GitOpError) -> str:
     """Git's own diagnosis: its first non-blank line that is not clone
     progress, else the command.
@@ -984,14 +763,6 @@ def _git_error_summary(exc: GitOpError) -> str:
     return lines[0] if lines else " ".join(exc.command)
 
 
-def _resolve_approved_product_url(client: CatalogClient, ap: ApprovedProduct) -> str:
-    """Slice-8 Decision #2α: catalog is canonical for repo identity."""
-    from .data import _require_repo_url
-
-    entry = client.fetch(ap.repo)
-    return _require_repo_url(entry.model_dump(), name=ap.repo)
-
-
 def _summary_finding(dep: DataDependency) -> CheckFinding:
     return CheckFinding(
         severity="info",
@@ -1002,12 +773,12 @@ def _summary_finding(dep: DataDependency) -> CheckFinding:
 
 
 def _uptodate_finding_for(
-    *, source: Path, field_path: str | None = None, label: str | None = None
+    *, source: Path, field_path: str | None = None
 ) -> CheckFinding:
     return CheckFinding(
         severity="info",
         section="consumer",
-        message=f"up to date ({label})" if label else "up to date",
+        message="up to date",
         source=source,
         field_path=field_path,
         kind="up_to_date",
@@ -1373,7 +1144,6 @@ def _head_unreadable_finding(
     pin: str,
     err: ProducerError,
     field_path: str | None = None,
-    label: str | None = None,
 ) -> CheckFinding:
     """The pin resolved but the producer's HEAD did not.
 
@@ -1390,13 +1160,12 @@ def _head_unreadable_finding(
     blocking both write verbs, which already refuse any kind outside
     {drift, up_to_date}.
     """
-    labelled = f" ({label})" if label else ""
     reason = f"{err.reason}: {err.detail}" if err.detail else str(err.reason)
     return _drift_unknown_finding(
         source=source,
         field_path=field_path,
         message=(
-            f"cannot determine drift{labelled}: cannot read the producer's "
+            f"cannot determine drift: cannot read the producer's "
             f"HEAD ({reason})"
         ),
         hint=(
@@ -1415,8 +1184,6 @@ def _drift_finding_from_views(
     expected_output_path: str | None,
     fetcher: Fetcher,
     memo: dict[tuple[str, ...], Any],
-    all_outputs: bool = False,
-    label: str | None = None,
 ) -> CheckFinding:
     """D-C: drift = the producer's DVC pointer md5 for your path differs
     pin-vs-HEAD. Producer *metadata* carries no per-output content identity
@@ -1428,63 +1195,9 @@ def _drift_finding_from_views(
     """
     repo = pin_view.repo
     pin, head = pin_view.pin, head_view.pin
-    labelled = f" ({label})" if label else ""
 
     def md5_at(rev: str, path: str) -> str | None:
         return _pointer_md5(fetcher, repo, rev, path, memo)
-
-    if all_outputs:
-        # Compare the whole {path: md5} map; any UNREADABLE member is loud.
-        paths = sorted(set(pin_view.output_paths()) | set(head_view.output_paths()))
-        if not paths:
-            return _drift_unknown_finding(
-                source=source,
-                field_path=field_path,
-                message=f"cannot determine drift{labelled}: producer lists no outputs",
-                hint=(
-                    "ask the producer to declare data_products.outputs, or "
-                    "subscribe to one path with 'enclave add --source-path'"
-                ),
-            )
-        pin_map = {p: md5_at(pin, p) for p in paths}
-        head_map = {p: md5_at(head, p) for p in paths}
-        # `_POINTER_ABSENT` is a comparable VALUE, not a read failure — only
-        # `None` (transport/parse) is unreadable. `outputs[]` is
-        # hand-maintained metadata and nothing requires an entry to carry a
-        # top-level pointer, so folding absence in here let one pointer-less
-        # member veto the whole map and wedge `enclave bump` for the repo
-        # forever. Absent at both revs compares equal and contributes nothing;
-        # absent at one is real drift, and an `--all` bump re-resolves the
-        # output list at HEAD, so a member that vanished is simply not
-        # imported. (The single-path lane below differs on purpose: its one
-        # target vanishing leaves the bump nothing to aim at.)
-        unreadable = sorted(
-            p for p in paths if pin_map[p] is None or head_map[p] is None
-        )
-        if unreadable:
-            return _drift_unknown_finding(
-                source=source,
-                field_path=field_path,
-                message=(
-                    f"cannot determine drift{labelled}: no readable pointer for "
-                    f"{', '.join(unreadable)} at {pin[:7]}/{head[:7]}"
-                ),
-                hint=NETWORK_HINT,
-            )
-        changed = sorted(p for p in paths if pin_map[p] != head_map[p])
-        if changed:
-            return CheckFinding(
-                severity="warning",
-                section="consumer",
-                message=(
-                    f"producer's HEAD differs from your pin{labelled}: "
-                    f"{', '.join(changed)} changed"
-                ),
-                source=source,
-                field_path=field_path,
-                kind="drift",
-            )
-        return _uptodate_finding_for(source=source, field_path=field_path, label=label)
 
     # The `or primary` fallback is load-bearing: `from_dvc_lock_stage` records
     # `output_path=""`, so without it every pipeline-stage import would
@@ -1495,7 +1208,7 @@ def _drift_finding_from_views(
             source=source,
             field_path=field_path,
             message=(
-                f"cannot determine drift{labelled}: no output path recorded "
+                f"cannot determine drift: no output path recorded "
                 f"and the producer has no primary at {pin[:7]}"
             ),
             hint=(
@@ -1504,19 +1217,13 @@ def _drift_finding_from_views(
             ),
         )
 
-    # For a `source_path` row `subscription_label` IS the path, so the
-    # parenthetical would repeat what every message in this arm already says:
-    # "cannot determine drift for data/final/b.csv (data/final/b.csv)".
-    if label and label.rstrip("/") == path.rstrip("/"):
-        labelled = ""
-
     pin_md5, head_md5 = md5_at(pin, path), md5_at(head, path)
     if pin_md5 is None or head_md5 is None:
         return _drift_unknown_finding(
             source=source,
             field_path=field_path,
             message=(
-                f"cannot determine drift for {path}{labelled}: no readable "
+                f"cannot determine drift for {path}: no readable "
                 f".dvc or dvc.lock at {pin[:7]}/{head[:7]}"
             ),
             hint=NETWORK_HINT,
@@ -1529,7 +1236,7 @@ def _drift_finding_from_views(
             source=source,
             field_path=field_path,
             message=(
-                f"cannot determine drift for {path}{labelled}: "
+                f"cannot determine drift for {path}: "
                 f"not published at the producer's HEAD ({head[:7]})"
             ),
             hint=(
@@ -1547,7 +1254,7 @@ def _drift_finding_from_views(
             severity="warning",
             section="consumer",
             message=(
-                f"producer's HEAD differs from your pin{labelled}: {path} is "
+                f"producer's HEAD differs from your pin: {path} is "
                 f"published at HEAD but not at your pin {pin[:7]}"
             ),
             source=source,
@@ -1559,14 +1266,14 @@ def _drift_finding_from_views(
             severity="warning",
             section="consumer",
             message=(
-                f"producer's HEAD differs from your pin{labelled}: "
+                f"producer's HEAD differs from your pin: "
                 f"{path} changed"
             ),
             source=source,
             field_path=field_path,
             kind="drift",
         )
-    return _uptodate_finding_for(source=source, field_path=field_path, label=label)
+    return _uptodate_finding_for(source=source, field_path=field_path)
 
 
 def _drift_finding(
@@ -1592,8 +1299,6 @@ def _error_finding_for(
     source: Path,
     field_path: str | None,
     err: ProducerError,
-    *,
-    label: str | None = None,
 ) -> CheckFinding:
     kind: Literal[
         "unreachable",
@@ -1627,9 +1332,6 @@ def _error_finding_for(
         severity = "error"
         message = f"producer error at pin {err.pin[:7]}: {err.detail}"
         kind = None
-
-    if label:
-        message = f"{message} ({label})"
 
     return CheckFinding(
         severity=severity,

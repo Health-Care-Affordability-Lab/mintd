@@ -178,7 +178,7 @@ def test_reporter_status_resets_active_status_on_exit():
 # `[...]` token is read as a style tag and DELETED, and one starting with `/`
 # raises MarkupError -- which is not a ValueError, so it escapes every CLI
 # handler as a traceback. Found by P5: `enclave pull`'s per-subscription label
-# is `[<source_path>]`, and `--source-path` is stored verbatim with no
+# was `[<source_path>]`, and `--source-path` was stored verbatim with no
 # validation, so both halves were reachable from the CLI.
 #
 # These assert on what rich would RENDER, not on Reporter's own `_status_base`
@@ -198,8 +198,8 @@ def test_status_label_keeps_bracketed_text():
 
 
 def test_status_label_survives_an_absolute_path():
-    """`mintd enclave add P --source-path /mnt/x` is accepted, so `[/mnt/x]`
-    reaches the spinner and rich reads it as a closing tag."""
+    """A label holding `[/mnt/x]` reaches the spinner, as `mintd enclave add P
+    --source-path /mnt/x` once let it, and rich reads it as a closing tag."""
     reporter = Reporter(no_color=True)
     with reporter.status("start"):
         reporter.update_status("Fetching a [/mnt/x]... (1/2)")

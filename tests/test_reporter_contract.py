@@ -7,7 +7,7 @@ and its own docstring says why that mattered — it calls itself "a deterministi
 **rich-free** Reporter". Rich-free is exactly the property that makes it unable to
 witness a rich defect.
 
-**What this file cost to learn.** `enclave pull` labels each subscription
+**What this file cost to learn.** `enclave pull` labelled each subscription
 `Fetching <repo> [<source_path>]...`. Rich reads `[data/final/x]` as a style tag
 and DELETES it, so the label never reached the user — the feature was silently
 non-functional for its primary input — and `[/mnt/x]` (an absolute

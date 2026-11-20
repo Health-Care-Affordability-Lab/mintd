@@ -9,11 +9,10 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-import yaml
 
 from mintd import _atomic
 from mintd.config_ops import _atomic_write_yaml
-from mintd.enclave import EnclaveManifest
+from mintd.enclave import _append_rows
 from mintd.publish import _atomic_write_json
 
 
@@ -146,8 +145,8 @@ def test_try_fsync_file_closes_fd_on_fsync_failure(
 # ---------------------------------------------------------------------------
 # Temp-name safety for the three metadata writers
 #
-# ``_atomic_write_json``, ``_atomic_write_yaml`` and ``EnclaveManifest.save``
-# were three byte-identical copies of one body. Each derived its temp from
+# ``_atomic_write_json``, ``_atomic_write_yaml`` and the enclave manifest's
+# writer were three byte-identical copies of one body. Each derived its temp from
 # ``path.with_suffix(path.suffix + ".tmp")``, so every write went through the
 # guessable sibling ``<name>.tmp`` and landed there with a bare
 # ``write_text``. That destroyed a user's own scratch file of that name and
@@ -156,13 +155,16 @@ def test_try_fsync_file_closes_fd_on_fsync_failure(
 # ``test_tmp_name_parity.py``: mintd never destroys a file it did not create.
 # ---------------------------------------------------------------------------
 
-_MANIFEST = EnclaveManifest(enclave_name="x")
-_MANIFEST_YAML = yaml.safe_dump(_MANIFEST.model_dump(mode="json"), sort_keys=False)
+_MANIFEST_SEED = "enclave_name: x\ntransferred:\n"
+_MANIFEST_YAML = _MANIFEST_SEED + '- {"event": "packaged"}\n'
 
 
 def _write_manifest(path: Path, _content: str) -> None:
-    """``save`` serializes its own payload; ``_MANIFEST_YAML`` is that payload."""
-    _MANIFEST.save(path)
+    """``_append_rows`` appends to a manifest that exists and renders its own
+    row; ``_MANIFEST_YAML`` is the seed plus that row."""
+    if not path.exists():
+        path.write_text(_MANIFEST_SEED, encoding="utf-8")
+    _append_rows(path, [{"event": "packaged"}])
 
 
 _WRITERS: dict[str, tuple[Any, str, str]] = {
@@ -171,8 +173,8 @@ _WRITERS: dict[str, tuple[Any, str, str]] = {
     "manifest": (_write_manifest, "enclave_manifest.yaml", _MANIFEST_YAML),
 }
 
-# ``EnclaveManifest.save`` renders its own payload through ``yaml.safe_dump``,
-# which escapes a lone surrogate to ASCII ``\uD800``. That lane therefore
+# ``_append_rows`` renders its own row through ``json.dumps``, which escapes a
+# lone surrogate to ASCII ``\ud800``. That lane therefore
 # cannot express an unencodable write, so the failure-arm test below runs on
 # the writers that take ``content`` verbatim. The arm itself is one body in
 # ``_atomic_write_text``, which all three share.

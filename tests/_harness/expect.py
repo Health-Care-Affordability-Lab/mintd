@@ -172,3 +172,13 @@ def s3_state(s3: S3Server, prefix: str) -> S3State:
             state.gets[path.removeprefix(root)] += 1
             state.bytes_served[path.removeprefix(root)] += size
     return state
+
+
+def bundle_steps(readme: str, system: str) -> tuple[str, str]:
+    """The two lines, unzip then check, of the one fenced block under
+    `## <system>` in a transfer bundle's README.md: what a person pastes."""
+    section = readme.split(f"\n## {system}\n", 1)[1]
+    block = section.split("```", 2)[1]
+    lines = [line for line in block.splitlines()[1:] if line.strip()]  # [0] is the language tag
+    assert len(lines) == 2, f"{system}: expected unzip and check, got {lines}"
+    return lines[0], lines[1]

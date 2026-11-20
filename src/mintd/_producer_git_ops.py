@@ -204,6 +204,27 @@ class GitArchiveFetcher:
         ):
             self._run_clone(argv, repo=repo, pin=pin, path="")
 
+    def commit_time_at(self, repo: str, pin: str) -> int:
+        """The committer time of ``pin`` in ``repo``, in Unix seconds.
+
+        Committer time, not author time: when the commit entered the
+        producer's history, the same in every clone, so every enclave names a
+        version alike. Read from a one-commit fetch, the one
+        ``_fallback_clone`` makes. ``git archive --remote`` would be cheaper,
+        but it refuses a bare SHA unless the server allows unreachable
+        objects, and GitHub disables it. Raises FetchError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, tmp], repo=repo, pin=pin, path="")
+            self._run_clone(["git", "-C", tmp, "fetch", "--depth=1", "origin", pin], repo=repo, pin=pin, path="")
+            log = _run(
+                ["git", "-C", tmp, "log", "-1", "--format=%ct", pin],
+                timeout=self.timeout, repo=repo, pin=pin, binary_stdout=False,
+            )
+        seconds = log.stdout.strip()
+        if log.returncode != 0 or not seconds.isdigit():
+            raise FetchError.pin_missing(repo, pin, detail=(log.stderr or log.stdout).strip())
+        return int(seconds)
+
     def _fallback_clone(self, repo: str, pin: str, path: str) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
             self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, tmp], repo=repo, pin=pin, path=path)

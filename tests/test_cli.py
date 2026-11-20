@@ -24,17 +24,14 @@ from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from mintd import cli
 from mintd.catalog import CatalogAlreadyExists, CatalogNotFound, InMemoryCatalogClient
 from mintd.check import CheckFinding
-from mintd._config import ConfigError
 from mintd.data import BumpBlocked
 from mintd.model import Metadata
 from mintd._dvc_ops import DvcPullError
 from mintd._registry_git_ops import GitOpError
 from tests._dvc_fixtures import stage_dvc_project, stage_undeliverable_primary, write_pointer
-from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 
 FIXTURES = Path(__file__).parent / "fixtures"
-ENCLAVE_FIXTURE = FIXTURES / "enclave_manifest_v2_minimal.yaml"
 STANDALONE_DVC = FIXTURES / "dvc_files" / "standalone_import.dvc"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
@@ -739,38 +736,6 @@ def test_data_import_bump_with_rev_exits_64(
     with pytest.raises(SystemExit) as exc:
         cli.main(["data", "import", "demo-xw", "--bump", "--rev", "abc123"])
     assert exc.value.code == 64
-
-
-# ---------------------------------------------------------------------------
-# enclave bump
-# ---------------------------------------------------------------------------
-
-
-def test_enclave_bump_up_to_date_prints_message(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    patched_clients,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **kw: None)
-    rc = cli.main(["enclave", "bump", "demo-xw"])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "up to date" in out
-
-
-def test_enclave_bump_drift_rewrites_manifest(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    patched_clients,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manifest = tmp_path / "enclave_manifest.yaml"
-    monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **kw: manifest)
-    rc = cli.main(["enclave", "bump", "demo-xw", "--manifest", str(manifest)])
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "bumped:" in out
 
 
 # ---------------------------------------------------------------------------
@@ -1498,423 +1463,6 @@ def test_cli_data_clone_returns_one_on_producer_error(
     assert "boom" in err
     assert "/tmp/y" in err
 
-def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    shutil.copy(ENCLAVE_FIXTURE, manifest_path)
-    cli.main(["enclave", "list", "--manifest", str(manifest_path)])
-    out, _ = capsys.readouterr()
-    assert "approved_products:" in out
-    assert "downloaded:" in out
-    assert "transferred:" in out
-    assert out.count("(none)") == 2
-    assert "demo-xw" in out
-
-def test_enclave_list_filtered_by_repo(patched_clients, capsys, tmp_path):
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    # Create multi-entry manifest matching EnclaveManifest schema
-    content = """
-enclave_name: test-enclave
-approved_products:
-  - repo: demo-xw
-    registry_entry: entry1
-    pin: 4f7c2a1
-    source_path: path1
-  - repo: other-provider
-    registry_entry: entry2
-    pin: abcdef0
-    source_path: path2
-downloaded: []
-transferred: []
-"""
-    manifest_path.write_text(content)
-    cli.main(["enclave", "list", "demo-xw", "--manifest", str(manifest_path)])
-    out, _ = capsys.readouterr()
-    assert "demo-xw" in out
-    assert "other-provider" not in out
-
-def test_enclave_list_missing_manifest_exits_one(patched_clients, capsys, tmp_path):
-    rc = cli.main(["enclave", "list", "--manifest", str(tmp_path / "nope.yaml")])
-    assert rc == 1
-    _, err = capsys.readouterr()
-    assert "not found" in err
-
-
-# ---------------------------------------------------------------------------
-# Slice 12 — enclave add
-# ---------------------------------------------------------------------------
-
-
-def test_enclave_add_subscribes(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-
-    rc = cli.main(
-        [
-            "enclave", "add", "demo-xw",
-            "--pin", "deadbeefcafe1234567890abcdef0123456789ab",
-            "--manifest", str(manifest),
-        ]
-    )
-
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "subscribed:" in out
-    assert "demo-xw" in out
-
-    from mintd.enclave import EnclaveManifest
-    loaded = EnclaveManifest.load(manifest)
-    assert len(loaded.approved_products) == 1
-    assert loaded.approved_products[0].repo == "demo-xw"
-
-
-def test_enclave_add_duplicate_exits_one(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-
-    cli.main(
-        [
-            "enclave", "add", "demo-xw",
-            "--pin", "a" * 40,
-            "--manifest", str(manifest),
-        ]
-    )
-    capsys.readouterr()  # discard first-add output
-    rc = cli.main(
-        [
-            "enclave", "add", "demo-xw",
-            "--pin", "b" * 40,
-            "--manifest", str(manifest),
-        ]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "already in approved_products" in err
-
-
-def test_enclave_add_source_path_and_all_exits_64(
-    patched_clients, tmp_path: Path
-) -> None:
-    """argparse mutex: --source-path and --all conflict → exit 64."""
-    with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "enclave", "add", "demo-xw",
-                "--pin", "a" * 40,
-                "--source-path", "outputs/x",
-                "--all",
-                "--manifest", str(tmp_path / "enclave_manifest.yaml"),
-            ]
-        )
-    assert exc.value.code == 64
-
-
-def test_enclave_add_missing_repo_url_exits_one(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """Catalog entry without `repository.github_url` → ValueError; CLI
-    converts to exit 1 + stderr message rather than propagating a traceback."""
-    client, _ = patched_clients
-    # Register a Metadata variant with an empty github_url. We bypass
-    # Metadata validation by registering a raw CatalogEntry directly into
-    # the InMemoryCatalogClient's internal dict.
-    from mintd.catalog import CatalogEntry
-    bad_entry = CatalogEntry.model_validate(
-        {"project": {"name": "broken-repo", "type": "data"}, "repository": {}}
-    )
-    client._entries["broken-repo"] = bad_entry
-
-    rc = cli.main(
-        [
-            "enclave", "add", "broken-repo",
-            "--pin", "a" * 40,
-            "--manifest", str(tmp_path / "enclave_manifest.yaml"),
-        ]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "error:" in err
-    assert "github_url" in err
-
-
-# ---------------------------------------------------------------------------
-# Slice 13 — enclave remove + enclave pull
-# ---------------------------------------------------------------------------
-
-
-def test_enclave_remove_subscribes(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """Happy path: subscribe via enclave_add, then remove the subscription."""
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-
-    cli.main([
-        "enclave", "add", "demo-xw",
-        "--pin", "a" * 40,
-        "--manifest", str(manifest),
-    ])
-    capsys.readouterr()  # discard add output
-
-    rc = cli.main([
-        "enclave", "remove", "demo-xw",
-        "--manifest", str(manifest),
-    ])
-
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "removed: demo-xw" in out
-
-    from mintd.enclave import EnclaveManifest
-    loaded = EnclaveManifest.load(manifest)
-    assert loaded.approved_products == []
-
-
-def test_enclave_remove_unknown_exits_one(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    from mintd.enclave import EnclaveManifest
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-
-    rc = cli.main([
-        "enclave", "remove", "ghost",
-        "--manifest", str(manifest),
-    ])
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "error:" in err
-
-
-def test_enclave_pull_happy_path(
-    patched_clients,
-    recording_reporter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from datetime import datetime
-    from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
-
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(
-        enclave_name="test",
-        approved_products=[
-            ApprovedProduct(
-                repo="demo-xw", registry_entry="e", pin="a" * 40,
-                source_path="outputs/main.parquet",
-            ),
-        ],
-    ).save(manifest)
-
-    fake_item = DownloadedItem(
-        repo="demo-xw",
-        output="outputs/main.parquet",
-        contract_pin="a" * 40,
-        artifact_pin="f" * 32,
-        fetch_strategy="dvc-import",
-        downloaded_at=datetime.now(),
-        local_path="downloads/demo-xw/fffffff-2026-05-20",
-    )
-
-    def fake_pull(*args: Any, **kwargs: Any) -> tuple[Path, list[DownloadedItem]]:
-        return manifest, [fake_item]
-
-    monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
-
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main([
-        "enclave", "pull", "demo-xw",
-        "--manifest", str(manifest),
-    ])
-
-    assert rc == 0
-    msg = recording_reporter.events_of("success")[-1][1]
-    assert "demo-xw" in msg
-    assert "aaaaaaa" in msg
-    assert "1 output(s)" in msg
-
-
-def test_enclave_pull_nothing_to_pull_message(
-    patched_clients,
-    recording_reporter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mintd.enclave import EnclaveManifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-
-    def fake_pull(*args: Any, **kwargs: Any) -> tuple[Path, list]:
-        return manifest, []
-
-    monkeypatch.setattr("mintd.cli.enclave_pull", fake_pull)
-
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main([
-        "enclave", "pull",
-        "--manifest", str(manifest),
-    ])
-
-    assert rc == 0
-    msg = recording_reporter.events_of("info")[-1][1]
-    assert "nothing to pull" in msg
-
-
-def test_enclave_pull_text_mode_drops_nothing_to_pull_when_files_are_missing(
-    patched_clients,
-    recording_reporter,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review round 4: only the `--json` lane had been fixed. Text mode
-    printed the D7 warnings and then, one line later, "nothing to pull" —
-    the exact sentence this branch exists to stop saying, contradicting the
-    warnings above it in the same breath. Exit code stays 0 (D7: a missing
-    path is indistinguishable from a deliberate prune-after-transfer, so it
-    is a report, not a failure); only the line goes.
-
-    Mutation: print the info line unconditionally again -> "nothing to pull"
-    reappears beside the warnings.
-    """
-    from datetime import datetime
-    from mintd.enclave import DownloadedItem, EnclaveManifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(
-        enclave_name="test",
-        downloaded=[
-            DownloadedItem(
-                repo="demo-xw", output="outputs/main.parquet",
-                contract_pin="a" * 40, artifact_pin="f" * 32,
-                fetch_strategy="dvc-import", downloaded_at=datetime.now(),
-                local_path="downloads/demo-xw/fffffff-2026-05-20",
-            ),
-        ],
-    ).save(manifest)
-    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
-
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(["enclave", "pull", "--manifest", str(manifest)])
-
-    assert rc == 0
-    assert not any(
-        "nothing to pull" in e[1] for e in recording_reporter.events_of("info")
-    ), recording_reporter.events_of("info")
-    assert any(
-        "outputs/main.parquet" in e[1] for e in recording_reporter.events_of("warn")
-    ), recording_reporter.events_of("warn")
-
-
-def test_enclave_pull_json_fresh_clone_reports_missing(
-    patched_clients,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Review round 1: `--json enclave pull` on a fresh clone used to emit
-    ZERO bytes at exit 0 — byte-identical to a healthy enclave — because
-    Reporter.warn is a no-op in json_mode and the handler only emitted a
-    result when something was pulled. The D7 missing report rides the json
-    result instead."""
-    from datetime import datetime
-    from mintd.enclave import DownloadedItem, EnclaveManifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(
-        enclave_name="test",
-        downloaded=[
-            DownloadedItem(
-                repo="demo-xw", output="outputs/main.parquet",
-                contract_pin="a" * 40, artifact_pin="f" * 32,
-                fetch_strategy="dvc-import", downloaded_at=datetime.now(),
-                local_path="downloads/demo-xw/fffffff-2026-05-20",
-            ),
-        ],
-    ).save(manifest)
-    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
-
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(["--json", "enclave", "pull", "--manifest", str(manifest)])
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["pulled"] == []
-    assert [(m["repo"], m["output"]) for m in payload["missing"]] == [
-        ("demo-xw", "outputs/main.parquet")
-    ]
-
-
-def test_enclave_pull_json_missing_scoped_to_repo_arg(
-    patched_clients,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Review round 2 (vacuity): `--json enclave pull <repo>` must scope the
-    "missing" list to <repo>. The only prior json test omitted the repo arg,
-    so repo=None at the cli.py call site survived every gate file."""
-    from datetime import datetime
-    from mintd.enclave import ApprovedProduct, DownloadedItem, EnclaveManifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-
-    def row(repo: str) -> DownloadedItem:
-        return DownloadedItem(
-            repo=repo, output="out", contract_pin="c" * 40,
-            artifact_pin="f" * 32, fetch_strategy="dvc-import",
-            downloaded_at=datetime.now(),
-            local_path=f"downloads/{repo}/fffffff-2026-05-20",
-        )
-
-    EnclaveManifest(
-        enclave_name="test",
-        approved_products=[
-            ApprovedProduct(
-                repo="provider-a", registry_entry="e", pin="c" * 40,
-                source_path="out",
-            ),
-            ApprovedProduct(
-                repo="provider-b", registry_entry="e", pin="c" * 40,
-                source_path="out",
-            ),
-        ],
-        downloaded=[row("provider-a"), row("provider-b")],
-    ).save(manifest)
-    (tmp_path / ".dvc").mkdir()  # nothing to import; skip the lazy dvc init
-
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(
-        ["--json", "enclave", "pull", "provider-b", "--manifest", str(manifest)]
-    )
-
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["pulled"] == []
-    assert [m["repo"] for m in payload["missing"]] == ["provider-b"]
-
-
 # ---------------------------------------------------------------------------
 # Slice 14 — mintd init
 # ---------------------------------------------------------------------------
@@ -2194,17 +1742,30 @@ def test_cli_publish_full_flow_calls_each_op(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("argv", [["incoming", "--manifest", "x"], ["--manifest", "x", "incoming"], ["--data-root", "d", "incoming"]])
+def test_cli_enclave_verify_is_removed_and_points_at_the_readme(
+    capsys: pytest.CaptureFixture[str], argv: list[str],
+) -> None:
+    """A bundle is unzipped and checked with the system's own tools. The old
+    verb says so and fails, so a script still calling it does not pass by
+    doing nothing, whatever order its flags came in."""
+    rc = cli.main(["enclave", "verify", *argv])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "removed" in err
+    assert "unzip -n" in err and "md5sum -c" in err and "README.md" in err
+
+
 def test_cli_package_creates_archive(
     patched_clients,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mintd.enclave import EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    archive = tmp_path / "out" / "transfer-2026-05-15-000000.tar.gz"
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
+    archive = tmp_path / "out" / "transfer-2026-05-15-000000.zip"
 
     captured: dict[str, Any] = {}
 
@@ -2239,10 +1800,10 @@ def test_cli_package_nothing_to_package_exits_one(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mintd.enclave import EnclaveManifest, NothingToPackage
+    from mintd.enclave import NothingToPackage
 
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
 
     def fake_package(*args: Any, **kwargs: Any) -> Path:
         raise NothingToPackage("no items")
@@ -2259,36 +1820,6 @@ def test_cli_package_nothing_to_package_exits_one(
     assert "no items" in err
 
 
-def test_cli_package_unsafe_symlink_exits_one(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`UnsafeArchiveMember` must be caught in the CLI handler — without
-    this, packaging a downloads dir with a hostile symlink would crash
-    with a raw Python traceback (caught in R2 review as P0)."""
-    from mintd._archive_ops import UnsafeArchiveMember
-    from mintd.enclave import EnclaveManifest
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-
-    def fake_package(*args: Any, **kwargs: Any) -> Path:
-        raise UnsafeArchiveMember(
-            "symlink /downloads/repo/v/evil resolves outside src_dir"
-        )
-
-    monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
-
-    rc = cli.main(["enclave", "package", "--manifest", str(manifest)])
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "error:" in err
-    assert "resolves outside" in err
-
-
 def test_cli_package_resend_flag_forwarded(
     patched_clients,
     tmp_path: Path,
@@ -2296,15 +1827,13 @@ def test_cli_package_resend_flag_forwarded(
 ) -> None:
     """--resend is the documented recovery for a bundle that never arrived, so
     the flag reaching enclave_package is the whole contract at this layer."""
-    from mintd.enclave import EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
     captured: dict[str, Any] = {}
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         captured.update(kwargs)
-        return tmp_path / "t.tar.gz", []
+        return tmp_path / "t.zip", []
 
     monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
 
@@ -2321,15 +1850,13 @@ def test_cli_package_defaults_to_not_resending(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from mintd.enclave import EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
     captured: dict[str, Any] = {}
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         captured.update(kwargs)
-        return tmp_path / "t.tar.gz", []
+        return tmp_path / "t.zip", []
 
     monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
 
@@ -2346,10 +1873,10 @@ def test_cli_package_nothing_new_exits_zero(
 ) -> None:
     """Everything already across the gap is the routine steady state. Exit 1
     would make a scripted `pull && package` loop a red run forever."""
-    from mintd.enclave import EnclaveManifest, NothingNewToPackage
+    from mintd.enclave import NothingNewToPackage
 
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         raise NothingNewToPackage("all 2 downloaded product(s) have already crossed")
@@ -2375,24 +1902,10 @@ def test_cli_package_reports_skipped_and_landing(
 ) -> None:
     """Silently shipping B while skipping A is the exact operation the user
     complained about; the skip and the landing commands both have to surface."""
-    from datetime import datetime
-
-    from mintd.enclave import DownloadedItem, EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    archive = tmp_path / "transfer-2026-05-15-000000.tar.gz"
-    skipped = [
-        DownloadedItem(
-            repo="ds-alpha",
-            output="data.csv",
-            contract_pin="c" * 40,
-            artifact_pin="a" * 32,
-            fetch_strategy="dvc-import",
-            downloaded_at=datetime(2026, 5, 15),
-            local_path=str(tmp_path / "downloads" / "ds-alpha" / "v1"),
-        )
-    ]
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
+    archive = tmp_path / "transfer-2026-05-15-000000.zip"
+    skipped = [("ds-alpha", "data.csv", "c" * 40)]
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         return archive, skipped
@@ -2408,8 +1921,8 @@ def test_cli_package_reports_skipped_and_landing(
     assert "--resend" in captured.err
     # The landing instructions travel with the researcher, who walks to a
     # different machine after running this.
-    assert "tar -xzf" in captured.err
-    assert "land.py" in captured.err
+    assert "unzip -n transfer-2026-05-15-000000.zip" in captured.err
+    assert "README.md" in captured.err
 
 
 def test_cli_package_skipped_count_counts_products_not_rows(
@@ -2418,29 +1931,14 @@ def test_cli_package_skipped_count_counts_products_not_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One product with two outputs is two downloaded[] rows. "skipped 2
+    """One product with two outputs is two skipped versions. "skipped 2
     products: ds-alpha" would read as two products sharing a name."""
-    from datetime import datetime
-
-    from mintd.enclave import DownloadedItem, EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    skipped = [
-        DownloadedItem(
-            repo="ds-alpha",
-            output=out,
-            contract_pin="c" * 40,
-            artifact_pin=pin * 32,
-            fetch_strategy="dvc-import",
-            downloaded_at=datetime(2026, 5, 15),
-            local_path=str(tmp_path / "downloads" / "ds-alpha" / "v1"),
-        )
-        for out, pin in (("a.parquet", "a"), ("b.parquet", "b"))
-    ]
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
+    skipped = [("ds-alpha", out, "c" * 40) for out in ("a.parquet", "b.parquet")]
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
-        return tmp_path / "t.tar.gz", skipped
+        return tmp_path / "t.zip", skipped
 
     monkeypatch.setattr("mintd.cli.enclave_package", fake_package)
 
@@ -2460,11 +1958,9 @@ def test_cli_package_json_emits_one_object(
     """--json means one compact object on stdout and no prose anywhere."""
     import json
 
-    from mintd.enclave import EnclaveManifest
-
     manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    archive = tmp_path / "transfer-2026-05-15-000000.tar.gz"
+    manifest.write_text("enclave_name: test\ntransferred: []\n")
+    archive = tmp_path / "transfer-2026-05-15-000000.zip"
 
     def fake_package(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
         return archive, []
@@ -2478,186 +1974,7 @@ def test_cli_package_json_emits_one_object(
     payload = json.loads(captured.out)
     assert payload["archive"] == str(archive)
     # The landing hint is stderr prose and must not pollute machine output.
-    assert "tar -xzf" not in captured.out
-
-
-def test_cli_verify_tarball_hint_says_extract(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Pointing verify at the .tar.gz is the likeliest mistake. The old hint
-    ("re-export from source") sends the researcher back across the air gap for
-    an archive that is fine."""
-    from mintd.enclave import EnclaveManifest, TransferManifestNotFound
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-
-    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
-        raise TransferManifestNotFound("_transfer_manifest.yaml not found at x.tar.gz")
-
-    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
-
-    rc = cli.main(
-        ["enclave", "verify", str(tmp_path / "x.tar.gz"), "--manifest", str(manifest)]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "tar -xzf" in err
-    assert "re-export from source" not in err
-
-
-def test_cli_verify_wrong_enclave_says_nothing_moved(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mintd.enclave import EnclaveManifest, WrongEnclave
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    extracted = tmp_path / "extracted"
-    extracted.mkdir()
-
-    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
-        raise WrongEnclave(
-            "transfer was built for enclave 'enclave-hcup' but x is enclave 'enclave-cms'"
-        )
-
-    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
-
-    rc = cli.main(
-        ["enclave", "verify", str(extracted), "--manifest", str(manifest)]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "built for enclave" in err
-    assert "nothing was moved" in err
-    assert "re-export from source" not in err
-
-
-def test_cli_verify_missing_enclave_manifest_no_traceback(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """Running verify outside the repo root used to raise a raw
-    FileNotFoundError at the user.
-
-    The extracted dir has to be valid: verify checks the transfer manifest
-    before it loads the enclave manifest, so a bare empty dir fails earlier
-    for a different reason.
-    """
-    import yaml
-
-    extracted = tmp_path / "extracted"
-    (extracted / "ds-alpha" / "aaabbb1-2026-05-15").mkdir(parents=True)
-    (extracted / "_transfer_manifest.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": "2.0",
-                "enclave_name": "test",
-                "transfer_date": "2026-05-15T12:00:00+00:00",
-                "transfer_id": "transfer-2026-05-15-000000",
-                "contents": [
-                    {
-                        "repo": "ds-alpha",
-                        "version_folder": "aaabbb1-2026-05-15",
-                        "contract_pin": "c" * 40,
-                        "artifact_pin": "a" * 32,
-                    }
-                ],
-            }
-        )
-    )
-    missing = tmp_path / "nope" / "enclave_manifest.yaml"
-
-    rc = cli.main(
-        ["enclave", "verify", str(extracted), "--manifest", str(missing)]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "error:" in err
-    assert "--manifest" in err
-    assert "Traceback" not in err
-
-
-def test_cli_verify_writes_transferred_entries(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from datetime import date
-    from mintd.enclave import EnclaveManifest, TransferredItem
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    extracted = tmp_path / "extracted"
-    extracted.mkdir()
-
-    item = TransferredItem(
-        repo="ds-alpha",
-        contract_pin="c" * 40,
-        artifact_pin="a" * 32,
-        transfer_date=date(2026, 5, 15),
-        transfer_id="transfer-2026-05-15-000000",
-        local_path="/abs/data/ds-alpha/v1",
-    )
-
-    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[TransferredItem]]:
-        return manifest, [item]
-
-    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
-
-    rc = cli.main(
-        [
-            "enclave",
-            "verify",
-            str(extracted),
-            "--manifest",
-            str(manifest),
-        ]
-    )
-
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "verified:" in out
-    assert "ds-alpha" in out
-
-
-def test_cli_verify_traversal_attack_exits_one_with_clear_error(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from mintd.enclave import EnclaveManifest, PathTraversalDetected
-
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test").save(manifest)
-    extracted = tmp_path / "extracted"
-    extracted.mkdir()
-
-    def fake_verify(*args: Any, **kwargs: Any) -> tuple[Path, list[Any]]:
-        raise PathTraversalDetected("evil/../etc")
-
-    monkeypatch.setattr("mintd.cli.enclave_verify", fake_verify)
-
-    rc = cli.main(
-        ["enclave", "verify", str(extracted), "--manifest", str(manifest)]
-    )
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "error:" in err
-    assert "evil/../etc" in err
+    assert "unzip -n" not in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -2922,170 +2239,6 @@ def test_cli_data_ls_shows_status_during_listing(
     assert any("Listing demo-xw on S3" in s for s in statuses)
 
 
-def test_cli_enclave_bump_shows_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    monkeypatch.setattr("mintd.cli.enclave_bump", lambda *a, **k: None)
-    cli.main(["enclave", "bump", "demo-xw", "--manifest", str(tmp_path / "m.yaml")])
-    assert any(
-        "Bumping demo-xw" in e[1] for e in recording_reporter.events_of("status")
-    )
-
-
-def test_cli_enclave_pull_shows_outer_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    from mintd.enclave import EnclaveManifest
-    # The fake pull leaves no manifest behind; the handler reads it back for
-    # the D7 missing report, which the real pull has always guaranteed exists.
-    EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
-    monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
-    monkeypatch.chdir(tmp_path)
-    cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
-    assert ("status", "Pulling enclave data...") in recording_reporter.events
-
-
-def test_cli_enclave_pull_dvc_op_error_names_producer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter, capsys: pytest.CaptureFixture[str],
-) -> None:
-    from mintd._dvc_ops import DvcPullError
-    from mintd.enclave import EnclavePullError
-    monkeypatch.setattr(
-        "mintd.cli.enclave_pull",
-        _raises(EnclavePullError("repo-b", DvcPullError("x"))),
-    )
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
-    assert rc == 1
-    errs = recording_reporter.events_of("error")
-    hint = errs[0][2] or ""
-    assert errs and "repo-b" in hint
-    # `pull` takes a positional repo, not --repo — the retry hint must be runnable.
-    assert "--repo" not in hint
-    assert "mintd enclave pull repo-b" in hint
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_cli_enclave_pull_not_in_repo_hint_is_not_pin_repo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter,
-) -> None:
-    """A not-DVC-initialized enclave must not get the misleading pin/repo hint
-    (slice 47, Q3) — the pin/repo are fine; the fix is `dvc init`."""
-    from mintd._dvc_ops import DvcNotInRepoError
-    from mintd.enclave import EnclavePullError
-    monkeypatch.setattr(
-        "mintd.cli.enclave_pull",
-        _raises(EnclavePullError("repo-b", DvcNotInRepoError("nope"))),
-    )
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
-    assert rc == 1
-    hint = recording_reporter.events_of("error")[0][2] or ""
-    assert "pin/repo" not in hint
-    assert "dvc init" in hint.lower()
-
-
-def test_cli_enclave_pull_path_not_found_keeps_pin_repo_hint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter,
-) -> None:
-    """A genuine pin/repo failure (path missing at rev) keeps the pin/repo hint."""
-    from mintd._dvc_ops import DvcImportPathNotFound
-    from mintd.enclave import EnclavePullError
-    monkeypatch.setattr(
-        "mintd.cli.enclave_pull",
-        _raises(EnclavePullError("repo-b", DvcImportPathNotFound("missing"))),
-    )
-    monkeypatch.chdir(tmp_path)
-    rc = cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
-    assert rc == 1
-    hint = recording_reporter.events_of("error")[0][2] or ""
-    assert "pin/repo" in hint
-    # `pull` takes a positional repo, not --repo — the retry hint must be runnable.
-    assert "--repo" not in hint
-    assert "mintd enclave pull repo-b" in hint
-
-
-def test_cli_enclave_bump_force_producer_error_is_clean(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """`bump --force` reaches ProducerView.at_head without the check_project
-    reachability gate, so an unreachable producer surfaces as ProducerError.
-    The handler must render it as a clean error, not a traceback."""
-    from mintd.producer import ProducerError
-    monkeypatch.setattr(
-        "mintd.cli.enclave_bump",
-        _raises(ProducerError.unreachable("demo-xw", "a" * 40)),
-    )
-    rc = cli.main(
-        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
-    )
-    assert rc == 1
-    errs = recording_reporter.events_of("error")
-    assert errs and errs[0][2]  # has a non-empty hint
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_cli_enclave_bump_force_catalog_not_found_is_clean(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """`bump --force` resolves the catalog entry directly (bypassing
-    check_project), so a removed/offline entry raises CatalogNotFound. The
-    handler must render it cleanly, not as a traceback."""
-    from mintd.catalog import CatalogNotFound
-    monkeypatch.setattr(
-        "mintd.cli.enclave_bump",
-        _raises(CatalogNotFound("demo-xw not in registry")),
-    )
-    rc = cli.main(
-        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
-    )
-    assert rc == 1
-    errs = recording_reporter.events_of("error")
-    assert errs and errs[0][2]  # has a non-empty hint
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_cli_enclave_bump_force_missing_repo_url_is_clean(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
-    recording_reporter, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A catalog entry with no repository.github_url raises ValueError on the
-    force path; the handler must render it cleanly, not as a traceback."""
-    monkeypatch.setattr(
-        "mintd.cli.enclave_bump",
-        _raises(ValueError("catalog entry 'demo-xw' has no repository.github_url")),
-    )
-    rc = cli.main(
-        ["enclave", "bump", "demo-xw", "--force", "--manifest", str(tmp_path / "m.yaml")]
-    )
-    assert rc == 1
-    errs = recording_reporter.events_of("error")
-    assert errs and errs[0][2]  # has a non-empty hint
-    assert "Traceback" not in capsys.readouterr().err
-
-
-def test_cli_enclave_bump_malformed_manifest_points_at_manifest(
-    tmp_path: Path, patched_clients, recording_reporter,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """A malformed enclave_manifest.yaml raises pydantic ValidationError (a
-    ValueError subclass) at load; the handler must point at the local manifest,
-    not misattribute it to the producer/catalog, and not traceback."""
-    m_path = tmp_path / "m.yaml"
-    m_path.write_text("enclave_name: test\napproved_products: notalist\n")
-    rc = cli.main(["enclave", "bump", "demo-xw", "--manifest", str(m_path)])
-    assert rc == 1
-    hint = recording_reporter.events_of("error")[0][2] or ""
-    assert "manifest" in hint.lower()
-    assert "producer" not in hint.lower()
-    assert "Traceback" not in capsys.readouterr().err
-
-
 def test_cli_registry_sync_shows_refresh_status(
     monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
 ) -> None:
@@ -3104,7 +2257,7 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
 
     Two factories since the issue30 split: `data push`/`data verify` never
     resolve the catalog (push also resolves git ops, for its pointer check),
-    `data import`/`enclave pull` need the catalog too. Both spies
+    `data import`/`enclave package` need the catalog too. Both spies
     append to one list — all four handlers must still thread the reporter."""
     captured: list = []
     client = InMemoryCatalogClient()
@@ -3118,17 +2271,13 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
         return fake_dvc
 
     monkeypatch.setattr("mintd.cli._resolve_dvc_ops", dvc_only_spy)
-    monkeypatch.setattr("mintd.cli.enclave_pull", lambda *a, **k: (Path("."), []))
-    from mintd.enclave import EnclaveManifest
-    # The fake pull leaves no manifest behind; the handler reads it back for
-    # the D7 missing report, which the real pull has always guaranteed exists.
-    EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
+    monkeypatch.setattr("mintd.cli.enclave_package", lambda *a, **k: (Path("t.zip"), []))
 
     monkeypatch.chdir(tmp_path)  # before `data push`: it commits from the cwd's project
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
     cli.main(["data", "import", "demo-xw", "--dest-root", str(tmp_path)])
-    cli.main(["enclave", "pull", "--manifest", str(tmp_path / "m.yaml")])
+    cli.main(["enclave", "package", "--manifest", str(tmp_path / "m.yaml")])
 
     assert len(captured) == 4
     assert all(r is recording_reporter for r in captured)
@@ -3838,133 +2987,6 @@ def test_cli_registry_update_success_names_reused_pr(
 # ---------------------------------------------------------------------------
 
 
-def test_registry_register_with_enclave_manifest_reaches_client_register(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    patched_clients,
-) -> None:
-    shutil.copy(MINIMAL, tmp_path / "metadata.json")
-    stage_enclave_manifest(tmp_path)
-    _git_repo(tmp_path)  # register needs the project committed
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    registered: list[str] = []
-    real_register = client.register
-
-    def spy(metadata: Metadata, **kwargs: Any):
-        registered.append(metadata.project.name)
-        return real_register(metadata, **kwargs)
-
-    monkeypatch.setattr(client, "register", spy)
-
-    rc = cli.main(["registry", "register", str(tmp_path)])
-
-    assert rc == 0
-    assert registered == ["test_project"]
-
-
-def test_plain_check_resolves_a_catalog_client(
-    tmp_path: Path,
-    patched_clients,
-) -> None:
-    """Pins fix 3 (the hoist): plain `check` resolves a client best-effort, so
-    an enclave consumer has a default surface that reports it healthy. Stays
-    red after the publish/register fixes alone."""
-    shutil.copy(MINIMAL, tmp_path / "metadata.json")
-    stage_enclave_manifest(tmp_path)
-    client, _ = patched_clients
-    _register_demo_xw(client)
-
-    rc = cli.main(["check", str(tmp_path)])
-
-    assert rc == 0
-
-
-def test_plain_check_without_registry_url_still_reports_catalog_unresolved(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The guard on fix 3: best-effort resolution must not swallow the
-    diagnostic on a machine with no registry_url."""
-    shutil.copy(MINIMAL, tmp_path / "metadata.json")
-    stage_enclave_manifest(tmp_path)
-    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
-
-    def _no_registry_url(*a: Any, **kw: Any):
-        raise ConfigError("registry_url required for this command; set it in ...")
-
-    monkeypatch.setattr("mintd.cli._resolve_catalog_client", _no_registry_url)
-
-    rc = cli.main(["check", str(tmp_path)])
-
-    out = capsys.readouterr().out
-    assert rc == 1
-    assert "catalog client not provided" in out
-
-
-def test_check_upgrades_unreachable_registry_prints_an_error_not_a_traceback(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-    patched_clients,
-) -> None:
-    """A registry that cannot be cloned is a documented failure path."""
-    shutil.copy(MINIMAL, tmp_path / "metadata.json")
-    stage_enclave_manifest(tmp_path)
-    client, _ = patched_clients
-
-    def _unreachable(name: str):
-        raise GitOpError(
-            ["git", "clone", "--depth=1", "/nonexistent/registry.git"],
-            "fatal: repository '/nonexistent/registry.git' does not exist",
-        )
-
-    monkeypatch.setattr(client, "fetch", _unreachable)
-
-    rc = cli.main(["check", str(tmp_path), "--upgrades"])
-
-    captured = capsys.readouterr()
-    output = captured.out + captured.err
-    assert rc == 1
-    assert "cannot read the catalog" in output
-    assert "does not exist" in output  # git's own words reach the user
-    assert "Traceback" not in output
-
-
-def test_every_check_project_call_site_passes_a_client() -> None:
-    """Meta-test: every `check_project(...)` call in src/mintd passes a
-    `client=` keyword. This is the anti-drift ratchet that keeps "one gate"
-    enforceable without making the parameter keyword-required (unit A owns
-    that migration).
-
-    Allowlist rationale — `data.py`'s import-bump call is inert for this
-    defect: `_find_consumer_finding_for_target` matches on
-    `source == <.dvc file>`, and enclave-manifest findings carry
-    `source=<manifest>`, so they never select a bump target. Asserted by set
-    equality, so the allowlist can only shrink.
-    """
-    import ast
-
-    src_dir = Path(__file__).resolve().parents[1] / "src" / "mintd"
-    offenders: set[str] = set()
-    for path in sorted(src_dir.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-            if name != "check_project":
-                continue
-            if not any(kw.arg == "client" for kw in node.keywords):
-                offenders.add(path.name)
-
-    assert offenders == {"data.py"}, (
-        f"check_project call sites missing client=: {sorted(offenders)}"
-    )
-
-
 # ---------------------------------------------------------------------------
 # P2b (issue30) — local commands must not demand a registry_url they never use
 # ---------------------------------------------------------------------------
@@ -4065,307 +3087,9 @@ def test_publish_builds_dvc_ops_with_a_reporter(
     assert captured["reporter"] is recording_reporter
 
 
-def test_enclave_pull_allows_the_relative_default_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The guard must not break the ordinary invocation.
-
-    `--manifest` defaults to a RELATIVE `enclave_manifest.yaml`, whose parent
-    is `.` — which always resolves to the process cwd. Standing in the enclave
-    and typing `mintd enclave pull` has to keep working, or the guard has
-    broken the only path anyone actually uses.
-    """
-    called = []
-    # Object-form on purpose: the pinned substrate census counts string-form
-    # `monkeypatch.setattr("mintd.…")` sites, and a new test should not move a
-    # ratchet it has nothing to do with.
-    monkeypatch.setattr(
-        cli, "enclave_pull", lambda *a, **k: called.append(1) or (Path("."), []),
-    )
-    from mintd.enclave import EnclaveManifest
-    # The fake pull leaves no manifest behind; the handler reads it back for
-    # the D7 missing report, which the real pull has always guaranteed exists.
-    EnclaveManifest(enclave_name="test").save(tmp_path / "enclave_manifest.yaml")
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main(["enclave", "pull"])
-
-    assert rc == 0
-    assert called == [1]
-
-
-def test_enclave_pull_refusal_hint_survives_spaces_and_carries_every_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The hint is runnable AS PRINTED — including a path with a space, and
-    including `--force`.
-
-    Two review rounds found two separate defects in the f-string version of
-    this hint: it dropped `--force` (so the pasted retry SKIPS already-
-    downloaded products instead of re-fetching them — a different operation
-    from the one the user asked for), and it did not quote, so an enclave
-    under `~/…/My Drive/…` produced `cd /x/My Drive/enclave` — which `cd`s to
-    `/x/My` and fails.
-
-    Both are the same root cause: a concatenated string makes every flag
-    something you can forget and every path something you can forget to quote.
-    The hint is built as argv and joined with `shlex` now, so this test asserts
-    against `shlex.split` round-tripping rather than against a literal.
-    """
-    import shlex
-
-    called = []
-    monkeypatch.setattr(
-        cli, "enclave_pull", lambda *a, **k: called.append(1) or (Path("."), []),
-    )
-    enclave = tmp_path / "My Drive" / "enclave_x"
-    enclave.mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main([
-        "enclave", "pull", "demo-xw",
-        "--manifest", str(enclave / "audit.yaml"), "--force",
-    ])
-
-    assert rc == 1
-    assert called == [], "the pull ran anyway; the guard is decorative"
-    errors = [e for e in recording_reporter.events if e[0] == "error"]
-    assert any("must run from inside the enclave" in e[1] for e in errors), errors
-    hint = next(e[2] for e in errors if e[2])
-    cd_part, _, retry_part = hint.partition(" && ")
-    # the `cd` target survives shlex round-trip as ONE argument, spaces intact
-    assert shlex.split(cd_part) == ["cd", str(enclave)]
-    # and every flag the user gave is carried into the retry
-    assert shlex.split(retry_part) == [
-        "mintd", "enclave", "pull", "demo-xw",
-        "--manifest", "audit.yaml", "--force",
-    ]
-
-
-def test_enclave_pull_refusal_names_one_filesystem_root_not_two(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """The message compares resolved paths, so it must PRINT resolved paths.
-
-    `Path.cwd()` is physical by definition — POSIX `getcwd` resolves symlinks —
-    so an unresolved `enclave_dir` printed beside it showed two roots that look
-    unrelated: "must run from inside the enclave (/tmp/x/enclave), not from
-    /private/tmp/x" on any macOS, where `/tmp` is itself a symlink. The user
-    cannot tell those are the same place.
-    """
-    monkeypatch.setattr(cli, "enclave_pull", lambda *a, **k: (Path("."), []))
-    real = tmp_path / "real"
-    (real / "enclave").mkdir(parents=True)
-    link = tmp_path / "link"
-    link.symlink_to(real, target_is_directory=True)
-    monkeypatch.chdir(tmp_path)
-
-    cli.main(["enclave", "pull", "--manifest", str(link / "enclave" / "m.yaml")])
-
-    msg = next(e[1] for e in recording_reporter.events if e[0] == "error")
-    assert str(real / "enclave") in msg, msg
-    assert str(link) not in msg, f"unresolved path leaked into the message: {msg}"
-
-
-def test_enclave_pull_missing_manifest_is_an_error_not_a_traceback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter,
-) -> None:
-    """A missing manifest reports; it does not raise.
-
-    `EnclaveManifest.load` raises `FileNotFoundError`, which was in none of the
-    handler's except arms, so it reached the user as a raw traceback. The cwd
-    guard added in this unit funnels every user into exactly this path — stand
-    in the enclave, run it — so leaving the leak would have traded one bad
-    message for a stack trace. `_handle_enclave_list` and
-    `_handle_enclave_verify` already fixed the identical leak; this mirrors them.
-    """
-    monkeypatch.chdir(tmp_path)
-
-    rc = cli.main(["enclave", "pull"])
-
-    assert rc == 1
-    errors = [e for e in recording_reporter.events if e[0] == "error"]
-    assert any("not found" in e[1] for e in errors), errors
-    assert any(e[2] and "--manifest" in e[2] for e in errors), errors
-
-
 # ---------------------------------------------------------------------------
 # P5 — one producer, many subscriptions (issue33)
 # ---------------------------------------------------------------------------
-
-
-def test_enclave_add_second_path_warns_pin_was_inherited(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """D1's consequence must reach the user AT ADD TIME. If the recorded pin
-    predates the newly added path the add still succeeds and the PULL is what
-    fails, so the add names the remedy.
-
-    Asserts SHORT tokens only: Reporter writes through a rich Console bound to
-    stderr, which soft-wraps at 80 columns off a tty, so a long phrase can be
-    split across lines.
-    """
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-
-    cli.main([
-        "enclave", "add", "demo-xw", "--pin", "a" * 40,
-        "--source-path", "data/final/a", "--manifest", str(manifest),
-    ])
-    capsys.readouterr()  # discard first-add output
-
-    rc = cli.main([
-        "enclave", "add", "demo-xw",
-        "--source-path", "data/final/b", "--manifest", str(manifest),
-    ])
-
-    err = capsys.readouterr().err
-    assert rc == 0
-    assert "inherited" in err
-    assert "bump" in err
-    assert "demo-xw" in err
-    # The md5 drift rule reports a path published after the pin as drift, so
-    # bare `bump` moves the pin; the advisory must not send users through
-    # `--force`, which skips every guard (M17).
-    assert "--force" not in err
-
-
-def test_enclave_add_hints_only_name_flags_the_parser_accepts() -> None:
-    """The MissingPrimaryDataProduct hint used to say `--path`, a flag this
-    parser does not define — following it exited 64 with `unrecognized
-    arguments`. Ratchet over the whole handler rather than that one string, so
-    any future hint naming a nonexistent flag fails here too.
-
-    Static: no doubles, and no producer resolve (which is what raises the
-    exception in the first place, and would need a real repo to reach).
-    """
-    import inspect
-    import re as _re
-
-    parser = cli._build_parser()
-    enclave = parser._subparsers._group_actions[0].choices["enclave"]
-    add = enclave._subparsers._group_actions[0].choices["add"]
-    accepted = {opt for action in add._actions for opt in action.option_strings}
-
-    source = inspect.getsource(cli._handle_enclave_add)
-    # `hint="..."` keywords and `_hint(<type>, "...")`'s positional hint.
-    hints = _re.findall(r'(?:hint=|_hint\([^"\']*)(["\'])(.*?)\1', source, _re.S)
-    named = {f for _, text in hints for f in _re.findall(r"--[a-z][a-z0-9-]*", text)}
-
-    assert named, "no hints found; the regex or the handler moved"
-    assert "--source-path" in named
-    assert named <= accepted, f"hints name flags the parser rejects: {named - accepted}"
-
-
-def test_enclave_list_distinguishes_all_from_primary(
-    patched_clients, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """An `--all` row and a bare primary both have source_path None, so the
-    list rendered them identically — on the very screen the AlreadyApproved
-    hint and D2's refusal both send users to."""
-    manifest = tmp_path / "enclave_manifest.yaml"
-    manifest.write_text("""
-enclave_name: test-enclave
-approved_products:
-  - repo: demo-xw
-    registry_entry: e
-    pin: 4f7c2a1
-    source_path: data/final/a
-  - repo: demo-xw
-    registry_entry: e
-    pin: 4f7c2a1
-    all: true
-  - repo: demo-xw
-    registry_entry: e
-    pin: 4f7c2a1
-downloaded: []
-transferred: []
-""")
-
-    cli.main(["enclave", "list", "--manifest", str(manifest)])
-
-    out, _ = capsys.readouterr()
-    assert "data/final/a" in out
-    assert "<all>" in out
-    assert out.count("<primary>") == 1
-
-
-def test_enclave_remove_ambiguous_exits_one_without_traceback(
-    patched_clients, capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """D2: refuse rather than wipe subscriptions the user did not name."""
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-    cli.main(["enclave", "add", "demo-xw", "--pin", "a" * 40,
-              "--source-path", "data/final/a", "--manifest", str(manifest)])
-    cli.main(["enclave", "add", "demo-xw",
-              "--source-path", "data/final/b", "--manifest", str(manifest)])
-    capsys.readouterr()
-    before = manifest.read_bytes()
-
-    rc = cli.main(["enclave", "remove", "demo-xw", "--manifest", str(manifest)])
-
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "Traceback" not in err
-    assert "data/final/a" in err
-    assert "data/final/b" in err
-    assert manifest.read_bytes() == before
-
-
-def test_enclave_remove_primary_and_source_path_exits_64(
-    patched_clients, tmp_path: Path
-) -> None:
-    """argparse mutex: the three remove selectors conflict → exit 64."""
-    with pytest.raises(SystemExit) as exc:
-        cli.main([
-            "enclave", "remove", "demo-xw",
-            "--source-path", "data/final/a", "--primary",
-            "--manifest", str(tmp_path / "enclave_manifest.yaml"),
-        ])
-    assert exc.value.code == 64
-
-
-def test_enclave_add_does_not_claim_inheritance_when_it_resolved_its_own_pin(
-    patched_clients,
-    capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
-) -> None:
-    """The advisory must key on "this add INHERITED a pin", not on "the repo
-    now has more than one row". They diverge when the sibling's pin is not
-    inheritable -- here a hand-edited empty pin, which `enclave_add`
-    deliberately declines to inherit -- and the row-count version then names a
-    pin that was never recorded.
-
-    Needs no producer resolve: with the sibling's pin blank, an explicit --pin
-    is taken verbatim rather than refused by D1.
-    """
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    client, _ = patched_clients
-    _register_demo_xw(client)
-    manifest = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(
-        enclave_name="test",
-        approved_products=[
-            ApprovedProduct(repo="demo-xw", registry_entry="x", pin="",
-                            source_path="data/final/a"),
-        ],
-    ).save(manifest)
-
-    rc = cli.main([
-        "enclave", "add", "demo-xw", "--pin", "b" * 40,
-        "--source-path", "data/final/b", "--manifest", str(manifest),
-    ])
-
-    err = capsys.readouterr().err
-    assert rc == 0
-    assert len(EnclaveManifest.load(manifest).approved_products) == 2
-    assert "inherited" not in err, "nothing was inherited; the sibling pin is blank"
 
 
 def test_render_findings_distinguishes_rows_by_message_not_field_path(
