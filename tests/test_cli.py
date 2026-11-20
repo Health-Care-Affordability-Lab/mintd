@@ -566,9 +566,8 @@ def test_data_import_timeout_reaches_the_dvc_ops_factory(
 
 def test_data_import_and_clone_share_the_selector_flags() -> None:
     """Parser parity: `--path` (repeatable), `--jobs` and `--timeout` parse
-    identically on `data import` and `data clone` — the clone help text
-    claims "same selector as `mintd data import --path`", which used to be
-    false."""
+    identically on `data import` and `data clone`. What each `--path` accepts
+    differs: import takes any tracked path, clone only declared outputs."""
     parser = cli._build_parser()
 
     imp = parser.parse_args([
@@ -5141,6 +5140,39 @@ def test_a_missing_dvc_exits_2_with_the_install_hint(
     err = " ".join(capsys.readouterr().err.split())
     assert "error: mintd's bundled dvc is missing" in err
     assert "hint: install DVC: pip install 'dvc[s3]'" in err
+
+
+def test_import_at_a_rev_from_an_unreachable_producer_names_its_url(
+    patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--rev` with no `--path` reads the producer's metadata before dvc runs, so
+    the unreachable hint rides on the verb's `_hint`. A port bound and closed
+    again refuses at once.
+
+    Mutation: drop `_hint(ProducerError, _producer_unreachable)` from the plain
+    import -> no hint, red."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{s.getsockname()[1]}/demo-xw.git"
+    client, _ = patched_clients
+    _register_demo_xw(client, github_url=url)
+
+    assert cli.main(["data", "import", "demo-xw", "--rev", "v1", "--dest-root", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: unreachable:" in err
+    assert f"hint: could not reach the producer's repository {url}: check your network" in err
+
+
+def test_only_an_unreachable_producer_gets_the_unreachable_hint() -> None:
+    """A wrong `--rev` or a missing metadata.json is not a network problem.
+    Mutation: return the hint for every reason -> red."""
+    from mintd.producer import ProducerError
+
+    assert "could not reach" in (cli._producer_unreachable(ProducerError.unreachable("u", "v1")) or "")
+    for err in (ProducerError.pin_missing("u", "v9"), ProducerError.metadata_missing("u", "v1")):
+        assert cli._producer_unreachable(err) is None
 
 
 def test_a_failed_dvc_import_exits_1_with_the_verbose_retry_hint(

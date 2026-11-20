@@ -38,6 +38,7 @@ from ._dvc_ops import (
     DvcOpError,
     DvcOps,
     SubprocessDvcOps,
+    unreachable_repo_hint,
 )
 from ._registry_git_ops import (
     GhAuthError,
@@ -239,7 +240,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 @contextmanager
 def _hint(
     errors: type[BaseException] | tuple[type[BaseException], ...],
-    hint: str | None = None,
+    hint: str | Callable[[Any], str | None] | None = None,
     *,
     exit_code: int | None = None,
     message: str | None = None,
@@ -248,7 +249,8 @@ def _hint(
     verb's advice, for ``main`` to render.
 
     For an error whose raise site several verbs share, so the advice depends
-    on the verb. ``hint`` applies only where the error has none of its own;
+    on the verb. ``hint`` (or ``hint(error)``, for advice built from the
+    error) applies only where the error has none of its own;
     ``exit_code`` overrides the error's own (else 1); ``message`` replaces
     ``str(error)``. The result is a plain ``MintdError``, so an outer
     ``_hint`` on a base class (``ValueError``, say) no longer matches it.
@@ -258,9 +260,17 @@ def _hint(
     except errors as e:
         raise MintdError(
             message or str(e),
-            hint=getattr(e, "hint", None) or hint,
+            hint=getattr(e, "hint", None) or (hint(e) if callable(hint) else hint),
             exit_code=exit_code or getattr(e, "exit_code", None),
         ) from e
+
+
+def _producer_unreachable(e: ProducerError) -> str | None:
+    """Import's advice when reading the producer's metadata (`--rev` with no
+    `--path`) fails because its repository can't be reached; other reasons get
+    none. `data clone` keeps its own. `--bump` meets an unreachable producer in
+    its `check` preflight, and `BumpBlocked` carries that hint."""
+    return unreachable_repo_hint(e.repo) if e.reason == ProducerError.Reason.UNREACHABLE else None
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +414,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data = subs.add_parser("data", help="Data commands")
     p_data_sub = p_data.add_subparsers(dest="data_command")
-    p_import = p_data_sub.add_parser("import", help="Import a producer's data product")
+    p_import = p_data_sub.add_parser(
+        "import", help="Import a producer's data product",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""what each form brings:
+  mintd data import <name>                the primary output
+  mintd data import <name> --path <path>  only that dataset or folder, declared
+                                          as an output or not (repeatable)
+  mintd data import <name> --all          every output in the product's
+                                          data_products.outputs; a tracked
+                                          folder no output declares is left out
+
+To get the producer's whole project, code and data, use `mintd data clone`.""",
+    )
     p_import.add_argument(
         "name",
         help="Registered data product name (the catalog key) — the same "
@@ -417,9 +439,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_import.add_argument(
         "--path", dest="import_path", action="append", default=[], metavar="PATH",
-        help="Import only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable; same selector as "
-             "`mintd data clone --path`). Default: the primary output.",
+        help="Import only this path — any file or directory the producer tracks, "
+             "declared in data_products.outputs or not (repeatable). Default: the "
+             "primary output.",
     )
     p_import.add_argument(
         "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
@@ -469,6 +491,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clone = p_data_sub.add_parser(
         "clone",
         help="Clone a published data product (registry lookup + git clone + dvc pull)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""what each form brings:
+  mintd data clone <name>            a full git clone of the producer's repo,
+                                     with every DVC-tracked output pulled
+  mintd data clone <name> --primary  the same clone, with only the primary
+                                     output pulled; --path pulls only declared
+                                     outputs
+
+To bring only a product's data into your project, use `mintd data import`.""",
     )
     p_clone.add_argument("name", help="Registered data product name")
     p_clone.add_argument(
@@ -484,8 +515,8 @@ def _build_parser() -> argparse.ArgumentParser:
     clone_scope.add_argument(
         "--path", dest="paths", action="append", metavar="PATH",
         help="Pull only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable; same selector as "
-             "`mintd data import --path`). Default: pull every tracked output.",
+             "product's data_products.outputs (repeatable). Default: pull every "
+             "tracked output.",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
@@ -2000,6 +2031,8 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         # The containment guard's raise site: a leading slash in `--path`, or
         # a catalog entry carrying an absolute/`..` output path.
         _hint(UnknownProductPath, "pass --path relative to the producer's repo root"),
+        # `--rev` with no `--path` reads the producer's metadata before dvc runs.
+        _hint(ProducerError, _producer_unreachable),
         _hint(DvcOpError, "retry with --dvc-arg=-v for verbose DVC output"),
     ):
         produced = import_product(

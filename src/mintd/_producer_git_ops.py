@@ -106,12 +106,15 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _classify_stderr(stderr: str) -> FetchError.Reason | None:
+    # Lowercased: git 2.48 says "couldn't find remote ref", older git
+    # "Couldn't"; "not our ref" is an unknown SHA. A reachable repo, wrong rev.
     if any(
-        token in stderr
+        token in stderr.lower()
         for token in (
-            "Could not resolve revision",
-            "Couldn't find remote ref",
+            "could not resolve revision",
+            "couldn't find remote ref",
             "unknown revision",
+            "not our ref",
         )
     ):
         return FetchError.Reason.PIN_MISSING

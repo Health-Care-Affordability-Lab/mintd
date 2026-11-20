@@ -3,7 +3,9 @@
 - Given: a project with files and git history.
 - When: an import fails partway: the producer is unreachable, or a file is
   missing from storage.
-- Then: an error says what failed and what to do; the exit code is non-zero.
+- Then: an error says what failed and what to do; the exit code is non-zero;
+  the hint names the cause: the producer URL it could not reach, or the
+  producer's data missing from storage.
 - Pass:
   - files, HEAD, the git index and refs are byte-identical to before, with no
     half-made folder;
@@ -89,6 +91,13 @@ def _missing(product, s3_server, registry: Path, tmp_path: Path):
     return [f"data/final/{name}" for name in product.outs["data/final"]], fix
 
 
+# What each cause's hint must say (the URL check is in the test).
+_HINT = {
+    _unreachable: "could not reach the producer's repository",
+    _missing: "the producer's data, or data it imports from another product, is missing from storage",
+}
+
+
 def _files_under(root: Path) -> set[str]:
     """Project-relative path of every file under `root` (`root` is `<project>/data`)."""
     return {p.relative_to(root.parent).as_posix() for p in root.rglob("*") if p.is_file()}
@@ -113,6 +122,10 @@ def test_a_failed_import_leaves_the_project_as_it_was(
     assert run.returncode != 0, said
     assert "error:" in said and any(n in said for n in named), said
     assert "hint:" in said, said
+    hint = said.split("hint:", 1)[1]
+    assert "".join(_HINT[cause].split()) in hint, said
+    if cause is _unreachable:
+        assert named[0] in hint, said  # the URL it tried
     assert_unchanged(before, snapshot(project))
 
     fix()

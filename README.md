@@ -227,8 +227,8 @@ mintd data ls my-cleaned-survey
 mintd data clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
 mintd data clone my-cleaned-survey --rev v0.1.0 --primary
-# or: only specific tracked outputs (repeatable; same selector as
-# `data import --path` — an unknown path lists the valid outputs):
+# or: only specific declared outputs (repeatable; an unknown path lists the
+# valid outputs):
 mintd data clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import one or more outputs
