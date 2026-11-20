@@ -2747,7 +2747,8 @@ def _prompt_publish_confirm(
 
 def _handle_config_show(args: argparse.Namespace) -> int:
     config = Config.load(args.path) if args.path is not None else Config.load()
-    text = config_ops.render_config(config, json_out=args.json_out)
+    # A registry_url can carry a token; the shown config never does.
+    text = strip_userinfo(config_ops.render_config(config, json_out=args.json_out))
     # YAML emits a trailing newline already; JSON does not. Use print's
     # default newline only when the rendered text doesn't carry one.
     print(text, end="" if text.endswith("\n") else "\n")

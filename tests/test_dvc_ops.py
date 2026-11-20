@@ -1049,6 +1049,10 @@ def test_import_from_an_unreachable_producer_names_the_url_it_tried(tmp_path: Pa
     ("git@github.com:org/r.git", "git@github.com:org/r.git"),
     ("git+https://ghp_s3cr3t@github.com/o/r.git", "git+https://github.com/o/r.git"),  # pip-style
     ("git+https://u:s3cr3t@h/r", "git+https://h/r"),
+    # No path, and an @ later: ordinary text, not userinfo.
+    ("https://example.org#frag@x", "https://example.org#frag@x"),
+    ("https://example.org?q=a@b", "https://example.org?q=a@b"),
+    ("see https://a.org,me@x", "see https://a.org,me@x"),
     ("clone 'https://u:s3cr3t@a/r' then 'http://b/r'", "clone 'https://a/r' then 'http://b/r'"),
 ])
 def test_strip_userinfo_takes_credentials_out_of_every_url(text: str, shown: str) -> None:

@@ -2702,6 +2702,18 @@ def test_cli_config_show_prints_yaml(
     assert "registry_url: https://e.com/r.git" in out
 
 
+@pytest.mark.parametrize("json_out", [False, True])
+def test_cli_config_show_prints_no_credentials(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], json_out: bool,
+) -> None:
+    """Mutation: print the rendered config without `strip_userinfo` -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("registry_url: https://x-access-token:s3cr3tTOKEN@e.com/r.git\n")
+    assert cli.main([*(["--json"] if json_out else []), "config", "show", "--path", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "s3cr3tTOKEN" not in out and "https://e.com/r.git" in out
+
+
 def test_cli_config_setup_set_writes_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

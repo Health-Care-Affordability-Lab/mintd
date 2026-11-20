@@ -12,8 +12,10 @@ import shlex
 # `\b` lets `git+https://TOKEN@` match; the password pattern starts only where a
 # run of scheme characters starts (the lookbehind), so a long `a-b-c-...` token
 # costs one pass, not one per letter.
-_HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/\s@'\"]+@")
-_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^/\s:@'\"]+):[^/\s@'\"]+@")
+# The userinfo stops at `#`, `?` and `,` too, so `https://host#frag@x` (no path,
+# an @ later) is left alone rather than eaten.
+_HTTP_USERINFO = re.compile(r"(?i)\b(https?://)[^/\s@'\"#?,]+@")
+_PASSWORD = re.compile(r"(?i)(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*://[^/\s:@'\"#?,]+):[^/\s@'\"#?,]+@")
 
 
 def strip_userinfo(text: str) -> str:
