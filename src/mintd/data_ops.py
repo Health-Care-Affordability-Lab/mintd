@@ -54,10 +54,12 @@ from ._dvc_state import (
     push_targets,
     stages_behind,
     with_outputs,
+    unlisted_on_disk,
 )
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
 from ._storage_state import inspect_storage
+from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
 from .model import FastPullResult
 
@@ -433,8 +435,12 @@ def _checkout_pull_verify(
     branch (its checkout_targets only ever contain fast-syncable stage
     targets).
     """
+    checkout_failed: DvcOpError | None = None
     if checkout_targets:
-        _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
+        try:
+            _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
+        except DvcOpError as exc:  # raised once the pull's other steps, imports included, have run
+            checkout_failed = exc
 
     pull_failed = _pull_targets_with_import_rescue(
         project_path, pull_targets, remote_name, pipeline_outs,
@@ -442,6 +448,8 @@ def _checkout_pull_verify(
         extra_dvc_args=extra_dvc_args, reporter=reporter,
         aws_profile_name=aws_profile_name, import_rescue=import_rescue,
     )
+    if checkout_failed is not None:
+        raise checkout_failed
 
     not_materialized: list[str] = []
     if checkout_targets:
@@ -761,6 +769,19 @@ def _materialize_fast_sync_result(
     )
 
 
+def _dvc_stage_names(project_path: Path, dvc_ops: DvcOps) -> set[str] | None:
+    """The stages dvc lists for the root ``dvc.yaml`` (``DvcOps.stage_names``),
+    or None when there's no ``dvc.lock`` to sort, dvc can't list them, or it
+    lists none (an empty or vars-only ``dvc.yaml`` teaches nothing): every lock
+    out is then kept, and dvc's own checkout says what's wrong."""
+    if not (project_path / "dvc.lock").is_file():
+        return None
+    try:
+        return set(dvc_ops.stage_names(cwd=project_path)) or None
+    except (DvcOpError, WallTimeoutExceeded):
+        return None
+
+
 def data_pull(
     project_path: Path,
     *,
@@ -819,7 +840,20 @@ def data_pull(
     all_pipeline: list[DvcOut] = []
     if pull_all_requested:
         targets = discover_all_outs(project_path)
-        pipeline_outs, all_pipeline = partition_pipeline_outs(project_path, remote_name)
+        # A lock entry for a stage dvc.yaml no longer declares (a foreach that
+        # shrank, a stage renamed) is one dvc checkout and dvc pull refuse, and
+        # plain dvc pull skips: it is never listed, so never downloaded.
+        stale: list[str] = []
+        pipeline_outs, all_pipeline = partition_pipeline_outs(
+            project_path, remote_name, declared=_dvc_stage_names(project_path, dvc_ops), skipped=stale,
+        )
+        if stale:
+            note = (f"skipped dvc.lock entries for {len(stale)} stage(s) dvc.yaml no longer declares, "
+                    f"as dvc pull does: {abbreviate(sorted(stale))}")
+            if reporter is not None:
+                reporter.warn(note)
+            else:
+                logger.warning(note)
         # dvc never pushes a `cache: false` out, so no pull can land it;
         # enumerating one turned every pull into a permanent failure.
         pipeline_outs = [o for o in pipeline_outs if o.use_cache]
@@ -1108,6 +1142,18 @@ def data_push(
             + (f"; or push the rest by naming it, for example mintd data push {shlex.join(map(from_here, rest[:3]))}"
                if rest else "")
             + ("; if dvc.lock was cut short, restore it from git" if stale else ""),
+        )
+    # A folder pointer lists no count, so one cut at the end of an entry, or
+    # recorded before files were added, reads as a smaller folder; DVC would
+    # push the shorter list at exit 0 while the rest sits on disk.
+    unlisted = unlisted_on_disk(project_path, scope, remote=effective_remote)
+    if unlisted:
+        raise PushRefused(
+            "nothing was written or pushed: " + "; ".join(u.message() for u in unlisted),
+            hint=(unlisted[0].hint() if len(unlisted) == 1 else
+                  "record each folder again (mintd data add <folder>, or dvc commit <stage> for a stage out), "
+                  "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
+            + "; then push",
         )
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
                        aws_profile=aws_profile, memo_path=memo_path)

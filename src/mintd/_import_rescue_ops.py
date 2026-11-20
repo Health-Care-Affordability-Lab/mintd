@@ -55,7 +55,7 @@ from ._fast_sync_ops import (
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
-from .errors import MintdError
+from .errors import MintdError, unreachable_repo_hint
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -114,7 +114,7 @@ def _fetch_error_reason(exc: FetchError, repo: str) -> tuple[str, str]:
     if exc.reason is FetchError.Reason.UNREACHABLE:
         return (
             f"could not reach the producer repo ({repo})",
-            f"check git access to {repo}",
+            unreachable_repo_hint(repo),
         )
     return (
         f"could not read the producer repo ({repo}): {exc.detail or exc.reason}",

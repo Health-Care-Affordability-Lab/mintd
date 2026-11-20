@@ -351,14 +351,41 @@ def available() -> bool:
 
 def download(
     s3: Any, bucket: str, key: str, path: Path, *, version_id: str | None = None,
-    progress: Callable[[int], None] | None = None,
+    checksum: bool = False, progress: Callable[[int], None] | None = None,
 ) -> None:
-    """Download one object (at ``version_id`` when given) to ``path``. boto3's
-    ``download_file`` takes ``VersionId`` only through ``ExtraArgs``, and calls
-    ``progress`` from its own transfer threads."""
-    kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key}
-    if version_id:
-        kwargs["ExtraArgs"] = {"VersionId": version_id}
-    if progress is not None:
+    """Download one object (at ``version_id`` when given) to ``path``, retrying
+    transient errors (:func:`retry_transient`). Every lane downloads through here.
+    A GetObject 5xx that botocore raises as ``AttributeError`` (see
+    ``StreamingChecksumBody`` above) is re-raised as the 5xx ``ClientError`` it
+    was, so it is retried and reported like any 500. ``checksum`` has botocore
+    verify the object's stored checksum on the response. boto3's ``download_file``
+    takes ``VersionId`` only through ``ExtraArgs``, and calls ``progress`` from its
+    own transfer threads."""
+    kwargs: dict[str, Any] = {"Bucket": bucket, "Key": key, "Filename": str(path)}
+    extra = {"VersionId": version_id} if version_id else {}
+    if checksum:
+        extra["ChecksumMode"] = "ENABLED"
+    if extra:
+        kwargs["ExtraArgs"] = extra
+    if progress is not None:  # absent, not None: boto3 calls Callback(bytes)
         kwargs["Callback"] = progress
-    s3.download_file(Filename=str(path), **kwargs)
+
+    def attempt() -> None:
+        try:
+            s3.download_file(**kwargs)
+        except AttributeError as exc:
+            if not isinstance(exc.obj, StreamingChecksumBody):
+                raise  # a real bug: propagate verbatim
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": "InternalError",
+                        "Message": "S3 returned a server error (5xx) whose body botocore could not parse",
+                    },
+                    # The stubs want every metadata key; only the status is read.
+                    "ResponseMetadata": {"HTTPStatusCode": 500},  # type: ignore[typeddict-item]
+                },
+                "GetObject",
+            ) from exc
+
+    retry_transient(attempt)

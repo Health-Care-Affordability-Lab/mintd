@@ -9,8 +9,10 @@ own output can only claim.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import threading
+import zlib
 import urllib.request
 from typing import Any
 from urllib.parse import parse_qs
@@ -35,6 +37,12 @@ class S3Server:
     hold_puts_after: int | None = None
     holding: threading.Event = dataclasses.field(default_factory=threading.Event)
     release: threading.Event = dataclasses.field(default_factory=threading.Event)
+    #: `{path: n}`: answer the next n GETs of that object with a 503 whose body
+    #: carries an `x-amz-checksum-*` header, as Wasabi sent. botocore wraps such a
+    #: body in StreamingChecksumBody and raises `AttributeError` instead of the 5xx.
+    #: Each one served is recorded in `hiccups`.
+    hiccup_gets: dict[str, int] = dataclasses.field(default_factory=dict)
+    hiccups: list[str] = dataclasses.field(default_factory=list)
 
 
 @pytest.fixture
@@ -65,6 +73,14 @@ def s3_server():
                 recorder.release.wait(timeout=60)
                 start_response("503 Slow Down", [("Content-Type", "application/xml")])
                 return [b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>held</Message></Error>']
+        if method == "GET" and is_object and recorder.hiccup_gets.get(path, 0) > 0:
+            with put_lock:
+                recorder.hiccup_gets[path] -= 1
+                recorder.hiccups.append(path)
+            body = b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>hiccup</Message></Error>'
+            crc = base64.b64encode(zlib.crc32(body).to_bytes(4, "big")).decode()
+            start_response("503 Slow Down", [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", crc)])
+            return [body]
         if method == "GET" and is_object:
             status: list[str] = []
 
