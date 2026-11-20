@@ -1230,7 +1230,7 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     """Why ``.dvc/config.local`` sends this push somewhere other than where
     importers pull, or None. dvc merges ``config.local`` over ``.dvc/config``;
     a consumer's clone has only the latter. So another ``[core] remote``, or
-    the default remote's ``url``, ``version_aware`` or endpoint set locally,
+    the default remote's ``url``, ``version_aware``, ``worktree`` or endpoint set locally,
     records version IDs (or an object layout) importers cannot use, or checks
     them against a service importers don't read. ``named``: the
     push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
@@ -1249,7 +1249,8 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     for section in parser.sections():
         if _extract_remote_section_name(section) == default:
             keys = sorted(
-                k for k in ("url", "version_aware", "endpointurl", "endpoint") if parser.has_option(section, k)
+                k for k in ("url", "version_aware", "worktree", "endpointurl", "endpoint")  # worktree: version-aware too
+                if parser.has_option(section, k)
             )
             if keys:
                 return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
