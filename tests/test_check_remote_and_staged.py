@@ -66,6 +66,21 @@ def _commit(proj: Path, message: str = "c") -> None:
     _git(proj, "commit", "-q", "-m", message)
 
 
+def _file_pointer(md5: str, vid: str | None, *, path: str, remote: str = REMOTE, own_remote: bool = False) -> str:
+    """A single-file `.dvc` pointer, its version ID (when given) under
+    `remote`; `own_remote` names `remote` on the out itself."""
+    cloud = f"  cloud:\n    {remote}:\n      etag: {md5}\n      version_id: {vid}\n" if vid else ""
+    own = f"  remote: {remote}\n" if own_remote else ""
+    return f"outs:\n- hash: md5\n  path: {path}\n  md5: {md5}\n  size: 2\n{own}{cloud}"
+
+
+def _lock(stage: str, md5: str, vid: str | None, *, path: str = "data/x.csv") -> str:
+    """`dvc.lock` with one stage and one file out, its version ID when given."""
+    cloud = f"      cloud:\n        {REMOTE}:\n          etag: {md5}\n          version_id: {vid}\n" if vid else ""
+    return (f"schema: '2.0'\nstages:\n  {stage}:\n    cmd: run\n    outs:\n    - path: {path}\n      hash: md5\n"
+            f"      md5: {md5}\n      size: 2\n{cloud}")
+
+
 def _remote(findings) -> list[tuple[str, str, str]]:
     return [(f.severity, f.kind, f.message) for f in findings if (f.kind or "").startswith("remote_")]
 
@@ -192,6 +207,127 @@ def test_remote_names_a_null_version(pushed) -> None:
     assert finding[:2] == ("error", "remote_pin_unpinned") and "data/final/a.csv" in finding[2]
 
 
+def _raise(exc: Exception):
+    raise exc
+
+
+@pytest.mark.parametrize("answer, why", [
+    (lambda head: _raise(ClientError({"Error": {"Code": "InvalidArgument"},
+                                      "ResponseMetadata": {"HTTPStatusCode": 400}}, "HeadObject")),
+     "S3 gave no clear answer for its recorded version"),
+    (lambda head: {**head(), "ETag": '"0123-2"', "ContentLength": 99},
+     "its multipart upload can't be proven without the file in the cache"),
+    (lambda head: {**head(), "ETag": '"0123-2"'}, "its multipart upload matches by size only"),
+], ids=["inconclusive", "unproven", "size_only"])
+def test_remote_names_a_pin_s3_cant_settle(pushed, answer, why: str) -> None:
+    """S3 gives an error that maps to nothing: the version is unproven, an
+    error. A multipart ETag with the file not in the cache (a.csv's 2 bytes:
+    by size only when S3's size matches) is a warning: the version is there,
+    and nothing proves its bytes wrong, nor right.
+
+    Mutations: drop a verdict -> nothing reported, red; change one's
+    severity -> red.
+    """
+    proj, seam, *_ = pushed
+    seam.client = _Heads(seam.moto, lambda kw, head: answer(head) if kw["Key"].endswith("/a.csv") else head())
+    severity = "error" if why.startswith("S3 gave") else "warning"
+    assert _remote(check_project(proj, remote=True)) == [(
+        severity, "remote_unchecked",
+        f"data/final.dvc in the working tree and at HEAD: 1 file(s) where {why}: data/final/a.csv")]
+    assert cli.main(["check", "--remote", str(proj)]) == (1 if severity == "error" else 0)
+
+
+def test_remote_fails_when_s3_cant_be_reached(pushed) -> None:
+    """Every HEAD fails to connect, past the retries: no pin is proven, so
+    the check fails rather than pass with a warning.
+
+    Mutation: map inconclusive to a warning -> exit 0, red.
+    """
+    from botocore.exceptions import EndpointConnectionError
+
+    proj, seam, *_ = pushed
+
+    def down(kw, head):
+        raise EndpointConnectionError(endpoint_url="https://s3.example")
+
+    seam.client = _Heads(seam.moto, down)
+    (finding,) = _remote(check_project(proj, remote=True))
+    assert finding[:2] == ("error", "remote_unchecked")
+    assert "S3 gave no clear answer" in finding[2] and "data/final/a.csv, data/final/b.csv" in finding[2]
+    assert cli.main(["check", "--remote", str(proj)]) == 1
+
+
+@pytest.mark.parametrize("all_outs", [False, True], ids=["declared", "all"])
+def test_remote_refuses_an_out_with_its_own_remote(pushed, all_outs: bool) -> None:
+    """Push refuses an out that names a remote of its own on a version-aware
+    remote, so `--remote` can't check it as push's identity: an error,
+    declared (`data/final`) or, under `--all`, not (`data/extra`).
+
+    Mutation: drop the own-remote refusal from `pinned_remote` -> the
+    undeclared one passes, red.
+    """
+    proj, _, _, files = pushed
+    out = "final" if not all_outs else "extra"
+    (proj / "data" / f"{out}.dvc").write_text(_file_pointer(files["a.csv"][0], "gone", path=out, remote="other",
+                                                           own_remote=True))
+    _commit(proj)
+    (finding,) = [f for f in check_project(proj, remote=True, all_outs=all_outs) if f.kind == "remote_unreadable"]
+    assert finding.severity == "error"
+    assert finding.message == ("outputs with their own remote aren't supported on a version-aware remote: "
+                               f"data/{out}.dvc: {out}")
+
+
+@pytest.mark.parametrize("shape", ["files-without-ids", "bare-tree"])
+def test_remote_names_an_undeclared_out_with_no_ids_only_with_all(pushed, shape: str) -> None:
+    """No offline finding covers an undeclared out, so under `--all` one
+    that records no version ID (files listed without one, or a bare tree
+    hash) is an error; without `--all` it isn't checked at all.
+
+    Mutations: report an entry with no ID only at HEAD where the working
+    tree has it -> files-without-ids passes, red; the same for a bare tree
+    -> bare-tree red.
+    """
+    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+
+    proj, _, _, files = pushed
+    if shape == "files-without-ids":
+        _folder_pointer(proj, "extra", {"a.csv": (files["a.csv"][0], None)})
+        named = "data/extra/a.csv"
+    else:
+        tree = dir_manifest_md5([DvcFileEntry(md5=files["a.csv"][0], relpath="a.csv", size=2)])
+        (proj / "data" / "extra.dvc").write_text(f"outs:\n- md5: {tree}\n  size: 2\n  nfiles: 1\n  hash: md5\n"
+                                                "  path: extra\n")
+        named = "data/extra"
+    _commit(proj)
+    assert _remote(check_project(proj, remote=True)) == []
+    assert _remote(check_project(proj, remote=True, all_outs=True)) == [(
+        "error", "remote_pin_unpinned", "data/extra.dvc in the working tree and at HEAD: 1 file(s) where it "
+        f"records no S3 version ID, so importers can't fetch it: {named}")]
+
+
+@pytest.mark.parametrize("committed", [False, True], ids=["in-the-working-tree", "at-head-only"])
+def test_remote_names_a_nested_dvc_lock_it_doesnt_read(pushed, committed: bool) -> None:
+    """Only the root `dvc.lock` is read, as push verification reads it: a
+    nested one, in the working tree or only at HEAD, is named, not passed.
+
+    Mutation: drop the nested-lock finding -> nothing, red; read nested
+    locks from the working tree only -> at-head-only red.
+    """
+    proj, *_ = pushed
+    (proj / "pipe").mkdir()
+    (proj / "pipe" / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - x.csv\n")
+    (proj / "pipe" / "dvc.lock").write_text(_lock("build", _md5(b"x\n"), "gone", path="x.csv"))
+    _commit(proj)
+    if committed:
+        _git(proj, "rm", "-q", "--cached", "-r", "pipe")
+        import shutil
+
+        shutil.rmtree(proj / "pipe")
+        _git(proj, "reset", "-q")  # unstage the removal: HEAD still has pipe/, the working tree doesn't
+    assert _remote(check_project(proj, remote=True, all_outs=True)) == [(
+        "warning", "remote_unchecked", "only the root dvc.lock is read, so the pins in pipe/dvc.lock aren't checked")]
+
+
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("bad_at", ["working-tree", "head"])
 def test_remote_checks_the_working_tree_and_head_and_says_which(tmp_path: Path, s3, bad_at: str, layout: str) -> None:
@@ -303,6 +439,18 @@ def test_check_remote_exits_1_on_an_error_and_all_needs_remote(pushed) -> None:
         cli.main(["check", "--all", str(proj)])
 
 
+@pytest.mark.parametrize("flag, said", [("--all", "--all goes with --remote"),
+                                        ("--upgrades", "--upgrades doesn't go with --staged")])
+def test_check_staged_refuses_a_flag_it_would_ignore(tmp_path: Path, flag: str, said: str) -> None:
+    """A flag `--staged` doesn't act on would read as checked.
+
+    Mutation: drop either refusal -> the check runs and exits 0, red.
+    """
+    proj, _ = _pinned_repo(tmp_path)
+    with pytest.raises(SystemExit, match=said):
+        cli.main(["check", "--staged", flag, str(proj)])
+
+
 def test_remote_judges_each_tree_by_its_own_bytes(pushed) -> None:
     """HEAD records a.csv's version with other bytes' md5, the working tree
     with the right one: the finding is HEAD's alone.
@@ -360,27 +508,37 @@ def test_check_remote_cli_probes_as_mintds_profile(pushed, tmp_path: Path, monke
     assert seam.profiles == ["mintd"]
 
 
-def test_remote_leaves_out_a_committed_pointer_gitignore_excludes(pushed) -> None:
-    """DVC, and so push and importers, skip a `.dvc` file `.gitignore`
-    excludes, even one force-added; HEAD's check skips it too.
+@pytest.mark.parametrize("how", ["an-uncommitted-gitignore-line", "force-added-under-an-ignored-folder"])
+def test_remote_reads_every_committed_pointer_whatever_gitignore_says(pushed, how: str) -> None:
+    """A committed pointer is tracked, and git never ignores a tracked
+    file: HEAD's check reads it whatever `.gitignore` says, so a line not
+    yet committed can't hide HEAD's stale pin, and nor can a folder ignored
+    around a pointer that was force-added.
 
-    Mutation: read every committed pointer at HEAD -> its stale pin is
-    reported, red.
+    Mutations: filter HEAD's pointers by the working tree's `.gitignore` ->
+    nothing reported, red; drop the ignored pointer's hint -> push is
+    named, red.
     """
-    from mintd._fast_sync_ops import gitignored_pointers
-
     proj, _, _, files = pushed
-    (proj / "scratch").mkdir()
-    (proj / "scratch" / "old.dvc").write_text(
-        f"outs:\n- hash: md5\n  path: old\n  files:\n  - relpath: a.csv\n    md5: {files['a.csv'][0]}\n"
+    rel = "data/extra.dvc" if how == "an-uncommitted-gitignore-line" else "scratch/old.dvc"
+    (proj / rel).parent.mkdir(exist_ok=True)
+    (proj / rel).write_text(  # a.csv pinned to b.csv's version, which a.csv's key doesn't hold
+        f"outs:\n- hash: md5\n  path: {Path(rel).stem}\n  files:\n  - relpath: a.csv\n    md5: {files['a.csv'][0]}\n"
         f"    size: 2\n    cloud:\n      {REMOTE}:\n        etag: {files['a.csv'][0]}\n"
         f"        version_id: {files['b.csv'][1]}\n")
-    with (proj / ".gitignore").open("a") as f:
-        f.write("/scratch/\n")
-    _git(proj, "add", "-f", "scratch/old.dvc")
+    if how == "force-added-under-an-ignored-folder":
+        with (proj / ".gitignore").open("a") as f:
+            f.write("/scratch/\n")
+        _git(proj, "add", "-f", rel)
     _commit(proj)
-    assert gitignored_pointers(proj) == ["scratch/old.dvc"]
-    assert _remote(check_project(proj, remote=True, all_outs=True)) == []
+    if how == "an-uncommitted-gitignore-line":
+        with (proj / ".gitignore").open("a") as f:
+            f.write(f"/{rel}\n")
+    (finding,) = [f for f in check_project(proj, remote=True, all_outs=True) if f.kind == "remote_pin_missing"]
+    assert finding.message.startswith(f"{rel} at HEAD: 1 file(s) where its recorded S3 version isn't at its key")
+    # push skips an ignored pointer, so the hint can't be push
+    assert finding.hint == (f"{rel} is excluded by .gitignore, so push skips it: stop ignoring it and run mintd "
+                            "data push, or git rm it")
 
 
 def test_remote_heads_every_pin_rather_than_trust_a_memo(tmp_path: Path, s3) -> None:
@@ -429,7 +587,7 @@ def test_remote_names_a_head_that_lost_its_ids_while_the_working_tree_has_them(p
     (finding,) = [f for f in check_project(proj, remote=True) if f.kind == "remote_pin_unpinned"]
     assert finding.severity == "error"
     assert finding.message.startswith("data/final.dvc at HEAD: ")
-    assert "records no S3 version ID, so importers of that commit can't fetch it" in finding.message
+    assert "records no S3 version ID, so importers can't fetch it" in finding.message
     assert "push the pointers again" in (finding.hint or "")
 
 
@@ -461,19 +619,54 @@ def test_remote_reports_head_s_missing_ids_only_where_the_working_tree_has_them(
         assert any(f.kind == "data_products_output_unpinned" for f in found)
 
 
-def test_remote_names_a_pointer_it_cant_read_at_head(pushed) -> None:
-    """A merge left conflict markers in HEAD's pointer and the working tree
-    was fixed but not committed: importers read the damaged one.
+def _damaged(good: str, damage: str) -> bytes:
+    """A pointer dvc would refuse: a merge's conflict markers, cut short
+    before its out's path (the cut-short rule's case), not UTF-8 (Latin-1,
+    as an editor may save it), with a key twice (PyYAML takes it, dvc's
+    ruamel refuses it), or an impossible date (ruamel raises ValueError)."""
+    return {"conflict-markers": f"<<<<<<< ours\n{good}=======\n{good}>>>>>>> theirs\n".encode(),
+            "cut-short": good[:good.index("  path:")].encode(),
+            "not-utf-8": b"# caf\xe9\n" + good.encode(),
+            "duplicate-key": f"{good}meta: 1\nmeta: 2\n".encode(),
+            "impossible-date": f"{good}meta:\n  reviewed: 2023-02-29\n".encode()}[damage]
 
-    Mutation: skip the screen at HEAD -> read as no outs, nothing, red.
+
+@pytest.mark.parametrize("damage", ["conflict-markers", "not-utf-8", "duplicate-key", "impossible-date"])
+def test_remote_names_a_pointer_it_cant_read_at_head(pushed, damage: str) -> None:
+    """A merge left conflict markers in HEAD's pointer (or it was saved as
+    Latin-1) and the working tree was fixed but not committed: importers
+    read the damaged one.
+
+    Mutations: skip the screen at HEAD -> read as no outs, nothing, red;
+    write the scratch tree without surrogateescape -> UnicodeEncodeError,
+    red.
     """
     proj, *_ = pushed
     good = (proj / "data" / "final.dvc").read_text()
-    (proj / "data" / "final.dvc").write_text(f"<<<<<<< ours\n{good}=======\n{good}>>>>>>> theirs\n")
+    (proj / "data" / "final.dvc").write_bytes(_damaged(good, damage))
     _commit(proj)
     (proj / "data" / "final.dvc").write_text(good)
     (finding,) = [f for f in check_project(proj, remote=True) if f.kind == "dvc_state_unreadable"]
     assert finding.severity == "error" and finding.message.startswith("could not read data/final.dvc at HEAD: ")
+    if damage == "not-utf-8":
+        assert finding.message.endswith(": not UTF-8 text (dvc writes UTF-8)")
+
+
+@pytest.mark.parametrize("where", ["a-pointer", "dvc-yaml"])
+def test_remote_names_a_working_tree_file_of_the_wrong_shape(pushed, where: str) -> None:
+    """`outs` that isn't a list, in a working-tree pointer or a dvc.yaml
+    stage, is the offline screen's to name: reading the remote as push's
+    identity skips it rather than traceback.
+
+    Mutation: drop `_own_remotes`'s list test -> TypeError, red.
+    """
+    proj, *_ = pushed
+    if where == "a-pointer":
+        (proj / "data" / "final.dvc").write_text("outs: true\n")
+    else:
+        (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs: 5\n")
+    kinds = [f.kind for f in check_project(proj, remote=True)]
+    assert "dvc_state_unreadable" in kinds
 
 
 def test_remote_leaves_out_a_committed_subrepo_s_pointers(pushed) -> None:
@@ -534,7 +727,7 @@ def test_staged_refuses_a_commit_that_drops_ids_from_unchanged_files(tmp_path: P
 
 
 @pytest.mark.parametrize("change", ["new-data", "ids-added", "file-removed", "new-pointer", "pointer-deleted",
-                                    "readme", "another-project"])
+                                    "readme", "another-project", "a-dvc-yaml-never-added"])
 def test_staged_lets_through_a_commit_that_drops_no_id(tmp_path: Path, change: str) -> None:
     """A changed md5 (new data, no ID yet), added IDs, a removed file, a new
     pointer, a deleted pointer, a README, and a pointer of another project
@@ -560,8 +753,14 @@ def test_staged_lets_through_a_commit_that_drops_no_id(tmp_path: Path, change: s
         _git(proj, "rm", "-q", "data/final.dvc")
     elif change == "readme":
         (proj.parent / "README.md").write_text("hi\n")
-    else:  # what dvc commit -f does, in the other project
+    elif change == "another-project":  # what dvc commit -f does, in the other project
         _folder_pointer(other, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+    else:  # on disk, not in git: each tree reads its own dvc.yaml from git
+        (proj / "dvc.yaml").write_text("stages: {}\n")
+        _folder_pointer(proj, "final", {**files, "c.csv": (_md5(b"c\n"), "vc")})
+        _git(proj, "add", "data/final.dvc")
+        assert check_staged(proj) == []
+        return
     _git(proj, "add", "-A")
     assert check_staged(proj) == []
 
@@ -646,25 +845,239 @@ def test_staged_names_only_the_file_that_lost_its_id(tmp_path: Path) -> None:
         "data/final.dvc drops S3 version IDs from 1 unchanged file(s) (data/final/a.csv)"]
 
 
-@pytest.mark.parametrize("damage", ["conflict-markers", "cut-short"])
+@pytest.mark.parametrize("move", ["pointer-renamed", "stage-renamed", "out-moved-into-a-stage"])
+def test_staged_matches_a_file_by_its_s3_identity_whatever_records_it(tmp_path: Path, move: str) -> None:
+    """A file is matched by its path, its S3 key, so a dropped ID is found
+    when the pointer is renamed, the stage is renamed, or the out moves from
+    a `.dvc` file into a `dvc.lock` stage.
+
+    Mutations: match on (pointer, stage, out, relpath) -> every case passes,
+    red; read HEAD's copies of staged pointers only, not deleted ones ->
+    pointer-renamed and out-moved red; give HEAD's tree the staged dvc.yaml
+    -> HEAD's stage isn't declared there, stage-renamed red.
+    """
+    md5 = _md5(b"x\n")
+    if move == "pointer-renamed":
+        proj, files = _pinned_repo(tmp_path)
+        _git(proj, "rm", "-q", "data/final.dvc")
+        _folder_pointer(proj, "renamed", {rel: (m, None) for rel, (m, _) in files.items()})
+        (proj / "data" / "renamed.dvc").write_text((proj / "data" / "renamed.dvc").read_text()
+                                                   .replace("path: renamed", "path: final"))
+        want = "data/renamed.dvc drops S3 version IDs from 2 unchanged file(s) (data/final/a.csv, data/final/b.csv)"
+    else:
+        proj = _repo(tmp_path)
+        (proj / "data").mkdir()
+        if move == "stage-renamed":
+            (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - data/x.csv\n")
+            (proj / "dvc.lock").write_text(_lock("build", md5, "vx"))
+        else:
+            (proj / "data" / "x.csv.dvc").write_text(_file_pointer(md5, "vx", path="x.csv"))
+        _commit(proj)
+        if move == "out-moved-into-a-stage":
+            _git(proj, "rm", "-q", "data/x.csv.dvc")
+        stage = "make" if move == "stage-renamed" else "build"
+        (proj / "dvc.yaml").write_text(f"stages:\n  {stage}:\n    cmd: run\n    outs:\n    - data/x.csv\n")
+        (proj / "dvc.lock").write_text(_lock(stage, md5, None))
+        want = "dvc.lock drops S3 version IDs from 1 unchanged file(s) (data/x.csv)"
+    _git(proj, "add", "-A")
+    assert [f.message for f in check_staged(proj)] == [want]
+
+
+@pytest.mark.parametrize("outer", ["version-aware", "not-version-aware", "no-default-remote"])
+@pytest.mark.parametrize("where", ["the-outer-project", "the-nested-project"])
+def test_staged_names_a_nested_project_s_pointers_from_the_outer_one(tmp_path: Path, where: str, outer: str) -> None:
+    """A folder with its own `.dvc/` is a project of its own, with its own
+    remote (here the same name, as mintd scaffolds give them): from the
+    outer project, its staged pointers are named, not read under the
+    outer's remote, whatever the outer's remote is; from inside it, they
+    are checked.
+
+    Mutations: drop the finding -> the outer passes, red; read them as the
+    outer's -> a second, drop finding, red; name them after the outer's
+    no-remote or not-version-aware exit -> those cases pass, red.
+    """
+    proj = _repo(tmp_path, version_aware=outer == "version-aware")
+    if outer == "no-default-remote":
+        (proj / ".dvc" / "config").write_text("")
+    sub = proj / "sub"
+    sub.mkdir()
+    stage_dvc_project(sub)
+    (sub / "x.dvc").write_text(_file_pointer(_md5(b"x\n"), "vx", path="x"))
+    _commit(proj)
+    (sub / "x.dvc").write_text(_file_pointer(_md5(b"x\n"), None, path="x"))
+    _git(proj, "add", "-A")
+    if where == "the-outer-project":
+        (finding,) = check_staged(proj)
+        assert (finding.kind, finding.message) == (
+            "staged_unchecked", "can't check the staged commit: the commit stages pointers in another DVC project "
+            "(sub/x.dvc)")
+    else:
+        assert [f.message for f in check_staged(sub)] == ["x.dvc drops S3 version IDs from 1 unchanged file(s) (x)"]
+
+
+@pytest.mark.parametrize("change", ["ids-dropped", "stage-moved-to-the-root"])
+def test_staged_names_a_nested_dvc_lock_it_doesnt_read(tmp_path: Path, change: str) -> None:
+    """Only the root `dvc.lock` is read: a nested one the commit changes is
+    named, not passed, a deleted one included, since its stages' IDs may
+    have moved (here into the root lock, without them). A commit that only
+    removes a nested pipeline is refused too, an accepted false refusal.
+
+    Mutations: drop the finding -> [], red; name a nested lock only when
+    it isn't deleted -> stage-moved-to-the-root passes, red.
+    """
+    proj = _repo(tmp_path)
+    md5 = _md5(b"x\n")
+    (proj / "pipe").mkdir()
+    (proj / "pipe" / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - x.csv\n")
+    (proj / "pipe" / "dvc.lock").write_text(_lock("build", md5, "vx", path="x.csv"))
+    _commit(proj)
+    if change == "ids-dropped":
+        (proj / "pipe" / "dvc.lock").write_text(_lock("build", md5, None, path="x.csv"))
+    else:
+        _git(proj, "rm", "-q", "pipe/dvc.yaml", "pipe/dvc.lock")
+        (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - pipe/x.csv\n")
+        (proj / "dvc.lock").write_text(_lock("build", md5, None, path="pipe/x.csv"))
+    _git(proj, "add", "-A")
+    (finding,) = check_staged(proj)
+    assert (finding.severity, finding.kind) == ("error", "staged_unchecked")
+    assert finding.message == ("can't check the staged commit: only the root dvc.lock is read, and the commit "
+                               "changes pipe/dvc.lock")
+
+
+@pytest.mark.parametrize("remote", ["not-version-aware", "an-out-s-own"])
+def test_staged_reads_the_remote_as_push_does(tmp_path: Path, remote: str) -> None:
+    """`pinned_remote`, push's own test: a remote that isn't version-aware
+    pins nothing, so nothing can be dropped and push can't put IDs back
+    there; an out with its own remote is one push refuses, so it is named.
+
+    Mutations: skip the version-aware test -> a false refusal whose hint is
+    push, red; skip the own-remote refusal -> [], red.
+    """
+    proj = _repo(tmp_path, version_aware=remote == "an-out-s-own")
+    md5 = _md5(b"x\n")
+    own = remote == "an-out-s-own"
+    (proj / "data").mkdir()
+    named = {"remote": "other", "own_remote": True} if own else {}
+    (proj / "data" / "x.csv.dvc").write_text(_file_pointer(md5, "vx", path="x.csv", **named))
+    _commit(proj)
+    (proj / "data" / "x.csv.dvc").write_text(_file_pointer(md5, None, path="x.csv", **named))
+    _git(proj, "add", "-A")
+    if not own:
+        assert check_staged(proj) == []
+    else:
+        (finding,) = check_staged(proj)
+        assert (finding.kind, finding.message) == (
+            "staged_unchecked", "can't check the staged commit: outputs with their own remote aren't supported on a "
+            "version-aware remote: data/x.csv.dvc: x.csv")
+
+
+@pytest.mark.parametrize("head", ["a-conflicted-lock", "an-impossible-date", "fixed-with-its-ids"])
+def test_staged_names_a_head_copy_it_cant_read(tmp_path: Path, head: str) -> None:
+    """HEAD's copy read as "no outs" would hide every ID it records, so a
+    commit that records a file with no ID over a HEAD copy dvc couldn't
+    read is named (here, what `dvc commit -f` writes over a lock a merge
+    left conflicted, or over a pointer with an impossible date). A commit
+    that records every file's ID drops none, whatever HEAD's copy is.
+
+    Mutations: skip HEAD's screen -> the first two pass, red; name it
+    whatever the commit records -> fixed-with-its-ids refused, red.
+    """
+    md5 = _md5(b"x\n")
+    proj = _repo(tmp_path)
+    (proj / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - data/x.csv\n")
+    good = _lock("build", md5, "vx")
+    (proj / "dvc.lock").write_text(f"<<<<<<< ours\n{good}=======\n{good}>>>>>>> theirs\n" if head == "a-conflicted-lock"
+                                   else f"{good}meta:\n  reviewed: 2023-02-29\n")
+    _commit(proj)
+    (proj / "dvc.lock").write_text(_lock("build", md5, "vx" if head == "fixed-with-its-ids" else None))
+    _git(proj, "add", "-A")
+    got = check_staged(proj)
+    if head == "fixed-with-its-ids":
+        assert got == []
+    else:
+        (finding,) = got
+        assert (finding.severity, finding.kind) == ("error", "staged_unchecked")
+        assert finding.message.startswith("can't check the staged commit: HEAD's dvc.lock can't be read (")
+        assert finding.message.endswith("), so the IDs it records can't be compared")
+
+
+@pytest.mark.parametrize("setting", ['version_aware = "true"', "worktree = true"])
+def test_staged_reads_version_aware_as_dvc_does(tmp_path: Path, setting: str) -> None:
+    """A quoted `version_aware`, or `worktree = true` with no
+    `version_aware`, is a version-aware remote to dvc, which records IDs
+    there: a commit that drops them is refused.
+
+    Mutation: read only an unquoted `version_aware` key -> [], red.
+    """
+    proj, files = _pinned_repo(tmp_path)
+    cfg = proj / ".dvc" / "config"
+    cfg.write_text(cfg.read_text().replace("version_aware = true", setting))
+    _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+    _git(proj, "add", "-A")
+    assert [f.kind for f in check_staged(proj)] == ["staged_drops_version_ids"]
+
+
+@pytest.mark.parametrize("shape", ["staged-dvc-yaml", "deleted-pointer", "remote-working-tree-dvc-yaml",
+                                   "staged-on-a-remote-that-isnt-version-aware"])
+def test_an_impossible_date_is_read_as_unparseable_not_a_traceback(tmp_path: Path, s3, shape: str) -> None:
+    """ruamel raises a bare ValueError for `2023-02-29`. Every reader takes
+    the file as unparseable: the screen names it where it's read (a staged
+    dvc.yaml, the working tree's), and a pointer the commit deletes drops
+    nothing. The screen runs before the remote is read, so a damaged staged
+    pointer is named even on a remote that pins nothing.
+
+    Mutations: read12 catches YAMLError only -> ValueError, red; screen
+    after pinned_remote -> the not-version-aware case passes, red.
+    """
+    bad = "meta:\n  reviewed: 2023-02-29\n"
+    if shape == "remote-working-tree-dvc-yaml":
+        proj, *_ = _pushed(tmp_path, s3)
+        (proj / "dvc.yaml").write_text(f"stages: {{}}\n{bad}")
+        kinds = [f.kind for f in check_project(proj, remote=True)]
+        assert "dvc_state_unreadable" in kinds
+        return
+    proj, files = _pinned_repo(tmp_path)
+    if shape == "staged-dvc-yaml":  # with a pointer that drops its IDs, so the trees are read
+        (proj / "dvc.yaml").write_text(f"stages: {{}}\n{bad}")
+        _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+        want = [("dvc_state_unreadable", "could not read dvc.yaml in the staged commit: ")]
+    elif shape == "deleted-pointer":
+        (proj / "data" / "bad.dvc").write_text(_file_pointer(_md5(b"x\n"), "vx", path="bad") + bad)
+        _commit(proj)
+        _git(proj, "rm", "-q", "data/bad.dvc")
+        want = []
+    else:
+        cfg = proj / ".dvc" / "config"
+        cfg.write_text(cfg.read_text().replace("    version_aware = true\n", ""))
+        (proj / "data" / "final.dvc").write_text((proj / "data" / "final.dvc").read_text() + bad)
+        want = [("dvc_state_unreadable", "could not read data/final.dvc in the staged commit: ")]
+    _git(proj, "add", "-A")
+    got = check_staged(proj)
+    assert len(got) == len(want)
+    assert [(f.kind, f.message[:len(m)]) for f, (_, m) in zip(got, want, strict=True)] == want
+
+
+@pytest.mark.parametrize("damage", ["conflict-markers", "cut-short", "not-utf-8", "duplicate-key",
+                                    "impossible-date"])
 def test_staged_refuses_a_pointer_it_cant_read(tmp_path: Path, damage: str) -> None:
     """A staged pointer dvc would refuse is not "no outs": read that way, it
     would look like a pointer dropped on purpose and pass.
 
-    Mutation: skip the screen on the staged tree -> [], red.
+    Mutations: skip the screen on the staged tree -> [], red; write the
+    scratch tree without surrogateescape -> UnicodeEncodeError, red.
     """
     proj, files = _pinned_repo(tmp_path)
     good = (proj / "data" / "final.dvc").read_text()
-    damaged = (f"<<<<<<< ours\n{good}=======\n{good}>>>>>>> theirs\n" if damage == "conflict-markers"
-               else good[:good.index("  path:")])  # cut before the out's path: the cut-short rule's case
-    (proj / "data" / "final.dvc").write_text(damaged)
+    (proj / "data" / "final.dvc").write_bytes(_damaged(good, damage))
     _git(proj, "add", "data/final.dvc")
     (finding,) = check_staged(proj)
     assert (finding.severity, finding.kind) == ("error", "dvc_state_unreadable")
     assert finding.message.startswith("could not read data/final.dvc in the staged commit: ")
+    if damage == "not-utf-8":
+        assert finding.message.endswith(": not UTF-8 text (dvc writes UTF-8)")
 
 
-def _stage_the_cms_pdc_commit(proj: Path) -> None:
+def _stage_a_dvc_commit_f_on_a_wdir_stage(proj: Path) -> None:
     """What `dvc commit -f <stage>` stages for a `wdir: code` stage's folder
     out: dvc.lock's out written back as a bare tree hash, with no file list
     and no IDs, over a commit that recorded each file's ID."""
@@ -691,13 +1104,13 @@ def _stage_the_cms_pdc_commit(proj: Path) -> None:
 def test_staged_from_a_project_subfolder_checks_the_project(tmp_path: Path, monkeypatch, layout: str) -> None:
     """The project is found as dvc finds it, up from the path: run from
     `proj/code` (the CLI's path defaults to "."), it checks `proj`, and
-    refuses the cms-pdc commit.
+    refuses what `dvc commit -f` stages for a `wdir: code` stage.
 
     Mutation: check only the folder given -> no .dvc/ there, nothing found,
     red.
     """
     proj = _repo(tmp_path, layout=layout)
-    _stage_the_cms_pdc_commit(proj)
+    _stage_a_dvc_commit_f_on_a_wdir_stage(proj)
     want = ["dvc.lock drops S3 version IDs from 2 unchanged file(s) (data/out/a.csv, data/out/b.csv)"]
     assert [f.message for f in check_staged(proj / "code")] == want
     assert cli.main(["check", "--staged", str(proj / "code")]) == 1
@@ -717,7 +1130,7 @@ def test_staged_outside_any_dvc_project_refuses_a_commit_that_stages_pointers(tm
     proj = _repo(tmp_path, layout="below-the-repo-root")
     (proj.parent / "docs").mkdir()
     (proj.parent / "docs" / "notes.md").write_text("hi\n")
-    _stage_the_cms_pdc_commit(proj)
+    _stage_a_dvc_commit_f_on_a_wdir_stage(proj)
     path = proj.parent if where == "the-repo-root-above" else proj.parent / "docs"
     (finding,) = check_staged(path)
     assert (finding.severity, finding.kind) == ("error", "staged_unchecked")
@@ -762,6 +1175,27 @@ def test_staged_in_a_nested_git_repo_stops_at_its_own_top_level(tmp_path: Path) 
     _git(inner, "init", "-q", "-b", "main")
     assert check_staged(inner) == []
     assert [f.kind for f in check_staged(proj)] == ["staged_drops_version_ids"]  # the outer one still refuses
+
+
+def test_staged_checks_the_nearest_dvc_project_up_from_the_path(tmp_path: Path) -> None:
+    """A project inside another's folder, in the same git repository, is the
+    one dvc runs in from below it, so it is the one checked.
+
+    Mutation: take the outermost `.dvc/` up from the path -> the finding
+    names `inner/data/final.dvc`, red.
+    """
+    outer = _repo(tmp_path)
+    inner = outer / "inner"
+    inner.mkdir()
+    stage_dvc_project(inner)
+    files = {"a.csv": (_md5(b"a\n"), "va")}
+    _folder_pointer(inner, "final", files)
+    _commit(outer)
+    _folder_pointer(inner, "final", {"a.csv": (files["a.csv"][0], None)})
+    _git(outer, "add", "-A")
+    (finding,) = check_staged(inner / "data")
+    assert finding.message == "data/final.dvc drops S3 version IDs from 1 unchanged file(s) (data/final/a.csv)"
+    assert finding.source == inner / "data" / "final.dvc"
 
 
 def test_staged_passes_a_repo_with_no_dvc_folder_and_no_pointer_staged(tmp_path: Path) -> None:

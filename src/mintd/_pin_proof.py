@@ -96,14 +96,16 @@ def _load(path: Path) -> Any:
 
 def read12(text: str | None) -> Any:
     """``text`` read as DVC reads its files (YAML 1.2, where an unquoted
-    ``on`` / ``no`` / ``12:30`` stays a string); None when absent or unparseable."""
+    ``on`` / ``no`` / ``12:30`` stays a string); None when absent or unparseable,
+    an impossible date included (ruamel raises a bare ``ValueError`` for
+    ``2023-02-29``)."""
     from ruamel.yaml import YAMLError
 
     if not text:
         return None
     try:
         return load12(text)
-    except YAMLError:
+    except (YAMLError, ValueError):
         return None
 
 

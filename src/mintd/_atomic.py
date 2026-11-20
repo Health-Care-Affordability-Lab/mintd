@@ -66,6 +66,7 @@ _TMP_TAIL = ".tmp"
 
 def _atomic_write_text(
     path: Path, content: str, *, tmp_suffix: str | None = None, newline: str | None = None,
+    errors: str | None = None,
 ) -> None:
     """Write ``content`` to ``path`` atomically, destroying no neighbour.
 
@@ -105,6 +106,8 @@ def _atomic_write_text(
 
     ``newline`` is ``open``'s: the default writes ``\n`` as the platform's
     line ending; ``""`` writes ``content`` exactly, to put bytes back as read.
+    ``errors`` is ``open``'s too: ``"surrogateescape"`` writes back the bytes
+    that were not UTF-8 in text decoded that way.
 
     The failure arm is not optional. A guessable temp self-healed (the next
     run overwrote it); an unguessable one would strand a fresh orphan per
@@ -127,7 +130,7 @@ def _atomic_write_text(
     tmp = path.with_name(path.name + suffix)
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline, errors=errors) as f:
             f.write(content)
             f.flush()
             os.fsync(f.fileno())
@@ -143,7 +146,9 @@ def write_tree(root: Path, files: dict[str, str]) -> None:
     """Write each text at its relative path under ``root``, exactly as given
     (no line-ending translation), making folders as needed: a scratch copy
     of pointer files, such as ``check`` builds from HEAD and the index.
-    Refuses a path that would land outside ``root``."""
+    Text git gave (decoded with ``surrogateescape``) is written back as git's
+    own bytes, so a file that isn't UTF-8 stays that way for its reader to
+    refuse by name. Refuses a path that would land outside ``root``."""
     root.mkdir(parents=True, exist_ok=True)
     base = root.resolve()
     for rel, text in files.items():
@@ -151,4 +156,4 @@ def write_tree(root: Path, files: dict[str, str]) -> None:
         if not target.resolve().is_relative_to(base):
             raise ValueError(f"{rel} is outside {root}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(target, text, newline="")
+        _atomic_write_text(target, text, newline="", errors="surrogateescape")

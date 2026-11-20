@@ -883,7 +883,11 @@ def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> Reg
 
 
 def _handle_check(args: argparse.Namespace) -> int:
+    if args.all_outs and not args.remote:
+        raise SystemExit("mintd check: --all goes with --remote")
     if args.staged:  # offline and fast: no catalog, no S3, no dvc
+        if args.upgrades:  # a flag that did nothing would read as checked
+            raise SystemExit("mintd check: --upgrades doesn't go with --staged")
         from .check import check_staged
 
         return _render_findings(check_staged(args.path), json_out=args.json_out)
@@ -899,8 +903,6 @@ def _handle_check(args: argparse.Namespace) -> int:
         # Let the manifest walker emit `catalog_unresolved` findings —
         # surface what's missing without pre-validating.
         client = None
-    if args.all_outs and not args.remote:
-        raise SystemExit("mintd check: --all goes with --remote")
     findings = check_project(args.path, upgrades=args.upgrades, client=client, remote=args.remote,
                              all_outs=args.all_outs, aws_profile=config.aws_profile_name)
     return _render_findings(findings, json_out=args.json_out)
