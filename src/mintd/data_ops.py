@@ -16,8 +16,10 @@ pull-all audit.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import hashlib
+import shlex
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from ._dvc_ops import (
+    DvcOpError,
     DvcOps,
     DvcPullError,
     DvcPushResult,
@@ -34,6 +37,7 @@ from ._dvc_ops import (
 from ._fast_sync_ops import (
     DvcOut,
     FastSyncOps,
+    PointerCutShort,
     cached_targets,
     discover_all_outs,
     outs_for_target,
@@ -42,10 +46,19 @@ from ._fast_sync_ops import (
     resolve_target_outs,
     skipped_targets,
 )
-from ._dvc_state import _names_a_stage, abbreviate, judge_pointers, push_targets
+from ._dvc_state import (
+    _names_a_stage,
+    abbreviate,
+    does_not_parse,
+    judge_pointers,
+    push_targets,
+    stages_behind,
+    with_outputs,
+)
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
 from ._storage_state import inspect_storage
+from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
 from .model import FastPullResult
 
@@ -421,8 +434,12 @@ def _checkout_pull_verify(
     branch (its checkout_targets only ever contain fast-syncable stage
     targets).
     """
+    checkout_failed: DvcOpError | None = None
     if checkout_targets:
-        _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
+        try:
+            _checkout_grouped(dvc_ops, checkout_targets, cwd=project_path)
+        except DvcOpError as exc:  # raised once the pull's other steps, imports included, have run
+            checkout_failed = exc
 
     pull_failed = _pull_targets_with_import_rescue(
         project_path, pull_targets, remote_name, pipeline_outs,
@@ -430,6 +447,8 @@ def _checkout_pull_verify(
         extra_dvc_args=extra_dvc_args, reporter=reporter,
         aws_profile_name=aws_profile_name, import_rescue=import_rescue,
     )
+    if checkout_failed is not None:
+        raise checkout_failed
 
     not_materialized: list[str] = []
     if checkout_targets:
@@ -749,6 +768,19 @@ def _materialize_fast_sync_result(
     )
 
 
+def _dvc_stage_names(project_path: Path, dvc_ops: DvcOps) -> set[str] | None:
+    """The stages dvc lists for the root ``dvc.yaml`` (``DvcOps.stage_names``),
+    or None when there's no ``dvc.lock`` to sort, dvc can't list them, or it
+    lists none (an empty or vars-only ``dvc.yaml`` teaches nothing): every lock
+    out is then kept, and dvc's own checkout says what's wrong."""
+    if not (project_path / "dvc.lock").is_file():
+        return None
+    try:
+        return set(dvc_ops.stage_names(cwd=project_path)) or None
+    except (DvcOpError, WallTimeoutExceeded):
+        return None
+
+
 def data_pull(
     project_path: Path,
     *,
@@ -807,7 +839,20 @@ def data_pull(
     all_pipeline: list[DvcOut] = []
     if pull_all_requested:
         targets = discover_all_outs(project_path)
-        pipeline_outs, all_pipeline = partition_pipeline_outs(project_path, remote_name)
+        # A lock entry for a stage dvc.yaml no longer declares (a foreach that
+        # shrank, a stage renamed) is one dvc checkout and dvc pull refuse, and
+        # plain dvc pull skips: it is never listed, so never downloaded.
+        stale: list[str] = []
+        pipeline_outs, all_pipeline = partition_pipeline_outs(
+            project_path, remote_name, declared=_dvc_stage_names(project_path, dvc_ops), skipped=stale,
+        )
+        if stale:
+            note = (f"skipped dvc.lock entries for {len(stale)} stage(s) dvc.yaml no longer declares, "
+                    f"as dvc pull does: {abbreviate(sorted(stale))}")
+            if reporter is not None:
+                reporter.warn(note)
+            else:
+                logger.warning(note)
         # dvc never pushes a `cache: false` out, so no pull can land it;
         # enumerating one turned every pull into a permanent failure.
         pipeline_outs = [o for o in pipeline_outs if o.use_cache]
@@ -851,7 +896,7 @@ def data_pull(
                         reporter=reporter,
                     )
                 except MintdError:
-                    raise  # the user's to fix (a missing named AWS profile); dvc would fail on it too
+                    raise  # the user's to fix (a missing named AWS profile, a pointer cut short): no dvc pull fallback
                 except Exception as exc:
                     logger.warning("fast-sync raised; falling back to full dvc pull: %s", exc)
                     fast_sync_failed = True
@@ -968,6 +1013,15 @@ def _default_dvc_remote(project_path: Path) -> str | None:
     return _default_remote_name_from_config(cp)
 
 
+def _cut_short_hint(pointers: list[str]) -> str:
+    locks = [p for p in pointers if not p.endswith(".dvc")]
+    ways = [*(["re-record a .dvc file with mintd data add <path>, or restore it from git"]
+              if len(locks) < len(pointers) else []),
+            *(["restore a dvc.lock from git, or delete it and run dvc commit -f when every stage's outputs "
+               "are in the workspace"] if locks else [])]
+    return "; ".join(ways) + "; then push"
+
+
 def data_push(
     project_path: Path,
     *,
@@ -1008,18 +1062,79 @@ def data_push(
                 f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pushed",
                 hint="change the .gitignore, or drop this target",
             )
-        resolved, selection = push_targets(
-            project_path, targets, effective_remote, cwd=cwd or project_path
-        )
+        try:
+            resolved, selection = push_targets(
+                project_path, targets, effective_remote, cwd=cwd or project_path
+            )
+        except PointerCutShort as exc:  # a path target is found by reading every pointer
+            from ._push_verify import PushRefused
+
+            pointer = Path(exc.pointer).resolve().relative_to(Path(project_path).resolve()).as_posix()
+            raise PushRefused(
+                f"nothing was written or pushed: {pointer} is cut short or damaged ({exc.detail}), and a push "
+                "naming a path reads every pointer to find what it names",
+                hint=_cut_short_hint([pointer]),
+            ) from exc
         groups = list(resolved)
     # On a version-aware remote: refuse what can't be checked, then repair
     # the pins in this push's scope before DVC sees them (``_push_verify``).
     # Raises ``PushRefused`` before any write or upload.
-    from ._push_verify import prepare, uploading
+    from ._push_verify import PushRefused, prepare, pushed_dvc_files, pushed_lockfiles, pushed_pipelines, uploading
 
     # A target push_targets couldn't resolve reaches dvc as typed, so which
     # outs it uploads is unknown: repair (and allow changes to) every out.
     unresolved = selection is not None and any(t not in selection for g in groups if g for t in g)
+    # A pointer cut short reads to DVC as tracking nothing: it would push
+    # nothing for it and exit 0, so stop before anything is written.
+    if selection is None or unresolved:
+        scope = [*pushed_dvc_files(project_path), *pushed_lockfiles(project_path)]
+    else:
+        scope = sorted({k if k.endswith(".dvc") else Path(k.split(":", 1)[0]).with_name("dvc.lock").as_posix()
+                        for k in selection})
+    cut = [p for p in scope if does_not_parse(project_path, p)]
+    if cut:
+        raise PushRefused(
+            f"nothing was written or pushed: {len(cut)} pointer file(s) are cut short or damaged, "
+            f"so DVC would skip what they record: {abbreviate(cut)}",
+            hint=_cut_short_hint(cut),
+        )
+    # A stage behind its dvc.yaml stops only a push that includes it: a push
+    # naming other stages, or .dvc files, goes ahead. dvc names the stages
+    # (foreach and matrix instances, templating), so mintd never guesses.
+    stage_targets = None if selection is None or unresolved else [k for k in selection if not k.endswith(".dvc")]
+    pipelines = pushed_pipelines(project_path) if stage_targets is None else sorted(
+        {y for k in stage_targets if (project_path / (y := k.split(":", 1)[0])).is_file()})
+    behind: list[str] = []
+    others: list[str] = []
+    for pipeline in pipelines:
+        try:
+            names = dvc_ops.stage_names(cwd=project_path / Path(pipeline).parent)
+        except DvcOpError as exc:
+            raise PushRefused(f"nothing was written or pushed: dvc can't read {pipeline}, so mintd can't tell "
+                              f"which of its stages a push would skip: {exc}",
+                              hint=f"fix {pipeline}, then push") from exc
+        named = None if stage_targets is None else {
+            k.split(":", 1)[1] for k in stage_targets if k.split(":", 1)[0] == pipeline}
+        late = stages_behind(project_path, Path(pipeline).with_name("dvc.lock").as_posix(), names, stages=named)
+        behind += [f"{pipeline}:{s}" for s in late]
+        others += [f"{pipeline}:{s}" for s in with_outputs(project_path / pipeline, names) if s not in late]
+    if behind:
+        rest = [] if stage_targets is not None else [*others, *(p for p in scope if p.endswith(".dvc"))]
+        here = Path(cwd or project_path)
+
+        def from_here(target: str) -> str:  # the hints' commands run where mintd did
+            path, colon, stage = (target, "", "") if target.endswith(".dvc") else target.partition(":")
+            return f"{Path(os.path.relpath(Path(project_path) / path, here)).as_posix()}{colon}{stage}"
+
+        raise PushRefused(
+            f"nothing was written or pushed: dvc.lock records fewer outputs than dvc.yaml declares for "
+            f"{abbreviate(behind)}, so DVC would push nothing for the missing ones: each stage hasn't run "
+            "since, or dvc.lock was cut short",
+            hint=f"run dvc repro {shlex.join(map(from_here, behind))}, then push"
+            + (f"; or push the rest by naming it, for example mintd data push {shlex.join(map(from_here, rest[:3]))}"
+               if rest else "")
+            + "; if dvc.lock was cut short, restore it from git",
+        )
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
                        aws_profile=aws_profile, memo_path=memo_path)
     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a

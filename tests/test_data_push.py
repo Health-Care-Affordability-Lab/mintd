@@ -768,6 +768,238 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
         assert _head(proj) == before
 
 
+@pytest.mark.parametrize("pointer, cut, targets", [
+    ("data/final.dvc", "", []),
+    ("data/final.dvc", "outs:\n", []),
+    ("data/final.dvc", "", ["data/final.dvc"]),
+    ("dvc.lock", "", []),
+    ("dvc.lock", "stages:\n", ["dvc.yaml:build"]),
+    ("data/final.dvc", "outs: []\n", []),
+    ("data/final.dvc", "", [os.path.join("..", "elsewhere")]),
+    ("data/final.dvc", "outs:\n- path: final\n", []),
+    ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n", ["dvc.yaml:build"]),
+    ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out.csv\n", []),
+    ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - null\n", []),
+    ("data/final.dvc", "outs:\n- path: final\n  hash: md5\n  files:\n", []),
+], ids=["empty", "outs-only", "targeted", "lock-empty", "lock-stage-targeted", "outs-empty-list",
+        "unresolved-target", "path-only", "lock-stage-null", "lock-out-path-only", "lock-outs-null", "files-null"])
+def test_push_refuses_a_pointer_in_scope_that_does_not_parse_before_any_upload(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], pointer: str, cut: str, targets: list[str],
+) -> None:
+    """A pointer file cut short (dvc killed while it rewrites one, say) can
+    read as tracking nothing: a `.dvc` with no outs, or only an out's path,
+    or a dvc.lock with no stages, a null stage, or an out with no hash. DVC
+    then pushes nothing for it and exits 0, and the push used to end with a
+    warning (or commit the cut file) and exit 0, the data never uploaded. It
+    stops before anything is written or uploaded, naming the file. A target
+    that resolves to nothing (here, outside the project) reaches dvc as
+    typed, so every pointer is checked.
+
+    Mutations: drop the check in `data_push` -> exit 0 and dvc runs, red;
+    let `outs: []` through -> that case and path-only red; skip a null
+    stage entry -> lock-stage-null red; let a lock out without a hash
+    through -> lock-out-path-only and lock-outs-null red; check only the
+    selection when a target is unresolved -> unresolved-target red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    write_pipeline(proj, "data/out.csv")
+    _commit_all(proj, "pipeline")
+    (proj / pointer).write_text(cut)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push", *targets]) == 1
+    err = _err(capsys)
+    assert "1 pointer file(s) are cut short or damaged" in err and pointer in err
+    if pointer == "dvc.lock":
+        assert "restore a dvc.lock from git" in err
+    assert push_clients.push_calls == []
+    assert (proj / pointer).read_text() == cut
+
+
+@pytest.mark.parametrize("lock", [
+    "schema: '2.0'\nstages: {}\ndatasets:\n- name: ref\n  type: url\n  url: s3://bucket/ref\n",
+    "schema: '2.0'\nstages:\n  build:\n    cmd: run\n",
+    "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out.csv\n      hash: md5\n",
+], ids=["no-stage-run-yet", "stage-without-its-outs", "stage-written-unrun-by-a-push"])
+def test_push_refuses_a_stage_short_of_its_declared_outs_without_calling_the_lock_cut_short(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], lock: str,
+) -> None:
+    """A whole dvc.lock can still record fewer outs than dvc.yaml declares:
+    `dvc ds add` writes one with `stages: {}` before any stage runs, a push
+    to a version-aware remote writes a stage that never ran with no hash,
+    and a lock cut between a stage's command and its outs, or right after an
+    out's `hash: md5`, reads the same. DVC pushes nothing for the missing
+    outs, so the push stops, names the stage, and gives both ways out,
+    without calling the lock damaged.
+
+    Mutations: skip the dvc.yaml comparison -> dvc runs, red; report it as
+    cut short -> red; count unhashed outs -> the unrun case pushes, red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    write_pipeline(proj, "data/out.csv")
+    _commit_all(proj, "pipeline")
+    (proj / "dvc.lock").write_text(lock)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "fewer outputs than dvc.yaml declares for dvc.yaml:build" in err
+    assert "cut short or damaged" not in err and "dvc repro" in err and "restore it from git" in err
+    assert push_clients.push_calls == []
+
+
+def _pipeline_with_an_unrun_stage(proj: Path) -> None:
+    """Stage `build` ran; stage `other` never did, so its lock entry is the
+    one a version-aware push writes for it: `path` and `hash` only."""
+    write_pipeline(proj, "data/out.csv")
+    with (proj / "dvc.yaml").open("a") as f:
+        f.write("  other:\n    cmd: run\n    outs:\n    - data/other.csv\n")
+    with (proj / "dvc.lock").open("a") as f:
+        f.write("  other:\n    cmd: run\n    outs:\n    - path: data/other.csv\n      hash: md5\n")
+    _commit_all(proj, "pipeline")
+
+
+def test_a_push_naming_a_stage_goes_ahead_beside_a_stage_that_never_ran(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the stages being pushed count: `mintd data push dvc.yaml:build`
+    uploads build although `other`, in the same dvc.lock, never ran. Real
+    `dvc push dvc.yaml:build` exits 0 there too.
+
+    Mutation: check every stage of the lock whatever the push names -> refused,
+    red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    _pipeline_with_an_unrun_stage(proj)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push", "dvc.yaml:build"]) == 0
+    assert "✓ pushed 1 object(s)" in _err(capsys)
+    assert [c.targets for c in push_clients.push_calls] == [["dvc.yaml:build"]]
+
+
+def test_a_push_naming_a_stage_that_never_ran_is_refused(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Mutation: leave a named stage out of the check -> dvc runs, red."""
+    proj = _producer(tmp_path, version_aware=False)
+    _pipeline_with_an_unrun_stage(proj)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push", "dvc.yaml:other"]) == 1
+    err = _err(capsys)
+    assert "fewer outputs than dvc.yaml declares for dvc.yaml:other" in err
+    assert "run dvc repro dvc.yaml:other, then push" in err and "push the rest" not in err
+    assert push_clients.push_calls == []
+
+
+def test_a_full_push_beside_a_stage_that_never_ran_says_how_to_push_the_rest(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A push of everything includes the stage that never ran, so it stops,
+    names that stage, and gives both ways on: run it, or push the rest by
+    naming it, with the command spelled out.
+
+    Mutations: drop the push-the-rest example -> red; list the stage that
+    never ran among the rest -> red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    _pipeline_with_an_unrun_stage(proj)
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert "fewer outputs than dvc.yaml declares for dvc.yaml:other" in err
+    assert "run dvc repro dvc.yaml:other, then push" in err
+    assert "or push the rest by naming it, for example mintd data push dvc.yaml:build data/final.dvc" in err
+    assert push_clients.push_calls == []
+
+
+def test_push_naming_a_path_stops_on_a_cut_pointer_with_the_push_hint(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A path target is found by reading every pointer, so a cut one stops
+    the push even when the path names another output. It is a push
+    refusal, with the push's way out, not the pull's.
+
+    Mutation: let `PointerCutShort` out of `push_targets` unconverted -> the
+    pull's hint, red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    write_pipeline(proj, "data/out.csv")
+    _commit_all(proj, "pipeline")
+    (proj / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files:\n")
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push", "data/out.csv"]) == 1
+    err = _err(capsys)
+    assert "data/final.dvc is cut short or damaged (the file list of final is missing)" in err
+    assert "a push naming a path reads every pointer" in err
+    assert "mintd data add" in err and "then push" in err and "ask them to" not in err
+    assert push_clients.push_calls == []
+
+
+@pytest.mark.parametrize("where", ["no-dvc-yaml", "gitignored", "subrepo"])
+def test_push_is_not_stopped_by_a_dvc_lock_dvc_never_reads(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], where: str,
+) -> None:
+    """DVC reads a dvc.lock only beside a dvc.yaml it collects, so an empty
+    one with no dvc.yaml beside it, or in a folder .gitignore excludes, is
+    no part of the push, and real dvc pushes everything.
+
+    A subrepo (a folder with its own `.dvc/`) is pushed from there, not here.
+
+    Mutations: check every dvc.lock -> no-dvc-yaml red; check a dvc.yaml in
+    an ignored folder -> gitignored red; drop the subrepo filter -> subrepo
+    red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    stray = proj / (".venv/x" if where == "gitignored" else "sub")
+    stray.mkdir(parents=True)
+    if where == "subrepo":
+        (stray / ".dvc").mkdir()
+        (stray / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - out.csv\n")
+    if where == "gitignored":
+        (proj / ".gitignore").write_text((proj / ".gitignore").read_text() + "/.venv/\n")
+        (stray / "dvc.yaml").write_text("stages:\n  build:\n    cmd: run\n    outs:\n    - out.csv\n")
+        _commit_all(proj, "ignore .venv")
+    (stray / "dvc.lock").write_text("")
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push"]) == 0, _err(capsys)
+    assert len(push_clients.push_calls) == 1
+
+
+def test_push_of_another_output_goes_ahead_but_commits_nothing_while_a_pointer_is_cut_short(
+    push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only the push's own scope is checked before the upload: pushing the
+    pipeline's stage goes ahead with data/final.dvc cut short. The commit
+    step then commits nothing while a changed pointer is cut short, and
+    says which.
+
+    Mutation: check every pointer whatever the selection -> dvc never runs,
+    red.
+    """
+    proj = _producer(tmp_path, version_aware=False)
+    write_pipeline(proj, "data/out.csv")
+    _commit_all(proj, "pipeline")
+    (proj / "data" / "final.dvc").write_text("")
+    monkeypatch.chdir(proj)
+
+    assert cli.main(["data", "push", "dvc.yaml:build"]) == 1
+    assert [c.targets for c in push_clients.push_calls] == [["dvc.yaml:build"]]
+    assert "data/final.dvc is cut short or damaged" in _err(capsys)
+
+
 def test_push_to_a_non_default_remote_commits_nothing(
     push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1582,6 +1814,7 @@ def test_check_a_foreach_group_target_checks_and_keeps_every_instance(
             {"schema": "2.0", "stages": {"fan@a": {"cmd": "make a", "outs": [pinned]}}}, sort_keys=False))
 
     dvc.on_push = dvc_push
+    dvc.stage_names_by_cwd[proj] = ["fan@a"]  # dvc expands the foreach
     assert cli.main(["data", "push", target]) == 0, _err(capsys)
     assert "✓ 1 file(s) verified" in _err(capsys)
     committed = yaml.safe_load(_git(["show", "HEAD:dvc.lock"], cwd=proj))

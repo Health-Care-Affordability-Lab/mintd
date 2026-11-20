@@ -9,17 +9,15 @@ cache-contract test (non-``share/`` key, ``Tagging`` / ``Metadata`` extra_args,
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import inspect
-import zlib
 from pathlib import Path
 
 import pytest
 from boto3.exceptions import S3UploadFailedError
-from botocore.awsrequest import AWSResponse
 from botocore.exceptions import ClientError, NoCredentialsError
 
+from tests._harness.s3_faults import serve_5xx
 from mintd._share_ops import (
     RemoteObjectInfo,
     RemoteObjectNotFound,
@@ -458,48 +456,18 @@ def test_download_network_error_after_retry_maps_to_hinted_error(tmp_path: Path)
     assert not dest.exists() and list(tmp_path.iterdir()) == []
 
 
-class _RawBody:
-    def __init__(self, body: bytes) -> None:
-        self._body = body
-
-    def stream(self, *a, **k):
-        yield self._body
-
-
-def _serve_5xx(client, times: int, status: int = 503) -> list[int]:
-    """Answer the first ``times`` GetObject calls with a 5xx that carries an
-    ``x-amz-checksum-*`` header, as real S3 sent; later GETs fall through to
-    moto. Returns a list that grows by one per GET sent.
-
-    botocore 1.43.0 wraps such an error body in ``StreamingChecksumBody`` and
-    then calls ``.strip()`` on it, so the real client raises ``AttributeError``
-    instead of a ``ClientError``."""
-    sent: list[int] = []
-    body = b"<Error><Code>SlowDown</Code></Error>"
-    crc = base64.b64encode(zlib.crc32(body).to_bytes(4, "big")).decode()
-
-    def hook(request, **_kw):
-        sent.append(1)
-        if len(sent) <= times:
-            return AWSResponse(request.url, status, {"x-amz-checksum-crc32": crc}, _RawBody(body))
-        return None
-
-    client.meta.events.register_first("before-send.s3.GetObject", hook)
-    return sent
-
-
 def test_download_retries_a_5xx_that_botocore_raises_as_attribute_error(
     s3_versioned, tmp_path: Path
 ) -> None:
     """One 5xx whose body botocore cannot parse is retried like any 500, and the
     next GET lands the bytes.
 
-    Mutations: delete the `except AttributeError` in `download_object` ->
+    Mutations: delete the `except AttributeError` in `_s3.download` ->
     AttributeError escapes; synthesize a 403 instead of a 500 -> no retry.
     """
     s3, bucket = s3_versioned
     s3.put_object(Bucket=bucket, Key="k", Body=b"payload")
-    sent = _serve_5xx(s3, times=1)
+    sent = serve_5xx(s3, times=1)
     dest = tmp_path / "out.bin"
 
     n = download_object(s3, bucket, "k", dest, progress=lambda _n: None)
@@ -516,7 +484,7 @@ def test_download_persistent_5xx_attribute_error_maps_to_transfer_error(
 
     Canary: the first assert pins that botocore still raises AttributeError
     here. If a botocore upgrade turns it red, botocore has fixed the defect:
-    delete the workaround in `download_object` and this assert. It comes
+    delete the workaround in `_s3.download` and this assert. It comes
     first because a fixed botocore also retries the 503 itself, which would
     otherwise fail the GET count below and hide this signal.
 
@@ -525,7 +493,7 @@ def test_download_persistent_5xx_attribute_error_maps_to_transfer_error(
     """
     s3, bucket = s3_versioned
     s3.put_object(Bucket=bucket, Key="k", Body=b"payload")
-    sent = _serve_5xx(s3, times=99)
+    sent = serve_5xx(s3, times=99)
     dest = tmp_path / "out.bin"
 
     with pytest.raises(TransferError) as ei:

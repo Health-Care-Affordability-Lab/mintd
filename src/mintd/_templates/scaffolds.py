@@ -37,9 +37,6 @@ def _common_data_files() -> list[tuple[str, str]]:
         ("metadata.json", "metadata.json.j2"),
         (".gitignore", "gitignore.txt"),
         (".dvcignore", "dvcignore.txt"),
-        (".pre-commit-config.yaml", "pre-commit-config.yaml.j2"),
-        ("scripts/check-dvc-sync.sh", "check-dvc-sync.sh.j2"),
-        ("scripts/check-env-lockfiles.sh", "check-env-lockfiles.sh.j2"),
         ("dvc_vars.yaml", "dvc_vars.yaml.j2"),
         ("dvc.yaml", "dvc_data.yaml.j2"),
     ]
@@ -80,9 +77,6 @@ def _common_project_files() -> list[tuple[str, str]]:
         ("citations.md", "citations.md.j2"),
         (".gitignore", "gitignore.txt"),
         (".dvcignore", "dvcignore.txt"),
-        (".pre-commit-config.yaml", "pre-commit-config.yaml.j2"),
-        ("scripts/check-dvc-sync.sh", "check-dvc-sync.sh.j2"),
-        ("scripts/check-env-lockfiles.sh", "check-env-lockfiles.sh.j2"),
     ]
 
 

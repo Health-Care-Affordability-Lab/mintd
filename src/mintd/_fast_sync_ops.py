@@ -16,9 +16,8 @@ import subprocess
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Callable, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Collection, Optional, Protocol
 
-import yaml
 
 from mintd._atomic import _try_fsync_file, _try_fsync_parent_dir
 from mintd._dvc_invoke import dvc_cmd, dvc_env
@@ -258,11 +257,13 @@ def _degrade_all_targets(
 
 
 def _extract_version_id(out_dict: dict[str, Any]) -> str | None:
-    if "version_id" in out_dict:
+    # A null ID (a pointer cut short right after the key) is unpinned, never "None".
+    if out_dict.get("version_id") is not None:
         return str(out_dict["version_id"])
-    if "cloud" in out_dict:
-        for cloud_info in out_dict["cloud"].values():
-            if "version_id" in cloud_info:
+    cloud = out_dict.get("cloud")
+    if isinstance(cloud, dict):  # null in a pointer cut short right after `cloud:`
+        for cloud_info in cloud.values():
+            if isinstance(cloud_info, dict) and cloud_info.get("version_id") is not None:
                 return str(cloud_info["version_id"])
     return None
 
@@ -272,7 +273,7 @@ def _extract_version_id_from_file_entry(entry: dict[str, Any], remote_name: str)
     if not isinstance(cloud, dict):
         return None
     remote_block = cloud.get(remote_name)
-    if isinstance(remote_block, dict) and "version_id" in remote_block:
+    if isinstance(remote_block, dict) and remote_block.get("version_id") is not None:
         return str(remote_block["version_id"])
     return None
 
@@ -307,26 +308,144 @@ def _is_path_based_file_entry(entry: dict[str, Any], remote_name: str | None = N
     return _is_path_based_entry(entry, remote_name)
 
 
+class PointerCutShort(MintdError):
+    """A pointer file isn't whole: a null or wrong type where DVC writes a
+    mapping, a list, a number or a string, an output with no path or no hash,
+    or no YAML at all.
+    A write to it stopped partway (dvc killed mid-dump, say). Read on, it
+    lists less than it records: DVC pushes nothing for it at exit 0, and a
+    pull lands an empty folder. So every reader stops on it, naming the file;
+    ``cli.main`` renders it, exit 1. Not a ValueError, so no handler that
+    degrades on bad values swallows it."""
+
+    hint = ("restore it from git, or record the data again (mintd data add <path>); "
+            "if it came from someone else's repo, ask them to")
+
+    def __init__(self, pointer: Path | str, detail: str) -> None:
+        super().__init__(f"{pointer} is cut short or damaged: {detail}")
+        self.pointer = pointer
+        self.detail = detail
+
+
+def load12(text: str) -> Any:
+    """``text`` read as DVC reads ``.dvc``, ``dvc.lock`` and ``dvc.yaml``:
+    YAML 1.2, with ruamel (DVC's own library), so an unquoted ``on``,
+    ``no`` or ``1:30`` stays a string, where YAML 1.1 (PyYAML) reads a
+    boolean or a number. Raises ``ruamel.yaml.YAMLError``."""
+    from ruamel.yaml import YAML
+
+    return YAML(typ="safe", pure=True).load(text)
+
+
+def load_pointer(path: Path) -> Any:
+    """The YAML in pointer file ``path``, read as DVC reads it (``load12``);
+    ``PointerCutShort`` when it isn't valid YAML. A missing file raises
+    ``FileNotFoundError``."""
+    from ruamel.yaml import YAMLError
+
+    try:
+        # dvc writes UTF-8 whatever the locale; the platform default (cp1252
+        # on Windows) misreads a non-ASCII relpath, and the tree it hashes to.
+        return load12(Path(path).read_text(encoding="utf-8"))
+    except (YAMLError, UnicodeDecodeError) as exc:
+        raise PointerCutShort(path, "it isn't valid YAML") from exc
+
+
+def _scalars_ok(rec: dict[str, Any]) -> bool:
+    """A count DVC writes is a number, and a hash or version ID is no mapping
+    or list (a null one is left to the rules above). ``path`` and ``relpath``
+    aren't checked: DVC writes a name like ``on`` bare, which YAML 1.1 reads
+    as a boolean."""
+    return (all(type(rec[k]) is int for k in ("size", "nfiles") if k in rec)
+            and not any(isinstance(rec.get(k), (dict, list)) for k in ("md5", "hash", "etag", "version_id")))
+
+
+def _cloud_ok(rec: dict[str, Any]) -> bool:
+    """A ``cloud`` block as DVC writes it: a mapping of remote to mapping. A
+    null block or remote entry is no version ID (unpinned), not damage."""
+    cloud = rec.get("cloud")
+    return cloud is None or (isinstance(cloud, dict) and all(
+        v is None or (isinstance(v, dict) and _scalars_ok(v)) for v in cloud.values()))
+
+
+def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = False) -> None:
+    if not isinstance(out, dict):
+        raise PointerCutShort(pointer, "an output entry is empty" if out is None
+                              else "an output entry is not in the shape dvc writes")
+    name = out.get("path")
+    if name is None:
+        raise PointerCutShort(pointer, "an output has no path")
+    if hashed and not out.get("md5") and "files" not in out and not (unrun_ok and out.get("hash")):
+        raise PointerCutShort(pointer, f"{name} records no hash")
+    if not _scalars_ok(out):
+        raise PointerCutShort(pointer, f"a value of {name} is not in the shape dvc writes")
+    if not _cloud_ok(out):
+        raise PointerCutShort(pointer, f"the version block of {name} is incomplete")
+    if "files" in out:
+        files = out["files"]
+        if not isinstance(files, list):
+            raise PointerCutShort(pointer, f"the file list of {name} is missing")
+        # dvc writes no nfiles beside a file list, so one cut between two
+        # entries reads as a smaller folder; the file alone can't show it.
+        for fe in files:
+            if (not isinstance(fe, dict) or fe.get("md5") is None or fe.get("relpath") is None
+                    or not _scalars_ok(fe) or not _cloud_ok(fe)):
+                raise PointerCutShort(pointer, f"a file entry of {name} is incomplete")
+
+
+def check_dvc_file(pointer: Path | str, doc: Any) -> None:
+    """``PointerCutShort`` unless ``doc`` reads as a whole ``.dvc`` file: at
+    least one output, each with a path and, outside a dvc import, a hash."""
+    if not isinstance(doc, dict):
+        raise PointerCutShort(pointer, "it is empty" if doc is None else "it doesn't read as a DVC file")
+    outs = doc.get("outs")
+    if not isinstance(outs, list) or not outs:
+        raise PointerCutShort(pointer, "it lists no outputs")
+    for out in outs:
+        _check_out(pointer, out, hashed="deps" not in doc)
+
+
+def check_lock(pointer: Path | str, doc: Any) -> None:
+    """``PointerCutShort`` unless ``doc`` reads as a whole ``dvc.lock``: its
+    stages a mapping, each stage a mapping, and any ``outs`` a non-empty list
+    of outputs that each record a hash, or at least ``hash: md5``. DVC hashes
+    every out of a stage that ran (a ``cache: false`` one too), but a push to
+    a version-aware remote writes a declared stage that never ran as ``path``
+    and ``hash`` only; a cut right after ``hash: md5`` reads the same. The
+    parser skips such an out, and the push counts its stage as behind
+    (``_dvc_state.stages_behind``). An out with no ``hash`` at all is cut:
+    DVC 3 always writes one."""
+    stages = doc.get("stages") if isinstance(doc, dict) else None
+    if not isinstance(stages, dict):
+        raise PointerCutShort(pointer, "it lists no stages")
+    for stage, entry in stages.items():
+        if not isinstance(entry, dict):
+            raise PointerCutShort(pointer, f"stage {stage} is empty")
+        if "outs" in entry:
+            outs = entry["outs"]
+            if not isinstance(outs, list) or not outs:
+                raise PointerCutShort(pointer, f"stage {stage} lists no outputs")
+            for out in outs:
+                _check_out(pointer, out, hashed=True, unrun_ok=True)
+
+
 def parse_dvc_outs(dvc_path: Path, remote_name: str) -> list[DvcOut]:
     """Parse a .dvc file into DvcOut entries.
 
     DVC marks directories by suffixing the md5 hash with ``.dir`` — that's
     the only signal; there is no separate ``is_dir`` YAML field. Files-format
     directories use an inline ``files:`` list with no top-level md5.
-    Entries with no md5 AND no files list are hash-missing — returned as
-    empty so the caller routes them to fallback.
+    A dvc import's output with no md5 and no files list is hash-missing:
+    left out, so the caller routes it to fallback. A file that isn't whole
+    raises ``PointerCutShort`` (``check_dvc_file``); a missing one is ``[]``.
     """
     try:
-        # dvc writes UTF-8 whatever the locale; the platform default (cp1252
-        # on Windows) misreads a non-ASCII relpath, and the tree it hashes to.
-        with open(dvc_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError, UnicodeDecodeError):
+        data = load_pointer(dvc_path)
+    except FileNotFoundError:
         return []
+    check_dvc_file(dvc_path, data)
 
     outs = []
-    if not isinstance(data, dict) or "outs" not in data:
-        return []
     # Slice 29: `dvc import` produces a .dvc with `deps[].repo` blocks
     # pointing at the source repo. The data lives in that source repo's
     # bucket, not this one — fast-sync cannot serve it. Detect once per
@@ -467,7 +586,10 @@ def resolve_out(wdir: str, out_path: str) -> str:
     return posixpath.normpath(posixpath.join(wdir or ".", out_path))
 
 
-def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
+def parse_dvc_lock_outs(
+    project_path: Path, remote_name: str, *, declared: Collection[str] | None = None,
+    skipped: list[str] | None = None,
+) -> list[DvcOut]:
     """Parse ``project_path/dvc.lock`` into ``DvcOut`` entries for pipeline-
     stage outputs (no per-output ``.dvc`` pointer files). Slice 37 — gives
     fast-sync a way to enumerate pipeline products so they bypass DVC's
@@ -485,16 +607,21 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     skip stays off rather than dropping every out on the strength of a
     document that taught us nothing.
 
-    Not caught: a ``foreach``/``matrix`` list that SHRANK. ``fan@b`` left in
-    the lock while ``dvc.yaml`` still declares ``fan`` keeps its base, so it
-    survives here and dvc still rejects it. Closing that needs the instance
+    ``declared``, when given, is dvc's own list of the stages ``dvc.yaml``
+    declares (``DvcOps.stage_names``, foreach and matrix expanded): a lock
+    stage it doesn't hold is skipped too, and its name appended to
+    ``skipped``. Without it, a ``foreach``/``matrix`` list that SHRANK is not
+    caught: ``fan@b`` left in the lock while ``dvc.yaml`` still declares
+    ``fan`` keeps its base, so it survives here and dvc still rejects it. Closing that needs the instance
     names, and ``foreach`` may be a ``${vars}`` reference only dvc's
     templating can expand — guessing it would drop live instances instead.
 
     An out ``dvc.yaml`` declares ``cache: false`` is kept, marked
     ``use_cache=False`` (see ``DvcOut.use_cache``).
 
-    Returns ``[]`` when ``dvc.lock`` is missing or malformed.
+    Returns ``[]`` when ``dvc.lock`` is missing. One that isn't whole raises
+    ``PointerCutShort`` (``check_lock``), unless no ``dvc.yaml`` is beside it:
+    DVC never reads such a lock, so it stays ``[]``.
     """
     yaml_path = project_path / "dvc.yaml"
     lock_path = project_path / "dvc.lock"
@@ -504,26 +631,37 @@ def parse_dvc_lock_outs(project_path: Path, remote_name: str) -> list[DvcOut]:
     # `open()`. Only the acquisition differs; the walk is identical.
     stage_wdirs: dict[str, str | None] = {}
     stage_uncached: dict[str, set[str]] = {}
+    from ruamel.yaml import YAMLError
+
     try:
         if yaml_path.exists():
-            with open(yaml_path, encoding="utf-8") as f:
-                yaml_doc = yaml.safe_load(f)
+            yaml_doc = load12(yaml_path.read_text(encoding="utf-8"))
             stage_wdirs = wdir_map(yaml_doc)
             stage_uncached = uncached_outs(yaml_doc)
-    except (FileNotFoundError, yaml.YAMLError, OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError, YAMLError):
         pass
 
     try:
-        with open(lock_path, encoding="utf-8") as f:
-            lock_data = yaml.safe_load(f)
-    except (FileNotFoundError, yaml.YAMLError, OSError, UnicodeDecodeError):
+        lock_data = load_pointer(lock_path)
+        check_lock(lock_path, lock_data)
+    except OSError:  # missing or unreadable
+        return []
+    except PointerCutShort:
+        if yaml_path.exists():
+            raise
         return []
 
-    if not isinstance(lock_data, dict) or "stages" not in lock_data:
-        return []
-
+    # dvc keeps a foreach item's trailing space in the lock key (`fan@t `) but prints the
+    # step as `fan@t` in `dvc stage list`, so the two are matched without it.
+    listed = None if declared is None else {name.rstrip() for name in declared}
     outs: list[DvcOut] = []
-    for stage, stage_data in lock_data["stages"].items():
+    for key, stage_data in lock_data["stages"].items():
+        stage = str(key)  # dvc writes a name like `on` bare; YAML 1.1 reads it as a boolean
+        if listed is not None and stage.rstrip() not in listed:
+            logger.info("dvc.lock stage %s is not a stage dvc lists; skipping", stage)
+            if skipped is not None:
+                skipped.append(stage)
+            continue
         if stage_wdirs and stage not in stage_wdirs and stage.split("@", 1)[0] not in stage_wdirs:
             logger.info("dvc.lock stage %s no longer in dvc.yaml; skipping", stage)
             continue
@@ -618,7 +756,8 @@ def _is_fast_syncable_pipeline_out(out: DvcOut) -> bool:
 
 
 def partition_pipeline_outs(
-    project_path: Path, remote_name: str
+    project_path: Path, remote_name: str, *, declared: Collection[str] | None = None,
+    skipped: list[str] | None = None,
 ) -> tuple[list[DvcOut], list[DvcOut]]:
     """Parse ``dvc.lock`` once and partition its stage outs.
 
@@ -626,9 +765,9 @@ def partition_pipeline_outs(
     can serve (see ``_is_fast_syncable_pipeline_out``); the second is every
     stage out in the lockfile. Callers diff the two to find the outs that must
     route to ``dvc pull``. One parse, so ``data_pull`` doesn't read the lock
-    twice.
+    twice. ``declared`` and ``skipped``: see :func:`parse_dvc_lock_outs`.
     """
-    all_outs = parse_dvc_lock_outs(project_path, remote_name)
+    all_outs = parse_dvc_lock_outs(project_path, remote_name, declared=declared, skipped=skipped)
     fast_syncable = [o for o in all_outs if _is_fast_syncable_pipeline_out(o)]
     return fast_syncable, all_outs
 
@@ -653,6 +792,12 @@ def discover_all_outs(project_path: Path) -> list[str]:
     check see what DVC sees.
     """
     return [rel for rel, ignored in _walk_pointers(project_path) if not ignored]
+
+
+def pipeline_files(project_path: Path) -> list[str]:
+    """The ``dvc.yaml`` files DVC reads, by the walk ``discover_all_outs``
+    makes: none in a folder ``.gitignore`` excludes."""
+    return [rel for rel, ignored in _walk_pointers(project_path, lambda name: name == "dvc.yaml") if not ignored]
 
 
 def gitignored_pointers(project_path: Path) -> list[str]:
@@ -703,9 +848,12 @@ class _NothingIgnored:
         return False
 
 
-def _walk_pointers(project_path: Path) -> list[tuple[str, bool]]:
-    """Every ``*.dvc`` file under project_path, relative and posix, with
-    whether DVC skips it because of ``.gitignore``.
+def _walk_pointers(
+    project_path: Path, match: Callable[[str], bool] = lambda name: name.endswith(".dvc"),
+) -> list[tuple[str, bool]]:
+    """Every ``*.dvc`` file (or file whose name ``match`` accepts) under
+    project_path, relative and posix, with whether DVC skips it because of
+    ``.gitignore``.
 
     It mirrors DVC's own walk (``dvc/repo/index.py`` ``collect_files``): a
     folder DVC reads as ignored is never read, so everything under it is
@@ -745,7 +893,7 @@ def _walk_pointers(project_path: Path) -> list[tuple[str, bool]]:
                 if inside or scm.is_ignored(sub + os.sep):  # trailing sep: how DVC asks about a folder
                     ignored_dirs.add(sub)
             for name in filenames:
-                if not name.endswith(".dvc") or name == "dvc.lock":
+                if not match(name):
                     continue
                 path = os.path.join(dirpath, name)
                 found.append((Path(os.path.relpath(path, root)).as_posix(), inside or scm.is_ignored(path)))
@@ -905,6 +1053,8 @@ def outs_for_target(project_path: Path, target: str, remote_name: str) -> "list[
     )
     try:
         return parse_dvc_outs(dvc_path, remote_name)
+    except PointerCutShort:
+        raise
     except Exception:
         return []
 
@@ -1333,9 +1483,9 @@ def fetch_to_cache(
     thread-safe — boto3's transfer manager runs multipart parts on its own
     internal pool.
 
-    Retry: transient S3/network errors are retried via :func:`retry_transient`
-    (3 attempts, capped backoff); the tmp file is unlinked between attempts.
-    Non-transient errors (incl. md5 mismatch) propagate immediately.
+    Retry: ``_s3.download`` retries transient S3/network errors (3 attempts,
+    capped backoff), a 5xx botocore mislabels among them. Non-transient errors
+    (incl. md5 mismatch) propagate immediately, and the tmp file is unlinked.
     """
     tmp_path = cache_path.with_suffix(".tmp")
     tmp_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1360,7 +1510,7 @@ def fetch_to_cache(
             tmp_path.unlink(missing_ok=True)
             raise
 
-    return retry_transient(_attempt)
+    return _attempt()
 
 
 def fetch_dir_manifest(

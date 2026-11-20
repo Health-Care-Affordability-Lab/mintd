@@ -9,13 +9,11 @@ session unless `MINTD_BIN` names a binary.
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
 
 import pytest
 
-from tests._harness.consumer import build_consumer_project
-from tests._harness.git import _git
+from tests._harness.consumer import fresh_project  # noqa: F401
 from tests._harness.mintd import Mintd, mintd, mintd_bin  # noqa: F401
 from tests._harness.producer import LocalProducer, build_local_producer, register
 from tests._harness.s3 import BUCKET, S3Server
@@ -67,26 +65,3 @@ def product(
     s3_server.puts.clear()
     s3_server.gets.clear()
     return product
-
-
-@pytest.fixture
-def fresh_project(tmp_path: Path):
-    """A project as a researcher has it before any import: metadata.json, git
-    and dvc initialized, all committed. One folder per call.
-
-    `mintd init` would make it, but init refuses to run without a terminal."""
-    from dvc.repo import Repo
-
-    def build(name: str = "project") -> Path:
-        root = build_consumer_project(tmp_path / name)
-        meta = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
-        meta["project"].update(type="project", name="analysis", full_name="prj_analysis")
-        meta["data_products"] = {"primary": None, "outputs": []}  # as `mintd init` writes it
-        (root / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-        _git(["init", "-b", "main", str(root)])
-        Repo.init(str(root)).close()
-        _git(["add", "-A"], cwd=root)
-        _git(["commit", "-m", "fresh project"], cwd=root)
-        return root
-
-    return build

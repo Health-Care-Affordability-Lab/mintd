@@ -45,7 +45,16 @@ from pydantic import ValidationError
 # `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
 from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
-from ._fast_sync_ops import discover_all_outs, normalize_target, resolve_out, stage_wdir, wdir_map
+from ._fast_sync_ops import (
+    PointerCutShort,
+    check_dvc_file,
+    check_lock,
+    discover_all_outs,
+    normalize_target,
+    resolve_out,
+    stage_wdir,
+    wdir_map,
+)
 from ._registry_git_ops import GitOpError
 from .catalog import CatalogClient, CatalogNotFound
 from .imports import DataDependency, scan_imports
@@ -331,9 +340,9 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                         )
                     )
                 except Exception as exc:
-                    # The screen above checks shape, not every value; whatever
-                    # the parsers still reject is dvc.lock's (pointer errors
-                    # are swallowed into "no outs" upstream).
+                    # The screen above applies the parsers' cut-short rule, not
+                    # every value check: what the parsers still reject (a lock
+                    # out's `size: twelve`, say) is dvc.lock's.
                     findings.append(
                         CheckFinding(
                             severity="error",
@@ -575,20 +584,29 @@ def _unreadable_dvc_files(project_path: Path, pointers: list[str]) -> list[tuple
                 return False
         return True
 
+    # dvc.lock (where DVC reads it, beside a dvc.yaml) and every pointer get
+    # the parsers' own cut-short rule, so the gate below never meets one.
     for rel, strings_allowed in (("dvc.yaml", True), ("dvc.lock", False)):
         if not (project_path / rel).is_file():
             continue
         ok, doc = load(rel)
-        if ok and not stages_ok(doc, strings_allowed=strings_allowed):
+        if not ok:
+            continue
+        if rel == "dvc.lock" and (project_path / "dvc.yaml").is_file():
+            try:
+                check_lock(rel, doc)
+            except PointerCutShort as exc:
+                bad.append((rel, exc.detail))
+        elif not stages_ok(doc, strings_allowed=strings_allowed):
             bad.append((rel, "not in the shape dvc writes"))
     for rel in pointers:
         ok, doc = load(rel)
         if not ok:
             continue
-        if doc is None:
-            bad.append((rel, "empty"))
-        elif not isinstance(doc, dict) or doc.get("outs") is None or not outs_ok(doc, strings_allowed=False):
-            bad.append((rel, "not in the shape dvc writes"))
+        try:
+            check_dvc_file(rel, doc)
+        except PointerCutShort as exc:
+            bad.append((rel, exc.detail))
     return bad
 
 

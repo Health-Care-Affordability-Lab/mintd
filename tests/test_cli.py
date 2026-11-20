@@ -4600,6 +4600,68 @@ def _undeliverable_producer(tmp_path: Path, client: InMemoryCatalogClient) -> st
     return _git(["rev-parse", "HEAD"], cwd=producer).strip()
 
 
+def test_cli_data_pull_stops_on_a_cut_pointer_with_its_name_and_a_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pointer cut right after `files:` used to pull as an empty folder at
+    exit 0. The pull stops before any download: exit 1, the file named, the
+    way out given, no traceback.
+
+    Mutations: make `PointerCutShort` a plain Exception, so `cli.main`'s
+    `MintdError` arm misses it -> the error escapes, red; let
+    `outs_for_target` swallow it -> the pull runs, rc 0, red.
+    """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
+    _, dvc_ops = patched_clients
+    stage_dvc_project(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files:\n")
+
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "final.dvc is cut short or damaged: the file list of final is missing" in err
+    assert "restore it from git" in err and "Traceback" not in err
+    assert dvc_ops.pull_calls == []
+
+
+def test_data_import_stops_on_a_producer_pointer_cut_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer committed a pointer cut right after `files:`. The import
+    lands nothing, and the delivery verdict that explains why used to call
+    the cut folder "pinned (empty directory out)". Now it stops on the cut
+    pointer, naming it.
+
+    Mutation: read a null file list as `[]` -> the import is accepted, rc 0.
+    """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
+    from tests._harness.git import _git
+
+    client, dvc_ops = patched_clients
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer, declared=("data/final/",))
+    (producer / "data").mkdir()
+    (producer / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files:\n")
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+    sha = _git(["rev-parse", "HEAD"], cwd=producer).strip()
+    dvc_ops.import_lands_nothing = {"data/final"}
+
+    rc = cli.main(["data", "import", "test_project", "--path", "data/final/", "--rev", sha,
+                   "--dest-root", str(tmp_path / "imports")])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "final.dvc is cut short or damaged" in err and "Traceback" not in err
+
+
 def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
 ) -> None:

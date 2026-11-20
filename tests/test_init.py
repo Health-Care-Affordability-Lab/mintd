@@ -612,7 +612,7 @@ def test_init_rollback_keeps_a_dvc_dir_it_did_not_create(tmp_path: Path) -> None
 
 def test_init_refuses_resume_over_a_partial_scaffold(tmp_path: Path) -> None:
     """A crash mid-render leaves the sentinel and a matching metadata.json --
-    metadata.json is written 2nd of 14 -- but resuming there would skip the
+    metadata.json is written 2nd -- but resuming there would skip the
     render and report success over a tree with no .gitignore and no dvc.yaml."""
     project_path = tmp_path / "data_foo"
     project_path.mkdir()
