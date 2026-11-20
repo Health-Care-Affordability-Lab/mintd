@@ -43,6 +43,12 @@ It is on the prerelease's notes. The workflow writes the first two lines; people
   non-public product.
 - **Canary:** the lab's own workflows, run by hand by the people the maintainer names. Write the
   result on the canary line.
+- **Pre-release sweep, for the first two releases:** every lab data product is cloned and imported
+  with the candidate's mintd on the lab Linux box, through the live tier, read-only. Add a line:
+  `pre-release sweep on the lab box: N of N data products cloned and imported`, or the failing count
+  and the issues filed for it. Counts only, never a product's name. For the release that first ships
+  the install scripts, the sweep runs on that PR's wheel before it merges, so the merge and the
+  promotion happen the same day.
 
 To edit the notes: `gh release view vX.Y.Z --json body --jq .body > notes.md`, edit `notes.md`,
 then `gh release edit vX.Y.Z --notes-file notes.md`. CI holds no storage credentials, so every
