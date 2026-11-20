@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 from mintd._dvc_ops import DvcPullError, pull_retry_hint
-from mintd._fast_sync_ops import EMPTY_DIR_MD5, DvcFileEntry, DvcOut, cache_path_for
+from mintd._dvc_state import EMPTY_DIR_MD5, DvcFileEntry, DvcOut, cache_path_for
 from mintd.model import FastPullResult
 from mintd.data_ops import (
     _out_aggregate_bytes,
@@ -1478,7 +1478,7 @@ def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_cache_probe(
     fake = _FakeDvcOps()
     fast_fake = _FakeFastSyncOps()
     fast_fake.raises = RuntimeError("boom mid-sync")
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged: a value of bad.csv"):
         data_pull(
@@ -1504,7 +1504,7 @@ def test_data_pull_stops_on_a_wrong_typed_dvc_in_the_blocked_targets_probe(
         blocked_reasons={"data/bad.csv.dvc": "unparseable"},
         reason="unparseable",
     )
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     with pytest.raises(PointerCutShort, match="bad.csv.dvc is cut short or damaged"):
         data_pull(
@@ -1929,7 +1929,7 @@ def test_a_lock_stage_dvc_does_not_list_is_never_listed(tmp_path: Path) -> None:
     still declares. Given dvc's own stage names, the lock reader skips it and
     says so, so it is never downloaded or checked out.
     Mutation that must redden this: keep a stage dvc doesn't list."""
-    from mintd._fast_sync_ops import parse_dvc_lock_outs
+    from mintd._dvc_state import parse_dvc_lock_outs
 
     _lock_with_fan(tmp_path)
     skipped: list[str] = []
@@ -2019,7 +2019,7 @@ def test_a_step_whose_item_ends_in_a_space_is_kept(real_dvc, tmp_path: Path) -> 
 
     from mintd._config import Timeouts
     from mintd._dvc_ops import SubprocessDvcOps
-    from mintd._fast_sync_ops import parse_dvc_lock_outs
+    from mintd._dvc_state import parse_dvc_lock_outs
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
     # Python writes the file, in double quotes, so cmd.exe runs it as a POSIX shell does.

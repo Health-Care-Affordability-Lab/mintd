@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
-from ._dvc_state import delivery, outs_matching, path_covers
-from ._fast_sync_ops import FastSyncOps, normalize_target
+from ._dvc_state import delivery, normalize_target, outs_matching, path_covers
+from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
@@ -989,7 +989,7 @@ def clone_and_pull_product(
         resolved_rev = None
     remote_bucket: str | None = None
     try:
-        from ._fast_sync_ops import get_remote_config, parse_s3_url
+        from ._dvc_state import get_remote_config, parse_s3_url
         remote_name = _default_dvc_remote(resolved_dest) or "origin"
         url = get_remote_config(resolved_dest, remote_name).get("url", "")
         remote_bucket, _ = parse_s3_url(url)

@@ -18,7 +18,8 @@ import yaml
 
 from mintd import cli
 from mintd._dvc_ops import DvcPushError, DvcPushResult, _parse_push_output
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import DvcFileEntry
+from mintd._fast_sync_ops import ensure_dir_manifest
 from mintd._registry_git_ops import GitOpError, SubprocessRegistryGitOps
 from mintd._subprocess import WallTimeoutExceeded
 from mintd.data_ops import PushSummary, commit_pushed_pointers, data_push
@@ -1296,7 +1297,7 @@ def test_real_dvc_push_of_one_file_commits_the_whole_folder(
 
 import hashlib  # noqa: E402
 
-from mintd._fast_sync_ops import cache_path_for  # noqa: E402
+from mintd._dvc_state import cache_path_for  # noqa: E402
 
 KEY = "lab/p/data/x.csv"
 

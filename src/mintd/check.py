@@ -42,11 +42,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
-# `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
+# `_dvc_state` imports no mintd module but the leaf `errors`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
-from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers, unlisted_on_disk
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._pin_proof import unlisted_on_disk
 from ._push_verify import pushed_lockfiles
-from ._fast_sync_ops import (
+from ._dvc_state import (
     PointerCutShort,
     check_dvc_file,
     check_lock,

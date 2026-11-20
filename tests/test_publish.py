@@ -14,7 +14,8 @@ from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import DvcFileEntry
+from mintd._fast_sync_ops import ensure_dir_manifest
 from tests._dvc_fixtures import (
     MD5,
     S3HoldsWhatThePointersSay,
@@ -1494,7 +1495,7 @@ def _publish_on_moto(tmp_path: Path, s3, *, cloud: dict | None, cache: bool) -> 
 
     import yaml
 
-    from mintd._fast_sync_ops import cache_path_for
+    from mintd._dvc_state import cache_path_for
 
     proj = _seed_project(tmp_path)
     stage_dvc_project(proj)

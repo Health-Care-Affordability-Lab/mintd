@@ -38,19 +38,21 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import imports
-from ._fast_sync_ops import (
+from ._dvc_state import (
     _DEFAULT_DVC_CACHE_REL,
     _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
     DvcFileEntry,
     cache_path_for,
-    ensure_dir_manifest,
     is_cached,
     outs_for_target,
     outs_materialized,
     parse_remote_config_text,
     parse_s3_url,
     read_cached_dir_manifest,
+)
+from ._fast_sync_ops import (
+    ensure_dir_manifest,
     fetch_to_cache,
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client

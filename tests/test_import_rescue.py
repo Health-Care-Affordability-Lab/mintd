@@ -25,10 +25,12 @@ from moto import mock_aws
 
 from mintd import imports
 from mintd._dvc_ops import DvcPullError
-from mintd._fast_sync_ops import (
+from mintd._dvc_state import (
     DvcFileEntry,
-    ensure_dir_manifest,
     is_cached,
+)
+from mintd._fast_sync_ops import (
+    ensure_dir_manifest,
 )
 from mintd._import_rescue_ops import (
     _entries_from_producer_pointer,

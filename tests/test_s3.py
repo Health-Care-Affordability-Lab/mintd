@@ -310,7 +310,7 @@ def test_mintd_reads_a_hand_edited_profile_as_dvc_reads_it(real_dvc, tmp_path: P
     `.dvc/config`, in `.dvc/config.local` alone (`dvc remote modify --local`), and in a
     `.dvc/config.local` laid over a committed profile.
     Mutations that must redden this: drop the stripping in get_remote_config or in merged_remote."""
-    from mintd._fast_sync_ops import get_remote_config
+    from mintd._dvc_state import get_remote_config
     from mintd._push_verify import merged_remote
 
     real_dvc(["init", "-q", "--no-scm"], cwd=tmp_path, check=True)
@@ -420,7 +420,7 @@ def test_config_local_lends_the_committed_remote_only_its_profile(
     raise when config.local has no section for this remote; parse with configparser's
     %-interpolation."""
     from mintd import _s3
-    from mintd._fast_sync_ops import get_remote_config
+    from mintd._dvc_state import get_remote_config
 
     cfg = get_remote_config(_committed_and_local(tmp_path, local), "origin")
     assert cfg == {"url": "s3://b/p", "profile": profile}
@@ -430,7 +430,7 @@ def test_config_local_lends_the_committed_remote_only_its_profile(
 def test_an_unreadable_config_local_is_an_error_not_a_silent_fallback(tmp_path: Path) -> None:
     """dvc can't read it either; falling back to the committed profile would use other
     credentials. Mutation that must redden this: swallow the parse error again."""
-    from mintd._fast_sync_ops import get_remote_config
+    from mintd._dvc_state import get_remote_config
     from mintd.errors import MintdError
 
     project = _committed_and_local(tmp_path, "not ini at all\n[unclosed\n")

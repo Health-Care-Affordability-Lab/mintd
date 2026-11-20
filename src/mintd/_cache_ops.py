@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
 from .errors import MintdError
-from ._fast_sync_ops import get_remote_config, parse_s3_url, s3_key_for_out, workspace_path_for
+from ._dvc_state import get_remote_config, parse_s3_url, s3_key_for_out, workspace_path_for
 from ._s3 import ClientError, create_client as _create_s3_client, check_bucket_versioning, retry_transient
 from ._s3_listing_ops import (
     S3ListingError,

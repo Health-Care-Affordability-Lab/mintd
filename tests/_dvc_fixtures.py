@@ -10,10 +10,10 @@ Facts the writers encode, because a fixture that gets one wrong passes for the
 wrong reason:
 
 - a `.dvc` out records `path` as the BASENAME, anchored to the pointer's own
-  directory (`_fast_sync_ops.workspace_path_for`);
+  directory (`_dvc_state.workspace_path_for`);
 - a files-format entry's version ID is read ONLY from
   `cloud.<remote>.version_id` keyed by the remote's name
-  (`_fast_sync_ops._extract_version_id_from_file_entry`), while a top-level
+  (`_dvc_state._extract_version_id_from_file_entry`), while a top-level
   out's comes from `version_id` or any `cloud.*.version_id`;
 - a `dvc.lock` stage must also exist in `dvc.yaml`, or the orphan-stage guard
   drops it from enumeration;
@@ -212,7 +212,7 @@ class S3HoldsWhatThePointersSay:
         self._base = base
 
     def _truth(self, key: str) -> tuple[str, int | None]:
-        from mintd._fast_sync_ops import discover_all_outs, parse_s3_url
+        from mintd._dvc_state import discover_all_outs, parse_s3_url
         from mintd._pin_proof import publishable_scope
         from mintd._push_verify import merged_default_remote, merged_remote
 

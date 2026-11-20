@@ -46,7 +46,7 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
 )
-from ._fast_sync_ops import FastSyncOps, gitignored_pointers
+from ._fast_sync_ops import FastSyncOps
 from . import _s3
 from ._s3 import S3AccessDenied
 from .errors import MintdError, strip_userinfo, unreachable_repo_hint
@@ -59,7 +59,7 @@ from .catalog import (
     CatalogNotFound,
     GitCatalogClient,
 )
-from ._dvc_state import abbreviate
+from ._dvc_state import abbreviate, gitignored_pointers
 from .check import CheckFinding, check_project
 from .data import (
     BumpBlocked,

@@ -80,7 +80,7 @@ def test_clone_stops_on_a_cut_pointer_without_pulling(tmp_path: Path, monkeypatc
     Mutation: let `outs_for_target` swallow `PointerCutShort` -> the fallback
     `dvc pull` runs, red.
     """
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
 
     class _CutCloneGitOps(_NoopCloneGitOps):
         def clone(self, url: str, dest: Path, *, shallow: bool = True, branch: str | None = None) -> None:

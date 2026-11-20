@@ -20,17 +20,10 @@ import pytest
 from botocore.exceptions import ClientError
 from moto import mock_aws
 
-from mintd._fast_sync_ops import (
-    SubprocessFastSyncOps,
-    _check_dvc,
+from mintd._dvc_state import (
     cache_path_for,
     classify_targets,
     discover_all_outs,
-    ensure_dir_manifest,
-    fetch_dir_contents,
-    fetch_dir_manifest,
-    fetch_files_dir_contents,
-    fetch_to_cache,
     get_remote_config,
     is_cached,
     normalize_target,
@@ -41,9 +34,18 @@ from mintd._fast_sync_ops import (
     parse_s3_url,
     s3_key_for,
     s3_key_for_out,
-    spot_check_versions,
     DvcFileEntry,
     DvcOut,
+)
+from mintd._fast_sync_ops import (
+    SubprocessFastSyncOps,
+    _check_dvc,
+    ensure_dir_manifest,
+    fetch_dir_contents,
+    fetch_dir_manifest,
+    fetch_files_dir_contents,
+    fetch_to_cache,
+    spot_check_versions,
 )
 from mintd._s3 import check_bucket_versioning
 
@@ -74,7 +76,7 @@ def _put_dir_manifest(s3, bucket, prefix, entries) -> str:
     ``.dir`` suffix is kept on the filename, not stripped. Returns
     ``{md5}.dir``.
     """
-    from mintd._fast_sync_ops import s3_key_for
+    from mintd._dvc_state import s3_key_for
     body = _manifest_bytes(entries)
     raw_md5 = hashlib.md5(body, usedforsecurity=False).hexdigest()
     full_md5 = f"{raw_md5}.dir"
@@ -354,25 +356,25 @@ def test_get_remote_config_missing_raises(tmp_path: Path) -> None:
 # ---------- parse_remote_config_text (text-level parser) ----------
 
 def test_parse_remote_config_text_quoted_section() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = "['remote \"storage\"']\n    url = s3://b/p\n"
     assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
 
 
 def test_parse_remote_config_text_double_quoted_section() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = '[remote "storage"]\n    url = s3://b/p\n'
     assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
 
 
 def test_parse_remote_config_text_unquoted_section() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = "[remote storage]\n    url = s3://b/p\n"
     assert parse_remote_config_text(text, "storage")["url"] == "s3://b/p"
 
 
 def test_parse_remote_config_text_default_from_core() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = (
         "[core]\n    remote = storage\n"
         "['remote \"storage\"']\n    url = s3://b/p\n"
@@ -382,13 +384,13 @@ def test_parse_remote_config_text_default_from_core() -> None:
 
 
 def test_parse_remote_config_text_default_single_remote() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = "['remote \"only\"']\n    url = s3://b/p\n"
     assert parse_remote_config_text(text, None)["url"] == "s3://b/p"
 
 
 def test_parse_remote_config_text_default_ambiguous_raises() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = (
         "['remote \"a\"']\n    url = s3://b/p\n"
         "['remote \"b\"']\n    url = s3://b/q\n"
@@ -398,7 +400,7 @@ def test_parse_remote_config_text_default_ambiguous_raises() -> None:
 
 
 def test_parse_remote_config_text_named_absent_raises() -> None:
-    from mintd._fast_sync_ops import parse_remote_config_text
+    from mintd._dvc_state import parse_remote_config_text
     text = "['remote \"storage\"']\n    url = s3://b/p\n"
     with pytest.raises(KeyError):
         parse_remote_config_text(text, "nope")
@@ -419,7 +421,7 @@ def test_check_bucket_versioning_disabled() -> None:
 
 
 def test_spot_check_versions_all_match(s3_versioned, tmp_path: Path) -> None:
-    from mintd._fast_sync_ops import DvcOut
+    from mintd._dvc_state import DvcOut
 
     s3, bucket = s3_versioned
     body = b"hello"
@@ -435,7 +437,7 @@ def test_spot_check_versions_drift_names_affected_out(s3_versioned, tmp_path: Pa
     """Slice B: a verified 404 on the pinned version reports (target, reason)
     for THAT out only (was: bool False, which the orchestrator turned into
     demote-everything)."""
-    from mintd._fast_sync_ops import DvcOut
+    from mintd._dvc_state import DvcOut
 
     s3, bucket = s3_versioned
     body = b"v1"
@@ -824,7 +826,7 @@ def test_classify_targets_routes_imports_to_fallback(
     import logging
     _write_dvc_file_md5(tmp_path, "data/regular", "cafe")
     _write_dvc_file_import(tmp_path, "data/imported", "deadbeef.dir")
-    with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
+    with caplog.at_level(logging.INFO, logger="mintd._dvc_state"):
         all_outs, fallback, missing = classify_targets(
             tmp_path, ["data/regular", "data/imported"], "origin",
         )
@@ -1108,7 +1110,7 @@ def test_pointer_parsers_read_utf8_whatever_the_locale(tmp_path: Path) -> None:
     )
     code = (
         "import sys, pathlib\n"
-        "from mintd._fast_sync_ops import parse_dvc_outs, parse_dvc_lock_outs\n"
+        "from mintd._dvc_state import parse_dvc_outs, parse_dvc_lock_outs\n"
         "root = pathlib.Path(sys.argv[1])\n"
         "assert parse_dvc_outs(root / 'data' / 'final.dvc', 's')[0].files[0].relpath == 'donn\\u00e9es.csv'\n"
         "assert parse_dvc_lock_outs(root, 's')[0].path == 'r\\u00e9sum\\u00e9.csv'\n"
@@ -1124,7 +1126,7 @@ def test_dir_manifest_md5_is_the_hash_ensure_dir_manifest_writes(tmp_path: Path)
     """The pure hash `data push`'s tree check uses: the empty list is DVC's
     empty-directory hash, and any list hashes to the name ensure_dir_manifest
     saves it under."""
-    from mintd._fast_sync_ops import EMPTY_DIR_MD5, dir_manifest_md5
+    from mintd._dvc_state import EMPTY_DIR_MD5, dir_manifest_md5
     entries = [DvcFileEntry("b", "b.csv"), DvcFileEntry("a", "a.csv")]
     assert dir_manifest_md5([]) == EMPTY_DIR_MD5
     assert dir_manifest_md5(entries) == ensure_dir_manifest(tmp_path, entries)
@@ -1418,7 +1420,7 @@ def test_a_project_inside_a_larger_git_repo_skips_what_its_gitignore_excludes(tm
     """DVC opens the git repository above a project nested in it, and a
     folder its .gitignore excludes hides every pointer under it, however deep.
     Mutation: drop search_parent_directories -> nothing is skipped, red."""
-    from mintd._fast_sync_ops import gitignored_pointers
+    from mintd._dvc_state import gitignored_pointers
     from tests._harness.git import _git
 
     _git(["init", "-q", "-b", "main"], cwd=tmp_path)
@@ -1962,7 +1964,7 @@ def test_parse_dvc_lock_outs_drops_a_true_orphan_stage(
             "        md5: 22222222222222222222222222222222\n"
         ),
     )
-    with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
+    with caplog.at_level(logging.INFO, logger="mintd._dvc_state"):
         outs = parse_dvc_lock_outs(tmp_path, "x")
 
     assert [o.path for o in outs] == ["data/clean.csv"]

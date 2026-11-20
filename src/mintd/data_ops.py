@@ -34,17 +34,19 @@ from ._dvc_ops import (
     DvcStorageKeyError,
     pull_retry_hint,
 )
-from ._fast_sync_ops import (
+from ._dvc_state import (
     DvcOut,
-    FastSyncOps,
     PointerCutShort,
-    cached_targets,
     discover_all_outs,
     outs_for_target,
     outs_materialized,
     partition_pipeline_outs,
     resolve_target_outs,
     skipped_targets,
+)
+from ._fast_sync_ops import (
+    FastSyncOps,
+    cached_targets,
 )
 from ._dvc_state import (
     _names_a_stage,
@@ -54,8 +56,8 @@ from ._dvc_state import (
     push_targets,
     stages_behind,
     with_outputs,
-    unlisted_on_disk,
 )
+from ._pin_proof import unlisted_on_disk
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
 from ._storage_state import inspect_storage
@@ -997,12 +999,12 @@ def _default_dvc_remote(project_path: Path) -> str | None:
       3. None — caller defaults to "origin".
 
     Name-resolution logic is hoisted into
-    ``_fast_sync_ops._default_remote_name_from_config`` so it is written once
+    ``_dvc_state._default_remote_name_from_config`` so it is written once
     (shared with ``parse_remote_config_text``'s default-remote path).
     """
     import configparser
 
-    from ._fast_sync_ops import _default_remote_name_from_config
+    from ._dvc_state import _default_remote_name_from_config
     config_file = project_path / ".dvc" / "config"
     if not config_file.is_file():
         return None

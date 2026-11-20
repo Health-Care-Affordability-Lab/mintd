@@ -27,7 +27,7 @@ from typing import Any
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
-from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url, pipeline_files
+from ._dvc_state import discover_all_outs, dvc_config_value, parse_s3_url, pipeline_files
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,

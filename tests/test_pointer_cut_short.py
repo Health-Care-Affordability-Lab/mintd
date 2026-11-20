@@ -15,11 +15,13 @@ from pathlib import Path
 import pytest
 
 from mintd._dvc_state import delivery, does_not_parse, stages_behind
-from mintd._fast_sync_ops import (
+from mintd._dvc_state import (
     PointerCutShort,
-    SubprocessFastSyncOps,
     parse_dvc_lock_outs,
     parse_dvc_outs,
+)
+from mintd._fast_sync_ops import (
+    SubprocessFastSyncOps,
 )
 from mintd.check import check_project
 from mintd.data_ops import data_pull
