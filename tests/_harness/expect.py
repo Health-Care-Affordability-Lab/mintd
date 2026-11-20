@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import posixpath
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -172,3 +173,50 @@ def s3_state(s3: S3Server, prefix: str) -> S3State:
             state.gets[path.removeprefix(root)] += 1
             state.bytes_served[path.removeprefix(root)] += size
     return state
+
+
+def assert_storage_holds_pins(s3: S3Server, repo: Path, prefix: str, *, rev: str = "main",
+                              remote: str = "storage") -> int:
+    """Story 3's Pass line: storage holds every version the pointers at `rev`
+    pin, read from git (the producer's bare repo, which importers read), never
+    from mintd. A pin is a `.dvc` out, or a root `dvc.lock` out, with its md5
+    and its `cloud[remote]` version id; a folder out with a `files:` list is one
+    pin per file. Each pinned version is fetched and its bytes hashed. Fails
+    when no pin exists (never vacuous), or a pin has no version id, a version
+    storage does not hold, or other bytes. Returns the count of pins. Its GETs
+    land in the server's records, so read `s3_state` first."""
+    from botocore.exceptions import ClientError
+
+    from mintd._fast_sync_ops import load12  # read as DVC reads them: YAML 1.2
+
+    pins: list[tuple[str, str, dict]] = []
+
+    def take(root: str, out: dict) -> None:
+        for entry in out.get("files") or [out]:
+            path = root if entry is out else f"{root}/{entry['relpath']}"
+            pins.append((path, entry.get("md5", ""), (entry.get("cloud") or {}).get(remote) or {}))
+
+    for rel in _git(["ls-tree", "-r", "--name-only", rev], cwd=repo).split():
+        if rel.endswith(".dvc"):
+            for out in load12(_git(["show", f"{rev}:{rel}"], cwd=repo))["outs"]:
+                take(posixpath.normpath(posixpath.join(posixpath.dirname(rel), out["path"])), out)
+        elif rel == "dvc.lock":
+            # ponytail: a stage's wdir is not applied; apply it if a story's stage sets one
+            for stage in (load12(_git(["show", f"{rev}:{rel}"], cwd=repo)).get("stages") or {}).values():
+                for out in stage.get("outs") or []:
+                    take(posixpath.normpath(out["path"]), out)
+    wrong: dict[str, str] = {}
+    for path, digest, cloud in pins:
+        if not cloud.get("version_id"):  # a .dir record with no file list has none either
+            wrong[path] = "no version id"
+            continue
+        try:
+            body = s3.client.get_object(Bucket=BUCKET, Key=f"{prefix}/{path}", VersionId=cloud["version_id"])["Body"].read()
+        except ClientError as e:
+            wrong[path] = e.response["Error"]["Code"]
+            continue
+        if md5(body) != digest:
+            wrong[path] = "holds other bytes"
+    assert pins, f"no pin at {rev} in {repo}"
+    assert not wrong, f"storage does not hold what the pointers pin: {wrong}"
+    return len(pins)

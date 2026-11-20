@@ -4,13 +4,16 @@ moto's server app behind a small WSGI layer that refuses ListObjectVersions
 with 403, as the lab's `mintd` key is refused, and records every object PUT
 and every successful object GET with the bytes it served. A story reads those
 records to prove what a command uploaded or downloaded, which the command's
-own output can only claim.
+own output can only claim. A story can also fail the GETs of named keys, with
+the 500 real S3 sends.
 """
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import threading
+import zlib
 import urllib.request
 from typing import Any
 from urllib.parse import parse_qs
@@ -19,6 +22,11 @@ import boto3
 import pytest
 
 BUCKET = "journey-bucket"
+# The 500 real S3 sent, checksum header included: with it, botocore wraps the
+# error body in StreamingChecksumBody and raises AttributeError instead of a
+# ClientError (the failure #68 fixed). Without it, a story could not see that bug.
+_ERROR_500 = b'<?xml version="1.0"?><Error><Code>InternalError</Code><Message>injected</Message></Error>'
+_CRC_500 = base64.b64encode(zlib.crc32(_ERROR_500).to_bytes(4, "big")).decode()
 
 
 @dataclasses.dataclass
@@ -35,6 +43,9 @@ class S3Server:
     hold_puts_after: int | None = None
     holding: threading.Event = dataclasses.field(default_factory=threading.Event)
     release: threading.Event = dataclasses.field(default_factory=threading.Event)
+    #: paths `/<bucket>/<key>` whose object GET answers 500 until removed; HEAD
+    #: still answers; a failed GET is not recorded in `gets`.
+    fail_gets: set[str] = dataclasses.field(default_factory=set)
 
 
 @pytest.fixture
@@ -65,6 +76,10 @@ def s3_server():
                 recorder.release.wait(timeout=60)
                 start_response("503 Slow Down", [("Content-Type", "application/xml")])
                 return [b'<?xml version="1.0"?><Error><Code>SlowDown</Code><Message>held</Message></Error>']
+        if method == "GET" and is_object and path in recorder.fail_gets:
+            start_response("500 Internal Server Error",
+                           [("Content-Type", "application/xml"), ("x-amz-checksum-crc32", _CRC_500)])
+            return [_ERROR_500]
         if method == "GET" and is_object:
             status: list[str] = []
 
