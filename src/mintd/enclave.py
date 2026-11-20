@@ -139,6 +139,10 @@ class EnclaveManifest(BaseModel):
                 f"{path} is not a valid enclave manifest: {exc}",
                 hint="pins are full 40-character commit SHAs, and unknown keys are refused",
             ) from exc
+        except UnicodeDecodeError as exc:
+            raise MintdError(f"{path} is not UTF-8: {exc}", hint="save it as UTF-8") from exc
+        except OSError as exc:
+            raise MintdError(f"{path} cannot be read: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -179,8 +183,10 @@ def enclave_package(
 
     Each (product, pin) is written into the zip right after it is imported,
     so two approved pins of one output, which share one import folder, both
-    cross. A failure removes the partial zip, and the manifest is appended to
-    only after the zip is complete.
+    cross. The manifest is appended to only after the zip is complete, and on
+    a failure the zip is removed unless the log already records it. A hard
+    kill skips that cleanup and can leave a zip with no row, which the rerun
+    refuses as already existing.
 
     Returns `(archive, skipped)`, `skipped` as `(repo, path, pin)`.
     """
@@ -290,11 +296,15 @@ def enclave_package(
                 info.compress_type = zipfile.ZIP_STORED
                 info.external_attr = (stat.S_IFREG | 0o644) << 16
                 zf.writestr(info, text.encode("utf-8"))
+        _append_rows(manifest_path, [_row("packaged", transfer, c) for c in contents])
     except BaseException:
-        output_archive.unlink(missing_ok=True)
+        # A zip exists exactly when the log records it. Whatever failed, and
+        # wherever, the log on disk says which side of the write it fell on:
+        # unrecorded, the zip goes, so nothing crosses unrecorded; recorded
+        # (an interrupt after the rename), it stays with its rows.
+        if not _records(manifest_path, transfer_id):
+            output_archive.unlink(missing_ok=True)
         raise
-
-    _append_rows(manifest_path, [_row("packaged", transfer, c) for c in contents])
     return output_archive, skipped
 
 
@@ -391,40 +401,72 @@ def _row(event: str, transfer: dict[str, Any], content: dict[str, Any]) -> dict[
     }
 
 
-_LOG_KEY = re.compile(r"^transferred:[ \t]*(\[\s*\])?[ \t]*$", re.MULTILINE)
+_LOG_KEY = re.compile(r"^transferred:[ \t]*(\[\s*\])?[ \t]*(#.*)?$", re.MULTILINE)
+_SURROGATE_PAIR = re.compile(r"\\u(d[89ab][0-9a-f]{2})\\u(d[c-f][0-9a-f]{2})")
+
+
+def _row_line(row: dict[str, Any]) -> str:
+    """One row as one line of JSON that YAML also reads back exactly.
+
+    `json.dumps` escapes every other non-ASCII character, and YAML reads those
+    escapes back. A character past U+FFFF it escapes as a surrogate pair,
+    which YAML reads back as two lone surrogates, so that one is written as
+    itself, which JSON and YAML both accept."""
+    return _SURROGATE_PAIR.sub(
+        lambda m: chr(0x10000 + ((int(m[1], 16) - 0xD800) << 10) + int(m[2], 16) - 0xDC00),
+        json.dumps(row),
+    )
 
 
 def _with_rows(text: str, rows: list[dict[str, Any]], manifest_path: Path) -> str:
     """The manifest text with `rows` appended to `transferred:`, or refused.
 
     Rows go on at column 0 at the end of the file, leaving every byte before
-    them as it was (bar an empty `transferred: []` losing its `[]`). The
-    result is parsed back and refused unless `transferred` is a list ending in
-    exactly these rows: a later top-level key, or a log written as an indented
-    or flow-style list, would otherwise take the rows or stop the file
-    parsing at all."""
+    them as it was (bar an empty `transferred: []` losing its `[]`; a comment
+    after it stays). The result is parsed back and refused unless
+    `transferred` is a list ending in exactly these rows: a later top-level
+    key, or a log written as an indented or flow-style list, would otherwise
+    take the rows or stop the file parsing at all."""
+    unreadable = ManifestNotAppendable(
+        f"{manifest_path}: rows appended to transferred: would not read back as its last rows",
+        hint="keep transferred: last, as a list with each row on its own line starting with '- ' at column 0",
+    )
     key = _LOG_KEY.search(text)
     if key is None:
+        try:
+            parsed = yaml.safe_load(text)
+        except yaml.YAMLError:
+            parsed = None
+        if isinstance(parsed, dict) and "transferred" in parsed:
+            raise unreadable  # a log in another shape: never suggest a second key
         raise ManifestNotAppendable(
             f"{manifest_path}: no transferred: section to append rows to",
             hint="add `transferred: []` as the last line of enclave_manifest.yaml",
         )
     if key.group(1):
-        text = text[: key.start()] + "transferred:" + text[key.end():]
+        line = "transferred:" + (f" {key.group(2)}" if key.group(2) else "")
+        text = text[: key.start()] + line + text[key.end():]
     if not text.endswith("\n"):
         text += "\n"
-    new = text + "".join(f"- {json.dumps(r)}\n" for r in rows)
+    new = text + "".join(f"- {_row_line(r)}\n" for r in rows)
     try:
         parsed = yaml.safe_load(new)
     except yaml.YAMLError:
         parsed = None
     log = parsed.get("transferred") if isinstance(parsed, dict) else None
     if not isinstance(log, list) or log[len(log) - len(rows):] != rows:
-        raise ManifestNotAppendable(
-            f"{manifest_path}: rows appended to transferred: would not read back as its last rows",
-            hint="keep transferred: last, as a list with each row on its own line starting with '- ' at column 0",
-        )
+        raise unreadable
     return new
+
+
+def _records(manifest_path: Path, transfer_id: str) -> bool:
+    """Whether the log on disk has a row for `transfer_id`. A manifest that
+    cannot be read counts as no."""
+    try:
+        log = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["transferred"]
+        return any(row.get("transfer_id") == transfer_id for row in log)
+    except (OSError, ValueError, yaml.YAMLError, LookupError, TypeError, AttributeError):
+        return False
 
 
 def _append_rows(manifest_path: Path, rows: list[dict[str, Any]]) -> None:
@@ -454,11 +496,11 @@ _MACOS_CHECK = (
     'else echo "$f: FAILED"; bad=1; fi; done < MD5SUMS_PATH; [ "$bad" = 0 ] && [ "$n" -gt 0 ]'
 )
 _WINDOWS_CHECK = (
-    "$failed = 0; Get-Content -Encoding UTF8 -ErrorAction Stop MD5SUMS_PATH | ForEach-Object { "
-    "$sum, $file = $_ -split '  ', 2; "
+    "$failed = 0; $n = 0; Get-Content -Encoding UTF8 -ErrorAction Stop MD5SUMS_PATH | ForEach-Object { "
+    "$n++; $sum, $file = $_ -split '  ', 2; "
     'if ((Get-FileHash -Algorithm MD5 -LiteralPath $file).Hash -eq $sum) { "${file}: OK" } '
     'else { "${file}: FAILED"; $failed++ } }; '
-    'if ($failed) { throw "$failed file(s) FAILED the MD5 check" }'
+    'if (-not $n) { throw "no file was checked" }; if ($failed) { throw "$failed file(s) FAILED the MD5 check" }'
 )
 
 

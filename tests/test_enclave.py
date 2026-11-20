@@ -33,6 +33,7 @@ from mintd.enclave import (
     NothingNewToPackage,
     NothingToPackage,
     _append_rows,
+    _records,
     _member,
     enclave_package,
 )
@@ -362,9 +363,15 @@ def test_rows_append_after_a_log_older_mintd_wrote(tmp_path: Path) -> None:
     assert [r.get("n") for r in yaml.safe_load(m.read_text(encoding="utf-8"))["transferred"]] == [None, 1]
 
 
-def test_append_refuses_when_transferred_is_not_last(tmp_path: Path) -> None:
+@pytest.mark.parametrize("text", [
+    "enclave_name: e\ntransferred: []\nnotes: x\n",
+    # The file still parses and `transferred` is still a list, but the rows
+    # land under `notes`: only the "ends in exactly these rows" check refuses.
+    "enclave_name: e\ntransferred:\n- {a: 1}\nnotes:\n- x\n",
+], ids=["a-later-key", "a-later-key-holding-a-list"])
+def test_append_refuses_when_transferred_is_not_last(tmp_path: Path, text: str) -> None:
     m = tmp_path / "enclave_manifest.yaml"
-    m.write_text("enclave_name: e\ntransferred: []\nnotes: x\n", encoding="utf-8")
+    m.write_text(text, encoding="utf-8")
     before = m.read_bytes()
 
     with pytest.raises(ManifestNotAppendable):
@@ -375,15 +382,20 @@ def test_append_refuses_when_transferred_is_not_last(tmp_path: Path) -> None:
 
 def _step(line: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run one README line the way a person on this system pastes it."""
+    env = None
     if sys.platform == "win32":
         argv = ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand",
                 base64.b64encode(line.encode("utf-16-le")).decode()]
+        # A PowerShell 7 parent (CI's shell) leaves its own module path, where
+        # Windows PowerShell finds no Get-Content; a window opened from the
+        # Start menu has none.
+        env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     elif sys.platform == "darwin":
         argv = ["zsh", "-c", line]  # macOS's default shell
     else:
         argv = ["sh", "-c", line]
     return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                          stdin=subprocess.DEVNULL, timeout=300)
+                          stdin=subprocess.DEVNULL, timeout=300, env=env)
 
 
 def _lines(run: subprocess.CompletedProcess[str], ending: str) -> list[str]:
@@ -412,7 +424,7 @@ def test_the_readme_commands_unzip_and_check_this_bundle(world, tmp_path: Path, 
     assert _step(unzip, inside).returncode == 0
     ok = _step(check, inside)
     assert ok.returncode == 0, ok.stdout + ok.stderr
-    assert len(_lines(ok, ": OK")) == len(FOLDER)
+    assert len(_lines(ok, ": OK")) == len(FOLDER), ok.stdout + ok.stderr
     assert {k: (version / k).read_bytes() for k in FOLDER} == FOLDER
 
     # 2. A resend unzipped over it changes nothing in place, and adds its record.
@@ -427,12 +439,16 @@ def test_the_readme_commands_unzip_and_check_this_bundle(world, tmp_path: Path, 
     assert (inside / "transfers" / again.stem / "MD5SUMS").is_file(), "the resent bundle's record lands"
     second = _step(check2, inside)
     assert second.returncode == 0, second.stdout + second.stderr
-    assert len(_lines(second, ": OK")) == len(FOLDER)
+    assert len(_lines(second, ": OK")) == len(FOLDER), second.stdout + second.stderr
 
     # Run from the wrong folder, or before unzipping, the check fails too.
     empty = tmp_path / "empty"
     empty.mkdir()
     assert _step(check, empty).returncode != 0, "a missing MD5SUMS is not a pass"
+    # A check that checked nothing is not a pass either.
+    (empty / "transfers" / archive.stem).mkdir(parents=True)
+    (empty / "transfers" / archive.stem / "MD5SUMS").write_bytes(b"")
+    assert _step(check, empty).returncode != 0, "an empty MD5SUMS is not a pass"
 
     # 3. A damaged file fails the check, and only that file.
     damaged = version / "b.csv"
@@ -475,3 +491,133 @@ def test_a_pin_the_producer_cannot_serve_names_git_auth(world, monkeypatch: pyte
     assert rc == 1
     assert "check git auth" in capsys.readouterr().err
     assert not (world.enclave / "transfers").exists(), "nothing written"
+
+
+def test_a_row_with_a_character_past_the_bmp_reads_back(tmp_path: Path) -> None:
+    """An emoji in an output path: JSON escapes it as a surrogate pair, which
+    YAML would read back as two lone surrogates, so the row writes it as
+    itself, and the line is still one JSON object."""
+    m = tmp_path / "enclave_manifest.yaml"
+    m.write_text("enclave_name: e\ntransferred: []\n", encoding="utf-8")
+    row = {"event": "packaged", "path": "out/\U0001F600 caf\u00e9.csv"}
+
+    _append_rows(m, [row])
+
+    assert yaml.safe_load(m.read_text(encoding="utf-8"))["transferred"] == [row]
+    assert json.loads(m.read_text(encoding="utf-8").splitlines()[-1][2:]) == row
+
+
+@pytest.mark.parametrize("log", [
+    f"transferred: [{{repo: d, contract_pin: '{'c' * 40}'}}]\n",
+    f"transferred: [\n  {{repo: d, contract_pin: '{'c' * 40}'}}]\n",
+], ids=["one-line-flow-log", "flow-log-opened-on-the-key-line"])
+def test_a_log_in_another_shape_is_never_told_to_add_a_second_key(tmp_path: Path, log: str) -> None:
+    """A second `transferred:` key would win on load and drop the rows above
+    it, so a log that exists in a shape rows cannot follow gets the read-back
+    refusal, not the 'add transferred: []' hint."""
+    m = tmp_path / "enclave_manifest.yaml"
+    m.write_text("enclave_name: e\n" + log, encoding="utf-8")
+    before = m.read_bytes()
+
+    with pytest.raises(ManifestNotAppendable, match="would not read back") as raised:
+        _append_rows(m, [{"event": "packaged"}])
+
+    assert "add `transferred: []`" not in (raised.value.hint or "")
+    assert m.read_bytes() == before
+
+
+def test_an_empty_log_with_a_comment_takes_rows_and_keeps_the_comment(tmp_path: Path) -> None:
+    m = tmp_path / "enclave_manifest.yaml"
+    m.write_text("enclave_name: e\ntransferred: []  # none sent yet\n", encoding="utf-8")
+
+    _append_rows(m, [{"event": "packaged", "n": 1}])
+
+    text = m.read_text(encoding="utf-8")
+    assert "# none sent yet" in text
+    assert yaml.safe_load(text)["transferred"] == [{"event": "packaged", "n": 1}]
+
+
+def test_a_manifest_with_no_log_is_told_to_add_one(tmp_path: Path) -> None:
+    m = tmp_path / "enclave_manifest.yaml"
+    m.write_text("enclave_name: e\napproved_products: []\n", encoding="utf-8")
+
+    with pytest.raises(ManifestNotAppendable, match="no transferred: section") as raised:
+        _append_rows(m, [{"event": "packaged"}])
+
+    assert "add `transferred: []`" in (raised.value.hint or "")
+
+
+def test_a_refusal_at_append_time_leaves_no_zip(world) -> None:
+    """The manifest is edited while the bundle is built, after the early probe
+    passed: the rows cannot be recorded, so the finished zip is removed rather
+    than left to cross unrecorded."""
+    _approve(world, world.pin1)
+
+    def edit_then_answer(url: str, pin: str) -> int:
+        world.manifest.write_text(world.manifest.read_text(encoding="utf-8") + "notes:\n- x\n", encoding="utf-8")
+        return 1794717000
+
+    with pytest.raises(ManifestNotAppendable):
+        _package(world, commit_time=edit_then_answer)
+
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+    assert "packaged" not in world.manifest.read_text(encoding="utf-8")
+
+
+def test_the_record_check_reads_the_log_on_disk(tmp_path: Path) -> None:
+    m = tmp_path / "enclave_manifest.yaml"
+    tid = "transfer-2026-11-19-000000"
+    assert not _records(m, tid), "no manifest"
+    m.write_text("enclave_name: e\ntransferred: []\n", encoding="utf-8")
+    assert not _records(m, tid)
+
+    _append_rows(m, [{"event": "packaged", "transfer_id": tid}])
+
+    assert _records(m, tid)
+    assert not _records(m, "transfer-2026-11-19-000001"), "another transfer's rows"
+    m.write_text("enclave_name: [\n", encoding="utf-8")
+    assert not _records(m, tid), "a manifest that cannot be read"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="POSIX folder permissions, as a non-root user")
+def test_rows_that_fail_before_they_land_leave_no_zip(world) -> None:
+    """The enclave folder is read-only, so the manifest's temp file cannot be
+    made: nothing is recorded, so the finished zip goes."""
+    _approve(world, world.pin1)
+    written = world.manifest.read_text(encoding="utf-8")
+    first, _ = _package(world)  # makes .dvc/, data/imports/ and transfers/
+    world.manifest.write_text(written, encoding="utf-8")
+    first.unlink()
+    world.enclave.chmod(0o555)
+    try:
+        with pytest.raises(PermissionError) as raised:
+            _package(world)
+    finally:
+        world.enclave.chmod(0o755)
+
+    assert world.manifest.name in str(raised.value.filename), "it failed writing the manifest"
+    assert list((world.enclave / "transfers").glob("*.zip")) == []
+    assert world.manifest.read_text(encoding="utf-8") == written
+
+
+def test_an_interrupt_after_the_rows_land_keeps_their_zip(world, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ctrl-C just after the manifest's rename: the rows are on disk, so the
+    zip they record stays, rather than a log naming a bundle that is gone."""
+    _approve(world, world.pin1)
+    real_replace = os.replace
+
+    def ctrl_c_after_the_manifest_lands(src, dst):
+        real_replace(src, dst)
+        if Path(dst).name == world.manifest.name:
+            raise KeyboardInterrupt
+
+    # Census +1, by review: "a zip exists exactly when the log records it" is
+    # on a data-integrity path, and an interrupt after the rename can only be
+    # injected at the write itself.
+    monkeypatch.setattr("mintd._atomic.os.replace", ctrl_c_after_the_manifest_lands)
+    with pytest.raises(KeyboardInterrupt):
+        _package(world)
+
+    zips = list((world.enclave / "transfers").glob("*.zip"))
+    assert len(zips) == 1
+    assert f'"transfer_id": "{zips[0].stem}"' in world.manifest.read_text(encoding="utf-8")

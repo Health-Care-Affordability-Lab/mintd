@@ -265,7 +265,8 @@ approved_products:
     # all: true                                # or every output at that pin
 ```
 
-Then:
+`mintd check` loads the manifest as `package` does, so a mistyped pin or a
+misspelt key shows up as an error before you package. Then:
 
 ```bash
 mintd enclave package     # import the approved versions, bundle the new ones

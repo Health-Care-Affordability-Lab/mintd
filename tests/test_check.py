@@ -6,8 +6,10 @@ These tests pin the producer- and consumer-section validation behavior.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -161,6 +163,56 @@ def test_check_returns_only_producer_findings_in_slice_1(tmp_path: Path):
     findings = check_project(tmp_path)
 
     assert all(f.section == "producer" for f in findings)
+
+
+def _enclave_repo(tmp_path: Path, row: str) -> Path:
+    def _make(d):
+        d["project"]["type"] = "enclave"
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _make)
+    manifest = tmp_path / "enclave_manifest.yaml"
+    manifest.write_text(f"enclave_name: e\napproved_products:\n- repo: demo\n  {row}\ntransferred: []\n", encoding="utf-8")
+    return manifest
+
+
+def test_check_passes_an_enclave_manifest_package_can_load(tmp_path: Path) -> None:
+    manifest = _enclave_repo(tmp_path, f"pin: {'c' * 40}")
+
+    assert [f for f in check_project(tmp_path) if f.source == manifest] == []
+
+
+@pytest.mark.parametrize("row, problem", [
+    ("pin: abc1234", "approved_products.0.pin"),
+    (f"pin: {'c' * 40}\n  sorce_path: data/final", "approved_products.0.sorce_path"),
+], ids=["a-short-pin", "a-misspelt-key"])
+def test_check_reports_an_enclave_manifest_package_would_refuse(tmp_path: Path, row: str, problem: str) -> None:
+    """Plain check loads the manifest as `enclave package` does, so the
+    mistake shows up before package, as an error naming it."""
+    manifest = _enclave_repo(tmp_path, row)
+
+    findings = [f for f in check_project(tmp_path) if f.source == manifest]
+
+    assert [(f.severity, f.section, f.kind) for f in findings] == [("error", "consumer", "invalid_manifest")]
+    assert problem in findings[0].message
+    assert findings[0].hint
+
+
+@pytest.mark.parametrize("break_it, problem", [
+    (lambda m: m.write_bytes(m.read_text(encoding="utf-8").encode("utf-16")), "is not UTF-8"),
+    pytest.param(lambda m: m.chmod(0), "cannot be read", marks=pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="POSIX file permissions, as a non-root user")),
+], ids=["utf-16, as Windows PowerShell 5.1's > writes it", "unreadable"])
+def test_check_reports_an_enclave_manifest_it_cannot_read(tmp_path: Path, break_it, problem: str) -> None:
+    """A finding, not a traceback: publish and register gate on the same findings."""
+    manifest = _enclave_repo(tmp_path, f"pin: {'c' * 40}")
+    break_it(manifest)
+    try:
+        findings = [f for f in check_project(tmp_path) if f.source == manifest]
+    finally:
+        manifest.chmod(0o644)
+
+    assert [(f.severity, f.kind) for f in findings] == [("error", "invalid_manifest")]
+    assert problem in findings[0].message
 
 
 # ---------------------------------------------------------------------------

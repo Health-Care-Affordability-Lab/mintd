@@ -93,6 +93,10 @@ BANNED_TARGETS: dict[str, int] = {
 # `_resolve_catalog_client` 5 → 7 and `_resolve_dvc_ops` 5 → 7: two enclave
 # tests run the real `enclave package` handler with a real Reporter against
 # a local producer, injecting its catalog and dvc at the composition root.
+# `_atomic.os.replace` 2 → 3: a zip in an enclave's transfers/ exists exactly
+# when the manifest's log records it, a data-integrity invariant, and the one
+# case that keeps a zip after a failure, a Ctrl-C after the log's rename, can
+# only be injected at the write itself.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -101,7 +105,7 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_fast_sync_ops": 7,
     "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
-    "mintd._atomic.os.replace": 2,
+    "mintd._atomic.os.replace": 3,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 5,
     "mintd._push_verify._create_s3_client": 14,
@@ -133,7 +137,7 @@ def _scan_double_targets() -> dict[str, int]:
     ``unittest.mock.patch(...)`` whether imported bare or as ``mock.patch``.
 
     Neither half is optional. Restricting the receiver to ``monkeypatch``
-    silently drops ``tests/test_pre_units_journey.py:286``; dropping ``patch``
+    silently drops ``tests/test_pre_units_journey.py:277``; dropping ``patch``
     silently drops 29 sites, 16 of them banned-class, and leaves the ratchet
     evadable by a one-word change of mechanism.
     """
@@ -267,7 +271,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (185 sites / 43 targets), not
+    """The literals above are the *whole* census (186 sites / 43 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -278,14 +282,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (210 → 209), or drop ``patch`` (210 → 180).
+    ``monkeypatch``-receiver calls (186 → 185), or drop ``patch`` (186 → 157).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 185
+    assert sum(scanned.values()) == 186
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

@@ -305,7 +305,7 @@ An `enclave` project is a consumer whose data must reach a locked-down server. T
 
 ### `EnclaveManifest` ([src/mintd/enclave.py](src/mintd/enclave.py))
 
-Typed Pydantic view over `enclave_manifest.yaml`, the default `--manifest` of `mintd enclave package`. Unknown keys are refused. Fields: `enclave_name`, and two lists:
+Typed Pydantic view over `enclave_manifest.yaml`, the default `--manifest` of `mintd enclave package`. Unknown keys are refused. `mintd check` loads it with the same `EnclaveManifest.load` and reports one that does not load as an `invalid_manifest` error, without contacting the registry. Fields: `enclave_name`, and two lists:
 
 - `approved_products` (`ApprovedProduct`: `repo` (the catalog name), `pin` (a full commit SHA), optional `source_path` or `all`): which versions may cross. A row approves one output (`source_path`), every output at the pin (`all`), or the primary at the pin. People edit it; mintd never rewrites it.
 - `transferred`: the append-only outside log. `enclave package` appends a `packaged` row per version it bundles: one JSON object on one line (`event`, `transfer_id`, `transfer_date`, `repo`, `path`, `version`, `contract_pin`, `artifact_pin`, `dest`), which YAML reads as a mapping. Rows from older mintd are block-style mappings with no `event`, `path`, `version` or `dest`.
@@ -316,7 +316,7 @@ Why append-only by construction: mintd only ever adds lines after `transferred:`
 
 ### `enclave_package` (`mintd enclave package [repo] [--resend]`)
 
-For each approved version not yet in `transferred[]`, makes the output an ordinary import at the approved pin (`data.import_product` into `data/imports/<full_name>/`, re-importing when the pointer records another commit) and writes it into `transfers/<transfer_id>.zip` (`transfer-YYYY-MM-DD-NNNNNN`), checking every file against the md5 its import pointer records (the pointer's `files:` list, else the `.dir` manifest in the enclave's DVC cache). Then it appends `packaged` rows. A version whose `(repo, path, pin)` is already recorded is neither imported nor bundled unless `--resend`; an older row with no `path` matches any path at its pin. An existing zip is refused, and a failure removes the partial zip and appends nothing.
+For each approved version not yet in `transferred[]`, makes the output an ordinary import at the approved pin (`data.import_product` into `data/imports/<full_name>/`, re-importing when the pointer records another commit) and writes it into `transfers/<transfer_id>.zip` (`transfer-YYYY-MM-DD-NNNNNN`), checking every file against the md5 its import pointer records (the pointer's `files:` list, else the `.dir` manifest in the enclave's DVC cache). Then it appends `packaged` rows. A version whose `(repo, path, pin)` is already recorded is neither imported nor bundled unless `--resend`; an older row with no `path` matches any path at its pin. An existing zip is refused. A zip exists exactly when the log records it: on any failure the zip is removed unless the manifest on disk already records its transfer ID, as it does after a Ctrl-C that lands once the rows are written. A hard kill (SIGKILL, the OOM killer, a closed terminal) skips that cleanup and can leave a zip with no row; the rerun mints the same transfer ID and refuses it as already existing.
 
 Why: the import pointer already records the repo, the commit and every file's md5, so the bundle reuses it instead of keeping a second record.
 

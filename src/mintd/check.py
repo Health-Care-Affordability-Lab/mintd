@@ -15,7 +15,8 @@ Findings are split into two sections, by which artifact they read
   - consumer: derivable from the project's imports (the `.dvc` pointers
     under data/imports/ and dvc.lock deps with a `repo:` block), plus —
     with `upgrades` — each upstream producer at the pin and at HEAD:
-    pin resolvability, version compatibility, drift.
+    pin resolvability, version compatibility, drift. In an enclave repo,
+    also whether `mintd enclave package` can load enclave_manifest.yaml.
     This is what a project owner is responsible for keeping current as
     upstreams move.
 
@@ -163,7 +164,7 @@ def check_project(
         exists, DVC delivery of every declared output
 
     Consumer section: the project's imports; `upgrades=True` also resolves each producer at its pin and at HEAD and
-    reports drift.
+    reports drift. When enclave_manifest.yaml exists, a manifest `enclave package` cannot load is 1 error finding.
     """
     findings = _producer_findings(path)
     try:
@@ -194,7 +195,34 @@ def check_project(
                 hint="fix the unreadable DVC file reported above, then re-run 'mintd check'.",
             )
         )
+    findings.extend(_enclave_manifest_findings(path))
     return findings
+
+
+def _enclave_manifest_findings(project_path: Path) -> list[CheckFinding]:
+    """A mistyped pin or misspelt key, reported before `enclave package`
+    refuses it: the manifest is loaded with package's own loader, so its rules
+    have one copy, and nothing contacts the registry."""
+    manifest_path = project_path / "enclave_manifest.yaml"
+    if not manifest_path.is_file():
+        return []
+    from .enclave import EnclaveManifest  # here, not at the top: enclave imports data, which imports check
+    from .errors import MintdError
+
+    try:
+        EnclaveManifest.load(manifest_path)
+    except MintdError as exc:
+        return [
+            CheckFinding(
+                severity="error",
+                section="consumer",
+                message=str(exc),
+                source=manifest_path,
+                kind="invalid_manifest",
+                hint=exc.hint,
+            )
+        ]
+    return []
 
 
 def consumer_walk_failure(findings: list[CheckFinding]) -> str | None:
