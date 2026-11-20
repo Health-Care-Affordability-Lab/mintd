@@ -438,8 +438,6 @@ def test_check_remote_finds_what_push_wrote_and_staged_refuses_dvc_commit_f(prod
     writes a stage's folder out back as a bare tree hash with no IDs:
     `check --staged` refuses that commit, with the tree in the local cache
     and without it."""
-    import shutil
-
     from mintd._dvc_state import dvc_cache_dir
     from mintd.check import check_project, check_staged
 
@@ -465,7 +463,9 @@ def test_check_remote_finds_what_push_wrote_and_staged_refuses_dvc_commit_f(prod
     assert [f.message for f in check_staged(producer)] == want
     cache = dvc_cache_dir(producer)
     assert cache.is_relative_to(producer)
-    shutil.rmtree(cache)  # the test's own local cache: a CI checkout has none
+    # the test's own local cache, gone as from a CI checkout: moved, not
+    # deleted, since DVC makes cache files read-only and Windows won't delete those
+    cache.rename(cache.with_name("cache-gone"))
     assert [f.message for f in check_staged(producer)] == want
 
 
