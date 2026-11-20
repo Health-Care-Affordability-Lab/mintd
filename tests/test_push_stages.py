@@ -115,7 +115,8 @@ def _pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_serv
     """A git repo with a dvc project at the S3 server: `data/raw.dvc` and
     `data/my file.csv.dvc`; the stages of ``DVC_YAML``; a nested pipeline
     `sub/` with `sbuild` and `sother`. ``lock``: "partial" runs ``RAN`` and
-    sbuild only; "none" runs nothing, so there is no dvc.lock; "empty" then
+    sbuild only; "root-only" runs ``RAN`` but not sub's pipeline, so sub has
+    no dvc.lock; "none" runs nothing, so there is no dvc.lock; "empty" then
     leaves the root lock `stages: {}`; "orphan" also records a stage `gone`
     dvc.yaml no longer declares; "broken" leaves sub/dvc.yaml unreadable.
     Committed and pushed to a bare upstream; no data pushed yet."""
@@ -150,7 +151,10 @@ def _pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_serv
         "sbuild": {"cmd": json.loads(_cmd("out.csv")), "outs": ["out.csv"]},
         "sother": {"cmd": json.loads(_cmd("sother.csv")), "outs": ["sother.csv"]},
     }}, sort_keys=False))
-    if lock != "none":
+    if lock == "root-only":
+        r = real_dvc(["repro", "-q", *RAN], cwd=proj)
+        assert r.returncode == 0, r.stderr
+    elif lock != "none":
         r = real_dvc(["repro", "-q", *RAN, "sub/dvc.yaml:sbuild"], cwd=proj)
         assert r.returncode == 0, r.stderr
     if lock == "empty":
@@ -181,11 +185,11 @@ def _err(capsys) -> str:
     return " ".join(capsys.readouterr().err.split())
 
 
-def _command(err: str, after: str, before: str) -> list[str]:
-    """The command a hint spells out between ``after`` and ``before``, split
-    as a shell would split it."""
+def _command(err: str, after: str, before: str | None) -> list[str]:
+    """The command a hint spells out between ``after`` and ``before`` (or
+    the end, when None), split as a shell would split it."""
     start = err.index(after) + len(after)
-    return shlex.split(err[start:err.index(before, start)])
+    return shlex.split(err[start:err.index(before, start) if before else len(err)])
 
 
 @pytest.mark.parametrize("version_aware", [True, False], ids=["version-aware", "md5-layout"])
@@ -264,24 +268,50 @@ def test_a_pipeline_never_run_has_no_lock_and_stops_a_push_that_includes_it(
     tmp_path, monkeypatch, real_dvc, s3_server, capsys, version_aware: bool,  # noqa: F811
 ) -> None:
     """Nothing ran, so there is no dvc.lock at all. A full push, or one
-    naming a stage of either pipeline, refuses before any upload; the
-    full push's rest, the `.dvc` files, quoted, pushes.
+    naming a stage of either pipeline, refuses before any upload, saying
+    the pipeline hasn't run yet (not that a dvc.lock records too little,
+    and with no restore-from-git hint, since there is no lock); the full
+    push's rest, the `.dvc` files, quoted, pushes.
 
     Mutations: skip a pipeline with no dvc.lock -> the .dvc data pushes at
-    exit 0 and the stages say "already up to date", red.
+    exit 0 and the stages say "already up to date", red; word it as a lock
+    short of outputs -> red.
     """
     _pipeline(tmp_path, monkeypatch, real_dvc, s3_server, version_aware=version_aware, lock="none")
     puts = len(s3_server.puts)
 
-    for targets in ([], ["dvc.yaml:build"], ["sub/dvc.yaml:sbuild"]):
+    unrun = "the pipeline {} hasn't run yet (there's no dvc.lock beside it), so DVC would push nothing for its stages"
+    for targets, pipelines in (([], ["dvc.yaml", "sub/dvc.yaml"]), (["dvc.yaml:build"], ["dvc.yaml"]),
+                               (["sub/dvc.yaml:sbuild"], ["sub/dvc.yaml"])):
         assert cli.main(["data", "push", *targets]) == 1, targets
         err = _err(capsys)
-        assert "fewer outputs than dvc.yaml declares for" in err and "dvc repro" in err, err
+        assert "nothing was written or pushed: " + "; ".join(map(unrun.format, pipelines)) in err, err
+        assert "fewer outputs" not in err and "cut short" not in err and "dvc repro" in err, err
         assert len(s3_server.puts) == puts
     assert cli.main(["data", "push"]) == 1
-    rest = _command(_err(capsys), "for example ", "; if dvc.lock")
+    rest = _command(_err(capsys), "for example ", None)
     assert rest == ["mintd", "data", "push", "data/my file.csv.dvc", "data/raw.dvc"]
     assert cli.main(rest[1:]) == 0, _err(capsys)
+
+
+def test_a_pipeline_never_run_beside_one_that_ran_is_named_apart(
+    tmp_path, monkeypatch, real_dvc, s3_server, capsys,  # noqa: F811
+) -> None:
+    """The root pipeline ran in part; sub's never did, so it has no
+    dvc.lock. The refusal says sub's pipeline hasn't run yet, and that the
+    root dvc.lock records too little for the root stages that didn't.
+
+    Mutation: word a pipeline with no dvc.lock like a lock short of outputs
+    -> sub's stages are listed among the root's, red.
+    """
+    _pipeline(tmp_path, monkeypatch, real_dvc, s3_server, version_aware=False, lock="root-only")
+
+    assert cli.main(["data", "push"]) == 1
+    err = _err(capsys)
+    assert ("nothing was written or pushed: the pipeline sub/dvc.yaml hasn't run yet (there's no dvc.lock beside "
+            "it), so DVC would push nothing for its stages; dvc.lock records fewer outputs than dvc.yaml declares "
+            "for dvc.yaml:other,") in err, err
+    assert "sub/dvc.yaml:sbuild" not in err.split("hint:")[0] and "if dvc.lock was cut short" in err
 
 
 @pytest.mark.parametrize("target", ["dvc.yaml:fan@p q", "fan@p q"])
