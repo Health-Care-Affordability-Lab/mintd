@@ -121,8 +121,8 @@ class StaleBackupExists(ImportDestinationExists):
 
 class ImportNotFound(MintdError):
     """The named import or subscription is not there: `bump_import` finds no
-    matching `.dvc` under `data/imports/`, an enclave verb finds no matching
-    `approved_products[]` row, or `check` has no consumer finding for it."""
+    matching `.dvc` under `data/imports/`, or `check` has no consumer finding
+    for it."""
 
 
 class AmbiguousImport(MintdError):
@@ -1108,8 +1108,7 @@ def _payload_backup(dest: Path, *, engage: bool, name: str) -> Iterator[None]:
         # BaseException, not Exception: `run_streaming` re-raises
         # KeyboardInterrupt unchanged, so Ctrl-C during the transfer walked
         # past this restore and left the payload in the backup directory with
-        # nothing naming it. Same call, and for the same reason, as
-        # `enclave_pull`'s manifest flush. The block is local filesystem work
+        # nothing naming it. The block is local filesystem work
         # only, so it cannot stall the interrupt; the bare `raise` keeps the
         # exit code and the CLI's rendering unchanged.
         if moved:

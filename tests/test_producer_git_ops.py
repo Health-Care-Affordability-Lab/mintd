@@ -679,3 +679,18 @@ def test_fetch_metadata_at_translates_path_missing_to_metadata_missing(
         GitArchiveFetcher().fetch_metadata_at(REPO, PIN)
 
     assert ei.value.reason == FetchError.Reason.METADATA_MISSING
+
+
+def test_commit_time_at_is_the_pins_committer_time(local_producer, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Committer time, in UTC seconds, from the clone-and-fetch path production
+    takes. The commit is made at 23:30 on 2026-11-14 at -05:00, which is
+    04:30 on 2026-11-15 in UTC, and authored on another day, so a local-time
+    or author-time reader gives a different answer."""
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-11-14T23:30:00-05:00")
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-11-10T12:00:00+00:00")
+    pin = local_producer.commit_more("dated")
+
+    assert GitArchiveFetcher().commit_time_at(local_producer.url, pin) == 1794717000
+
+    with pytest.raises(FetchError):
+        GitArchiveFetcher().commit_time_at(local_producer.url, "0" * 40)

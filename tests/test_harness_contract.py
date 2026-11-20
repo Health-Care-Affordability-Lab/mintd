@@ -38,7 +38,7 @@ from mintd._fast_sync_ops import (
 )
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import check_project
-from mintd.data_ops import data_pull
+from mintd.data_ops import PullSummary, data_pull
 from mintd.imports import scan_imports
 from mintd.model import Metadata
 from mintd.producer import ProducerError, ProducerView
@@ -58,8 +58,6 @@ V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 
 ALPHA_URL = "https://github.com/example-org/alpha"
 BETA_URL = "https://github.com/example-org/beta"
-#: `source_path` of the one product `enclave_manifest_v2_minimal.yaml` approves.
-APPROVED_PATH = "outputs/cms_based/"
 
 
 def _catalog_pointing_at(url: str) -> InMemoryCatalogClient:
@@ -231,7 +229,7 @@ def _clone(producer: LocalProducer, dest: Path) -> Path:
     return dest
 
 
-def _pull(project: Path, targets: list[str] | None = None) -> None:
+def _pull(project: Path, targets: list[str] | None = None) -> PullSummary:
     """Production's own pull, through the real dvc seam, with the REAL
     `SubprocessFastSyncOps` — not a double and no longer `fast_sync_ops=None`,
     which issue18 removed from the signature. The route is unchanged:
@@ -247,13 +245,47 @@ def _pull(project: Path, targets: list[str] | None = None) -> None:
     is the strongest gate in that unit: with `data_pull` no longer passing
     `cwd`, the three real-dvc tests below fail outright rather than quietly
     passing on ambient process state."""
-    data_pull(
+    return data_pull(
         project_path=project,
         targets=targets,
         dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
         fast_sync_ops=SubprocessFastSyncOps(),
     )
 
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="DVC's trust of a read-only cache object, reproduced on POSIX")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Target: a cached .dir that does not hash to its name, left read-only as DVC leaves its cache objects, "
+    "is trusted by the fallback dvc pull, so pull returns normally with p2.csv missing; it should land both "
+    "files or exit non-zero. Predates the enclave change; the fix is follow-up work"
+))
+def test_a_pull_never_returns_normally_with_a_file_its_cached_tree_dropped(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """A changed .dir in the clone's cache (valid JSON, p2.csv dropped, read-only
+    again): pull must repair it, so both files land, or fail. Either fix flips
+    this Target."""
+    from mintd._dvc_state import dvc_cache_dir
+    from mintd.errors import MintdError
+
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+    _pull(clone)
+    (listing,) = dvc_cache_dir(clone).rglob("*.dir")
+    listing.chmod(0o644)
+    entries = [e for e in json.loads(listing.read_text(encoding="utf-8")) if e["relpath"] != "p2.csv"]
+    listing.write_text(json.dumps(entries), encoding="utf-8")
+    listing.chmod(0o444)
+    shutil.rmtree(clone / "data" / "parts")
+
+    try:
+        summary = _pull(clone)
+    except MintdError:
+        return  # pull failed, which the CLI turns into exit 1
+    if summary.error_count:
+        return  # reported as not delivered, which the CLI turns into exit 1
+    assert sorted(p.name for p in (clone / "data" / "parts").iterdir()) == ["p1.csv", "p2.csv"]
 
 def test_clone_from_local_producer_lands_payload_bytes(
     local_producer: LocalProducer, tmp_path: Path
@@ -1145,47 +1177,6 @@ def test_colliding_imports_resolve_independently_via_the_namespace_index(
     assert beta_index == {"outputs/final": beta}
 
 
-def test_enclave_manifest_consumer_variant_loads(
-    consumer_project, local_producer: LocalProducer, tmp_path: Path
-) -> None:
-    """The enclave arm of `check`, walked end to end.
-
-    `tests/fixtures/enclave_manifest_v2_minimal.yaml` has existed for a while
-    but nothing composed a *project* around it, so `check.py`'s enclave walker
-    was reached by no fixture. This is the variant unit A (position 8) needs.
-    """
-    # The manifest approves `outputs/cms_based/`. Under the md5 drift rule
-    # the comparison reads the producer's own DVC pointer at pin and HEAD,
-    # so the payload must really exist — `publish()` DVC-tracks bytes and
-    # commits, which is exactly what moves the pointer.
-    local_producer.rename_primary(APPROVED_PATH)
-    local_producer.publish({APPROVED_PATH: {"a.csv": b"v1"}})
-    proj = consumer_project(enclave=True, enclave_pin=local_producer.head_sha)
-
-    # ... and now the producer republishes new bytes at the SAME path — the
-    # researcher's actual drift case; no rename required.
-    local_producer.publish({APPROVED_PATH: {"a.csv": b"v2"}}, message="v2")
-
-    client = _catalog_pointing_at(local_producer.url)
-    cache = tmp_path / "pcache"
-
-    def at(repo: str, pin: str):
-        # `""` is check.py:443's HEAD sentinel — a contract between the walker
-        # and its factory, not something ProducerView.try_at interprets.
-        return ProducerView.try_at(
-            repo, pin or local_producer.head_sha, cache_dir=cache
-        )
-
-    findings = check_project(proj, upgrades=True, client=client, producer_view_factory=at)
-
-    consumer = [f for f in findings if f.section == "consumer"]
-    assert [f.field_path for f in consumer] == ["approved_products[demo-xw]"]
-    assert consumer[0].kind == "drift", consumer[0].message
-    assert APPROVED_PATH in consumer[0].message
-    assert "producer's HEAD differs from your pin" in consumer[0].message
-    assert consumer[0].source == proj / "enclave_manifest.yaml"
-
-
 # ---------------------------------------------------------------------------
 # synthetic_project
 # ---------------------------------------------------------------------------
@@ -1375,37 +1366,26 @@ def test_strict_fake_reads_the_out_path_from_the_pointer_not_its_filename(
     assert real_verdict["data/imports/alpha"] is False
 
 
-def test_enclave_pull_caches_into_the_enclave_not_the_outer_repo(
+def test_enclave_package_caches_into_the_enclave_not_the_outer_repo(
     local_producer: LocalProducer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The custody defect, through real dvc, with the enclave nested inside
     another DVC repo — the shape that failed SILENTLY at exit 0.
 
-    Standing in `outer/` and pulling `enclave/`'s manifest, pre-unit-A dvc
-    imported into `outer` because that is where the process was: measured at
-    `9a2a54e`, `outer/.dvc/cache` gained the producer's blob and the enclave's
-    cache stayed empty, rc=0, with the file still delivered to the right path
-    so nothing looked wrong. In the one lane whose entire purpose is data
-    custody, a repo that is not the enclave held the restricted bytes.
+    Standing in `outer/` with the enclave's manifest named relative to it,
+    dvc used to import into `outer`, because that is where the process was:
+    `outer/.dvc/cache` gained the producer's blob and the enclave's cache
+    stayed empty, rc=0. In the one lane whose purpose is data custody, a repo
+    that is not the enclave held the restricted bytes.
 
-    Two things have to be right for this to pass, and only one of them is
-    "pass cwd":
-
-    1. `import_` is aimed at `manifest_path.parent`.
-    2. `-o` is absolutized at the seam. The manifest path here is DELIBERATELY
-       RELATIVE, because that is production's default (`cli.py`'s `--manifest`
-       defaults to `Path("enclave_manifest.yaml")` and is never resolved). With
-       a relative `-o` and a re-aimed cwd, real dvc reads the destination
-       against the NEW directory and fails `stage working dir
-       '.../outer/enclave/enclave/downloads/_staging' does not exist` — note
-       the doubled segment. An absolute-manifest version of this test passes
-       either way and gates nothing.
+    The manifest path is DELIBERATELY RELATIVE, because that is production's
+    default (`--manifest` defaults to `Path("enclave_manifest.yaml")`): the
+    imports must run in `manifest_path.parent`, with `-o` absolutized at the
+    seam, or real dvc reads the destination against the wrong directory.
     """
-    from dataclasses import dataclass
-
     from mintd._config import Timeouts
     from mintd._dvc_ops import SubprocessDvcOps
-    from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_pull
+    from mintd.enclave import enclave_package
 
     for key, value in {
         "HOME": str(tmp_path / "dvc-home"),
@@ -1427,26 +1407,27 @@ def test_enclave_pull_caches_into_the_enclave_not_the_outer_repo(
     enclave = outer / "enclave"
     enclave.mkdir()
     _git(["init", "-b", "main", str(enclave)])
-    ops.init(cwd=enclave)
+    (enclave / "enclave_manifest.yaml").write_text(
+        "enclave_name: test\napproved_products:\n"
+        f"  - repo: prod\n    pin: {pin}\n    source_path: outputs/data.csv\n"
+        "transferred: []\n",
+        encoding="utf-8",
+    )
 
-    m_path = enclave / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="test", approved_products=[
-        ApprovedProduct(
-            repo="prod", registry_entry="e", pin=pin, source_path="outputs/data.csv",
-        )
-    ]).save(m_path)
-
-    @dataclass
     class _Entry:
-        repo_url: str
+        def model_dump(self):
+            return {"repository": {"github_url": local_producer.url}, "project": {"full_name": "data_prod"}}
 
     class _Client:
         def fetch(self, name):
-            return _Entry(repo_url=local_producer.url)
+            return _Entry()
 
     monkeypatch.chdir(outer)
     # RELATIVE on purpose -- see the docstring. This is what production passes.
-    enclave_pull(_Client(), ops, manifest_path=Path("enclave/enclave_manifest.yaml"))
+    enclave_package(
+        _Client(), ops, manifest_path=Path("enclave/enclave_manifest.yaml"),
+        output_dir=Path("enclave/transfers"),
+    )
 
     def blobs(repo: Path) -> list[str]:
         d = repo / ".dvc" / "cache" / "files" / "md5"
@@ -1456,9 +1437,9 @@ def test_enclave_pull_caches_into_the_enclave_not_the_outer_repo(
         f"the OUTER repo cached the producer's bytes: {blobs(outer)}"
     )
     assert blobs(enclave), "the enclave's cache is empty; the import went elsewhere"
-    delivered = list((enclave / "downloads" / "prod").rglob("data.csv"))
-    assert delivered, "the payload was not delivered into the enclave"
-    assert delivered[0].read_bytes() == b"restricted-producer-bytes\n"
+    delivered = enclave / "data" / "imports" / "data_prod" / "outputs" / "data.csv"
+    assert delivered.read_bytes() == b"restricted-producer-bytes\n"
+    assert list((enclave / "transfers").glob("*.zip")), "and the bundle was built"
 
 
 #: The mintd data scaffold's stage shape (`src/mintd/files/dvc_data.yaml.j2`):

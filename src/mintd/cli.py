@@ -10,8 +10,7 @@ work to the library layer (``mintd.check``, ``mintd.data``, ``mintd.enclave``,
   humans and ``--json``
 - exit-code dispatch
 - a few guards no library function owns, such as ``registry register``
-  refusing an uncommitted project and ``enclave pull`` refusing to run
-  outside the enclave
+  refusing an uncommitted project
 """
 
 from __future__ import annotations
@@ -64,8 +63,6 @@ from .check import CheckFinding, check_project
 from .data import (
     BumpBlocked,
     ImportDestinationExists,
-    ImportNotFound,
-    PrimaryRemovedAtHead,
     UnknownProductPath,
     bump_import,
     clone_and_pull_product,
@@ -86,7 +83,6 @@ from ._s3_listing_ops import (
     S3ListingResult,
     list_product_objects,
 )
-from ._archive_ops import UnsafeArchiveMember
 from ._share_ops import (
     neutralize_control_chars,
     resolve_share_user,
@@ -101,19 +97,7 @@ from ._cache_ops import (
     list_cache_objects,
     resolve_repo_remote,
 )
-from .enclave import (
-    EnclaveManifest,
-    InvalidTransferManifest,
-    NothingNewToPackage,
-    enclave_add,
-    enclave_bump,
-    enclave_package,
-    enclave_pull,
-    enclave_remove,
-    enclave_verify,
-    missing_downloads,
-    subscription_label,
-)
+from .enclave import NothingNewToPackage, enclave_package
 from .imports import scan_imports
 from .init import init_project
 from .model import Metadata
@@ -615,68 +599,16 @@ To bring only a product's data into your project, use `mintd data import`.""",
 
     p_enclave = subs.add_parser("enclave", help="Enclave commands")
     p_enclave_sub = p_enclave.add_subparsers(dest="enclave_command")
-    p_ebump = p_enclave_sub.add_parser("bump", help="Bump approved_products[].pin")
-    p_ebump.add_argument("name")
-    p_ebump.add_argument(
-        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
-    )
-    p_ebump.add_argument("--force", action="store_true")
-    p_ebump.set_defaults(_handler=_handle_enclave_bump)
-
-    p_elist = p_enclave_sub.add_parser("list", help="List manifest entries")
-    p_elist.add_argument("repo", nargs="?")
-    p_elist.add_argument(
-        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
-    )
-    p_elist.set_defaults(_handler=_handle_enclave_list)
-
-    p_eadd = p_enclave_sub.add_parser("add", help="Subscribe to a producer")
-    p_eadd.add_argument("repo")
-    p_eadd.add_argument("--pin")
-    _eadd_mutex = p_eadd.add_mutually_exclusive_group()
-    _eadd_mutex.add_argument("--source-path", dest="source_path")
-    _eadd_mutex.add_argument("--all", action="store_true", dest="all_outputs")
-    p_eadd.add_argument(
-        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
-    )
-    p_eadd.set_defaults(_handler=_handle_enclave_add)
-
-    p_erm = p_enclave_sub.add_parser("remove", help="Unsubscribe from a producer")
-    p_erm.add_argument("repo")
-    _erm_mutex = p_erm.add_mutually_exclusive_group()
-    _erm_mutex.add_argument(
-        "--source-path", dest="source_path",
-        help="remove the subscription to this path",
-    )
-    _erm_mutex.add_argument(
-        "--primary", action="store_true", dest="primary",
-        help="remove the subscription to the producer's primary product",
-    )
-    _erm_mutex.add_argument(
-        "--all", action="store_true", dest="all_outputs",
-        help="remove EVERY subscription to this repo (on 'enclave add', "
-             "--all means an all-outputs subscription instead)",
-    )
-    p_erm.add_argument("--manifest", type=Path, default=Path("enclave_manifest.yaml"))
-    p_erm.set_defaults(_handler=_handle_enclave_remove)
-
-    p_epull = p_enclave_sub.add_parser("pull", help="Fetch subscribed data")
-    p_epull.add_argument("repo", nargs="?")
-    p_epull.add_argument("--force", action="store_true")
-    p_epull.add_argument(
-        "--manifest", type=Path, default=Path(_DEFAULT_ENCLAVE_MANIFEST),
-    )
-    p_epull.set_defaults(_handler=_handle_enclave_pull)
-
     p_epkg = p_enclave_sub.add_parser(
-        "package", help="Bundle downloads into a transfer archive"
+        "package",
+        help="Import the approved versions and bundle the new ones into a transfer zip",
     )
     p_epkg.add_argument("repo", nargs="?")
     p_epkg.add_argument("--output", type=Path, dest="output_archive")
     p_epkg.add_argument(
         "--resend",
         action="store_true",
-        help="Re-bundle products already recorded in transferred[] (default: "
+        help="Re-bundle versions already recorded in transferred[] (default: "
              "skip them). Use when a bundle was built but never arrived.",
     )
     p_epkg.add_argument(
@@ -684,14 +616,16 @@ To bring only a product's data into your project, use `mintd data import`.""",
     )
     p_epkg.set_defaults(_handler=_handle_enclave_package)
 
+    # Removed: a bundle is unzipped and checked with the system's own tools.
+    # Kept for one release so the old command says where its job went.
     p_ever = p_enclave_sub.add_parser(
-        "verify", help="Reconcile an extracted transfer into the manifest"
+        "verify", help="Removed: unzip the bundle and run the check in its README"
     )
-    p_ever.add_argument("extracted_dir", type=Path)
-    p_ever.add_argument(
-        "--manifest", type=Path, default=Path("enclave_manifest.yaml")
-    )
-    p_ever.add_argument("--data-root", type=Path, dest="data_root")
+    # The old flags, so an invocation that leads with one still reaches the
+    # stub rather than argparse's usage error.
+    p_ever.add_argument("--manifest")
+    p_ever.add_argument("--data-root")
+    p_ever.add_argument("_rest", nargs=argparse.REMAINDER)
     p_ever.set_defaults(_handler=_handle_enclave_verify)
 
     p_registry = subs.add_parser("registry", help="Catalog commands")
@@ -900,19 +834,7 @@ def _resolve_git_ops(config: Config, reporter: Optional[Reporter] = None) -> Reg
 
 
 def _handle_check(args: argparse.Namespace) -> int:
-    config = Config.load()
-    client: CatalogClient | None = None
-    # Resolved for every check, not just --upgrades: an enclave consumer's
-    # approved products need the catalog to validate, and publish/register
-    # already validate them. Leaving plain check weaker would mean "check is
-    # green" and "publish will not be blocked" stop meaning the same thing.
-    try:
-        client = _resolve_catalog_client(config)
-    except ConfigError:
-        # Let the manifest walker emit `catalog_unresolved` findings —
-        # surface what's missing without pre-validating.
-        client = None
-    findings = check_project(args.path, upgrades=args.upgrades, client=client)
+    findings = check_project(args.path, upgrades=args.upgrades)
     return _render_findings(findings, json_out=args.json_out)
 
 
@@ -2151,279 +2073,38 @@ def _render_catalog_table(entries, *, detailed: bool, width: int) -> str:
     return "\n\n".join(sections)
 
 
-def _handle_enclave_list(args: argparse.Namespace) -> int:
-    with _hint(
-        FileNotFoundError,
-        "create one with 'mintd enclave add <repo> --pin <sha>', or pass --manifest <path>",
-        message=f"enclave_manifest.yaml not found at {args.manifest}",
-    ):
-        manifest = EnclaveManifest.load(args.manifest)
-    repo_filter: str | None = args.repo
-
-    approved = [ap for ap in manifest.approved_products if repo_filter is None or ap.repo == repo_filter]
-    downloaded = [d for d in manifest.downloaded if repo_filter is None or d.repo == repo_filter]
-    transferred = [t for t in manifest.transferred if repo_filter is None or t.repo == repo_filter]
-
-    if repo_filter is not None and not approved and not downloaded and not transferred:
-        print(f"no entries for {repo_filter}")
-        return 0
-
-    print("approved_products:")
-    if not approved:
-        print("  (none)")
-    for ap in approved:
-        path = subscription_label(ap)
-        print(f"  {ap.repo}@{ap.pin[:7]} (path: {path})")
-
-    print("downloaded:")
-    if not downloaded:
-        print("  (none)")
-    for d in downloaded:
-        print(f"  {d.repo} @ {d.contract_pin[:7]} → {d.local_path} ({d.fetch_strategy})")
-
-    print("transferred:")
-    if not transferred:
-        print("  (none)")
-    for t in transferred:
-        print(f"  {t.repo} @ {t.contract_pin[:7]} ({t.transfer_date}) → {t.local_path}")
-
-    return 0
-
-
-def _handle_enclave_bump(args: argparse.Namespace) -> int:
+def _handle_enclave_package(args: argparse.Namespace) -> int:
     reporter = getattr(args, "_reporter", None) or Reporter()
-    config = Config.load()
-    client = _resolve_catalog_client(config)
-    try:
-        with (
-            # `--force` skips the check_project reachability gate and resolves
-            # the producer's HEAD directly, so an unreachable/broken producer or
-            # a malformed catalog entry (no github_url) surfaces here rather
-            # than as a BumpBlocked finding.
-            _hint(
-                (ProducerError, ValueError),
-                "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
-            ),
-            # A pydantic ValidationError is a ValueError: inside the clause
-            # above, so it keeps this hint. The manifest is human-editable.
-            _hint(ValidationError, "enclave_manifest.yaml is malformed; fix the reported field"),
-            _hint(ImportNotFound, "'mintd enclave list' to see subscribed repos"),
-            _hint(PrimaryRemovedAtHead, "pin to an older SHA or unsubscribe with 'mintd enclave remove'"),
-            reporter.status(f"Bumping {args.name}..."),
-        ):
-            result = enclave_bump(
-                client,
-                manifest_path=args.manifest,
-                name=args.name,
-                force=args.force,
-            )
-    except BumpBlocked as exc:
-        return _render_bump_blocked(exc)
-    if result is None:
-        print("up to date")
-    else:
-        print(f"bumped: {result}")
-    return 0
-
-
-def _handle_enclave_add(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
-    config = Config.load()
-    client = _resolve_catalog_client(config)
-    with (
-        _hint((ProducerError, ValueError), "check the repo/pin arguments"),
-        # `--path` is not a flag on this parser; following the old hint exited
-        # 64 with `unrecognized arguments`.
-        _hint(MissingPrimaryDataProduct, "pass --source-path <output> or --all"),
-    ):
-        path = enclave_add(
-            client,
-            manifest_path=args.manifest,
-            name=args.repo,
-            pin=args.pin,
-            source_path=args.source_path,
-            all_=args.all_outputs,
-        )
-    # Re-load to print the just-added entry's resolved pin.
-    manifest = EnclaveManifest.load(path)
-    ap = manifest.approved_products[-1]
-    print(f"subscribed: {ap.repo}@{ap.pin[:7]} (path: {subscription_label(ap)})")
-    # "this add INHERITED a pin", not "the repo now has >1 row": those differ
-    # whenever the sibling rows carry a different pin — a hand-edited manifest,
-    # or the empty-pin case, where enclave_add deliberately resolves HEAD
-    # instead of inheriting. Warning there names a pin that was never recorded.
-    inherited = any(
-        a is not ap and a.repo == ap.repo and a.pin == ap.pin
-        for a in manifest.approved_products
-    )
-    if inherited:
-        # D1: this add INHERITED the repo's recorded pin, it did not resolve
-        # HEAD. If the path did not exist at that pin the add still succeeds and
-        # `pull` is what fails, so name the remedy now rather than in the notes.
-        # Bare `bump` suffices since the md5 drift rule: a path published at
-        # HEAD but absent at the pin reports as drift, so the bump moves the
-        # pin without `--force` (which skips every guard and was only ever a
-        # workaround for the retired short-circuit).
-        reporter.warn(
-            f"inherited the pin recorded for {ap.repo} ({ap.pin[:7]}) - one pin per repo. "
-            f"If {subscription_label(ap)} is newer than that pin, "
-            f"'mintd enclave pull' will fail; run "
-            f"'mintd enclave bump {ap.repo}' to move every subscription."
-        )
-    return 0
-
-
-def _handle_enclave_remove(args: argparse.Namespace) -> int:
-    config = Config.load()
-    client = _resolve_catalog_client(config)
-    with _hint(ImportNotFound, "'mintd enclave list' to see subscribed repos"):
-        enclave_remove(
-            client,
-            manifest_path=args.manifest,
-            name=args.repo,
-            source_path=args.source_path,
-            all_=args.all_outputs,
-            primary=args.primary,
-        )
-    msg = f"removed: {args.repo}"
-    if args.source_path:
-        msg += f" (source_path={args.source_path})"
-    elif args.primary:
-        msg += " (primary)"
-    print(msg)
-    return 0
-
-
-_DEFAULT_ENCLAVE_MANIFEST = "enclave_manifest.yaml"
-
-
-def _handle_enclave_pull(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
-    # Resolved ONCE and used for the comparison, the message and the hint.
-    # `Path.cwd()` is physical by definition (POSIX getcwd resolves symlinks),
-    # so printing an unresolved `enclave_dir` beside it showed the user two
-    # roots that look unrelated -- "(/tmp/x/enclave), not from /private/tmp/x"
-    # on any macOS, where /tmp IS a symlink.
-    enclave_dir = args.manifest.parent.resolve()
-    if enclave_dir != Path.cwd():
-        # Deliberately narrow. `dvc import` acts on the repo it runs in, and
-        # this is the custody lane: `--manifest` names a file, it is not a
-        # licence to reach into another directory. The library is correct from
-        # anywhere now; the CLI still declines to widen the flag.
-        #
-        # The hint is BUILT AS ARGV and joined by shlex, never concatenated:
-        # a list makes a dropped flag visible and `shlex.join` makes an
-        # unquoted path (cloud drives hand out "My Drive") impossible.
-        # `--manifest` carries only when it is not the default, and as a NAME,
-        # because the hint has already `cd`'d there.
-        retry = ["mintd", "enclave", "pull"]
-        if args.repo:
-            retry.append(args.repo)
-        if args.manifest.name != _DEFAULT_ENCLAVE_MANIFEST:
-            retry += ["--manifest", args.manifest.name]
-        if args.force:
-            retry.append("--force")
-        reporter.error(
-            f"`mintd enclave pull` must run from inside the enclave "
-            f"({enclave_dir}), not from {Path.cwd()}",
-            hint=f"cd {shlex.quote(str(enclave_dir))} && {shlex.join(retry)}",
-        )
-        return 1
     config = Config.load()
     client = _resolve_catalog_client(config)
     dvc_ops = _resolve_dvc_ops(config, reporter)
-    with (
-        _hint(ValueError),
-        # The enclave manifest itself is missing. The cwd guard above funnels
-        # every user into this path.
-        _hint(
-            FileNotFoundError,
-            "run this from the enclave repo root, or pass --manifest <path>",
-            message=f"{args.manifest.name} not found at {args.manifest}",
-        ),
-        reporter.status("Pulling enclave data..."),
-    ):
-        _, written = enclave_pull(
-            client,
-            dvc_ops,
-            manifest_path=args.manifest,
-            repo=args.repo,
-            force=args.force,
-            reporter=reporter,
-        )
-    # Computed ONCE for both lanes. Text mode already got the D7 report as
-    # warns from enclave_pull, but it used to print "nothing to pull" straight
-    # after them — the line the whole branch exists to stop saying, since what
-    # is recorded as downloaded is precisely NOT on disk.
-    missing = missing_downloads(manifest_path=args.manifest, repo=args.repo)
-    if reporter.json_mode:
-        # BEFORE the not-written early return, and with a "missing" key:
-        # Reporter.warn is a no-op in json_mode, so the D7 missing report
-        # (enclave_pull's warns) never reaches a `--json` caller — a fresh
-        # clone used to print ZERO bytes at exit 0, byte-identical to a
-        # healthy up-to-date enclave. The result is emitted even when both
-        # lists are empty so json output is never "bare nothing".
-        reporter.result(
-            {
-                "pulled": [
-                    {"repo": i.repo, "pin": i.contract_pin, "local_path": str(i.local_path)}
-                    for i in written
-                ],
-                "missing": [
-                    {
-                        "repo": d.repo,
-                        "output": d.output,
-                        "pin": d.contract_pin,
-                        "local_path": str(d.local_path),
-                    }
-                    for d in missing
-                ],
-            }
-        )
-        return 0
-    if not written:
-        # Exit 0 either way (D7: a missing path is indistinguishable from a
-        # deliberate prune-after-transfer, so it is a report, not a failure) —
-        # only the contradicting line goes.
-        if not missing:
-            reporter.info("nothing to pull")
-        return 0
-    by_repo: dict[str, list] = {}
-    for item in written:
-        by_repo.setdefault(item.repo, []).append(item)
-    for repo, items in by_repo.items():
-        pin = items[0].contract_pin[:7]
-        reporter.success(f"✓ {repo} @ {pin} ({len(items)} output(s))")
-    return 0
-
-
-def _handle_enclave_package(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
-    # When --output is unset, hand `enclave_package` an output_dir; it
-    # builds the filename from the computed `transfer_id` so same-day
-    # re-runs produce distinct archives.
-    output_dir = (
-        args.manifest.parent / "transfers"
-        if args.output_archive is None
-        else None
-    )
+    # With no --output the zip is named after its transfer ID, so same-day
+    # runs produce distinct bundles.
+    output_dir = args.manifest.parent / "transfers" if args.output_archive is None else None
     try:
+        # No spinner around the whole package: each import shows its own,
+        # and rich allows one live display at a time.
         with (
-            _hint((UnsafeArchiveMember, InvalidTransferManifest), "re-run 'mintd enclave pull --force'"),
-            reporter.status("Packaging enclave archive..."),
+            # `_require_repo_url`'s bare ValueError, as in `data import`.
+            _hint(ValueError),
+            # A producer read at the pin, or the pin's commit date, failed.
+            _hint(ProducerError, "check git auth (gh auth status / ssh -T git@github.com)"),
         ):
+            warnings: list[str] = []
             archive, skipped = enclave_package(
+                client,
+                dvc_ops,
                 manifest_path=args.manifest,
                 name=args.repo,
                 output_archive=args.output_archive,
                 output_dir=output_dir,
                 resend=args.resend,
+                reporter=reporter,
+                warnings=warnings,
             )
     except NothingNewToPackage as exc:
         # Everything already crossed the gap — the routine steady state, not a
-        # failure. Exit 0 so a scripted `pull && package` loop is not a red run.
-        # Caught before NothingToPackage, whose hint ("run pull first") is only
-        # right for a genuinely empty selection.
+        # failure. Exit 0 so a scripted loop is not a red run.
         reporter.info(f"nothing new to package: {exc}")
         reporter.info(
             "a bundle that was built is recorded as transferred even if it never "
@@ -2432,57 +2113,38 @@ def _handle_enclave_package(args: argparse.Namespace) -> int:
         )
         return 0
     if skipped:
-        # Count repos, not `downloaded[]` rows: one product with several
-        # outputs is several rows, and "skipped 3 products: my-repo" reads as
-        # three products that share a name.
-        repos = sorted({d.repo for d in skipped})
+        # Count repos, not versions: one product with several outputs is
+        # several versions, and "skipped 3 products: my-repo" reads as three
+        # products that share a name.
+        repos = sorted({repo for repo, _, _ in skipped})
         names = ", ".join(repos)
         reporter.info(
             f"skipped {len(repos)} already-transferred product"
             f"{'' if len(repos) == 1 else 's'}: {names} "
             f"(pass --resend to ship {'it' if len(repos) == 1 else 'them'} again)"
         )
-    # `result` (not `print`) so the archive path lands on stdout AND is flushed
-    # before the stderr hint below — otherwise a piped stdout is block-buffered
-    # and the hint surfaces first. Also gives --json mode the skipped list.
+    # `result` (not `print`) so the bundle path lands on stdout AND is flushed
+    # before the stderr hint below. Also gives --json mode the skipped list.
     reporter.result(
-        {"archive": str(archive), "skipped": sorted({d.repo for d in skipped})},
+        {"archive": str(archive), "skipped": sorted({repo for repo, _, _ in skipped}), "warnings": warnings},
         pretty=lambda p: f"packaged: {p['archive']}",
     )
     reporter.info(
-        "land it inside the enclave with:\n"
-        f"  mkdir -p incoming && tar -xzf {archive.name} -C incoming\n"
-        "  python3 incoming/land.py"
+        "in the enclave folder, unzip it and check it:\n"
+        f"  unzip -n {archive.name}\n"
+        "  md5sum -c transfers/<transfer id>/MD5SUMS\n"
+        "the README.md it unzips under transfers/ has the macOS and Windows commands"
     )
     return 0
 
 
 def _handle_enclave_verify(args: argparse.Namespace) -> int:
-    reporter = getattr(args, "_reporter", None) or Reporter()
-    with (
-        # The enclave manifest itself is missing.
-        _hint(
-            FileNotFoundError,
-            "run this from the enclave repo root, or pass --manifest <path>",
-            message=f"enclave_manifest.yaml not found at {args.manifest}",
-        ),
-        # The base class's hint; its subclasses carry their own.
-        _hint(InvalidTransferManifest, "the archive is malformed; re-export from source"),
-        reporter.status("Verifying enclave manifest..."),
-    ):
-        _, written = enclave_verify(
-            extracted_dir=args.extracted_dir,
-            manifest_path=args.manifest,
-            data_root=args.data_root,
-        )
-    if not written:
-        print("nothing to verify (all entries already in transferred[])")
-        return 0
-    for item in written:
-        print(
-            f"verified: {item.repo} @ {item.contract_pin[:7]} → {item.local_path}"
-        )
-    return 0
+    raise MintdError(
+        "'mintd enclave verify' was removed",
+        hint="in the enclave folder: unzip -n <bundle>.zip, then md5sum -c "
+             "transfers/<transfer id>/MD5SUMS; that folder's README.md has the "
+             "macOS and Windows commands",
+    )
 
 
 def _handle_registry_register(args: argparse.Namespace) -> int:
@@ -2490,7 +2152,7 @@ def _handle_registry_register(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     metadata = _load_metadata_with_schema_hint(args.path / "metadata.json")
-    findings = check_project(args.path, upgrades=False, client=client)
+    findings = check_project(args.path, upgrades=False)
     error_findings = [f for f in findings if f.severity == "error"]
     if error_findings:
         return _render_findings(error_findings, json_out=False)

@@ -17,13 +17,11 @@ import shutil
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests._harness.git import _git
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
-ENCLAVE_MANIFEST = FIXTURES / "enclave_manifest_v2_minimal.yaml"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,29 +67,12 @@ def build_consumer_project(
     root: Path,
     *,
     imports: list[Import] | None = None,
-    enclave: bool = False,
-    enclave_pin: str | None = None,
 ) -> Path:
-    """A consumer tree. With `enclave=True` it also carries an
-    `enclave_manifest.yaml`, which is the variant `check.py`'s enclave arm
-    walks and which nothing in the tree composes a project around today.
-
-    `enclave_pin` re-points the approved product at a pin that actually
-    exists — the checked-in fixture's `4f7c2a1…` resolves nowhere, so without
-    this the arm can only ever be walked as far as its first error.
-    """
+    """A consumer tree: `metadata.json` plus `imports`."""
     root.mkdir(parents=True, exist_ok=True)
     shutil.copy(V2_MINIMAL, root / "metadata.json")
     for imp in imports or []:
         write_import(root, imp)
-    if enclave:
-        manifest = yaml.safe_load(ENCLAVE_MANIFEST.read_text(encoding="utf-8"))
-        if enclave_pin is not None:
-            for ap in manifest["approved_products"]:
-                ap["pin"] = enclave_pin
-        (root / "enclave_manifest.yaml").write_text(
-            yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
-        )
     return root
 
 
@@ -105,8 +86,8 @@ def set_github_url(project: Path, url: str) -> None:
 
 @pytest.fixture
 def consumer_project(tmp_path: Path):
-    """Returns the builder, not a tree — a test that needs two producers, or
-    the enclave variant, needs to say so.
+    """Returns the builder, not a tree — a test that needs two producers needs
+    to say so.
 
     Each call gets its own directory. A shared one silently merges the second
     build into the first: same `Path` back, both sets of imports on disk, and

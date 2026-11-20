@@ -244,69 +244,71 @@ mintd data import my-cleaned-survey --bump --path data/final/survey.parquet
 
 ## Example: enclave workflow
 
-For air-gapped / governed-access environments where data leaves a secure
-machine via a manifest + archive instead of S3:
+For a locked-down server that only receives data by file. The enclave is an
+ordinary consumer of data products; `enclave_manifest.yaml` says which
+versions may cross.
 
 On the networked machine:
 
 ```bash
 mintd init enclave my-restricted-analysis
 cd enclave_my-restricted-analysis
-
-mintd enclave add producer-repo --pin <git-sha>
-mintd enclave pull                          # fetch outside the enclave
-mintd enclave package                       # bundle into a transfer archive
 ```
 
-**Bundles are incremental.** `package` skips products already recorded in
-`transferred[]`, so each archive carries only what hasn't crossed the gap yet:
+Approve each product at a full producer commit in `enclave_manifest.yaml`:
 
-```
-$ mintd enclave package
-skipped 2 already-transferred products: claims, prices (pass --resend to ship them again)
-packaged: transfers/transfer-2026-07-28-000001.tar.gz
-```
-
-When nothing is new it says so and exits 0 without building an archive:
-
-```
-$ mintd enclave package
-nothing new to package: all 3 downloaded product(s) have already crossed the gap
-a bundle that was built is recorded as transferred even if it never arrived — to re-ship:
-  mintd enclave package --resend
+```yaml
+approved_products:
+  - repo: my-cleaned-survey
+    pin: 0123456789abcdef0123456789abcdef01234567
+    # source_path: data/final/survey.parquet   # one output; omit for the primary
+    # all: true                                # or every output at that pin
 ```
 
-A bundle counts as transferred when it's *built*, not when it arrives. If an
-archive is lost in transit, re-ship it with `mintd enclave package --resend
-<repo>`.
-
-Inside the enclave, after the archive is delivered:
+`mintd check` loads the manifest as `package` does, so a mistyped pin or a
+misspelt key shows up as an error before you package. Then:
 
 ```bash
-mkdir -p incoming && tar -xzf transfer-2026-07-28-000001.tar.gz -C incoming
-python3 incoming/land.py
+mintd enclave package     # import the approved versions, bundle the new ones
 ```
 
-Every archive ships with its own generated `README.md` — listing exactly which
-products, pins and version folders it carries, and where they go — plus
-`land.py`, which does the placement. `land.py` uses **only the Python standard
-library**: no pip, no network, no DVC, no mintd, no PyYAML. It moves each
-product into `data/<repo>/<version-folder>/`, appends the audit row, refuses to
-run against the wrong enclave, and does nothing on a second run. `--dry-run`
-previews; `--repo <path>` points it at the repo if you extracted elsewhere.
+`package` imports each approved version into `data/imports/` as `mintd data
+import --rev <pin>` would. It writes `transfers/transfer-YYYY-MM-DD-NNNNNN.zip`,
+checking every file against the MD5 its import records, and appends a
+`packaged` row to `transferred` in the manifest. The zip's paths mirror the
+enclave folder:
 
-This matters because mintd itself generally *can't* be installed inside the gap
-— it needs Python 3.11+, network access and DVC. If the enclave does happen to
-have mintd, `mintd enclave verify incoming` does the same job, and running it
-after `land.py` correctly reports nothing left to do.
+```
+data/<product>/<commit date>_<first 7 of the pin>/<producer path>/...
+transfers/<transfer id>/MD5SUMS        one "<md5>  <path>" line per file
+transfers/<transfer id>/manifest.json  the enclave, products and versions
+transfers/<transfer id>/README.md      the unzip and check commands
+```
 
-The manifest's `transferred[]` section is append-only by construction —
-`EnclaveManifest.save()` refuses to write if an existing entry was
-mutated, so the audit trail can't be silently rewritten.
+The commit date is the pinned commit's, in UTC, so every enclave names a
+version alike. To move to a newer version, change the row's `pin`
+(`mintd check --upgrades` shows which imports moved on). **Bundles are
+incremental**: versions already in `transferred` are skipped, and when nothing
+is new it says so and exits 0. A bundle counts as sent when it is built;
+re-ship a lost one with `mintd enclave package --resend`.
 
-> **Not yet verified:** neither landing path checksums the delivered files
-> against the recorded `artifact_pin`, so in-flight corruption is not currently
-> detected. Treat the audit trail as a record of provenance, not of integrity.
+Inside the enclave, copy the zip into the enclave folder and, on Linux:
+
+```bash
+unzip -n transfer-2026-07-28-000001.zip
+md5sum -c transfers/transfer-2026-07-28-000001/MD5SUMS
+```
+
+`unzip -n` never overwrites a file already in place, so a new version lands
+beside the old one and a resent bundle changes nothing. The check prints one
+line per file, each ending in `OK`, and exits non-zero if any file is damaged.
+Like `md5sum -c`, it covers every file the bundle lists, not extra files
+already in the folder. The bundle's `README.md` has the same two steps for
+macOS (`md5`) and Windows (`Expand-Archive` and `Get-FileHash`). Nothing inside
+needs Python or mintd.
+
+`transferred` is append-only by construction: mintd only adds lines at the end
+of the manifest, one JSON object per row.
 
 ## Example: files that aren't data products
 
@@ -360,7 +362,7 @@ mintd check    [path] [--upgrades]                Validate metadata, output deli
 mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
-mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
+mintd enclave  package|verify                     package: bundle approved versions not yet sent, as a zip
 mintd registry register|update|status|sync        Catalog operations
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
 mintd config   show|setup|validate

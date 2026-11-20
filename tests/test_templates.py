@@ -127,10 +127,12 @@ def test_enclave_renders_transfer_scripts(tmp_path: Path) -> None:
     )
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
     assert "enclave_manifest.yaml" in rel
-    assert "scripts/pull_data.sh" in rel
-    assert "src/registry.py" in rel
+    # Superseded by `mintd enclave package`, and they called removed verbs.
+    assert "scripts/pull_data.sh" not in rel
+    assert "src/registry.py" not in rel
+    assert "src/download.py" not in rel
     # The v1 inside-enclave path is gone: all four failed against a real v2
-    # archive. Landing is `land.py`, shipped inside each transfer instead.
+    # archive. A bundle is unzipped and checked with the system's own tools.
     assert "enclave_cli.py" not in rel
     assert "src/transfer.py" not in rel
     assert "scripts/unpack_transfer.sh" not in rel
@@ -1017,22 +1019,6 @@ def test_render_scaffold_matrix_no_unrendered_markers(
         assert "{%" not in text, f"{project_type}/{language}: unrendered block in {path.name}"
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="POSIX exec bit; the scaffolded .sh are bash-only (Windows GA "
-    "tracks .ps1 siblings — see project_windows_support_followup)",
-)
-def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
-    """Enclave transfer shell scripts must ship with 0o755. The legacy
-    workflow `bash scripts/pull_data.sh` relies on the exec bit."""
-    render_scaffold(
-        project_type="enclave", name="foo", language="python", target_dir=tmp_path
-    )
-    for rel in ("scripts/pull_data.sh",):
-        mode = (tmp_path / rel).stat().st_mode
-        assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
-
-
 @pytest.mark.parametrize("project_type", ["data", "project", "code", "enclave"])
 def test_scaffolds_write_no_commit_hooks(tmp_path: Path, project_type: str) -> None:
     """Nothing installed the scaffold's pre-commit hooks, so they never ran: init no
@@ -1059,27 +1045,11 @@ def test_scaffold_template_names_resolve_to_vendored_files() -> None:
                 )
 
 
-def test_gitignore_negates_dvc_pointers_under_downloads(tmp_path: Path) -> None:
-    """The scaffolded `.gitignore` must keep bulk data under `downloads/`
-    ignored while leaving DVC `.dvc` pointers trackable — else `dvc import`
-    refuses to write into the enclave staging tree (slice 47, Failure 2)."""
-    import subprocess
-
-    from tests.scaffold_contract import is_ignored
-
-    render_scaffold(
-        project_type="enclave", name="foo", language="python", target_dir=tmp_path
-    )
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-
-    assert not is_ignored(tmp_path, "downloads/provider-x/_staging/outputs.dvc")
-    assert is_ignored(tmp_path, "downloads/provider-x/_staging/outputs/part.parquet")
-
-
 def test_enclave_gitignore_covers_transfers(tmp_path: Path) -> None:
-    """Transfer archives carry restricted data and are one `git add -A` from a
-    commit. Landing receipts under `transfers/received/` must stay trackable —
-    a receipt that can never be committed is not a receipt."""
+    """Transfer zips carry restricted data and are one `git add -A` from a
+    commit, as is landed data. Each bundle's record under
+    `transfers/<transfer id>/` must stay trackable: inside the enclave it is
+    the record of what landed."""
     import subprocess
 
     from tests.scaffold_contract import is_ignored
@@ -1089,9 +1059,11 @@ def test_enclave_gitignore_covers_transfers(tmp_path: Path) -> None:
     )
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
 
-    assert is_ignored(tmp_path, "transfers/transfer-2026-05-15-000000.tar.gz")
-    assert is_ignored(tmp_path, "incoming/land.py")
-    assert not is_ignored(tmp_path, "transfers/received/transfer-2026-05-15-000000.yaml")
+    assert is_ignored(tmp_path, "transfers/transfer-2026-05-15-000000.zip")
+    assert is_ignored(tmp_path, "transfer-2026-05-15-000000.zip"), "where it is copied to be unzipped"
+    assert is_ignored(tmp_path, "data/demo/2026-11-15_abc1234/data/final/a.csv")
+    for record in ("MD5SUMS", "manifest.json", "README.md"):
+        assert not is_ignored(tmp_path, f"transfers/transfer-2026-05-15-000000/{record}")
 
 
 def test_enclave_readme_documents_landing(tmp_path: Path) -> None:
@@ -1103,38 +1075,16 @@ def test_enclave_readme_documents_landing(tmp_path: Path) -> None:
     readme = next(p for p in written if p.name == "README.md")
     text = readme.read_text(encoding="utf-8")
 
-    assert "tar -xzf" in text
-    assert "land.py" in text
+    assert "unzip -n" in text
+    assert "md5sum -c" in text
+    assert "land.py" not in text
+    assert "tar -xzf" not in text
+    assert "enclave pull" not in text
     # The deleted v1 path, the wrong binary name, and a flag that never existed.
     assert "enclave_cli.py" not in text
     assert "unpack_transfer.sh" not in text
     assert "mint enclave" not in text
     assert "pull --all" not in text
-
-
-@pytest.mark.parametrize("template_name", ["package.py.j2"])
-def test_transfer_manifest_default_schema_version_validates(
-    template_name: str, tmp_path: Path
-) -> None:
-    """A transfer manifest built from a source manifest that omits
-    ``schema_version`` must default to ``"2.0"`` and validate against
-    ``TransferManifest`` (slice 46). Guards the fallback default in the
-    generated transfer/package scripts against future drift back to ``"1.0"``.
-    """
-    from mintd.enclave import TransferManifest
-
-    source = render_template(template_name, _MIN_CONTEXT)
-    namespace: dict[str, object] = {"__file__": str(tmp_path / "script.py")}
-    exec(compile(source, template_name, "exec"), namespace)
-
-    # Simulate an enclave manifest missing ``schema_version`` (hand-edited,
-    # older file, or partial write) with no downloaded contents.
-    namespace["load_manifest"] = lambda: {"enclave_name": "foo"}
-
-    manifest = namespace["create_transfer_manifest"]({})
-
-    assert manifest["schema_version"] == "2.0"
-    TransferManifest.model_validate(manifest)
 
 
 @pytest.mark.parametrize(

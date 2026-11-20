@@ -123,7 +123,7 @@ class DvcNotInRepoError(DvcOpError):
     """A `dvc` command ran outside a DVC repository (no `.dvc/` scaffold).
 
     Distinct from a pin/repo problem: the consumer-side fix is `dvc init`
-    (which `enclave_pull` now does lazily), not checking the producer's pin.
+    (which `enclave_package` does lazily), not checking the producer's pin.
     """
 
 

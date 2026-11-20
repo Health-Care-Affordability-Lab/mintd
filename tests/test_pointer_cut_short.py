@@ -159,9 +159,20 @@ FILES_NULL = "outs:\n- path: final\n  hash: md5\n  files:\n"
     (f"outs:\n- md5: {A}\n  path: x\n  cloud:\n    storage:\n      etag\n", "the version block of x is incomplete"),
     (f"outs:\n- md5: {A}\n  path: x\n  cloud:\n    storage:\n      version_id: [v]\n",
      "the version block of x is incomplete"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: {A}\n  - relpath: a.csv\n    md5: 3b5d5c3712955042212316173ccf37be\n",
+     "the file list of final lists a path twice, which dvc never writes"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: 1\n    md5: {A}\n  - relpath: '1'\n    md5: 3b5d5c3712955042212316173ccf37be\n",
+     "the file list of final lists a path twice, which dvc never writes"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: [a.csv]\n    md5: {A}\n",
+     "a file entry of final is not in the shape dvc writes"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: {{a: b}}\n    md5: {A}\n",
+     "a file entry of final is not in the shape dvc writes"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: !!set {{a.csv: null}}\n    md5: {A}\n",
+     "a file entry of final is not in the shape dvc writes"),
 ], ids=["empty", "outs-null", "outs-empty", "out-null", "no-path", "no-hash", "md5-null", "files-null",
         "entry-null", "entry-no-md5", "entry-no-relpath", "entry-size-not-a-number", "size-not-a-number",
-        "not-yaml", "cloud-key-cut", "remote-entry-cut", "version-id-not-text"])
+        "not-yaml", "cloud-key-cut", "remote-entry-cut", "version-id-not-text", "a-path-listed-twice",
+        "a-path-listed-twice-as-a-number-and-text", "relpath-a-list", "relpath-a-mapping", "relpath-a-set"])
 def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
     """Mutations, each through `_check_out` / `check_dvc_file`: let a null or
     empty `outs` through, a null out, a missing path, a missing hash, a null
@@ -185,7 +196,11 @@ def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail
      "the file list of data/out is missing"),
     (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {A}\n      size: two\n",
      "a value of data/a.csv is not in the shape dvc writes"),
-], ids=["empty", "stages-null", "stage-null", "outs-null", "no-hash", "hash-null", "files-null", "size-not-a-number"])
+    ("schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out\n      hash: md5\n      files:\n"
+     f"      - relpath: a.csv\n        md5: {A}\n      - relpath: a.csv\n        md5: 3b5d5c3712955042212316173ccf37be\n",
+     "the file list of data/out lists a path twice, which dvc never writes"),
+], ids=["empty", "stages-null", "stage-null", "outs-null", "no-hash", "hash-null", "files-null", "size-not-a-number",
+        "a-path-listed-twice"])
 def test_a_dvc_lock_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
     """Mutations: `check_lock` lets a null stage or stage outs through, or
     an out with no `hash` key, or a null one -> red."""

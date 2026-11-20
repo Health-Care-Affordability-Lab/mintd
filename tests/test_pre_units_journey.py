@@ -36,7 +36,6 @@ from mintd._config import ConfigError
 from mintd.catalog import CatalogAlreadyExists, GitCatalogClient
 from mintd.model import Metadata
 from tests._dvc_fixtures import write_lock
-from tests._enclave_fixtures import stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.fast_sync_ops import _FakeFastSyncOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
@@ -164,24 +163,10 @@ def _seed_project(tmp_path: Path) -> Path:
     return proj
 
 
-def _register_provider(registry_url: str, work_dir: Path) -> None:
-    """Seed the one entry the staged enclave manifest approves."""
-    data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
-    client = GitCatalogClient(
-        registry_repo_url=registry_url,
-        work_dir=work_dir,
-        git_ops=_FakeRegistryGitOps(),
-    )
-    client.register(Metadata.model_validate(data))
-
-
 @pytest.fixture
 def journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_empty: Path):
-    """The world: a migrated v1 project with an approved enclave product, a real
-    local-git registry, a fake dvc and a stubbed `gh`."""
+    """The world: a migrated v1 project, a real local-git registry, a fake dvc
+    and a stubbed `gh`."""
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     cache_dir = tmp_path / "cache"
@@ -189,12 +174,7 @@ def journey(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remote_registry_emp
     _write_config(config_dir, registry_url=None, cache_dir=cache_dir)
 
     registry_url = str(remote_registry_empty)
-    _register_provider(registry_url, tmp_path / "seed-work")
-
     proj = _seed_project(tmp_path)
-    stage_enclave_manifest(proj)
-    _git(["add", "-A"], cwd=proj)
-    _git(["commit", "-m", "enclave manifest"], cwd=proj)
 
     git_ops = _FakeRegistryGitOps()
     dvc_ops = _FakeDvcOps()
@@ -233,8 +213,6 @@ def test_local_loop_never_manufactures_a_failure(journey, capsys) -> None:
     configure_registry()
 
     assert cli.main(["check", str(proj)]) == 0, _drain(capsys)
-    # The third call site P2 repaired: an approved enclave product blocked
-    # `register` the same way it blocked `check` and `publish`.
     assert cli.main(["registry", "register", str(proj)]) == 0, _drain(capsys)
     assert cli.main(["publish", "--path", str(proj), "--yes"]) == 0, _drain(capsys)
 
@@ -606,8 +584,7 @@ def payload_journey(
         if mutate is not None:
             mutate(data)
         # `gh` is a network boundary and is the one thing faked here, by
-        # CONSTRUCTOR ARGUMENT rather than monkeypatch — the same seam
-        # `_register_provider` above uses. The catalog client itself, the git
+        # CONSTRUCTOR ARGUMENT rather than monkeypatch. The catalog client itself, the git
         # clone into the bare registry and the entry it writes are all real,
         # which is what the `data import` leg below then reads back through
         # the untouched `_resolve_catalog_client`.
@@ -1434,125 +1411,6 @@ def test_cli_data_pull_partial_failure_prints_a_summary_not_a_traceback(
     assert "dvc pull failed (exit 1)" not in out, out
     assert "does not exist as an output or a stage name" not in out, out
     assert (dest / PRIMARY_OUT / "part.csv").read_bytes() == b"v1\n"
-
-
-def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
-    """`mintd enclave pull` — the restricted lane, with real bytes.
-
-    The enclave arm has had a consumer *fixture* since 1a but no journey: no
-    test had ever driven `enclave pull` to the point where a file appears. It
-    matters more here than on the ordinary lane because the enclave's whole
-    premise is that only approved products cross the boundary, and "it was
-    approved" and "it arrived" are different claims.
-
-    `_FakeRegistryGitOps` stands in for `gh` and nothing else; the manifest,
-    the catalog entry, the pin and the dvc import are all real.
-    """
-    producer, consumer, _register = payload_journey
-    producer.publish({"outputs/cms_based": {"part.csv": b"enclave\n"}})
-
-    # The catalog entry the manifest approves, pointed at the local producer.
-    data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
-    data["repository"]["github_url"] = producer.url
-    data["data_products"]["primary"] = "outputs/cms_based/"
-    data["data_products"]["outputs"] = [
-        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
-         "last_published": ""}
-    ]
-    GitCatalogClient(
-        registry_repo_url=_registry_url_from_config(),
-        work_dir=consumer.parent / "enclave-seed",
-        git_ops=_FakeRegistryGitOps(),
-    ).register(Metadata.model_validate(data))
-
-    # The manifest, pinned at the producer's REAL head — the fixture's
-    # hardcoded pin is a dead sha and would fail at fetch, not at approval.
-    (consumer / "enclave_manifest.yaml").write_text(
-        "schema_version: '2.0'\n"
-        "enclave_name: my_workspace\n"
-        "approved_products:\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
-        f"    pin: {producer.head_sha}\n"
-        "    source_path: outputs/cms_based/\n"
-        "downloaded: []\n"
-        "transferred: []\n",
-        encoding="utf-8",
-    )
-
-    assert cli.main(["enclave", "pull"]) == 0, _drain(capsys)
-
-    landed = sorted((consumer / "downloads").rglob("part.csv"))
-    assert landed, f"nothing under downloads/: {sorted((consumer / 'downloads').rglob('*'))}"
-    assert landed[0].read_bytes() == b"enclave\n"
-
-
-def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> None:
-    """R1, asserted where the harm lands: the manifest on disk.
-
-    The P5 shape — a second subscription inherits the repo's recorded pin,
-    and its path only exists at a LATER commit. The old drift walk
-    short-circuited that row to "up to date" (path absent from the pinned
-    outputs), so bare `enclave bump` returned "up to date" with the pin
-    unmoved and the advisory sent users through `--force`, which skips every
-    guard. Under the md5 rule the row is drift, and the guarded path moves
-    the pin.
-    """
-    import yaml as _yaml
-
-    producer, consumer, _register = payload_journey
-    producer.publish({"outputs/cms_based": {"part.csv": b"v1\n"}})
-    pin = producer.head_sha
-
-    data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
-    data["repository"]["github_url"] = producer.url
-    data["data_products"]["primary"] = "outputs/cms_based/"
-    data["data_products"]["outputs"] = [
-        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
-         "last_published": ""}
-    ]
-    GitCatalogClient(
-        registry_repo_url=_registry_url_from_config(),
-        work_dir=consumer.parent / "enclave-seed",
-        git_ops=_FakeRegistryGitOps(),
-    ).register(Metadata.model_validate(data))
-
-    # The producer registers AND publishes a second output — after the pin.
-    producer.add_output("outputs/extra/")
-    producer.publish({"outputs/extra": {"part.csv": b"x1\n"}}, message="extra")
-    assert producer.head_sha != pin
-
-    (consumer / "enclave_manifest.yaml").write_text(
-        "schema_version: '2.0'\n"
-        "enclave_name: my_workspace\n"
-        "approved_products:\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
-        f"    pin: {pin}\n"
-        "    source_path: outputs/cms_based/\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
-        f"    pin: {pin}\n"  # inherited (D1) — predates outputs/extra/
-        "    source_path: outputs/extra/\n"
-        "downloaded: []\n"
-        "transferred: []\n",
-        encoding="utf-8",
-    )
-
-    assert cli.main(["enclave", "bump", "demo-xw"]) == 0, _drain(capsys)
-
-    manifest = _yaml.safe_load(
-        (consumer / "enclave_manifest.yaml").read_text(encoding="utf-8")
-    )
-    pins = {ap["pin"] for ap in manifest["approved_products"]}
-    assert pins == {producer.head_sha}, (
-        f"bare bump left the manifest at {pins}; expected every row moved "
-        f"to {producer.head_sha}"
-    )
 
 
 def test_failed_import_through_dotdot_keeps_a_destination_that_was_already_there(

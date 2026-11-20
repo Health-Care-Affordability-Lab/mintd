@@ -66,6 +66,7 @@ _TMP_TAIL = ".tmp"
 
 def _atomic_write_text(
     path: Path, content: str, *, tmp_suffix: str | None = None, newline: str | None = None,
+    mode: int | None = None,
 ) -> None:
     """Write ``content`` to ``path`` atomically, destroying no neighbour.
 
@@ -105,6 +106,10 @@ def _atomic_write_text(
 
     ``newline`` is ``open``'s: the default writes ``\n`` as the platform's
     line ending; ``""`` writes ``content`` exactly, to put bytes back as read.
+    ``mode``, when given, is set on ``path`` after the rename, so it keeps a
+    mode its caller read from it (a read-only file stays read-only). Not on
+    the temp: Windows cannot delete a read-only temp when the rename fails. A
+    crash between the rename and the chmod leaves the default mode.
 
     The failure arm is not optional. A guessable temp self-healed (the next
     run overwrote it); an unguessable one would strand a fresh orphan per
@@ -136,4 +141,6 @@ def _atomic_write_text(
         # Ctrl-C between the open and the replace lands here too.
         tmp.unlink(missing_ok=True)
         raise
+    if mode is not None:
+        os.chmod(path, mode)
     _try_fsync_parent_dir(path)

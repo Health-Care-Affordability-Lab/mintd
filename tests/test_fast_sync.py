@@ -11,6 +11,7 @@ mock_aws` (legacy `mock_s3` is removed).
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -39,6 +40,7 @@ from mintd._fast_sync_ops import (
     parse_dvc_outs,
     partition_pipeline_outs,
     parse_s3_url,
+    read_cached_dir_manifest,
     s3_key_for,
     s3_key_for_out,
     spot_check_versions,
@@ -2722,3 +2724,47 @@ def test_retry_transient_backoff_caps_at_8s() -> None:
     assert [c.args[0] for c in mock_sleep.call_args_list] == [
         0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0,
     ]
+
+
+@pytest.mark.parametrize("tamper", ["drop an entry", "swap an md5"])
+def test_a_cached_dir_manifest_that_does_not_hash_to_its_name_is_not_used(tmp_path: Path, tamper: str) -> None:
+    """Every caller reads None as "not usable from cache". A list changed in
+    place can stay valid JSON, so it is used only when its bytes hash to the
+    tree md5 it is filed under."""
+    entries = [DvcFileEntry(md5=hashlib.md5(n.encode()).hexdigest(), relpath=n, size=1) for n in ("a.csv", "b.csv")]
+    md5 = ensure_dir_manifest(tmp_path, entries)
+    assert [e.relpath for e in read_cached_dir_manifest(tmp_path, md5) or []] == ["a.csv", "b.csv"]
+    path = cache_path_for(tmp_path, md5 if md5.endswith(".dir") else f"{md5}.dir")
+    path.chmod(0o644)
+    listing = json.loads(path.read_bytes())
+    if tamper == "drop an entry":
+        listing = listing[:1]
+    else:
+        listing[0]["md5"] = hashlib.md5(b"other").hexdigest()
+    path.write_text(json.dumps(listing), encoding="utf-8")
+
+    assert read_cached_dir_manifest(tmp_path, md5) is None
+
+
+def test_a_cached_dir_manifest_listing_a_path_twice_is_not_used(tmp_path: Path) -> None:
+    """dvc lists each path once. A list naming one twice, filed under the md5
+    of its own bytes, would answer for one file with two md5s, depending on
+    which entry a reader takes; every reader gets None instead."""
+    entries = [DvcFileEntry(md5=hashlib.md5(b"a").hexdigest(), relpath="a.csv", size=1),
+               DvcFileEntry(md5=hashlib.md5(b"evil").hexdigest(), relpath="a.csv", size=1)]
+    md5 = ensure_dir_manifest(tmp_path, entries)
+
+    assert read_cached_dir_manifest(tmp_path, md5) is None
+
+
+def test_fetch_dir_manifest_refuses_a_list_naming_a_path_twice(s3_versioned, tmp_path: Path) -> None:
+    """The same parse as read_cached_dir_manifest, so the same rule: a list on
+    the remote that names a.csv twice, under the md5 of its own bytes, is not
+    one dvc wrote, and nothing of it stays in the cache."""
+    s3, bucket = s3_versioned
+    entries = [DvcFileEntry("9a0364b9e99bb480dd25e1f0284c8555", "a.csv"),
+               DvcFileEntry("8c736521e9a8e2eee7e8a13a6e88f1ce", "a.csv")]
+    dir_md5 = _put_dir_manifest(s3, bucket, "", entries)
+
+    assert fetch_dir_manifest(s3, bucket, "", dir_md5, tmp_path / "cache") is None
+    assert not cache_path_for(tmp_path / "cache", dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir").exists()

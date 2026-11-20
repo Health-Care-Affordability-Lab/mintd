@@ -3,8 +3,8 @@
 Real files, no doubles: `check`'s delivery gate reads `.dvc` pointers,
 `dvc.lock` and `.dvc/config` and nothing else, so the fixture IS the project.
 Shared by test_dvc_state / test_check / test_cli / test_publish / the scaffold
-journey the way `tests/_enclave_fixtures.py` is, and deliberately not under
-`tests/_fakes/` (that directory owes every module a contract-test licence).
+journey, and deliberately not under `tests/_fakes/` (that directory owes every
+module a contract-test licence).
 
 Facts the writers encode, because a fixture that gets one wrong passes for the
 wrong reason:

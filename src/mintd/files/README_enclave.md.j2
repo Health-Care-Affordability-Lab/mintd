@@ -1,138 +1,83 @@
 # {{ full_project_name }}
 
-Secure data consumption workspace for air-gapped enclave environments.
+Versioned data products, brought into a locked-down server.
 
-## Overview
+## How it works
 
-This enclave workspace manages versioned data transfers from the Data Product Catalog to secure, air-gapped environments. Data is pulled on a networked machine, packaged for physical transfer, and verified upon receipt in the enclave.
+`enclave_manifest.yaml` lists the data products approved for this enclave,
+each pinned to a producer commit. On a networked machine, `mintd enclave
+package` imports exactly those versions and bundles the ones not yet sent into
+one zip. Inside the enclave, you unzip it in this folder and check every file
+with the system's own MD5 tool. Nothing inside needs Python or mintd.
 
-## Key Features
+## 1. Approve a product (networked machine)
 
-- **Registry Integration**: Discover and pull approved data products from the Data Product Catalog
-- **Version Management**: Keep all versions for reproducibility, with duplicate warnings
-- **Bulk Operations**: Pull latest versions of all approved data products with single command
-- **Data Integrity**: SHA256 checksum validation for secure transfers
-- **Audit Trail**: Complete manifest of transferred data versions
+Add a row to `approved_products` in `enclave_manifest.yaml`:
 
-## Workflow
-
-### 1. Add Data Products to Enclave
-
-Add approved data products to the enclave manifest:
-
-```bash
-# Add a producer's primary data product
-mintd enclave add data_cms-provider-data-service
-
-# Add a second product from the same producer
-mintd enclave add data_cms-provider-data-service --source-path data/final/<product>
-
-# Or subscribe to every output it publishes
-mintd enclave add data_cms-provider-data-service --all
+```yaml
+approved_products:
+  - repo: my-cleaned-survey                       # as `mintd data list` shows it
+    pin: 0123456789abcdef0123456789abcdef01234567  # a full producer commit
+    # source_path: data/final/survey.parquet      # one output; omit for the primary
+    # all: true                                   # or every output at that pin
 ```
 
-### 2. Pull Data (Networked Machine)
+`mintd check` loads this file as `package` does, so a mistyped pin or a
+misspelt key shows up as an error before you package. To move to a newer
+version, change `pin`. `mintd check --upgrades` lists the imports whose
+producer has moved on.
 
-```bash
-# Pull every approved product
-mintd enclave pull
-
-# Pull one product
-mintd enclave pull data_cms-provider-data-service
-```
-
-Data you already have is not re-fetched. Pass `--force` to re-download.
-
-### 3. Package for Transfer (Networked Machine)
+## 2. Package (networked machine)
 
 ```bash
 mintd enclave package
-# Creates transfers/transfer-YYYY-MM-DD-NNNNNN.tar.gz
+# Creates transfers/transfer-YYYY-MM-DD-NNNNNN.zip
 ```
 
-Bundles are **incremental**: products already recorded in `transferred[]` are
-skipped, so each archive carries only what has not yet crossed the gap. If
-everything has already crossed, `package` says so and exits 0 without building
-an archive.
+Each approved version is imported into `data/imports/` as `mintd data import`
+would, and every file's MD5 is checked against its import as it goes into the
+zip. Bundles are **incremental**: versions already recorded in `transferred`
+are skipped, and when nothing is new it says so and exits 0. A bundle counts
+as sent when it is built; if one is lost in transit, re-ship it with
+`mintd enclave package --resend`.
 
-A bundle is recorded as transferred when it is *built*, not when it arrives. If
-an archive is lost in transit, re-ship it with:
+## 3. Land it (enclave)
+
+Copy the zip into this folder, then run the two commands for your system from
+here. On Linux:
 
 ```bash
-mintd enclave package --resend data_cms-provider-data-service
+unzip -n transfer-YYYY-MM-DD-NNNNNN.zip
+md5sum -c transfers/transfer-YYYY-MM-DD-NNNNNN/MD5SUMS
 ```
 
-### 4. Physical Transfer
+`unzip -n` never overwrites a file already in place. The check prints one line
+per file, and each should end in `OK`. The `README.md` the zip unzips under
+`transfers/<transfer id>/` gives the same two steps for macOS and Windows.
 
-Copy the transfer archive to the enclave via USB, secure file transfer, etc.
-
-### 5. Land the Data (Enclave)
-
-Every archive contains its own `README.md` describing exactly what is inside and
-where it goes, plus `land.py`, which does the placement for you:
-
-```bash
-cd /path/to/this-repo
-mkdir -p incoming && tar -xzf transfer-YYYY-MM-DD-NNNNNN.tar.gz -C incoming
-python3 incoming/land.py
-```
-
-`land.py` needs **only python3** — no pip, no network, no DVC, no mintd. It
-moves each product into `data/<product>/<version folder>/` and appends the
-audit row to `enclave_manifest.yaml`. Running it twice does nothing the second
-time. Use `--dry-run` to preview, and `--repo <path>` if you extracted the
-archive somewhere outside this repo.
-
-If this enclave happens to have mintd installed (it needs Python 3.11+, which
-many air-gapped hosts do not have), `mintd enclave verify incoming` does the
-same job.
-
-## Data Organization
+## Data layout
 
 ```
 data/
-└── {repo_name}/
-    └── {artifact_pin}-{pull_date}/
-        └── final/
-            └── *.dta, *.csv, etc.
+└── <product>/
+    └── <commit date>_<first 7 characters of the pin>/
+        └── <the producer's path, e.g. data/final/>
+transfers/
+└── <transfer id>/      MD5SUMS, manifest.json and README.md for one bundle
 ```
 
-The date in the folder name is the date the data was **pulled from the
-producer**, not the date it was transferred into the enclave. A folder dated
-months ago is not stale — it is the pinned version you asked for.
+A newer version lands in its own folder beside the older one. Never edit a
+version folder by hand. Each bundle adds one folder under `transfers/`, the
+record of what landed.
 
-## Manifest Structure
+## Security notes
 
-The `enclave_manifest.yaml` tracks all data operations:
-
-- **approved_products**: Data products this enclave can access
-- **downloaded**: Versions pulled to the networked repo
-- **transferred**: Versions verified on enclave
-
-## Security Notes
-
-- Data transfers require physical media (no network on enclave)
-- Every product is pinned by producer commit (`contract_pin`) and content hash
-  (`artifact_pin`); both travel with the archive
-- Complete audit trail maintained in `transferred[]`, which is append-only
-- Registry approval required before data can be accessed
-- `transfers/` and `incoming/` are git-ignored so restricted data cannot be
-  committed by accident
-
-## Requirements
-
-**Networked machine:** mintd (Python 3.11+), network access.
-
-**Enclave machine:** python3 only. `land.py` ships inside each transfer archive
-and uses nothing outside the standard library, so there is nothing to install
-across the air gap.
-
-## Getting Help
-
-```bash
-mintd enclave --help         # Show enclave commands
-mintd enclave list           # Show approved products
-```
+- Every version is pinned by producer commit and every file by MD5, from the
+  import pointer to the zip to the check inside.
+- `transferred` in `enclave_manifest.yaml` is append-only: mintd only adds lines
+  to the end of the file.
+- Transfer zips and `data/` are git-ignored, so restricted data cannot be
+  committed by accident; `transfers/<transfer id>/` records are tracked.
 
 ---
 This project was created by and is managed by [mintd](https://github.com/health-care-affordability-lab/mintd).

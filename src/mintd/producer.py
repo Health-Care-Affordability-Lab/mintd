@@ -263,9 +263,8 @@ class ProducerView:
     ) -> "ProducerView | ProducerError":
         """Resolve `repo` at `pin`, returning the error instead of raising.
 
-        ``pin=""`` means HEAD. That sentinel is how `check`'s consumer lanes
-        (`_consumer_findings_from_dvc`, `_consumer_findings_from_enclave_manifest`)
-        ask "where is the producer now?"; a HEAD failure there becomes a
+        ``pin=""`` means HEAD. That sentinel is how `check`'s consumer lane
+        (`_consumer_findings_from_dvc`) asks "where is the producer now?"; a HEAD failure there becomes a
         `drift_unknown` finding (`_head_unreadable_finding`), not "up to date".
         """
         try:

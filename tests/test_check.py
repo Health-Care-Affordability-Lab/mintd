@@ -6,8 +6,10 @@ These tests pin the producer- and consumer-section validation behavior.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,10 +17,10 @@ import pytest
 from typing import get_args
 
 from mintd._dvc_state import DeliveryState, delivery
-from mintd._registry_git_ops import GitOpError
 from mintd.check import _UNDELIVERABLE_KINDS, CheckFinding, check_project
 from mintd.model import DataProductOutput, DataProducts, Metadata
 from mintd.producer import ProducerError, ProducerView
+from tests._harness.consumer import Import, write_import
 from tests._dvc_fixtures import (
     REMOTE,
     stage_dvc_project,
@@ -161,6 +163,56 @@ def test_check_returns_only_producer_findings_in_slice_1(tmp_path: Path):
     findings = check_project(tmp_path)
 
     assert all(f.section == "producer" for f in findings)
+
+
+def _enclave_repo(tmp_path: Path, row: str) -> Path:
+    def _make(d):
+        d["project"]["type"] = "enclave"
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _make)
+    manifest = tmp_path / "enclave_manifest.yaml"
+    manifest.write_text(f"enclave_name: e\napproved_products:\n- repo: demo\n  {row}\ntransferred: []\n", encoding="utf-8")
+    return manifest
+
+
+def test_check_passes_an_enclave_manifest_package_can_load(tmp_path: Path) -> None:
+    manifest = _enclave_repo(tmp_path, f"pin: {'c' * 40}")
+
+    assert [f for f in check_project(tmp_path) if f.source == manifest] == []
+
+
+@pytest.mark.parametrize("row, problem", [
+    ("pin: abc1234", "approved_products.0.pin"),
+    (f"pin: {'c' * 40}\n  sorce_path: data/final", "approved_products.0.sorce_path"),
+], ids=["a-short-pin", "a-misspelt-key"])
+def test_check_reports_an_enclave_manifest_package_would_refuse(tmp_path: Path, row: str, problem: str) -> None:
+    """Plain check loads the manifest as `enclave package` does, so the
+    mistake shows up before package, as an error naming it."""
+    manifest = _enclave_repo(tmp_path, row)
+
+    findings = [f for f in check_project(tmp_path) if f.source == manifest]
+
+    assert [(f.severity, f.section, f.kind) for f in findings] == [("error", "consumer", "invalid_manifest")]
+    assert problem in findings[0].message
+    assert findings[0].hint
+
+
+@pytest.mark.parametrize("break_it, problem", [
+    (lambda m: m.write_bytes(m.read_text(encoding="utf-8").encode("utf-16")), "is not UTF-8"),
+    pytest.param(lambda m: m.chmod(0), "cannot be read", marks=pytest.mark.skipif(
+        sys.platform == "win32" or os.geteuid() == 0, reason="POSIX file permissions, as a non-root user")),
+], ids=["utf-16, as Windows PowerShell 5.1's > writes it", "unreadable"])
+def test_check_reports_an_enclave_manifest_it_cannot_read(tmp_path: Path, break_it, problem: str) -> None:
+    """A finding, not a traceback: publish and register gate on the same findings."""
+    manifest = _enclave_repo(tmp_path, f"pin: {'c' * 40}")
+    break_it(manifest)
+    try:
+        findings = [f for f in check_project(tmp_path) if f.source == manifest]
+    finally:
+        manifest.chmod(0o644)
+
+    assert [(f.severity, f.kind) for f in findings] == [("error", "invalid_manifest")]
+    assert problem in findings[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -546,74 +598,6 @@ def test_finding_source_field_round_trips(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Slice 8 — enclave manifest walker
-# ---------------------------------------------------------------------------
-
-from tests._enclave_fixtures import (  # noqa: E402
-    client_with_demo_xw as _client_with_demo_xw,
-    stage_enclave_manifest as _stage_enclave_manifest,
-)
-
-
-def test_consumer_section_walks_enclave_manifest_approved_products(tmp_path: Path):
-    _write_metadata(tmp_path)
-    manifest_path = _stage_enclave_manifest(tmp_path)
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    f = consumer_findings[0]
-    assert f.source == manifest_path
-    assert f.field_path == "approved_products[demo-xw]"
-
-
-def test_consumer_section_walks_both_dvc_files_and_enclave_manifest(tmp_path: Path):
-    _write_metadata(tmp_path)
-    _stage_dvc_fixture(tmp_path, "standalone_import.dvc", "standalone_import.dvc")
-    manifest_path = _stage_enclave_manifest(tmp_path)
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    dvc_findings = [f for f in consumer_findings if f.source != manifest_path]
-    manifest_findings = [f for f in consumer_findings if f.source == manifest_path]
-    assert len(dvc_findings) == 1
-    assert dvc_findings[0].field_path is None
-    assert len(manifest_findings) == 1
-    assert manifest_findings[0].field_path == "approved_products[demo-xw]"
-
-
-def test_consumer_section_handles_invalid_enclave_manifest(tmp_path: Path):
-    _write_metadata(tmp_path)
-    (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    assert consumer_findings[0].severity == "error"
-    assert consumer_findings[0].source == tmp_path / "enclave_manifest.yaml"
-
-
-def test_consumer_section_empty_approved_products_emits_nothing(tmp_path: Path):
-    _write_metadata(tmp_path)
-    (tmp_path / "enclave_manifest.yaml").write_text(
-        "schema_version: '2.0'\nenclave_name: my_workspace\napproved_products: []\n"
-        "downloaded: []\ntransferred: []\n"
-    )
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert consumer_findings == []
-
-
-# ---------------------------------------------------------------------------
 # Slice 9 — `kind` discriminator pins
 # ---------------------------------------------------------------------------
 
@@ -645,118 +629,6 @@ def test_consumer_dvc_error_findings_assign_correct_kinds(
     assert f.kind == expected_kind
     assert f.severity == expected_severity
     assert message_fragment in f.message
-
-
-@pytest.mark.parametrize(
-    "result,expected_kind,expected_severity",
-    [
-        (ProducerError.unreachable("repo", _PIN, "timeout"), "unreachable", "warning"),
-        # A warning, as for imports: the consumer can't restore the producer's history.
-        (ProducerError.pin_missing("repo", _PIN), "pin_missing", "warning"),
-        (ProducerError.metadata_missing("repo", _PIN), "metadata_missing", "error"),
-        (ProducerError.metadata_invalid("repo", _PIN, "bad"), "metadata_invalid", "error"),
-        (ProducerError.schema_too_old("repo", _PIN, "1.5"), "schema_too_old", "warning"),
-    ],
-)
-def test_consumer_manifest_error_findings_assign_correct_kinds(
-    tmp_path: Path, result, expected_kind, expected_severity
-):
-    _write_metadata(tmp_path)
-    _stage_enclave_manifest(tmp_path)
-    client = _client_with_demo_xw()
-    factory = _factory_returning(result)
-
-    findings = check_project(
-        tmp_path, upgrades=True, producer_view_factory=factory, client=client
-    )
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    f = consumer_findings[0]
-    assert f.kind == expected_kind
-    assert f.severity == expected_severity
-    assert f.source == tmp_path / "enclave_manifest.yaml"
-    assert f.field_path == "approved_products[demo-xw]"
-
-
-def test_consumer_manifest_invalid_finding_has_invalid_manifest_kind(tmp_path: Path):
-    _write_metadata(tmp_path)
-    (tmp_path / "enclave_manifest.yaml").write_text("schema_version: '1.0'\nenclave_name: x\n")
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    assert consumer_findings[0].kind == "invalid_manifest"
-
-
-def test_consumer_manifest_catalog_unresolved_finding_has_catalog_unresolved_kind(tmp_path: Path):
-    """`client=None` path → kind='catalog_unresolved'."""
-    _write_metadata(tmp_path)
-    _stage_enclave_manifest(tmp_path)
-    # No client passed; manifest walker emits a catalog_unresolved finding.
-
-    findings = check_project(tmp_path)
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    assert consumer_findings[0].kind == "catalog_unresolved"
-
-
-class _UnreachableRegistryClient:
-    """Catalog client whose every read fails the way an unreachable registry
-    does: `CatalogCache.ensure_fresh` shells out to `git clone`, which raises
-    `GitOpError` out of `_registry_git_ops`."""
-
-    def fetch(self, name: str):
-        raise GitOpError(["git", "clone", "--depth=1", "/nonexistent/registry.git"],
-                         "fatal: repository '/nonexistent/registry.git' does not exist")
-
-
-@pytest.mark.parametrize("upgrades", [False, True])
-def test_unreachable_registry_becomes_a_finding_not_an_exception(tmp_path: Path, upgrades: bool):
-    """A registry that cannot be reached is a documented failure path, not a
-    traceback. Both arms: `_resolve_approved_product_url` is called above the
-    `if not upgrades` branch, so plain `check` hits the network too."""
-    _write_metadata(tmp_path)
-    _stage_enclave_manifest(tmp_path)
-
-    findings = check_project(tmp_path, upgrades=upgrades, client=_UnreachableRegistryClient())
-    consumer_findings = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer_findings) == 1
-    f = consumer_findings[0]
-    assert f.kind == "catalog_unresolved"
-    assert f.severity == "error"
-    assert "demo-xw" in f.message
-    # Reports what git said rather than asserting a cause: the same exception
-    # covers an unreachable registry and a corrupt local cache.
-    assert "does not exist" in f.message
-    assert f.hint is not None
-    assert f.source == tmp_path / "enclave_manifest.yaml"
-
-
-def test_catalog_read_failure_does_not_blame_the_network_for_a_local_cache_fault(
-    tmp_path: Path,
-):
-    """A corrupt registry cache raises the same GitOpError as an unreachable
-    remote. The finding must carry git's own words and offer both remedies."""
-    _write_metadata(tmp_path)
-    _stage_enclave_manifest(tmp_path)
-
-    class _CorruptCacheClient:
-        def fetch(self, name: str):
-            raise GitOpError(
-                ["git", "checkout", "-f", "main"],
-                "error: pathspec 'main' did not match any file(s) known to git",
-            )
-
-    findings = check_project(tmp_path, client=_CorruptCacheClient())
-    f = [f for f in findings if f.section == "consumer"][0]
-
-    assert "did not match any file" in f.message
-    assert "registry cache" in (f.hint or "")
 
 
 # ---------------------------------------------------------------------------
@@ -907,59 +779,6 @@ def test_check_primary_mismatch_fires_for_non_data_type(tmp_path: Path):
     dp = [f for f in findings if f.kind and f.kind.startswith("data_products_")]
     assert len(dp) == 1
     assert dp[0].kind == "data_products_primary_mismatch"
-
-
-def test_consumer_summary_distinguishes_all_from_primary(tmp_path: Path):
-    """P5: the summary render paraphrased `subscription_label` and lost the
-    `<all>` case, so an all-outputs subscription read as `<primary>`."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40, all=True),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40),
-    ]).save(manifest_path)
-    client = _client_with_demo_xw()
-
-    findings = check_project(tmp_path, client=client)
-    messages = [f.message for f in findings if f.source == manifest_path]
-
-    assert any("<all>" in m for m in messages)
-    assert sum("<primary>" in m for m in messages) == 1
-
-
-def test_consumer_walk_resolves_each_producer_view_once(tmp_path: Path):
-    """P5 made a repo able to hold several rows, and the walk resolved producer
-    HEAD once per ROW. `try_at(repo, "")` "always pays the round-trip" by its
-    own docstring, so a three-subscription repo tripled the network cost of
-    every `check --upgrades` -- and `enclave bump` pays it again."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40,
-                        source_path="data/final/b"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="a" * 40),
-    ]).save(manifest_path)
-
-    calls: list[tuple[str, str]] = []
-    real = ProducerView.try_at
-
-    def counting_factory(repo_url: str, pin: str):
-        calls.append((repo_url, pin))
-        return real(repo_url, pin)
-
-    check_project(tmp_path, upgrades=True, client=_client_with_demo_xw(),
-                  producer_view_factory=counting_factory)
-
-    assert len(calls) == len(set(calls)), f"resolved the same view twice: {calls}"
-    # Three rows, one producer, two distinct pins asked for (the recorded one
-    # and the HEAD sentinel) -> at most two resolves, not six.
-    assert len(calls) <= 2, f"expected <=2 resolves for 3 rows of one repo, got {len(calls)}"
 
 
 # ---------------------------------------------------------------------------
@@ -1416,19 +1235,18 @@ def test_unreadable_dvc_yaml_is_never_a_verdict(tmp_path: Path):
 def test_dvc_yaml_is_fetched_once_per_repo_and_rev(tmp_path: Path):
     """The wdir memo is keyed (repo, rev) — coarser than the pointer memo's
     (repo, rev, path) — so one `dvc.yaml` serves every subscribed path of
-    that repo. Three rows must not mean three fetches per rev.
+    that repo. Three imports must not mean three fetches per rev.
 
     Mutation W4: key the memo on (repo, rev, path) -> fetch count triples.
     """
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
     from tests._fakes.producer import StaticFetcher
 
     _write_metadata(tmp_path)
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path=f"data/final/{leaf}")
-        for leaf in ("a", "b", "c")
-    ]).save(tmp_path / "enclave_manifest.yaml")
+    for leaf in ("a", "b", "c"):
+        write_import(tmp_path, Import(
+            name=leaf, producer_url=_VIEW_REPO, pin=_PIN,
+            producer_path=f"data/final/{leaf}", local_path=leaf,
+        ))
 
     store = {(_VIEW_REPO, rev, "dvc.yaml"): _scaffold_yaml() for rev in (_PIN, _HEAD)}
     for rev, md5 in ((_PIN, "a" * 32), (_HEAD, "c" * 32)):
@@ -1442,8 +1260,7 @@ def test_dvc_yaml_is_fetched_once_per_repo_and_rev(tmp_path: Path):
 
     fetcher = StaticFetcher({}, path_store=store)
     check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=_factory_by_pin({
+        tmp_path, upgrades=True, producer_view_factory=_factory_by_pin({
             _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
             "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
         }),
@@ -1496,106 +1313,6 @@ def test_lock_stage_dep_resolves_via_primary_fallback(tmp_path: Path):
 
     # Resolved via the pin view's primary -> a real verdict, not a stuck one.
     assert [f.kind for f in consumer] == ["drift"]
-
-
-def test_all_outputs_row_ignores_a_member_with_no_pointer(tmp_path: Path):
-    """`outputs[]` is hand-maintained metadata: nothing requires an entry to
-    have a top-level DVC pointer. Folding head-side absence into `unreadable`
-    let one such member (`docs/` here) veto the whole map — `drift_unknown`,
-    which blocks `enclave bump` for the repo permanently — while the member
-    that ACTUALLY moved was ignored. Only `None` is a read failure.
-
-    Mutation: re-add `head_map[p] == _POINTER_ABSENT` to `unreadable` ->
-    this reddens with drift_unknown.
-    """
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
-    ]).save(tmp_path / "enclave_manifest.yaml")
-
-    meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
-    meta = meta.model_copy(update={"data_products": DataProducts(
-        primary="data/final/",
-        outputs=[
-            DataProductOutput(path="data/final/", description="d", primary=True,
-                              last_published=""),
-            DataProductOutput(path="docs/", description="d", primary=False,
-                              last_published=""),
-        ],
-    )})
-    factory = _factory_by_pin({
-        _PIN: ProducerView(repo=_VIEW_REPO, pin=_PIN, metadata=meta),
-        "": ProducerView(repo=_VIEW_REPO, pin=_HEAD, metadata=meta),
-    })
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
-        # `docs/` has no pointer at either rev; `data/final/` really moved.
-        fetcher=_fetcher_serving({
-            (_VIEW_REPO, _PIN, "data/final.dvc"): _pointer_doc("a" * 32, "final"),
-            (_VIEW_REPO, _HEAD, "data/final.dvc"): _pointer_doc("c" * 32, "final"),
-        }),
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert [f.kind for f in consumer] == ["drift"], consumer[0].message
-    assert consumer[0].message == (
-        "producer's HEAD differs from your pin (<all>): data/final/ changed"
-    )
-
-
-def test_all_outputs_row_reaches_the_comparator_from_the_manifest(tmp_path: Path):
-    """The test above drives `_drift_finding_from_views` directly, so nothing
-    exercised the enclave call site's `all_outputs=ap.all` wiring: changing
-    it to a hardcoded `False` survived the entire suite, i.e. the `--all` map
-    comparison could be deleted from production invisibly.
-
-    Mutation: `all_outputs=ap.all` -> `all_outputs=False` at the enclave call
-    site -> this reddens (the single-path lane reads only the primary, so the
-    non-primary member's move is missed and the row reports up_to_date).
-    """
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
-    ]).save(manifest_path)
-
-    meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
-    meta = meta.model_copy(update={"data_products": DataProducts(
-        primary="data/final/",
-        outputs=[
-            DataProductOutput(path="data/final/", description="d", primary=True,
-                              last_published=""),
-            DataProductOutput(path="data/extract/", description="d", primary=False,
-                              last_published=""),
-        ],
-    )})
-    factory = _factory_by_pin({
-        _PIN: ProducerView(repo=_VIEW_REPO, pin=_PIN, metadata=meta),
-        "": ProducerView(repo=_VIEW_REPO, pin=_HEAD, metadata=meta),
-    })
-    # Only the NON-primary member moves. A row that silently degraded to the
-    # single-path lane would read `data/final/` alone and say up to date.
-    fetcher = _fetcher_serving({
-        (_VIEW_REPO, _PIN, "data/final.dvc"): _pointer_doc("a" * 32, "final"),
-        (_VIEW_REPO, _HEAD, "data/final.dvc"): _pointer_doc("a" * 32, "final"),
-        (_VIEW_REPO, _PIN, "data/extract.dvc"): _pointer_doc("b" * 32, "extract"),
-        (_VIEW_REPO, _HEAD, "data/extract.dvc"): _pointer_doc("c" * 32, "extract"),
-    })
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory, fetcher=fetcher,
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert [f.kind for f in consumer] == ["drift"]
-    assert "data/extract/" in consumer[0].message
 
 
 @pytest.mark.parametrize("abs_wdir_at", ["pin", "head"], ids=["pin", "head"])
@@ -1697,65 +1414,13 @@ def test_an_orphan_lock_stage_leaves_absence_a_verdict(tmp_path: Path) -> None:
     ) == "b" * 32
 
 
-def test_a_subpath_row_no_longer_blocks_its_drifting_sibling(tmp_path: Path) -> None:
-    """The compound shape D1 makes dangerous: one repo, two rows, one of them a
-    path inside the other. `enclave_bump` blocks the WHOLE repo on any row it
-    cannot evaluate (one pin per repo, so a partial bump is not a thing), so
-    the subpath row's `drift_unknown` vetoed a sibling with real drift — bare
-    `mintd enclave bump` exited 2, which is exactly the command `enclave add`'s
-    advisory points at.
-
-    Mutation: drop the enclosing-out fallback in `_match_out_md5` -> BumpBlocked.
-    """
-    from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_bump
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path=p)
-        for p in ("outputs/cms_based/", "outputs/cms_based/b.csv")
-    ]).save(manifest_path)
-
-    client = _client_with_demo_xw()
-    findings = check_project(
-        tmp_path, upgrades=True, client=client,
-        producer_view_factory=_factory_by_pin({
-            _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
-            "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
-        }),
-        fetcher=_fetcher_serving({
-            (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
-                ("a.csv", "a" * 32), ("b.csv", "b" * 32)),
-            (_VIEW_REPO, _HEAD, _OUT_PTR): _files_pointer(
-                ("a.csv", "a" * 32), ("b.csv", "z" * 32)),
-        }),
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-    assert sorted(f.kind or "" for f in consumer) == ["drift", "drift"], [
-        f.message for f in consumer
-    ]
-
-    def factory(url: str):
-        return _view_with_primary("outputs/cms_based/", pin=_HEAD), _HEAD
-
-    enclave_bump(
-        client, manifest_path=manifest_path, name="demo-xw",
-        producer_view_factory=factory, check_findings=findings,
-    )
-
-    assert EnclaveManifest.load(manifest_path).approved_products[0].pin == _HEAD
-
-
 def _subscribe(tmp_path: Path, source_path: str):
-    """An enclave subscribed to ONE producer path, plus the pin/HEAD factory."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
+    """A project importing ONE producer path at `_PIN`, plus the pin/HEAD factory."""
     _write_metadata(tmp_path)
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path=source_path),
-    ]).save(tmp_path / "enclave_manifest.yaml")
+    write_import(tmp_path, Import(
+        name="demo-xw", producer_url=_VIEW_REPO, pin=_PIN, producer_path=source_path,
+        local_path=Path(source_path.rstrip("/")).name,
+    ))
     return _factory_by_pin({
         _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
         "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
@@ -1778,8 +1443,8 @@ def test_path_inside_a_tracked_out_is_answered_by_that_out(
     own: `outputs/cms_based/b.csv` when the producer tracks
     `outputs/cms_based/`. Matching only the exact path found nothing, and the
     absence was rendered as "not published at the producer's HEAD" — a false
-    statement about the producer, and `drift_unknown` blocks `enclave bump`
-    for EVERY row of that repo, permanently.
+    statement about the producer, and `drift_unknown` blocks `data import --bump`
+    for that import, permanently.
 
     files-format carries per-file md5s in the fetched document, so the answer
     is exact: a SIBLING moving must stay invisible.
@@ -1789,8 +1454,7 @@ def test_path_inside_a_tracked_out_is_answered_by_that_out(
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
                 ("a.csv", "a" * 32), ("b.csv", "b" * 32)),
@@ -1818,8 +1482,7 @@ def test_path_inside_a_dir_out_falls_back_to_the_directory_hash(
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _pointer_doc("a" * 32 + ".dir"),
             (_VIEW_REPO, _HEAD, _OUT_PTR): _pointer_doc(head_md5),
@@ -1835,8 +1498,7 @@ def test_path_removed_from_a_tracked_out_is_not_a_silent_up_to_date(tmp_path: Pa
     bump has no target for it."""
     factory = _subscribe(tmp_path, "outputs/cms_based/b.csv")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
                 ("a.csv", "a" * 32), ("b.csv", "b" * 32)),
@@ -1878,25 +1540,12 @@ _A, _B, _OTHER = "../outputs/cms_based/a.csv", "../outputs/cms_based/b.csv", "..
 _PIN_LOCK = _scaffold_lock_outs((_A, "a" * 32), (_B, "b" * 32), (_OTHER, "0" * 32))
 
 
-def _directory_over_lock_outs(tmp_path: Path, head_lock: bytes, *, all_outputs=False):
-    """Findings for a subscription to `outputs/cms_based/` when only a
+def _directory_over_lock_outs(tmp_path: Path, head_lock: bytes):
+    """Findings for an import of `outputs/cms_based/` when only a
     scaffold-shaped `dvc.lock` exists at both revs — no `.dvc` anywhere."""
-    if all_outputs:
-        from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-        _write_metadata(tmp_path)
-        EnclaveManifest(enclave_name="e", approved_products=[
-            ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN, all=True),
-        ]).save(tmp_path / "enclave_manifest.yaml")
-        factory = _factory_by_pin({
-            _PIN: _view_with_primary("outputs/cms_based/", pin=_PIN),
-            "": _view_with_primary("outputs/cms_based/", pin=_HEAD),
-        })
-    else:
-        factory = _subscribe(tmp_path, "outputs/cms_based/")
+    factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
             (_VIEW_REPO, _HEAD, "dvc.yaml"): _scaffold_yaml(),
@@ -1960,8 +1609,7 @@ def test_exact_and_enclosing_still_win_over_beneath(tmp_path: Path, winner: str)
         return _scaffold_lock_outs((winner, "d" * 32 + ".dir"), (_A, beneath_md5))
     factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): _scaffold_yaml(),
             (_VIEW_REPO, _HEAD, "dvc.yaml"): _scaffold_yaml(),
@@ -1971,19 +1619,6 @@ def test_exact_and_enclosing_still_win_over_beneath(tmp_path: Path, winner: str)
     )
     consumer = [f for f in findings if f.section == "consumer"]
     assert [f.kind for f in consumer] == ["up_to_date"], consumer[0].message
-
-
-def test_all_outputs_directory_member_over_lock_outs_reports_drift(tmp_path: Path):
-    """The `--all` arm counts absent-at-both as equal, so a directory member
-    over lock outs read CLEAN while a file beneath it moved — a silent wrong
-    up_to_date, the bug class this lane exists to kill.
-
-    Mutation: delete the `beneath` branch -> up_to_date.
-    """
-    moved = _scaffold_lock_outs((_A, "a" * 32), (_B, "z" * 32), (_OTHER, "0" * 32))
-    consumer = _directory_over_lock_outs(tmp_path, moved, all_outputs=True)
-    assert [f.kind for f in consumer] == ["drift"], consumer[0].message
-    assert "outputs/cms_based/" in consumer[0].message
 
 
 def test_unresolvable_path_hint_does_not_assert_the_producer_withdrew_it(tmp_path: Path):
@@ -2027,8 +1662,7 @@ def test_subdirectory_of_a_files_format_out_is_answered_by_the_entries_beneath_i
     """
     factory = _subscribe(tmp_path, "outputs/cms_based/sub/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, _OUT_PTR): _files_pointer(
                 ("sub/a.csv", "a" * 32), ("b.csv", "b" * 32)),
@@ -2067,8 +1701,7 @@ def test_a_dropped_stage_never_feeds_the_beneath_digest(tmp_path: Path):
     ).encode()
     factory = _subscribe(tmp_path, "outputs/cms_based/")
     findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory,
+        tmp_path, upgrades=True, producer_view_factory=factory,
         fetcher=_fetcher_serving({
             (_VIEW_REPO, _PIN, "dvc.yaml"): two_stage_yaml("code"),
             (_VIEW_REPO, _HEAD, "dvc.yaml"): two_stage_yaml("/abs/code"),
@@ -2084,219 +1717,6 @@ def test_a_dropped_stage_never_feeds_the_beneath_digest(tmp_path: Path):
 # D-D — each consumer row carries its own subscription label
 # ---------------------------------------------------------------------------
 
-
-def test_enclave_rows_carry_their_own_subscription_label(tmp_path: Path):
-    """Three rows of one repo: ONE repo-keyed field_path (D1 — enclave_bump
-    fans over all rows under it), THREE distinct messages. `_render_findings`
-    prints only the message, so the label must live there."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/b"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN),
-    ]).save(manifest_path)
-    client = _client_with_demo_xw()
-
-    pin_view = _view_with_primary("outputs/cms_based/", pin=_PIN)
-    head_view = _view_with_primary("outputs/cms_based/", pin=_HEAD)
-    factory = _factory_by_pin({_PIN: pin_view, "": head_view})
-    fetcher = _fetcher_serving({
-        (_VIEW_REPO, rev, ptr): _pointer_doc("a" * 32, path)
-        for rev in (_PIN, _HEAD)
-        for ptr, path in (
-            ("data/final/a.dvc", "a"),
-            ("data/final/b.dvc", "b"),
-            (_OUT_PTR, "cms_based"),
-        )
-    })
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=client,
-        producer_view_factory=factory, fetcher=fetcher,
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert len(consumer) == 3
-    assert {f.field_path for f in consumer} == {"approved_products[demo-xw]"}
-    assert [f.message for f in consumer] == [
-        "up to date (data/final/a)",
-        "up to date (data/final/b)",
-        "up to date (<primary>)",
-    ]
-
-
-def test_enclave_head_unreachable_is_labelled_and_not_up_to_date(tmp_path: Path):
-    """Parity with the dvc arm: an unreachable HEAD is `drift_unknown`, not
-    a clean row. Still one labelled line per row — unlabelled it prints N
-    identical lines, the exact complaint D-D exists to fix."""
-    from mintd.data import BumpBlocked
-    from mintd.enclave import ApprovedProduct, EnclaveManifest, enclave_bump
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/b"),
-    ]).save(manifest_path)
-    client = _client_with_demo_xw()
-
-    def factory(repo: str, pin: str):
-        if pin == "":
-            return ProducerError.unreachable(repo, pin, "network down")
-        return _view_with_primary("outputs/cms_based/", pin=_PIN)
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=client, producer_view_factory=factory,
-        fetcher=_fetcher_serving({}),
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert {f.kind for f in consumer} == {"drift_unknown"}
-    # `enclave_bump` finds its rows by `source` AND `field_path`; get either
-    # wrong and the offline bump raises ImportNotFound instead of blocking.
-    assert {f.field_path for f in consumer} == {"approved_products[demo-xw]"}
-    assert all(f.hint and _PIN[:7] in f.hint for f in consumer)
-    assert [f.message for f in consumer] == [
-        "cannot determine drift (data/final/a): cannot read the producer's "
-        "HEAD (unreachable: network down)",
-        "cannot determine drift (data/final/b): cannot read the producer's "
-        "HEAD (unreachable: network down)",
-    ]
-
-    # The enclave twin of `test_bump_blocks_when_the_producer_head_is_unreachable`,
-    # and the only binding on the `source=` the enclave arm passes: offline,
-    # `enclave bump` must block rather than silently no-op.
-    with pytest.raises(BumpBlocked) as ei:
-        enclave_bump(client, manifest_path=manifest_path, name="demo-xw",
-                     check_findings=findings)
-    assert ei.value.finding.kind == "drift_unknown"
-
-
-def test_enclave_error_findings_are_labelled_too(tmp_path: Path):
-    """An unreachable repo with three subscription rows otherwise prints
-    three identical unlabeled error lines — `_error_finding_for` kept the
-    twin of the defect D-D fixed in the up-to-date and degrade arms."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/b"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN),
-    ]).save(manifest_path)
-
-    def factory(repo: str, pin: str):
-        return ProducerError.unreachable(repo, pin, "network down")
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory, fetcher=_fetcher_serving({}),
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert {f.kind for f in consumer} == {"unreachable"}
-    assert [f.message for f in consumer] == [
-        "producer unreachable: network down (data/final/a)",
-        "producer unreachable: network down (data/final/b)",
-        "producer unreachable: network down (<primary>)",
-    ]
-
-
-def test_enclave_empty_pin_findings_are_labelled_too(tmp_path: Path):
-    """Two same-repo rows both with an empty pin otherwise produce two
-    byte-identical unlabeled error lines (same message, same field_path) —
-    the empty-pin arm kept the defect D-D fixed three lines below it."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="",
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin="",
-                        source_path="data/final/b"),
-    ]).save(manifest_path)
-
-    def factory(repo: str, pin: str):
-        return ProducerError.unreachable(repo, pin, "network down")
-
-    findings = check_project(
-        tmp_path, upgrades=True, client=_client_with_demo_xw(),
-        producer_view_factory=factory, fetcher=_fetcher_serving({}),
-    )
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert {f.kind for f in consumer} == {"pin_missing"}
-    assert [f.message for f in consumer] == [
-        "approved product 'demo-xw' has an empty pin (data/final/a)",
-        "approved product 'demo-xw' has an empty pin (data/final/b)",
-    ]
-
-
-def test_enclave_catalog_client_none_findings_are_labelled_too(tmp_path: Path):
-    """Two same-repo rows with no catalog client otherwise print two
-    byte-identical unlabeled error lines (same message, same field_path) —
-    the client-None arm kept the defect D-D fixed in its sibling arms."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/b"),
-    ]).save(manifest_path)
-
-    findings = check_project(tmp_path)
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert {f.kind for f in consumer} == {"catalog_unresolved"}
-    assert [f.message for f in consumer] == [
-        "catalog client not provided; cannot resolve producer URL for"
-        " demo-xw (data/final/a)",
-        "catalog client not provided; cannot resolve producer URL for"
-        " demo-xw (data/final/b)",
-    ]
-
-
-def test_enclave_catalog_resolve_failure_findings_are_labelled_too(tmp_path: Path):
-    """Two same-repo rows against an unreachable registry otherwise print two
-    byte-identical unlabeled error lines — the resolve-failure arm was the
-    last unlabeled per-row error emission in the enclave walk."""
-    from mintd.enclave import ApprovedProduct, EnclaveManifest
-
-    _write_metadata(tmp_path)
-    manifest_path = tmp_path / "enclave_manifest.yaml"
-    EnclaveManifest(enclave_name="e", approved_products=[
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="e", pin=_PIN,
-                        source_path="data/final/b"),
-    ]).save(manifest_path)
-
-    findings = check_project(tmp_path, client=_UnreachableRegistryClient())
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert {f.kind for f in consumer} == {"catalog_unresolved"}
-    msgs = [f.message for f in consumer]
-    assert msgs[0].endswith(" (data/final/a)")
-    assert msgs[1].endswith(" (data/final/b)")
-    # Identical apart from the label: same repo-level failure, but each line
-    # says which subscription row it belongs to.
-    assert msgs[0].removesuffix(" (data/final/a)") == msgs[1].removesuffix(
-        " (data/final/b)"
-    )
 
 # ---------------------------------------------------------------------------
 # An empty pin is refused by PLAIN `check`, not only by `--upgrades`
@@ -2345,26 +1765,6 @@ def test_plain_check_refuses_an_empty_dvc_rev_lock(tmp_path: Path, rev_lock_yaml
     # produces this state without any hand-editing, so the line has to say
     # how to get back. Mutation: drop the `hint=` -> this reddens.
     assert consumer[0].hint and "mintd data import" in consumer[0].hint
-
-
-@pytest.mark.parametrize("pin_yaml", ["''", "'   '"])
-def test_plain_check_refuses_an_empty_manifest_pin(tmp_path: Path, pin_yaml: str):
-    _write_metadata(tmp_path)
-    manifest = _stage_enclave_manifest(tmp_path)
-    manifest.write_text(
-        manifest.read_text(encoding="utf-8").replace(f"pin: {_PIN}", f"pin: {pin_yaml}"),
-        encoding="utf-8",
-    )
-
-    findings = check_project(tmp_path, client=_client_with_demo_xw())  # no --upgrades
-    consumer = [f for f in findings if f.section == "consumer"]
-
-    assert [f.kind for f in consumer] == ["pin_missing"]
-    assert consumer[0].severity == "error"
-    assert consumer[0].field_path == "approved_products[demo-xw]"
-    # Names the row's own repo, so the hint is copy-pasteable rather than a
-    # shape to fill in. Mutation: drop the `hint=` -> this reddens.
-    assert consumer[0].hint and "mintd enclave add demo-xw" in consumer[0].hint
 
 
 # ---------------------------------------------------------------------------
@@ -2874,7 +2274,7 @@ def test_check_ignores_a_git_ref_named_like_a_pointer(tmp_path: Path) -> None:
 def test_check_keeps_consumer_findings_when_an_unrelated_pointer_is_unreadable(tmp_path: Path) -> None:
     """A corrupt pointer outside data/imports/ stops the delivery gate, not
     the consumer section: the walk never reads it, so it runs and its
-    findings stay -- `data import --bump` and `enclave bump` read them and
+    findings stay -- `data import --bump` reads them and
     would otherwise report "no consumer finding".
 
     Mutation: skip the consumer walk whenever an unreadable finding exists

@@ -11,12 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-# `downloads/` is also mintd's enclave-pull staging root. Ignore the bulk
-# data but keep DVC pointers trackable (dvc import refuses to write a
-# git-ignored `.dvc` file) — mirrors the `/data/**` negation block below.
-downloads/**
-!downloads/**/
-!downloads/**/*.dvc
+downloads/
 eggs/
 .eggs/
 lib/
@@ -137,14 +132,17 @@ renv/python/
 !/data/**/.gitkeep
 !/data/**/*.dvc
 
-# Enclave transfer archives and the extraction staging dir. Restricted data
-# crosses the air gap through here; it must never reach git. Landing receipts
-# under transfers/received/ ARE tracked — they are the audit record when a
-# transfer is landed without mintd.
+# Enclave transfer bundles. Restricted data crosses the air gap in the zips,
+# so they must never reach git, in transfers/ or at the root, where a bundle is
+# copied to be unzipped. Each bundle's record, transfers/<transfer id>/ with
+# MD5SUMS, manifest.json and README.md, IS tracked: inside the enclave it is
+# the record of what landed.
+/transfer-*.zip
 /transfers/**
 !/transfers/**/
-!/transfers/received/**
-/incoming/
+!/transfers/*/MD5SUMS
+!/transfers/*/manifest.json
+!/transfers/*/README.md
 
 # Results (let DVC handle these)
 /results/**

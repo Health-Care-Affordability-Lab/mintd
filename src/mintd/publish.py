@@ -133,7 +133,7 @@ def prepare_publish(
     now: datetime | None = None,
 ) -> PublishPreview:
     metadata_path = project_path / "metadata.json"
-    findings = check_project(project_path, upgrades=False, client=client)
+    findings = check_project(project_path, upgrades=False)
     # A tracked output with no S3 version ID is what this verb's own
     # `dvc push` records (dvc rewrites the pointer / dvc.lock on a
     # version-aware push) and `commit_all` then commits, so it is not a reason
@@ -349,7 +349,7 @@ def _apply_publish(
     # that reports success and pins nothing is exactly how undeliverable
     # releases reached the catalog.
     still_wrong = [
-        f for f in check_project(project_path, upgrades=False, client=client)
+        f for f in check_project(project_path, upgrades=False)
         if f.severity == "error"
     ]
     if still_wrong:

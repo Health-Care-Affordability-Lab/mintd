@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from pathlib import Path
 from mintd._dvc_ops import DvcPullError, pull_retry_hint
@@ -825,7 +827,8 @@ def test_data_pull_all_fallback_md5_dir_out_fully_cached_checked_out(
     cache counts as verifiably cached — checked out, not pulled."""
     entry_md5 = "3" * 32
     manifest = f'[{{"md5": "{entry_md5}", "relpath": "f.csv"}}]'
-    dir_md5 = "4" * 30 + "ab.dir"
+    # Filed under the md5 of its bytes, as DVC files it; any other name is not this tree.
+    dir_md5 = hashlib.md5(manifest.encode(), usedforsecurity=False).hexdigest() + ".dir"
     _seed_cache(tmp_path, dir_md5, manifest.encode())
     _seed_cache(tmp_path, entry_md5)
     (tmp_path / "data").mkdir()

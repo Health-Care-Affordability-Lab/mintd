@@ -43,7 +43,7 @@ _BOUNDARY_SUFFIXES = (
 )
 
 # BANNED: internal mintd functions and module attributes stubbed out
-# wholesale (``_s3.boto3`` is the one attribute). 130 sites / 28
+# wholesale (``_s3.boto3`` is the one attribute). 102 sites / 22
 # targets at 70a7a9e, unmoved since. Shrink-only. The running totals for the
 # WHOLE census (banned + permitted) live in
 # ``test_the_checked_in_literal_matches_a_fresh_scan``, not here — a count
@@ -53,18 +53,14 @@ BANNED_TARGETS: dict[str, int] = {
     "mintd._fast_sync_ops._check_dvc": 16,
     "mintd._s3.boto3": 1,
     "mintd.check.ProducerView.try_at": 1,
-    "mintd.check.check_project": 6,
-    "mintd.cli.Config.load": 11,
+    "mintd.cli.Config.load": 10,
     "mintd.cli.bump_import": 6,
     "mintd.cli.check_project": 7,
     "mintd.cli.clone_and_pull_product": 9,
     "mintd.cli.config_ops.render_validation": 1,
     "mintd.cli.config_ops.validate_config": 2,
     "mintd.cli.data_pull": 5,
-    "mintd.cli.enclave_bump": 6,
     "mintd.cli.enclave_package": 9,
-    "mintd.cli.enclave_pull": 7,
-    "mintd.cli.enclave_verify": 4,
     "mintd.cli.import_product": 2,
     "mintd.data.ProducerView.at": 1,
     "mintd.data.ProducerView.at_head": 1,
@@ -72,11 +68,9 @@ BANNED_TARGETS: dict[str, int] = {
     "mintd.data.data_pull": 2,
     "mintd.data_ops.discover_all_outs": 14,
     "mintd.data_ops.partition_pipeline_outs": 6,
-    "mintd.enclave.ProducerView.at_head": 1,
-    "mintd.enclave.check_project": 1,
     "mintd.init._prompt_classification": 1,
     "mintd.init.render_scaffold": 1,
-    "mintd.publish.check_project": 6,
+    "mintd.publish.check_project": 4,
 }
 
 # PERMITTED: the other half of the same census — composition root (33 sites /
@@ -96,15 +90,22 @@ BANNED_TARGETS: dict[str, int] = {
 # `GitCatalogClient` 2 → 3: the README produce-flow journey runs `registry
 # register` through the real CLI with real dvc and git, and `gh` can only be
 # faked at the catalog client's constructor, as the `journey` fixture does.
+# `_resolve_catalog_client` 5 → 7 and `_resolve_dvc_ops` 5 → 7: two enclave
+# tests run the real `enclave package` handler with a real Reporter against
+# a local producer, injecting its catalog and dvc at the composition root.
+# `_atomic.os.replace` 2 → 3: a zip in an enclave's transfers/ exists exactly
+# when the manifest's log records it, a data-integrity invariant, and the one
+# case that keeps a zip after a failure, a Ctrl-C after the log's rename, can
+# only be injected at the write itself.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
-    "mintd.cli._resolve_catalog_client": 6,
-    "mintd.cli._resolve_dvc_ops": 5,
+    "mintd.cli._resolve_catalog_client": 7,
+    "mintd.cli._resolve_dvc_ops": 7,
     "mintd.cli._resolve_fast_sync_ops": 7,
     "mintd.cli._resolve_git_ops": 9,
     "mintd.cli._resolve_s3_listing_ops": 1,
-    "mintd._atomic.os.replace": 2,
+    "mintd._atomic.os.replace": 3,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 5,
     "mintd._push_verify._create_s3_client": 14,
@@ -136,7 +137,7 @@ def _scan_double_targets() -> dict[str, int]:
     ``unittest.mock.patch(...)`` whether imported bare or as ``mock.patch``.
 
     Neither half is optional. Restricting the receiver to ``monkeypatch``
-    silently drops ``tests/test_pre_units_journey.py:286``; dropping ``patch``
+    silently drops ``tests/test_pre_units_journey.py:277``; dropping ``patch``
     silently drops 29 sites, 16 of them banned-class, and leaves the ratchet
     evadable by a one-word change of mechanism.
     """
@@ -221,7 +222,7 @@ def test_internal_monkeypatch_sites_do_not_grow() -> None:
         "internal monkeypatch census moved; the literal may only shrink. "
         f"target -> (pinned, scanned): {dict(sorted(moved.items()))}"
     )
-    assert sum(banned.values()) == 130
+    assert sum(banned.values()) == 102
 
 
 def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
@@ -249,7 +250,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
     relabelling it into the other bucket; instead the name is gone from
     production, from both literals, and from every patch site — a real shrink,
     -4 sites / -1 target off a census of 193 / 47. ``BANNED_TARGETS`` stays at
-    130 / 28 and must not move here. The running totals live in
+    102 / 22 and must not move here. The running totals live in
     ``test_the_checked_in_literal_matches_a_fresh_scan``, not here, so an
     unrelated permitted patch added in the same slice cannot masquerade as
     this deletion failing.
@@ -265,12 +266,12 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
     assert "mintd.cli._resolve_clients" not in PERMITTED_TARGETS
     assert "mintd.cli._resolve_clients" not in BANNED_TARGETS
-    assert sum(BANNED_TARGETS.values()) == 130
-    assert len(BANNED_TARGETS) == 28
+    assert sum(BANNED_TARGETS.values()) == 102
+    assert len(BANNED_TARGETS) == 22
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (210 sites / 49 targets), not
+    """The literals above are the *whole* census (186 sites / 43 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -281,14 +282,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (210 → 209), or drop ``patch`` (210 → 180).
+    ``monkeypatch``-receiver calls (186 → 185), or drop ``patch`` (186 → 157).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 210
+    assert sum(scanned.values()) == 186
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 
@@ -299,7 +300,6 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
 #: module → the env vars that gate any test in it. Was a flat set of module
 #: names matched by grepping for one hardcoded variable; see the docstring.
 ENV_GATED_MODULES: dict[str, list[str]] = {
-    "test_enclave_pull_integration.py": ["MINTD_RUN_INTEGRATION"],
     "test_producer_integration.py": ["MINTD_RUN_INTEGRATION"],
     "test_scaffold_contract.py": ["MINTD_NETWORK_TESTS"],
 }
@@ -442,7 +442,7 @@ PER_FILE_IGNORES = {
     "src/mintd/cli.py": ["T201", "BLE001", "S110", "ANN001"],
     "src/mintd/config_ops.py": ["T201", "BLE001", "ANN001"],
     "src/mintd/data.py": ["TID251", "BLE001"],
-    "src/mintd/enclave.py": ["TID251", "DTZ005", "DTZ011"],
+    "src/mintd/enclave.py": ["DTZ011"],
     "src/mintd/init.py": ["TID251"],
     "src/mintd/pending_registrations.py": ["TID251"],
     "src/mintd/producer.py": ["TID251"],
@@ -568,7 +568,6 @@ TID251_NAMES_USED: dict[str, dict[str, int]] = {
     "src/mintd/_s3.py": {"boto3": 3, "botocore": 4},
     "src/mintd/_subprocess.py": {"subprocess": 1},
     "src/mintd/data.py": {"shutil.rmtree": 2},
-    "src/mintd/enclave.py": {"shutil.copytree": 1, "shutil.move": 2, "shutil.rmtree": 5},
     "src/mintd/init.py": {"shutil.rmtree": 1},
     "src/mintd/pending_registrations.py": {"os.replace": 1, "os.unlink": 1},
     "src/mintd/producer.py": {"os.replace": 1},
@@ -636,15 +635,14 @@ def test_src_type_ignore_comments_shrink_only() -> None:
 # `.replace(` is not counted: without types it can't be told from `str.replace`.
 # A new site, or a site in a new module, needs this literal edited in review.
 SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
-    "src/mintd/_archive_ops.py": {"open-for-write": 1},
     "src/mintd/_atomic.py": {"open-for-write": 1, "unlink": 1},
     "src/mintd/_aws_credentials.py": {"open-for-write": 1, "unlink": 2},
     "src/mintd/_catalog_cache.py": {"write_text": 1},
-    "src/mintd/_fast_sync_ops.py": {"unlink": 6, "write_bytes": 1},
+    "src/mintd/_fast_sync_ops.py": {"unlink": 5, "write_bytes": 1},
     "src/mintd/_share_ops.py": {"unlink": 3},
     "src/mintd/_templates/_render.py": {"unlink": 1, "write_text": 3},
     "src/mintd/data.py": {"rename": 2, "rmdir": 1, "unlink": 3, "write_bytes": 2},
-    "src/mintd/enclave.py": {"unlink": 1, "write_text": 4},
+    "src/mintd/enclave.py": {"unlink": 1},
     "src/mintd/init.py": {"unlink": 2, "write_text": 1},
     "src/mintd/pending_registrations.py": {"unlink": 1},
     "src/mintd/producer.py": {"write_bytes": 1},
@@ -746,9 +744,9 @@ LICENSED_FAKES = {
 
 # Unlicensed as of 2026-08-22. Each is a fake standing in for a boundary with
 # nothing proving it behaves like that boundary. Shrink this set by writing a
-# contract test, never by deleting a line from it.
+# contract test, never by deleting a line from it, unless the fake and the
+# seam it stands in for are deleted together.
 UNLICENSED_FAKES = {
-    "archive_ops",
     "fast_sync_ops",
     "init_ops",
     "registry_git_ops",

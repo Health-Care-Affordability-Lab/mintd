@@ -24,7 +24,7 @@ Why: the producer section of `mintd check` is what a project owner is responsibl
 
 ### Consumer
 
-A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project also records subscriptions in `enclave_manifest.yaml`. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd data import <name> --bump`, `mintd enclave bump`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
+A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project's imports are ordinary imports; its `enclave_manifest.yaml` says which pins may cross. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd data import <name> --bump`; an enclave changes the row's `pin`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
 
 Why: the consumer section of `mintd check` is what a project owner is responsible for keeping current as upstreams move.
 
@@ -33,7 +33,7 @@ Why: the consumer section of `mintd check` is what a project owner is responsibl
 - **Catalog**: how a consumer turns a name into a producer. Consumers read `repository.github_url` (required), `project.type` (where `data clone` puts the repo), `project.full_name` (the import folder) and `data_products` (default path selection for `data import` and `data clone`). Consumer code never reads `ownership.*` or `governance.*`. `mintd data ls` reads the entry's `storage` block to list S3 objects.
 - **Producer at a pinned commit**: `ProducerView`, read only for `data_products` (primary and outputs). Drift compares the producer's DVC pointer md5 at the pin and at `HEAD`, not its metadata. The storage location for fetching comes from the producer's `.dvc/config` at the pin, read by DVC itself and by the import-rescue lane; no consumer reads `storage.*` from metadata at the pin.
 
-`data import`, `data clone`, `enclave add`/`pull`/`bump` and the enclave-manifest checks find the producer through the catalog. `data import --bump` and the `.dvc`-lane checks use the git URL recorded in the `.dvc` file, so an import on disk stays bumpable after its catalog entry is gone.
+`data import`, `data clone` and `enclave package` find the producer through the catalog. `data import --bump` and the `.dvc`-lane checks use the git URL recorded in the `.dvc` file, so an import on disk stays bumpable after its catalog entry is gone.
 
 Why: the catalog is canonical for identity and the producer-at-pin for pipeline correctness. The catalog also carries the latest publish state (`status.*`); `mintd publish` reads its `status.last_published_version` to refuse replacing a newer entry.
 
@@ -75,7 +75,7 @@ Why `kind`: `message` is only human text. Hint and exit-code dispatch both read 
 The unified validation entry point, used by `mintd check`, `registry register`, `publish` (before and after its `dvc push`) and both bump verbs. Takes a **project directory**. An empty list means clean, but a healthy consumer still gets one info finding per import.
 
 - Producer section: `metadata.json` missing or malformed; one `metadata_invalid` per Pydantic error; storage drift (runs even if validation failed); then, for valid metadata, the primary and `repository.github_url`; and, when `.dvc/` exists, unreadable DVC files and the delivery gate.
-- Consumer section: every import from `scan_imports` plus `enclave_manifest.yaml` subscriptions. An empty pin is always a `pin_missing` error. Without `upgrades` no producer is read: the `.dvc` lane is fully offline, but the enclave-manifest lane still resolves each approved product through the catalog, which refreshes the registry clone. With `upgrades` it resolves each producer at the pin and at `HEAD` and reports drift or the producer error.
+- Consumer section: every import from `scan_imports`. An empty pin is always a `pin_missing` error. Without `upgrades` no producer is read and the check is fully offline. With `upgrades` it resolves each producer at the pin and at `HEAD` and reports drift or the producer error.
 
 Why: other modules query `check_project` instead of re-implementing checks.
 
@@ -159,20 +159,20 @@ Why: it unifies the two ways DVC records imports on the consumer side.
 
 Why: without the namespace, two products that both publish `data/final/` would collide. Mirroring the full producer path, not just the basename, keeps `data/final/` and `archive/final/` apart under `--all`.
 
-### Pin (`contract_pin` / `artifact_pin`)
+### Pin (`contract_pin` / `artifact_md5`)
 
 A consumer's record of which producer commit it imported and, where recorded, which exact bytes it got. There is no `Pin` type; pins are plain strings, and the names differ by lane:
 
 - `.dvc` import: `contract_pin` is the pointer's `repo.rev_lock` (the commit `dvc import --rev` resolved), next to an optional `artifact_md5` (`outs[0].md5`). A missing, null or non-string `rev_lock` becomes `""`, which `mintd check` reports as a `pin_missing` error even without `--upgrades`.
-- Enclave: an `approved_products[]` row holds a single `pin` (a commit), shared by every row of the same repo. `downloaded[]`, `transferred[]` and the transfer manifest carry `contract_pin` + `artifact_pin` (the md5 from the imported `.dvc`).
+- Enclave: an `approved_products[]` row holds a `pin`, a full 40-character commit SHA. `transferred[]` rows and the transfer manifest carry `contract_pin` (the import's `rev_lock`) + `artifact_pin` (the out's md5 in the import pointer).
 
-`mintd check` never lets an empty pin mean `HEAD` (it reports `pin_missing`), and a bump records the resolved SHA, never the string `HEAD`. `enclave pull` does not check: a `source_path` row with an empty `pin` is imported without `--rev`, that is, at `HEAD`.
+`mintd check` never lets an empty pin mean `HEAD` (it reports `pin_missing`), and a bump records the resolved SHA, never the string `HEAD`. `EnclaveManifest` refuses an approved pin that is not a commit SHA.
 
 Why the non-string refusal: YAML 1.1 reads an unquoted `rev_lock: 0123456` as octal, so `str()` would mint a different, valid-looking pin. Refusing gives a loud `pin_missing` instead of a quiet wrong comparison.
 
 ### `ProducerView` / `ProducerError` / `Fetcher` ([src/mintd/producer.py](src/mintd/producer.py))
 
-`ProducerView` is a frozen dataclass `(repo, pin, metadata)`: a producer's `metadata.json` at one commit. `ProducerView.at(repo, pin)` is strict and raises `ProducerError`; `at_head(repo)` resolves the remote `HEAD` and returns `(view, sha)`; `try_at(repo, pin)` returns the error instead of raising, with `pin == ""` meaning `HEAD`. Bytes are cached on disk under `~/.cache/mintd/producers/`, keyed by `(repo, pin)`, and re-validated on every read. Helpers: `outputs()`, `output_paths()`, `primary_or_raise()`. Used by `check --upgrades`, `data import --rev`, `data import --bump`, `enclave add`, `enclave bump` and `enclave pull`.
+`ProducerView` is a frozen dataclass `(repo, pin, metadata)`: a producer's `metadata.json` at one commit. `ProducerView.at(repo, pin)` is strict and raises `ProducerError`; `at_head(repo)` resolves the remote `HEAD` and returns `(view, sha)`; `try_at(repo, pin)` returns the error instead of raising, with `pin == ""` meaning `HEAD`. Bytes are cached on disk under `~/.cache/mintd/producers/`, keyed by `(repo, pin)`, and re-validated on every read. Helpers: `outputs()`, `output_paths()`, `primary_or_raise()`. Used by `check --upgrades`, `data import --rev`, `data import --bump` and `enclave package`.
 
 `ProducerError.Reason` has five values: `unreachable`, `pin_missing`, `metadata_missing` (translated from the fetcher's `FetchError`), and `metadata_invalid`, `schema_too_old` (from validation; any `schema_version` other than `"2.0"`). Consumer findings reuse these names as their `kind`. `Fetcher` ([src/mintd/_producer_git_ops.py](src/mintd/_producer_git_ops.py)) is the Protocol that reads one file from a producer repo at a commit; `GitArchiveFetcher` uses `git archive --remote` and falls back to a shallow clone.
 
@@ -183,13 +183,13 @@ Why: `ProducerView` is the runtime object that *is* "producer at pin", with a ty
 How a consumer turns a product name into the paths to fetch. There are two:
 
 - `data._resolve_paths`, shared by `data import` and `data clone`, reads the **catalog entry**: `--all` → every `data_products.outputs[].path`; else `--path` (repeatable) → exactly those; else `data_products.primary`. Exception: `data import --rev R` with neither `--path` nor `--all` takes the primary from `ProducerView.at(repo, R)`. Clone checks `--path` against the catalog at the default rev, or against the cloned `metadata.json` when `--rev` is given; a clone with no flags pulls everything DVC tracks.
-- `enclave._resolve_outputs`, used by `enclave pull`, reads the **producer at the pin**: `source_path` → that path; `all` → every output at the pin; else the primary at the pin.
+- `enclave._resolve_outputs`, used by `enclave package`, reads the **producer at the pin**: `source_path` → that path; `all` → every output at the pin; else the primary at the pin.
 
 Why one resolver for both data verbs: their selection semantics cannot drift.
 
 ### Drift (`mintd check --upgrades`)
 
-An import has drifted when the producer's DVC pointer md5 for the imported path (the recorded output path or enclave `source_path`, else the primary at the pin) differs between the pinned commit and `HEAD`; for an `all` subscription the whole path→md5 map is compared. Kinds: `drift` (warning; bump re-pins), `up_to_date` (info; bump is a no-op), `drift_unknown` (warning; the comparison could not be made: a pointer or `HEAD` was unreadable, an `all` producer lists no outputs, there is no recorded path and no primary, or the path is absent at `HEAD`; bump refuses). Producer problems at the pin surface as `unreachable` / `schema_too_old` (warning) or `pin_missing` / `metadata_missing` / `metadata_invalid` (error).
+An import has drifted when the producer's DVC pointer md5 for the imported path (the recorded output path, else the primary at the pin) differs between the pinned commit and `HEAD`. Kinds: `drift` (warning; bump re-pins), `up_to_date` (info; bump is a no-op), `drift_unknown` (warning; the comparison could not be made: a pointer or `HEAD` was unreadable, there is no recorded path and no primary, or the path is absent at `HEAD`; bump refuses). Producer problems at the pin surface as `unreachable` / `schema_too_old` (warning) or `pin_missing` / `metadata_missing` / `metadata_invalid` (error).
 
 Why: producer metadata has no per-output content identity (`last_published` is a per-publish stamp), so bytes committed without a `mintd publish` still count and the pointer is the ground truth. An unreadable pointer is never `up_to_date`: silent degradation to "up to date" is the bug class this lane exists to kill.
 
@@ -301,45 +301,37 @@ Why the name: every user-facing string says "repo file cache (S3)" to avoid conf
 
 ### Enclave project: outside copy and inside copy
 
-An `enclave` project is a consumer whose data must reach an air-gapped machine. The repo exists twice, each copy with its own `enclave_manifest.yaml`. The **outside** copy, on a networked machine, subscribes (`enclave add`), fetches (`enclave pull`) and bundles (`enclave package`). The **inside** copy, on the air-gapped box, receives the archive and lands it with `python3 land.py` (stdlib only, Python 3.8-compatible, no network, DVC or mintd) or `mintd enclave verify`. Only the transfer archive crosses, one way. CLI messages also say "inside the enclave" for the enclave repo directory: `enclave pull` must run from the manifest's directory.
-
-Why: a shipped transfer cannot be recalled and the inside box cannot fetch anything, so everything about what to bundle is decided outside.
+An `enclave` project is a consumer whose data must reach a locked-down server. The repo exists twice, each copy with its own `enclave_manifest.yaml`. The **outside** copy, on a networked machine, imports the approved versions and bundles them (`enclave package`). The **inside** copy, on the locked-down server, receives the bundle, unzips it in place and checks it with the system's own MD5 tool; nothing inside needs Python or mintd. Only the bundle crosses, one way.
 
 ### `EnclaveManifest` ([src/mintd/enclave.py](src/mintd/enclave.py))
 
-Typed Pydantic view over `enclave_manifest.yaml`, the default `--manifest` of every `mintd enclave` verb. Fields: `schema_version` (`"2.0"`), `enclave_name`, and three lists of row types:
+Typed Pydantic view over `enclave_manifest.yaml`, the default `--manifest` of `mintd enclave package`. Unknown keys are refused. `mintd check` loads it with the same `EnclaveManifest.load` and reports one that does not load as an `invalid_manifest` error, without contacting the registry. Fields: `enclave_name`, and two lists:
 
-- `approved_products` (`ApprovedProduct`: `repo` (the catalog name), `registry_entry`, `pin`, optional `source_path` or `all`): the active subscriptions.
-- `downloaded` (`DownloadedItem`: `repo`, `output`, `contract_pin`, `artifact_pin`, `fetch_strategy` (only `dvc-import` is ever written), `downloaded_at`, `local_path`): outside-enclave staging, written by `enclave pull`.
-- `transferred` (`TransferredItem`, `frozen=True`: `repo`, `contract_pin`, `artifact_pin`, `transfer_date`, `transfer_id`, `local_path`): the audit trail. `enclave package` appends to it on the outside manifest ("bundled"); `enclave verify` or the shipped `land.py` append to it inside the enclave ("landed").
+- `approved_products` (`ApprovedProduct`: `repo` (the catalog name), `pin` (a full commit SHA), optional `source_path` (a path as the producer's outputs name it; an empty path, `./x`, `/x`, `a//b` or `..` is refused when the manifest loads) or `all`): which versions may cross. A row approves one output (`source_path`), every output at the pin (`all`), or the primary at the pin. People edit it; mintd never rewrites it.
+- `transferred`: the append-only outside log. `enclave package` appends a `packaged` row per version it bundles: one JSON object on one line (`event`, `transfer_id`, `transfer_date`, `repo`, `path`, `version`, `contract_pin`, `artifact_pin`, `dest`), which YAML reads as a mapping. Rows from older mintd are block-style mappings with no `event`, `path`, `version` or `dest`.
 
-When the file already exists, `EnclaveManifest.save()` diffs `transferred[]` against the on-disk version and raises `AppendOnlyViolation` (carrying `path` and `changed_indices`) if any entry was modified, removed, or reordered; appending is allowed. Saves are atomic, and keys the model does not declare are dropped. The guard covers only writes through `save()`: hand edits and `land.py`'s text append bypass it.
+Keys older mintd wrote (`schema_version`, `registry_url`, `downloaded`, `registry_entry`) are accepted and ignored. A missing or invalid manifest is an error that names the file.
 
-Why: `transferred[]` is provenance that cannot be re-derived, so a crashed write must never truncate it, and a wrong row can only be removed by hand-editing.
+Why append-only by construction: mintd only ever adds lines after `transferred:`, which must be the file's last section, so it never rewrites a row or a person's comments.
 
-### Subscription
+### `enclave_package` (`mintd enclave package [repo] [--resend]`)
 
-One `approved_products[]` row. `enclave add --source-path X` subscribes to one output, `--all` to every `data_products.outputs[]` (re-resolved on each pull), and a bare add to the primary. A repo holds **one pin**: a second add inherits it, a disagreeing `--pin` is refused, and `bump` moves every row of the repo at once. `enclave remove` takes `--source-path X`, `--primary`, or `--all` (every row of the repo; not the meaning `--all` has on `add`), and also drops the matching `downloaded[]` rows.
+For each approved version not yet in `transferred[]`, makes the output an ordinary import at the approved pin (`data.import_product` into `data/imports/<full_name>/`, re-importing when the pointer records another commit) and writes it into `transfers/<transfer_id>.zip` (`transfer-YYYY-MM-DD-NNNNNN`). The chain of checks starts at the producer: where the producer's own pointer names the path on its own (read with `check._pointer_md5`, as drift is), the import must match it. Check's own matcher (`check._match_out`) says how it named the path: an out at the path or an entry of a per-file pointer is a name of its own; nothing at all (a folder holding several pointers), the outs beneath it (a folder of per-file lock outs), or a path inside a folder tracked as one tree is not. There package prints a warning naming the path, writes it into the transfer's `manifest.json` under `warnings`, and adds it to the `--json` result: the bytes match the local import, but are not checked against the producer's own record. A path read from a folder's import is checked by its own name too, so a parent folder imported on disk never downgrades it, and an import's `files:` list counts only when it has no top-level md5. Then the `.dir` manifest in the enclave's DVC cache is used only when its bytes hash to the md5 the import pins and it lists each path once (every reader refuses a `.dir`, or a pointer's `files:` list, that lists a path twice, which dvc never writes), and every file must hash to its md5 there (or in the pointer's `files:` list). Where bytes enter the zip, a member with two sources that disagree is refused. One import folder holds one pin, so a path inside a folder this run approves, or one imported on disk, is read from that folder's import, which is re-imported at the path's own pin when it sits at another. Then it appends `packaged` rows, rewriting the file a symlinked manifest points to, with its mode, its line endings and every byte before the rows kept. A version whose `(repo, path, pin)` is already recorded is neither imported nor bundled unless `--resend`; an older row with no `path` matches any path at its pin. An existing zip is refused. A zip exists exactly when the log records it: on any failure the zip is removed unless the manifest on disk already records its transfer ID, as it does after a Ctrl-C that lands once the rows are written. A hard kill (SIGKILL, the OOM killer, a closed terminal) skips that cleanup and can leave a zip with no row; the rerun mints the same transfer ID and refuses it as already existing.
 
-Why one pin per repo: `check` keys consumer findings on the repo alone and `enclave bump` takes a repo, not a row. Remove drops `downloaded[]` rows because `enclave package` selects from `downloaded[]`, and a revoked row left there would ship across a one-way transfer.
+Why: the import pointer already records the repo, the commit and every file's md5, so the bundle reuses it instead of keeping a second record.
 
-### `enclave_bump` (`mintd enclave bump <repo> [--force]`)
+### Transfer bundle
 
-Re-pins every row of one repo to the producer's `HEAD` SHA (via `ProducerView.at_head`, validating the primary when a row needs it), using `EnclaveManifest.apply_pin_bump` and saving through the append-only seam. Without `--force` it reads the repo's findings from `check_project(upgrades=True)` and decides on `kind`, like `--bump`. `--force` skips that gate. Only pins change; `downloaded[]` rows at the old pin are pruned by the next `enclave pull`.
+The zip `enclave package` writes, whose paths mirror the enclave folder so it unzips into place:
 
-Why a blocked row blocks the whole repo: a repo holds one pin, so a partial bump is not possible.
+- `data/<repo>/<version>/<producer path>/...`, where the **version folder** is `<the pin's committer date, UTC, YYYY-MM-DD>_<first 7 of the pin>` (`GitArchiveFetcher.commit_time_at`);
+- `transfers/<transfer_id>/MD5SUMS`: one `<md5>  <path>` line per file, paths relative to the enclave folder, the format `md5sum -c` reads;
+- `transfers/<transfer_id>/manifest.json`: the enclave name, transfer ID, packaged date and each version;
+- `transfers/<transfer_id>/README.md`: the unzip and check commands for Linux (`unzip -n`, `md5sum -c`), macOS (`unzip -n`, an `md5` loop) and Windows (`Expand-Archive`, a `Get-FileHash` loop).
 
-### `enclave_pull` (`mintd enclave pull [repo] [--force]`)
+Entries are stored uncompressed (zip64 where needed), in sorted order, with forward slashes and no symlinks. A path that is absolute or has an empty, `.` or `..` segment, a backslash or a line break is refused at package time. `unzip -n` never overwrites a file already in place, so a new version lands beside the old one and a resent bundle changes nothing; `transfers/<transfer_id>/` is the inside record, one folder per bundle.
 
-Outside-enclave fetch. For each resolved output it runs `dvc import --rev <pin>` into staging, then moves the result to `downloads/<repo>/<artifact_pin[:7]>-<pull date>/` and appends a `DownloadedItem`. Outputs already recorded are skipped unless `--force`. When every subscription succeeds, `downloaded[]` rows whose pin is no longer approved are pruned; recorded downloads missing on disk are reported by name, never re-fetched unasked. The CLI must run from the manifest's directory.
-
-Why: dvc runs with the enclave directory (the manifest's parent) as its working directory; run from an enclosing repo, it would cache the producer's restricted bytes into that repo and still exit 0. Superseded rows are pruned because `enclave package` would otherwise ship both old and new bytes.
-
-### Transfer archive (`enclave package` → `land.py` / `enclave verify`)
-
-`mintd enclave package [repo] [--resend]` bundles the selected `downloaded[]` folders into `transfers/<transfer_id>.tar.gz` (`transfer-YYYY-MM-DD-NNNNNN`) with `_transfer_manifest.yaml`/`.json`, a generated `README.md` and `land.py` ([src/mintd/files/land.py.txt](src/mintd/files/land.py.txt)). Rows whose `(repo, artifact_pin)` already appear in `transferred[]` are skipped unless `--resend`. Inside the enclave, `python3 land.py` (stdlib only) or `mintd enclave verify <extracted_dir>` moves each product to `data/<repo>/<version_folder>/` and appends `transferred[]` rows; verify refuses a wrong `enclave_name` or an existing destination and is idempotent on `(repo, contract_pin, artifact_pin)`.
-
-Why: the archive is the only artifact guaranteed to cross the gap, so the lander and instructions travel inside it. Package keys on `(repo, artifact_pin)`, "have these bytes already crossed?", so a metadata-only pin bump does not re-ship identical bytes.
+Why: some enclaves have no Python, so the landing path is the system's own unzip and MD5 tools. The version folder uses the committer date so every enclave names a version alike.
 
 ---
 
