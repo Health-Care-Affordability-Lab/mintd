@@ -878,3 +878,42 @@ def test_every_spinner_label_is_wrapped_in_text() -> None:
         "these spinner labels are raw strings and will be parsed as rich markup; "
         f"wrap each in Text(): _console.py lines {bare}"
     )
+
+
+#: The boto3 calls that download an object. Each runs botocore's response parsing,
+#: whose mislabelled 5xx only ``mintd._s3.download`` knows to retry.
+_S3_DOWNLOAD_CALLS = frozenset(
+    {"download_file", "download_fileobj", "get_object", "get_object_torrent", "select_object_content"}
+)
+
+
+def test_only_s3_download_downloads_from_s3() -> None:
+    """Every lane downloads through ``mintd._s3.download``, which retries a 5xx
+    botocore raises as ``AttributeError``; a second path would fail a file on it.
+    Scaffold templates (``*.j2``) render into users' projects, not mintd's own
+    code, so they are not scanned.
+    Mutations that must redden this: ``s3.download_file(...)`` back in
+    ``_fast_sync_ops.fetch_to_cache``, ``s3.get_object(...)`` anywhere outside
+    ``_s3.download``, or ``import s3transfer`` in any module."""
+
+    def calls(node: ast.AST, owner: str | None):
+        for child in ast.iter_child_nodes(node):
+            inner = owner
+            if owner is None and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                if child.func.attr in _S3_DOWNLOAD_CALLS:
+                    yield owner, child.func.attr
+            yield from calls(child, inner)
+
+    sites, imports = [], []
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        sites += [(rel, owner, attr) for owner, attr in calls(tree, None)]
+        for node in ast.walk(tree):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            imports += [(rel, n) for n in names if n.split(".")[0] == "s3transfer"]
+    assert sites == [("src/mintd/_s3.py", "download", "download_file")]
+    assert imports == []

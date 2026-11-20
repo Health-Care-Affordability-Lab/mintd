@@ -566,9 +566,8 @@ def test_data_import_timeout_reaches_the_dvc_ops_factory(
 
 def test_data_import_and_clone_share_the_selector_flags() -> None:
     """Parser parity: `--path` (repeatable), `--jobs` and `--timeout` parse
-    identically on `data import` and `data clone` — the clone help text
-    claims "same selector as `mintd data import --path`", which used to be
-    false."""
+    identically on `data import` and `data clone`. What each `--path` accepts
+    differs: import takes any tracked path, clone only declared outputs."""
     parser = cli._build_parser()
 
     imp = parser.parse_args([
@@ -655,17 +654,37 @@ def test_data_import_bump_drift_prints_path(
     assert "new7654" in msg
 
 
+def test_bump_blocked_on_an_empty_pin_keeps_the_findings_own_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty pin in the user's own manifest or `.dvc` is theirs to fix, not
+    the producer's. Mutation: print the producer-side text regardless -> red."""
+    finding = CheckFinding(
+        severity="error", section="consumer", kind="pin_missing",
+        message="approved product 'demo-xw' has an empty pin",
+        hint="set the pin for this row: `mintd enclave add demo-xw --pin=<commit>`",
+    )
+    assert cli._render_bump_blocked(BumpBlocked("demo-xw", finding)) == 1
+    err = capsys.readouterr().err
+    assert "hint: set the pin for this row" in err
+    assert "producer's history" not in err
+
+
 def test_data_import_bump_unreachable_exits_two_with_hint(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     patched_clients,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from mintd.errors import unreachable_repo_hint
+
+    # As check builds it: the finding carries the shared unreachable hint.
     finding = CheckFinding(
         severity="warning",
         section="consumer",
         message="producer unreachable: timeout",
         kind="unreachable",
+        hint=unreachable_repo_hint("https://example.org/demo-xw"),
     )
 
     def raises(*args: Any, **kwargs: Any) -> Any:
@@ -675,7 +694,7 @@ def test_data_import_bump_unreachable_exits_two_with_hint(
     rc = cli.main(["data", "import", "demo-xw", "--bump"])
     err = capsys.readouterr().err
     assert rc == 2
-    assert "retry" in err
+    assert "hint: could not reach the producer's repository https://example.org/demo-xw" in err
 
 
 def test_data_import_bump_pin_missing_exits_one(
@@ -699,6 +718,11 @@ def test_data_import_bump_pin_missing_exits_one(
     err = capsys.readouterr().err
     assert rc == 1
     assert "retry" not in err
+    # Mutation: drop bump's pin_missing hint -> red.
+    assert (
+        "hint: the producer's history no longer has your pinned commit; "
+        "ask the producer, or re-import at a commit that exists"
+    ) in err
 
 
 def test_bump_blocked_catalog_unresolved_prefers_the_findings_own_hint(
@@ -1497,6 +1521,8 @@ def test_cli_data_clone_returns_one_on_producer_error(
     err = capsys.readouterr().err
     assert "boom" in err
     assert "/tmp/y" in err
+    # The shared unreachable-producer hint. Mutation: put back "check git auth" -> red.
+    assert "hint: could not reach the producer's repository https://x" in " ".join(err.split())
 
 def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
     manifest_path = tmp_path / "enclave_manifest.yaml"
@@ -2674,6 +2700,18 @@ def test_cli_config_show_prints_yaml(
     assert rc == 0
     out = capsys.readouterr().out
     assert "registry_url: https://e.com/r.git" in out
+
+
+@pytest.mark.parametrize("json_out", [False, True])
+def test_cli_config_show_prints_no_credentials(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], json_out: bool,
+) -> None:
+    """Mutation: print the rendered config without `strip_userinfo` -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("registry_url: https://x-access-token:s3cr3tTOKEN@e.com/r.git\n")
+    assert cli.main([*(["--json"] if json_out else []), "config", "show", "--path", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "s3cr3tTOKEN" not in out and "https://e.com/r.git" in out
 
 
 def test_cli_config_setup_set_writes_file(
@@ -5141,6 +5179,83 @@ def test_a_missing_dvc_exits_2_with_the_install_hint(
     err = " ".join(capsys.readouterr().err.split())
     assert "error: mintd's bundled dvc is missing" in err
     assert "hint: install DVC: pip install 'dvc[s3]'" in err
+
+
+@pytest.mark.parametrize("how", ["rev-metadata-read", "dvc-clone"])
+def test_a_token_in_the_catalog_url_is_never_printed(
+    how: str, patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A catalog URL can carry credentials; mintd prints URLs in the error line
+    and the hint. Mutation: drop `strip_userinfo` from `Reporter.error` -> red."""
+    import socket
+
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        bare = f"127.0.0.1:{s.getsockname()[1]}/priv.git"
+    url = f"http://alice:s3cr3tTOKEN@{bare}"
+    client, dvc_ops = patched_clients
+    _register_demo_xw(client, github_url=url)
+    argv = ["data", "import", "demo-xw", "--dest-root", str(tmp_path)]
+    if how == "rev-metadata-read":
+        argv += ["--rev", "v1"]
+    else:  # dvc's own clone failure echoes the URL
+        dvc_ops.import_raises = DvcImportRepoUnreachable(
+            f"dvc import failed (exit 1): ERROR: failed to import 'data/final/' - SCM error: "
+            f"Failed to clone repo '{url}' to '/tmp/x': Connection refused", url,
+        )
+
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "s3cr3tTOKEN" not in err and "alice" not in err, err
+    assert f"http://{bare}" in " ".join(err.split())
+
+
+def test_check_findings_print_no_credentials(capsys: pytest.CaptureFixture[str]) -> None:
+    """`mintd check` prints findings itself, text and JSON."""
+    finding = CheckFinding(
+        severity="error", section="consumer", kind="pin_missing",
+        message="producer pin missing: abc1234 not found in https://x-token:s3cr3tTOKEN@example.org/r.git",
+        hint="see https://s3cr3tTOKEN@example.org/r.git",
+    )
+    for json_out in (False, True):
+        cli._render_findings([finding], json_out=json_out)
+        out = capsys.readouterr().out
+        assert "s3cr3tTOKEN" not in out and "https://example.org/r.git" in out, out
+
+
+def test_import_at_a_rev_from_an_unreachable_producer_names_its_url(
+    patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--rev` with no `--path` reads the producer's metadata before dvc runs, so
+    the unreachable hint rides on the verb's `_hint`. A port bound and closed
+    again refuses at once.
+
+    Mutation: drop `_hint(ProducerError, _producer_unreachable)` from the plain
+    import -> no hint, red."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{s.getsockname()[1]}/demo-xw.git"
+    client, _ = patched_clients
+    _register_demo_xw(client, github_url=url)
+
+    assert cli.main(["data", "import", "demo-xw", "--rev", "v1", "--dest-root", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: unreachable:" in err
+    assert f"hint: could not reach the producer's repository {url}: check your network" in err
+
+
+def test_only_an_unreachable_producer_gets_the_unreachable_hint() -> None:
+    """A wrong `--rev` or a missing metadata.json is not a network problem.
+    Mutation: return the hint for every reason -> red."""
+    from mintd.producer import ProducerError
+
+    assert "could not reach" in (cli._producer_unreachable(ProducerError.unreachable("u", "v1")) or "")
+    for err in (ProducerError.pin_missing("u", "v9"), ProducerError.metadata_missing("u", "v1")):
+        assert cli._producer_unreachable(err) is None
 
 
 def test_a_failed_dvc_import_exits_1_with_the_verbose_retry_hint(

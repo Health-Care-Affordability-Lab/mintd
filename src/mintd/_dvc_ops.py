@@ -18,7 +18,7 @@ from ._config import Timeouts
 from ._console import Reporter
 from ._dvc_invoke import dvc_cmd, dvc_env
 from ._subprocess import StreamResult, run_streaming
-from .errors import MintdError
+from .errors import MintdError, unreachable_repo_hint
 
 
 class DvcOpError(MintdError):
@@ -27,8 +27,9 @@ class DvcOpError(MintdError):
     A ``MintdError``, so ``cli.main`` renders it. ``hint`` is an optional
     actionable recovery command; ``None`` on every subclass except the ones
     that populate it (currently ``DvcNotInstalled``, ``DvcPushError``,
-    ``DvcRepoPathError``, ``DvcStorageKeyError``, ``DvcImportPathNotFound``
-    and enclave's ``EnclavePullError``). Where it is ``None``, a verb's ``_hint(...)``
+    ``DvcRepoPathError``, ``DvcStorageKeyError``, ``DvcImportPathNotFound``,
+    ``DvcImportRepoUnreachable``, ``DvcImportStorageMissing`` and enclave's
+    ``EnclavePullError``). Where it is ``None``, a verb's ``_hint(...)``
     supplies one.
     """
 
@@ -132,6 +133,27 @@ class DvcImportPathNotFound(DvcOpError):
     hint: str | None = (
         "if that path exists only on a branch or tag, name it: "
         "retry with --rev <branch-or-tag>"
+    )
+
+
+class DvcImportRepoUnreachable(DvcOpError):
+    """`dvc import` could not clone the producer's repository. The hint names the
+    URL mintd passed: the catalog entry's, or for `--bump` the import's own
+    pointer."""
+
+    def __init__(self, message: str, repo_url: str) -> None:
+        super().__init__(message, hint=unreachable_repo_hint(repo_url))
+
+
+class DvcImportStorageMissing(DvcOpError):
+    """The files the imported version points to aren't in storage: the
+    producer's own, or, when the producer's output is itself an import, the
+    upstream product's (dvc's stderr is the same). No repair command: nothing
+    has shown the producer's `check` or `push` would restore a deleted version."""
+
+    hint = (
+        "the producer's data, or data it imports from another product, is missing from storage; "
+        "that is the producer's to fix: send them this error, then re-run the import"
     )
 
 
@@ -473,6 +495,13 @@ class SubprocessDvcOps:
                 raise DvcNotInRepoError(
                     f"not inside a DVC repository while importing into '{dest}'"
                 )
+            failed = f"dvc import failed (exit {r.returncode}): {stderr.strip()}"
+            # Before the path checks: a git error such as "Unable to find
+            # remote helper" would otherwise read as a missing path.
+            if "Failed to clone repo" in stderr:
+                raise DvcImportRepoUnreachable(failed, repo_url)
+            if "No storage files available" in stderr:
+                raise DvcImportStorageMissing(failed)
             if (
                 "Does not exist" in stderr
                 or "Unable to find" in stderr
@@ -510,9 +539,7 @@ class SubprocessDvcOps:
                     f"destination '{dest}' already exists; remove the "
                     f"directory or pass force=True"
                 )
-            raise DvcOpError(
-                f"dvc import failed (exit {r.returncode}): {stderr.strip()}"
-            )
+            raise DvcOpError(failed)
 
         return dest.parent / (dest.name + ".dvc")
 

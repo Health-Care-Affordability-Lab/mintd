@@ -49,7 +49,7 @@ from ._registry_git_ops import (
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
-from .errors import MintdError
+from .errors import MintdError, strip_userinfo, unreachable_repo_hint
 from ._push_verify import judge as judge_push
 from ._registry_git_ops import RegistryGitOps, SubprocessRegistryGitOps
 from .catalog import (
@@ -239,7 +239,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 @contextmanager
 def _hint(
     errors: type[BaseException] | tuple[type[BaseException], ...],
-    hint: str | None = None,
+    hint: str | Callable[[Any], str | None] | None = None,
     *,
     exit_code: int | None = None,
     message: str | None = None,
@@ -248,7 +248,8 @@ def _hint(
     verb's advice, for ``main`` to render.
 
     For an error whose raise site several verbs share, so the advice depends
-    on the verb. ``hint`` applies only where the error has none of its own;
+    on the verb. ``hint`` (or ``hint(error)``, for advice built from the
+    error) applies only where the error has none of its own;
     ``exit_code`` overrides the error's own (else 1); ``message`` replaces
     ``str(error)``. The result is a plain ``MintdError``, so an outer
     ``_hint`` on a base class (``ValueError``, say) no longer matches it.
@@ -258,9 +259,17 @@ def _hint(
     except errors as e:
         raise MintdError(
             message or str(e),
-            hint=getattr(e, "hint", None) or hint,
+            hint=getattr(e, "hint", None) or (hint(e) if callable(hint) else hint),
             exit_code=exit_code or getattr(e, "exit_code", None),
         ) from e
+
+
+def _producer_unreachable(e: ProducerError) -> str | None:
+    """The shared advice when a producer's repository can't be reached: for
+    `data import --rev` with no `--path` (reading its metadata) and `data clone`.
+    Other reasons get none. `--bump` meets an unreachable producer in its
+    `check` preflight, whose finding carries the same hint."""
+    return unreachable_repo_hint(e.repo) if e.reason == ProducerError.Reason.UNREACHABLE else None
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +426,19 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data = subs.add_parser("data", help="Data commands")
     p_data_sub = p_data.add_subparsers(dest="data_command")
-    p_import = p_data_sub.add_parser("import", help="Import a producer's data product")
+    p_import = p_data_sub.add_parser(
+        "import", help="Import a producer's data product",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""what each form brings:
+  mintd data import <name>                the primary output
+  mintd data import <name> --path <path>  only that dataset or folder, declared
+                                          as an output or not (repeatable)
+  mintd data import <name> --all          every output in the product's
+                                          data_products.outputs; a tracked
+                                          folder no output declares is left out
+
+To get the producer's whole project, code and data, use `mintd data clone`.""",
+    )
     p_import.add_argument(
         "name",
         help="Registered data product name (the catalog key) — the same "
@@ -430,9 +451,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_import.add_argument(
         "--path", dest="import_path", action="append", default=[], metavar="PATH",
-        help="Import only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable; same selector as "
-             "`mintd data clone --path`). Default: the primary output.",
+        help="Import only this path — any file or directory the producer tracks, "
+             "declared in data_products.outputs or not (repeatable). Default: the "
+             "primary output.",
     )
     p_import.add_argument(
         "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
@@ -482,6 +503,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p_clone = p_data_sub.add_parser(
         "clone",
         help="Clone a published data product (registry lookup + git clone + dvc pull)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""what each form brings:
+  mintd data clone <name>            a full git clone of the producer's repo,
+                                     with every DVC-tracked output pulled
+  mintd data clone <name> --primary  the same clone, with only the primary
+                                     output pulled; --path pulls only declared
+                                     outputs
+
+To bring only a product's data into your project, use `mintd data import`.""",
     )
     p_clone.add_argument("name", help="Registered data product name")
     p_clone.add_argument(
@@ -497,8 +527,8 @@ def _build_parser() -> argparse.ArgumentParser:
     clone_scope.add_argument(
         "--path", dest="paths", action="append", metavar="PATH",
         help="Pull only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable; same selector as "
-             "`mintd data import --path`). Default: pull every tracked output.",
+             "product's data_products.outputs (repeatable). Default: pull every "
+             "tracked output.",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
@@ -1803,7 +1833,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             "or drop --path/--primary to pull everything",
         ),
         _hint(ImportDestinationExists, "pass --dest <path> or remove the existing directory"),
-        _hint(ProducerError, "check git auth (gh auth status / ssh -T git@github.com)"),
+        _hint(ProducerError, _producer_unreachable),
     ):
         clone_result = clone_and_pull_product(
             client, dvc_ops, registry_git_ops, fast_sync_ops,
@@ -2022,6 +2052,8 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         # The containment guard's raise site: a leading slash in `--path`, or
         # a catalog entry carrying an absolute/`..` output path.
         _hint(UnknownProductPath, "pass --path relative to the producer's repo root"),
+        # `--rev` with no `--path` reads the producer's metadata before dvc runs.
+        _hint(ProducerError, _producer_unreachable),
         _hint(DvcOpError, "retry with --dvc-arg=-v for verbose DVC output"),
     ):
         produced = import_product(
@@ -2737,7 +2769,8 @@ def _prompt_publish_confirm(
 
 def _handle_config_show(args: argparse.Namespace) -> int:
     config = Config.load(args.path) if args.path is not None else Config.load()
-    text = config_ops.render_config(config, json_out=args.json_out)
+    # A registry_url can carry a token; the shown config never does.
+    text = strip_userinfo(config_ops.render_config(config, json_out=args.json_out))
     # YAML emits a trailing newline already; JSON does not. Use print's
     # default newline only when the rendered text doesn't carry one.
     print(text, end="" if text.endswith("\n") else "\n")
@@ -2847,11 +2880,11 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
                     {
                         "severity": f.severity,
                         "section": f.section,
-                        "message": f.message,
+                        "message": strip_userinfo(f.message),
                         "field_path": f.field_path,
                         "source": str(f.source) if f.source else None,
                         "kind": f.kind,
-                        "hint": f.hint,
+                        "hint": strip_userinfo(f.hint) if f.hint else None,
                     }
                 )
             )
@@ -2859,9 +2892,9 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
         for f in findings:
             prefix = _resolve_prefix(f.kind)
             loc = f.source if f.source else "<project>"
-            print(f"{prefix} [{f.severity}] {loc}: {f.message}")
+            print(strip_userinfo(f"{prefix} [{f.severity}] {loc}: {f.message}"))
             if f.hint:
-                print(f"    💡 {f.hint}")
+                print(strip_userinfo(f"    💡 {f.hint}"))
         if not findings:
             print("no issues found")
         else:
@@ -2881,20 +2914,31 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
     read ``kind``. If a future error class wants different UX, add a
     ``kind`` value — don't parse messages.
     """
-    print(f"error: {exc}", file=sys.stderr)
+    print(strip_userinfo(f"error: {exc}"), file=sys.stderr)
     kind = exc.finding.kind
-    if kind == "unreachable":
-        print("hint: retry when the network is available", file=sys.stderr)
+    if kind == "unreachable" and exc.finding.hint:
+        # check's finding carries the shared unreachable-producer hint.
+        print(strip_userinfo(f"hint: {exc.finding.hint}"), file=sys.stderr)
+    elif kind == "pin_missing":
+        # An empty pin in the user's own file carries its own fix.
+        print(
+            strip_userinfo("hint: " + (
+                exc.finding.hint
+                or "the producer's history no longer has your pinned commit; "
+                "ask the producer, or re-import at a commit that exists"
+            )),
+            file=sys.stderr,
+        )
     elif kind == "drift_unknown":
         # Five states reach this kind and only two are transport failures, so
         # a fixed "check the network" misdiagnosed three of them at a network
         # that was working. Prefer the finding's own hint, as
         # `catalog_unresolved` below already does. Still `kind` dispatch.
         print(
-            "hint: " + (
+            strip_userinfo("hint: " + (
                 exc.finding.hint
                 or "'mintd check --upgrades' shows the row and the reason"
-            ),
+            )),
             file=sys.stderr,
         )
     elif kind == "schema_too_old":
@@ -2909,10 +2953,10 @@ def _render_bump_blocked(exc: BumpBlocked) -> int:
         # at a setting that is already correct. Still `kind` dispatch, not
         # message parsing.
         print(
-            "hint: " + (
+            strip_userinfo("hint: " + (
                 exc.finding.hint
                 or "check that registry_url is set in ~/.config/mintd/config.yaml"
-            ),
+            )),
             file=sys.stderr,
         )
     if kind in _RECOVERABLE_KINDS:
