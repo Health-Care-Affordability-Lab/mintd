@@ -1190,8 +1190,13 @@ _NESTED = "git@github.com:example-lab/nested.git"
         ("proj", ".", ["."], [_DEMO]),  # `data verify .`; the nested project's import isn't this one's
         ("proj", ".", None, [_DEMO]),
         ("proj/analysis", ".", None, [_DEMO]),
-        ("link/analysis", ".", ["../data/demo"], [_DEMO]),  # a symlinked working folder
         ("proj/inner", ".", None, [_NESTED]),  # inside the nested project, its own import
+        # Symlinked paths passed as the working folder itself, as an absolute
+        # `--path` through a symlink would be, not through a chdir (which
+        # resolves the link before mintd sees it).
+        ("sib", "{tmp}/link/analysis", ["../data/demo"], [_DEMO]),  # link -> the project
+        ("sib", "{tmp}/alink", None, [_DEMO]),  # alink -> the project's analysis folder
+        ("sib", "{tmp}/alink", ["../data/demo"], [_DEMO]),
     ],
 )
 def test_every_path_is_compared_in_one_form(
@@ -1205,8 +1210,9 @@ def test_every_path_is_compared_in_one_form(
     _import_pointer(project / "data" / "demo.dvc", _DEMO)
     _import_pointer(project / "inner" / "nested.dvc", _NESTED)
     (tmp_path / "link").symlink_to(project)
+    (tmp_path / "alink").symlink_to(project / "analysis")
     monkeypatch.chdir(tmp_path / run_in)
-    assert _import_urls(Path(cwd), targets) == found
+    assert _import_urls(Path(cwd.format(tmp=tmp_path)), targets) == found
 
 
 def test_www_github_passes_on_github_coms_helper(github: GitHub) -> None:
@@ -1214,6 +1220,7 @@ def test_www_github_passes_on_github_coms_helper(github: GitHub) -> None:
     then asks github.com's credential helper, as `gh auth setup-git` writes it."""
     github.ready()
     require_github_access("https://www.github.com/example-lab/demo")
+    assert "gh auth setup-git" not in github_access_hint("https://www.github.com/example-lab/demo")
 
 
 def test_dvc_imports_missing_path_error_names_the_url_dvc_was_given(

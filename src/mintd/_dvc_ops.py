@@ -400,9 +400,11 @@ def _require_github_access(repo_urls: list[str], what: str, *, pull: bool = Fals
 
 
 def _canonical(path: Path) -> Path:
-    """``path`` absolute, with "." and ".." resolved as text and symlinks
-    kept: the form dvc's own ``find_root`` walks (``os.path.abspath``)."""
-    return Path(os.path.abspath(path))
+    """``path`` absolute and physical: "." and ".." resolved, symlinks too.
+    dvc runs in a subprocess started in the working folder, which resolves
+    its symlinks, so its ``find_root`` walks up from the physical folder; a
+    symlink into a project's subfolder finds that project only this way."""
+    return Path(os.path.realpath(path))
 
 
 def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
@@ -423,7 +425,7 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
 
     # Every path here, the working folder, the project, each target and each
     # pointer, goes through `_canonical` once, so none is compared with
-    # another in a different form ("..", a relative --path, ".").
+    # another in a different form ("..", a relative --path, ".", a symlink).
     cwd = _canonical(cwd)
     root = _canonical(dvc_root(cwd))
     if not targets:
