@@ -1,0 +1,26 @@
+recall: undoes a pin is accepted on its size alone (found by review inside #70).
+fix: 9632271 (inside #70); before the fix: 082eead (#70's pre-review commit).
+validated: with this patch on HEAD, tests/test_data_push.py::test_check_a_pin_the_push_set_cant_pass_on_size_alone and tests/test_data_push.py::test_check_a_size_only_pin_passes_only_where_the_commit_leaves_it_unchanged goes red.
+
+diff --git a/src/mintd/_push_verify.py b/src/mintd/_push_verify.py
+index 6fac971..7ef6bcf 100644
+--- a/src/mintd/_push_verify.py
++++ b/src/mintd/_push_verify.py
+@@ -216,7 +216,7 @@ class Prepared:
+         the gate needn't HEAD one again; the tuple binds the proof to the file
+         it proved, not to a position in a pointer that DVC may rewrite or
+         reorder."""
+-        kept = {_proof_id(e) for e in self.plan.keep} - {_proof_id(e) for e in self.plan.on_size}
++        kept = {_proof_id(e) for e in self.plan.keep}  # recall: undoes the review fix
+         return kept | {_proof_id(new) for _, new, _ in self.plan.reattach}
+ 
+     @property
+@@ -570,7 +570,7 @@ def judge(
+         else:
+             verdict = verdicts[(e.key, e.version_id)]
+             if verdict == "size_only":  # only a pin the commit leaves as HEAD has it
+-                verdict = "unproven" if touched or (e.pointer, e.stage, e.record[0]) in differs else "ok"
++                verdict = "unproven" if touched else "ok"  # recall: undoes the review fix
+         counts[verdict] += 1
+         if verdict != "ok":
+             failed.setdefault(verdict, []).append(e.path)

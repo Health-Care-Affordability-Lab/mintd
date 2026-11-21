@@ -1,0 +1,17 @@
+recall: undoes push prints a check mark when git cannot say whether the pointers are committed (found by review inside #61).
+fix: a0a7b4f (inside #61); before the fix: 634a7e8 (#61's pre-review commit).
+validated: with this patch on HEAD, tests/test_data_push.py::test_cli_push_still_succeeds_when_git_cannot_answer goes red.
+
+diff --git a/src/mintd/cli.py b/src/mintd/cli.py
+index 72b98f1..c54e418 100644
+--- a/src/mintd/cli.py
++++ b/src/mintd/cli.py
+@@ -1217,7 +1217,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
+         line = f"pushed{count_clause}{size_clause}{remote_clause} in {duration}"
+     if found is None:
+         # The warning above says why: no ✓ over pointers nobody checked.
+-        reporter.success(line)
++        reporter.success(f"✓ {line}")  # recall: undoes the review fix
+     elif not found:
+         if unpushed:
+             reporter.warn(

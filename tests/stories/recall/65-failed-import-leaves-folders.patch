@@ -1,0 +1,17 @@
+recall: undoes a failed import leaves the folders it made.
+fix: c1ab728 (#65); before the fix: 71741d7.
+validated: with this patch on HEAD, tests/test_pre_units_journey.py::test_import_whose_transfer_fails_leaves_no_folders goes red.
+
+diff --git a/src/mintd/data.py b/src/mintd/data.py
+index 5f0c91a..b988a63 100644
+--- a/src/mintd/data.py
++++ b/src/mintd/data.py
+@@ -404,7 +404,7 @@ def import_product(
+         # fetches, so that tree is walked first, deepest folders first.
+         if new_dest is not None:
+             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
+-        _remove_empty_dirs(created_dirs)
++        pass  # recall: undoes #65
+         if produced and reporter is not None:
+             # EARLIER outputs are not rolled back — the failing one is, by
+             # `_payload_backup`. Say what landed, so the user is not left
