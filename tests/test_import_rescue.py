@@ -707,8 +707,10 @@ def test_entries_from_producer_pointer_reads_dvc_file():
 def test_a_producer_pointer_hash_dvc_never_writes_is_refused_naming_the_producer_file():
     """The rescue reads the producer's pointer itself, past the pointer
     readers' check. A hash dvc never writes there stops the pull naming that
-    file and where it came from, not "a pointer or folder list".
-    Mutation: drop the check in `_entries_from_producer_pointer` -> red."""
+    file and where it came from, not "a pointer or folder list", and holds
+    no credentials from the producer's URL, so no log line or traceback can.
+    Mutations: drop the check in `_entries_from_producer_pointer` -> red;
+    drop `strip_userinfo` there -> red."""
     pointer = _pointer_dvc([DvcFileEntry(md5="ab/../../a.csv", relpath="a.csv", size=1)])
 
     class _F:
@@ -720,8 +722,9 @@ def test_a_producer_pointer_hash_dvc_never_writes_is_refused_naming_the_producer
     from mintd._import_rescue_ops import _Producer
     producer = _Producer(bucket="lab", prefix="p", remote_cfg={}, remote_name="storage")
     with pytest.raises(PointerCutShort, match=r"data/final\.dvc in https://h/r at 1234567 is cut short or damaged: "
-                                              r"a hash in it is not in the shape dvc writes: 'ab/\.\./\.\./a\.csv'"):
-        _entries_from_producer_pointer(_dep(repo="https://h/r", pin="1234567abc"), producer, fetcher=_F())
+                                              r"a hash in it is not in the shape dvc writes: 'ab/\.\./\.\./a\.csv'") as refused:
+        _entries_from_producer_pointer(_dep(repo="https://user:TOKEN@h/r", pin="1234567abc"), producer, fetcher=_F())
+    assert "TOKEN" not in str(refused.value) and "TOKEN" not in str(refused.value.pointer)
 
 
 def test_rescue_reads_the_producers_bucket_with_the_consumers_credentials(producer_bucket, tmp_path):

@@ -57,7 +57,7 @@ from ._fast_sync_ops import (
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
-from .errors import MintdError, unreachable_repo_hint
+from .errors import MintdError, strip_userinfo, unreachable_repo_hint
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -239,7 +239,8 @@ def _entries_from_producer_pointer(
         entries = _match_out_files(data, output_path, producer.remote_name)
         bad = next((e.md5 for e in entries or [] if e.md5 and not hash_in_dvc_shape(e.md5)), None)
         if bad is not None:  # an empty one is the caller's "missing a file hash"
-            raise PointerCutShort(f"{candidate} in {dep.producer_repo} at {dep.contract_pin[:7]}",
+            # no credentials from the URL in the error itself, so no log line or traceback carries them
+            raise PointerCutShort(f"{candidate} in {strip_userinfo(dep.producer_repo)} at {dep.contract_pin[:7]}",
                                   f"a hash in it is not in the shape dvc writes: {bad!r}")
         if entries is not None:
             return entries

@@ -1357,10 +1357,10 @@ def test_a_folder_list_entry_with_a_hash_dvc_never_writes_stops_the_pull_naming_
 ) -> None:
     """A folder list in storage whose entry records no hash fell to one
     failed file and a quiet ``dvc pull``. Now the pull stops, naming the
-    list; the copy the fetch left in the cache is named as that.
+    list, and the list never lands in the cache, where later pulls would
+    find it as the cache's.
     Mutations: drop the check where the list is fetched, or the re-raise in
-    ``try_fast_pull`` -> the first red; where the cached list is read -> the
-    second red."""
+    ``try_fast_pull`` -> red; check it after it lands -> red."""
     s3, bucket = s3_versioned
     project = _project_on(bucket, tmp_path)
     body = json.dumps([{"relpath": "a.csv"}]).encode()
@@ -1371,8 +1371,22 @@ def test_a_folder_list_entry_with_a_hash_dvc_never_writes_stops_the_pull_naming_
     with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir from storage is cut short or damaged: "
                                               r"the hash of 'a\.csv' is not in the shape dvc writes: ''"):
         _fast_pull(s3, project, ["data/dir"])
-    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir in the cache is cut short or damaged"):
-        read_cached_dir_manifest(project / ".dvc" / "cache", tree)
+    landed = cache_path_for(project / ".dvc" / "cache", f"{tree}.dir")
+    assert not landed.exists() and not landed.with_suffix(".tmp").exists()
+
+
+def test_a_cached_folder_list_entry_with_a_hash_dvc_never_writes_is_refused_naming_the_cache(tmp_path: Path) -> None:
+    """A folder list already in the cache (dvc's, or one an older mintd
+    fetched) with an entry whose hash dvc never writes is refused, naming it
+    as the cache's. Mutation: drop the check in ``read_cached_dir_manifest`` -> red."""
+    body = json.dumps([{"md5": "ab/../../notes", "relpath": "a.csv"}]).encode()
+    tree = hashlib.md5(body, usedforsecurity=False).hexdigest()
+    landed = cache_path_for(tmp_path, f"{tree}.dir")
+    landed.parent.mkdir(parents=True)
+    landed.write_bytes(body)
+    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir in the cache is cut short or damaged: "
+                                              r"the hash of 'a\.csv' is not in the shape dvc writes"):
+        read_cached_dir_manifest(tmp_path, tree)
 
 
 def test_the_per_file_workers_let_a_refused_hash_through(tmp_path: Path) -> None:
