@@ -8,8 +8,9 @@ By hand only (it refuses when `CI` is set), from a clean commit:
 How each build is made:
 - **Rows:** a patch in `tests/stories/recall/` that undoes one fix on HEAD. HEAD is the control: the run starts
   with an unpatched HEAD, which must be green, so a red comes from the patch alone. Each patch's header names
-  its fix, its pre-fix commit and the fix's own tests, which must go red with the patch applied before the row
-  counts (checked in the build's clone; a parametrized test in at least one case). A row marked "Windows only"
+  its fix, its pre-fix commit and the fix's own tests, which must pass at HEAD and fail with the patch applied
+  before the row counts (checked in this tree, then in the build's clone; a parametrized test in at least one
+  case). A row marked "Windows only"
   is not built elsewhere: it counts as missed, "Windows only, not run here", and stays in the bar's denominator.
 - **Mutants:** one-line changes to `src/mintd` drawn with a fixed seed: a flipped comparison, a negated
   condition, a dropped return, an off-by-one. Each is built and run like a patch, stopping at its first red. One
@@ -362,12 +363,34 @@ def _stop(proc: subprocess.Popen) -> None:
             continue
 
 
+def not_green_at_head(named: tuple[str, ...]) -> str | None:
+    """Why the fix's tests do not all pass at HEAD (this tree, which `_unchanged` keeps at HEAD), or None.
+    Only when they pass here does their failing in the patched build mean the patch broke them, not the
+    environment (a missing `python` on PATH fails some of them anywhere)."""
+    with tempfile.TemporaryDirectory(prefix="mintd-recall-") as tmp:
+        junit = Path(tmp) / "head.xml"
+        ran = subprocess.run(
+            [sys.executable, "-m", "pytest", *named, "-q", "-p", "no:cacheprovider", "-p", PLUGIN,
+             f"--basetemp={Path(tmp) / 'pytest'}", f"--junitxml={junit}"],
+            cwd=REPO, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, check=False,
+        )
+        got = classify(junit, ran.returncode, strict=True)
+    return None if got.verdict == "green" else (
+        f"the fix's tests do not pass at HEAD, so their failing with the patch would prove nothing: "
+        f"{got.verdict} {got.detail}")
+
+
 def row_result(row: Row, head: str) -> Result:
     """A row's verdict. One whose defect shows only on Windows is not built elsewhere: it counts as missed
-    and stays in the bar's denominator, so a row that cannot run here can never flip the bar to met."""
+    and stays in the bar's denominator, so a row that cannot run here can never flip the bar to met. Before
+    a row is built, the fix's tests its patch names must pass at HEAD."""
     patch = (RECALL / row.patch).read_text(encoding="utf-8")
-    if regression_tests(patch)[1] and os.name != "nt":
+    named, windows_only = regression_tests(patch)
+    if windows_only and os.name != "nt":
         return Result("green", {"not run": "Windows only, not run here"})
+    why = not_green_at_head(named)
+    if why:
+        return Result("error", {"validation": why})
     return _run(head, patch, row.stories, strict=True)
 
 

@@ -143,8 +143,7 @@ def test_a_parametrized_fix_test_counts_when_any_of_its_cases_fails(tmp_path: Pa
 _FAKE_PYTEST = """#!{python}
 import os, pathlib, sys
 junit = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--junitxml="))
-which = "regression" if pathlib.Path(junit).name == "regression.xml" else "stories"
-body = (pathlib.Path(os.environ["FAKE_REPORTS"]) / f"{{which}}.xml").read_text(encoding="utf-8")
+body = (pathlib.Path(os.environ["FAKE_REPORTS"]) / pathlib.Path(junit).name).read_text(encoding="utf-8")
 pathlib.Path(junit).write_text(body, encoding="utf-8")
 sys.exit(1 if "<failure" in body else 0)
 """
@@ -175,6 +174,7 @@ def test_a_row_run_checks_the_fix_tests_first_and_reads_its_stories_strictly(
     patch = "validated: with this patch on HEAD, tests/test_x.py::test_fix goes red.\n"
 
     def report(name: str, *cases: str) -> None:
+        name = {"stories": "junit"}.get(name, name)
         (reports / f"{name}.xml").write_text(
             _junit(tmp_path, *cases).read_text(encoding="utf-8").replace("tests.stories.test_story_x", "tests.test_x"),
             encoding="utf-8")
@@ -195,6 +195,7 @@ def test_a_row_runs_strictly_and_a_windows_only_row_is_a_miss_off_windows(monkey
     row built off Windows, where a noise red could flip the bar to met; that row dropped from the count."""
     calls: list[dict] = []
     monkeypatch.setattr(rr, "_run", lambda rev, patch, stories, **kw: calls.append(kw) or rr.Result("red", {}))
+    monkeypatch.setattr(rr, "not_green_at_head", lambda named: None)
     crlf = next(r for r in rr.ROWS if "crlf" in r.patch)
     monkeypatch.setattr(rr.os, "name", "posix")
     assert rr.row_result(crlf, "HEAD") == rr.Result("green", {"not run": "Windows only, not run here"})
@@ -307,3 +308,27 @@ def test_preflight_refuses_a_patch_whose_header_names_no_test(tmp_path: Path, mo
     monkeypatch.setattr(rr, "_git", lambda args, cwd=None, host=False: "")
     with pytest.raises(SystemExit, match="names no test"):
         rr.preflight([rr.Row("#0", "x.patch", ("test_story_9_cache.py",), data_loss=False)])
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a shebang fake")
+def test_a_row_whose_fix_tests_fail_at_head_is_an_error_and_never_built(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fake pytest stands in for the HEAD run of the fix's tests. Mutations that turn it red: the HEAD
+    check dropped from `row_result`, or reading its failure as a pass (an environment failure in both runs
+    would then pass validation)."""
+    stub = tmp_path / "python"
+    stub.write_text(_FAKE_PYTEST.format(python=sys.executable), encoding="utf-8")
+    stub.chmod(0o755)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    monkeypatch.setattr(rr.sys, "executable", str(stub))
+    monkeypatch.setenv("FAKE_REPORTS", str(reports))
+    built: list[str] = []
+    monkeypatch.setattr(rr, "_run", lambda rev, patch, stories, **kw: built.append(rev) or rr.Result("red", {}))
+    head = _junit(tmp_path, _case("test_import_whose_transfer_fails_leaves_no_folders",
+                                  '<failure message="ReproductionError: failed to reproduce"/>', "other"))
+    (reports / "head.xml").write_text(head.read_text(encoding="utf-8"), encoding="utf-8")
+    got = rr.row_result(rr.ROWS[1], "HEAD")  # #65
+    assert got.verdict == "error" and "do not pass at HEAD" in got.detail["validation"] and built == []
+    (reports / "head.xml").write_text(_junit(tmp_path, _case("test_x")).read_text(encoding="utf-8"), encoding="utf-8")
+    assert rr.row_result(rr.ROWS[1], "HEAD").verdict == "red" and built == ["HEAD"]
