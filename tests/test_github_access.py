@@ -1049,3 +1049,4 @@ def test_an_import_refused_for_another_imports_sake_keeps_the_gh_fix_when_rescue
     assert failed == ["good.dvc"]
     [(msg, hint)] = reporter.errors
     assert SSH_TO_HTTPS in (hint or "") and "rescue" not in (hint or "")
+    assert "example-lab/bad" in msg and "rescue" not in msg  # names the import that caused the refusal
