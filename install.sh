@@ -28,6 +28,42 @@ version_lt() {
 MINTD_TAG=""
 RELEASES="https://github.com/Health-Care-Affordability-Lab/mintd/releases"
 
+# Prints file $1's physical path: every link in the chain followed, and every
+# directory resolved.
+physical() {
+    local p="$1" link
+    while link="$(readlink "$p")"; do
+        [[ "$link" == /* ]] || link="$(dirname "$p")/$link"
+        p="$link"
+    done
+    echo "$(cd -P "$(dirname "$p")" 2>/dev/null && pwd -P)/$(basename "$p")"
+}
+
+# Prints where command $1 is on the caller's own PATH, which installing uv
+# below changes only for this script. (`PATH=... command -v` would answer
+# from bash's hash table.)
+on_caller_path() {
+    local dir IFS=:
+    for dir in $CALLER_PATH; do
+        if [[ -f "${dir:-.}/$1" && -x "${dir:-.}/$1" ]]; then
+            echo "${dir:-.}/$1"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Says how to upgrade the uv on PATH. A Homebrew uv, one that resolves into
+# brew's Cellar, refuses `uv self update`.
+uv_upgrade_advice() {
+    if [[ "$(physical "$(command -v uv)")" == */Cellar/uv/* ]]; then
+        echo "Upgrade it with 'brew upgrade uv', then run the install line again. Nothing was installed." >&2
+    else
+        echo "Upgrade it with 'uv self update', then run the install line again. Nothing was installed." >&2
+        echo "If uv refuses to update itself (installed with pip, pipx, conda or a distro package), upgrade it with the tool that installed it." >&2
+    fi
+}
+
 # True when file $1's SHA-256 is the first field of file $2.
 sha256_matches() {
     local have
@@ -38,6 +74,8 @@ sha256_matches() {
 # Everything runs from main, called on the last line: a download cut short
 # defines nothing, runs nothing, and so installs nothing.
 main() {
+
+CALLER_PATH="$PATH"
 
 # The repository's own copy (an old install line) runs the newest release's
 # install.sh instead. Fetching it is kept apart from running it, so a failed
@@ -59,23 +97,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Ensure uv is installed
+# Ensure uv is installed, and new enough for --with-executables-from below.
 if ! command -v uv &>/dev/null; then
     echo "Installing uv ${UV_VERSION}..."
     curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
     export PATH="$HOME/.local/bin:$PATH"
 else
-    UV_HAVE="$(uv --version | awk '{print $2}')"
-    if version_lt "$UV_HAVE" "$UV_VERSION"; then
-        # A Homebrew uv is a link into brew's Cellar and can't update itself.
-        UV_PATH="$(command -v uv)"
-        if [[ "$UV_PATH" == */Cellar/uv/* || "$(readlink "$UV_PATH" || true)" == */Cellar/uv/* ]]; then
-            UV_UPGRADE="brew upgrade uv"
-        else
-            UV_UPGRADE="uv self update"
-        fi
+    UV_HAVE="$(uv --version 2>/dev/null | awk '{print $2}' || true)"
+    if [[ ! "$UV_HAVE" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+        echo "error: could not read your uv's version from 'uv --version'; this installer needs uv ${UV_VERSION} or newer." >&2
+        uv_upgrade_advice
+        exit 1
+    elif version_lt "$UV_HAVE" "$UV_VERSION"; then
         echo "error: this installer needs uv ${UV_VERSION} or newer, and you have ${UV_HAVE}." >&2
-        echo "Upgrade it with '${UV_UPGRADE}', then run the install line again. Nothing was installed." >&2
+        uv_upgrade_advice
         exit 1
     fi
 fi
@@ -97,6 +132,20 @@ else
     INSTALL_SPEC="$TMP/$WHEEL"
 fi
 
+# --force below replaces whatever dvc is already in uv's bin dir. One that
+# isn't mintd's own (a pip --user dvc, or another uv tool's) is named below.
+UV_BIN_DIR="$(uv tool dir --bin 2>/dev/null || true)"
+TOOLS_DIR="$(uv tool dir 2>/dev/null || true)"
+REPLACED_DVC=""
+if [[ -n "$UV_BIN_DIR" && ( -e "$UV_BIN_DIR/dvc" || -L "$UV_BIN_DIR/dvc" ) ]]; then
+    OLD_LINK="$(readlink "$UV_BIN_DIR/dvc" || true)"
+    if [[ -z "$OLD_LINK" ]]; then
+        REPLACED_DVC="a file of its own"
+    elif [[ "$OLD_LINK" != "$TOOLS_DIR/mintd/bin/dvc" ]]; then
+        REPLACED_DVC="a link to $OLD_LINK"
+    fi
+fi
+
 echo "Installing mintd ${MINTD_TAG}..."
 # Pin Python to the newest version CI tests (.github/workflows/test.yml).
 # Unpinned, uv uses the first Python it finds or downloads the newest, which
@@ -106,33 +155,27 @@ echo "Installing mintd ${MINTD_TAG}..."
 # DVC separately.
 uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc \
     --constraints "$TMP/constraints.txt" "$INSTALL_SPEC"
+[[ -z "$REPLACED_DVC" ]] || echo "Replaced ${UV_BIN_DIR}/dvc, ${REPLACED_DVC}, with the dvc installed with mintd."
 
-# Locate the tool's Python interpreter
-TOOL_PYTHON="$HOME/.local/share/uv/tools/mintd/bin/python"
-if [[ ! -f "$TOOL_PYTHON" ]]; then
-    # XDG_DATA_HOME override
-    TOOL_PYTHON="${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools/mintd/bin/python"
-fi
-
-if [[ ! -f "$TOOL_PYTHON" ]]; then
+# The tool's own Python, wherever uv keeps its tools (UV_TOOL_DIR moves them).
+TOOL_PYTHON="${TOOLS_DIR}/mintd/bin/python"
+if [[ -f "$TOOL_PYTHON" ]]; then
+    echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
+    # With the release's constraints, so cffi is the version the release pins.
+    uv pip install --python "$TOOL_PYTHON" --constraints "$TMP/constraints.txt" cffi reflink || {
+        echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
+    }
+else
     echo "Warning: could not locate mintd tool Python — skipping reflink install." >&2
-    echo "Run 'mintd --version' to verify your installation." >&2
-    exit 0
 fi
-
-echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
-# With the release's constraints, so cffi is the version the release pins.
-uv pip install --python "$TOOL_PYTHON" --constraints "$TMP/constraints.txt" cffi reflink || {
-    echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
-}
 
 # --- Post-install verification (non-fatal diagnostics) -----------------------
 # Help users catch the common failure mode where a successful reinstall still
 # leaves another mintd or dvc winning on PATH (pipx / pip --user / brew /
 # another bin dir resolving before the uv tool bin dir), or neither on PATH yet.
+# Both are looked up on the caller's own PATH.
 echo ""
 echo "Verifying installation..."
-UV_BIN_DIR="$(uv tool dir --bin 2>/dev/null || true)"
 UV_BIN_DIR_REAL="$(cd "${UV_BIN_DIR}" 2>/dev/null && pwd -P || echo "${UV_BIN_DIR}")"
 [[ -z "${UV_BIN_DIR}" ]] || echo "  uv tool bin dir: ${UV_BIN_DIR}"
 PROBLEMS=""   # one "  - " line per problem, for the closing line
@@ -140,20 +183,20 @@ PROBLEMS=""   # one "  - " line per problem, for the closing line
 # Says which $1 runs and warns when it is not the one uv installed; $2 says
 # what that means for $1.
 check_on_path() {
-    local found version dir
-    if ! found="$(command -v "$1")"; then
+    local found version
+    if ! found="$(on_caller_path "$1")"; then
         echo "  Warning: '$1' is not on your PATH yet." >&2
         PROBLEMS+=$'\n'"  - '$1' is not on your PATH yet: open a new shell, or add ${UV_BIN_DIR:-the uv tool bin dir} to your PATH."
         return 0
     fi
-    if version="$("$1" --version 2>/dev/null)"; then
+    if version="$("$found" --version 2>/dev/null)"; then
         echo "  $1 on PATH: ${found} (${version})"
     else
         echo "  $1 on PATH: ${found}"
         echo "  Warning: '$1 --version' did not run cleanly." >&2
     fi
-    dir="$(cd "$(dirname "${found}")" 2>/dev/null && pwd -P || dirname "${found}")"
-    if [[ -n "${UV_BIN_DIR}" && "${dir}" != "${UV_BIN_DIR_REAL}" ]]; then
+    # The same file is not shadowing, also when reached through another link.
+    if [[ -n "${UV_BIN_DIR}" && "$(physical "${found}")" != "$(physical "${UV_BIN_DIR}/$1")" ]]; then
         echo "" >&2
         echo "  WARNING: PATH shadowing detected!" >&2
         echo "    The '$1' on your PATH resolves to:" >&2

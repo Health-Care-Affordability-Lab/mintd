@@ -44,13 +44,21 @@ $ErrorActionPreference = "Stop"
 # together with UV_VERSION in install.sh (see there).
 $UvVersion = "0.13.9"
 
-# Ensure uv is installed
+# Ensure uv is installed, and new enough for --with-executables-from below.
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Host "Installing uv $UvVersion..."
     irm "https://astral.sh/uv/$UvVersion/install.ps1" | iex
     $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
-} elseif ((uv --version) -match '(\d+\.\d+\.\d+)' -and [version]$Matches[1] -lt [version]$UvVersion) {
-    throw "this installer needs uv $UvVersion or newer, and you have $($Matches[1]). Upgrade it with 'uv self update', then run the install line again. Nothing was installed."
+} else {
+    $UvHave = if ("$(uv --version)" -match '(\d+\.\d+\.\d+)') { $Matches[1] }
+    $Upgrade = "Upgrade it with 'uv self update', then run the install line again. Nothing was installed. " +
+        "If uv refuses to update itself (installed with pip, pipx, winget, scoop or conda), upgrade it with the tool that installed it."
+    if (-not $UvHave) {
+        throw "could not read your uv's version from 'uv --version'; this installer needs uv $UvVersion or newer. $Upgrade"
+    }
+    if ([version]$UvHave -lt [version]$UvVersion) {
+        throw "this installer needs uv $UvVersion or newer, and you have $UvHave. $Upgrade"
+    }
 }
 
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is slow with a progress bar
@@ -76,11 +84,27 @@ try {
         $InstallSpec = $Whl
     }
 
+    # --force below replaces a dvc already in uv's bin dir. One that isn't
+    # mintd's own (another uv tool's, or one uv didn't install) is named below.
+    $OldDvc = Join-Path "$(uv tool dir --bin)".Trim() "dvc.exe"
+    $ReplacedDvc = $null
+    if (Test-Path $OldDvc) {
+        $Owner = $null
+        # uv tool list: each tool's "name vX.Y.Z" line, then its "- executable" lines.
+        try {
+            foreach ($Line in @(uv tool list)) {
+                if ($Line -match '^(\S+) v') { $Tool = $Matches[1] } elseif ($Line -match '^- dvc(\.exe)?$') { $Owner = $Tool }
+            }
+        } catch { }
+        if (-not $Owner) { $ReplacedDvc = "which uv did not install" } elseif ($Owner -ne "mintd") { $ReplacedDvc = "from uv tool '$Owner'" }
+    }
+
     Write-Host "Installing mintd $MintdTag..."
     # Pin Python to the newest version CI tests, and put dvc on PATH beside
     # mintd (see install.sh).
     uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc --constraints $Constraints $InstallSpec
     if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
+    if ($ReplacedDvc) { Write-Host "Replaced $OldDvc, $ReplacedDvc, with the dvc installed with mintd." }
 
     # Locate the tool's Python interpreter
     $ToolPython = Join-Path $env:LOCALAPPDATA "uv\tools\mintd\Scripts\python.exe"

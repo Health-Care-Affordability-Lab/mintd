@@ -66,20 +66,25 @@ if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi
 _STUB_UV = """#!/bin/bash
 echo "uv $*" >> "$LOG"
 case "$*" in
-  --version) echo "uv ${STUB_UV_VERSION:-0.13.9}" ;;
-  "tool dir --bin") echo "$HOME/bin" ;;
+  --version) echo "${STUB_UV_SAYS-uv 0.13.9}"; exit "${STUB_UV_EXIT:-0}" ;;
+  "tool dir") echo "${STUB_UV_TOOLS:-$HOME/.local/share/uv/tools}" ;;
+  "tool dir --bin") echo "${STUB_UV_BIN:-$HOME/bin}" ;;
 esac
 """
 
 
-def _run_sh(tmp_path: Path, script: str, *args: str, assets: dict[str, bytes], **env: str) -> tuple[subprocess.CompletedProcess[str], str]:
+def _run_sh(
+    tmp_path: Path, script: str, *args: str, assets: dict[str, bytes], uv_dir: Path | None = None, **env: str
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """Runs `script` with stub curl, and stub uv in `uv_dir` (default: the stubs, first on PATH)."""
     stubs, served, home = tmp_path / "stubs", tmp_path / "assets", tmp_path / "home"
-    for d in (stubs, served, home / ".local/share/uv/tools/mintd/bin"):
+    uv_dir = uv_dir or stubs
+    for d in (stubs, uv_dir, served, home / ".local/share/uv/tools/mintd/bin"):
         d.mkdir(parents=True, exist_ok=True)
     (home / ".local/share/uv/tools/mintd/bin/python").touch()
-    for name, body in (("curl", _STUB_CURL), ("uv", _STUB_UV)):
-        (stubs / name).write_text(body)
-        (stubs / name).chmod(0o755)
+    for path, body in ((stubs / "curl", _STUB_CURL), (uv_dir / "uv", _STUB_UV)):
+        path.write_text(body)
+        path.chmod(0o755)
     for name, data in assets.items():
         (served / name).write_bytes(data)
     log = tmp_path / "log"
@@ -140,24 +145,63 @@ def test_stamped_install_sh_stops_when_a_release_file_is_missing(tmp_path: Path)
     assert "tool install" not in log
 
 
+_SELF_UPDATE = (
+    "Upgrade it with 'uv self update', then run the install line again. Nothing was installed.\n"
+    "If uv refuses to update itself (installed with pip, pipx, conda or a distro package), "
+    "upgrade it with the tool that installed it.\n"
+)
+_BREW_UPGRADE = "Upgrade it with 'brew upgrade uv', then run the install line again. Nothing was installed.\n"
+
+
+def _homebrew_uv(tmp_path: Path, layout: str) -> str:
+    """A stub Homebrew uv 0.12.0, reached on PATH the way `layout` says; returns
+    the PATH entry to put first."""
+    brew = tmp_path / "brew"
+    (brew / "Cellar" / "uv" / "0.12.0" / "bin").mkdir(parents=True)
+    shutil.copy(tmp_path / "stubs" / "uv", brew / "Cellar" / "uv" / "0.12.0" / "bin" / "uv")
+    (brew / "bin").mkdir()
+    (brew / "bin" / "uv").symlink_to("../Cellar/uv/0.12.0/bin/uv")  # what brew links
+    (brew / "opt").mkdir()
+    (brew / "opt" / "uv").symlink_to("../Cellar/uv/0.12.0")
+    if layout == "brew bin":
+        return str(brew / "bin")
+    if layout == "brew opt":
+        return str(brew / "opt" / "uv" / "bin")
+    (tmp_path / "mybin").mkdir()  # a link of the user's own to brew's link
+    (tmp_path / "mybin" / "uv").symlink_to(brew / "bin" / "uv")
+    return str(tmp_path / "mybin")
+
+
+_OLDER = "this installer needs uv 0.13.9 or newer, and you have 0.12.0."
+_UNREAD = "could not read your uv's version from 'uv --version'; this installer needs uv 0.13.9 or newer."
+
+
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
-@pytest.mark.parametrize(("homebrew", "upgrade"), [(False, "uv self update"), (True, "brew upgrade uv")])
-def test_stamped_install_sh_stops_on_a_uv_older_than_the_pin(tmp_path: Path, homebrew: bool, upgrade: str) -> None:
+@pytest.mark.parametrize(
+    ("layout", "says", "exit_code", "first", "advice"),
+    [
+        ("standalone", "uv 0.12.0", "0", _OLDER, _SELF_UPDATE),
+        ("brew bin", "uv 0.12.0", "0", _OLDER, _BREW_UPGRADE),
+        ("brew opt", "uv 0.12.0", "0", _OLDER, _BREW_UPGRADE),
+        ("link to brew", "uv 0.12.0", "0", _OLDER, _BREW_UPGRADE),
+        ("standalone", "", "1", _UNREAD, _SELF_UPDATE),
+        ("standalone", "", "0", _UNREAD, _SELF_UPDATE),
+        ("standalone", "uv-0.12.0", "0", _UNREAD, _SELF_UPDATE),
+        ("brew bin", "", "1", _UNREAD, _BREW_UPGRADE),
+    ],
+)
+def test_stamped_install_sh_stops_on_a_uv_older_than_the_pin_or_of_unknown_version(
+    tmp_path: Path, layout: str, says: str, exit_code: str, first: str, advice: str
+) -> None:
     _run_sh(tmp_path, "true", assets={})  # writes the stubs
     path = f"{tmp_path / 'stubs'}:/usr/bin:/bin"
-    if homebrew:  # brew's bin/uv is a link into its Cellar
-        cellar = tmp_path / "brew" / "Cellar" / "uv" / "0.12.0" / "bin"
-        cellar.mkdir(parents=True)
-        shutil.copy(tmp_path / "stubs" / "uv", cellar / "uv")
-        (tmp_path / "brew" / "bin").mkdir()
-        (tmp_path / "brew" / "bin" / "uv").symlink_to("../Cellar/uv/0.12.0/bin/uv")
-        path = f"{tmp_path / 'brew' / 'bin'}:{path}"
-    result, log = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets(), PATH=path, STUB_UV_VERSION="0.12.0")
-    assert result.returncode == 1
-    assert result.stderr == (
-        "error: this installer needs uv 0.13.9 or newer, and you have 0.12.0.\n"
-        f"Upgrade it with '{upgrade}', then run the install line again. Nothing was installed.\n"
+    if layout != "standalone":
+        path = f"{_homebrew_uv(tmp_path, layout)}:{path}"
+    result, log = _run_sh(
+        tmp_path, _STAMPED_SH, assets=_release_assets(), PATH=path, STUB_UV_SAYS=says, STUB_UV_EXIT=exit_code
     )
+    assert result.returncode == 1
+    assert result.stderr == f"error: {first}\n{advice}"
     assert log == "uv --version\n"
 
 
@@ -174,22 +218,26 @@ def _exe(folder: Path, name: str, says: str) -> Path:
     return path
 
 
-# (another dvc first on PATH, a dvc in uv's bin dir, the closing lines)
+_NOT_ON_PATH = "  - '{name}' is not on your PATH yet: open a new shell, or add {bin} to your PATH."
+_SHADOWED = "  - 'dvc' runs {other}, not the dvc installed with mintd (see the warning above)."
+# (mintd in uv's bin dir, another dvc first on PATH, a dvc in uv's bin dir, the closing lines)
 _WHICH_DVC = [
-    (False, True, ["mintd installed successfully (with {with_}, both on your PATH). Run 'mintd --help' to get started."]),
-    (False, False, ["mintd installed (with {with_}), but:", "  - 'dvc' is not on your PATH yet: open a new shell, or add {bin} to your PATH."]),
-    (True, True, ["mintd installed (with {with_}), but:", "  - 'dvc' runs {other}, not the dvc installed with mintd (see the warning above)."]),
+    (True, False, True, ["mintd installed successfully (with {with_}, both on your PATH). Run 'mintd --help' to get started."]),
+    (True, False, False, ["mintd installed (with {with_}), but:", _NOT_ON_PATH.replace("{name}", "dvc")]),
+    (True, True, True, ["mintd installed (with {with_}), but:", _SHADOWED]),
+    # A mintd problem is kept when dvc has one too.
+    (False, True, True, ["mintd installed (with {with_}), but:", _NOT_ON_PATH.replace("{name}", "mintd"), _SHADOWED]),
 ]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
 @pytest.mark.parametrize("schema", [False, True])
-@pytest.mark.parametrize(("other_dvc", "uv_dvc", "closing"), _WHICH_DVC)
+@pytest.mark.parametrize(("has_mintd", "other_dvc", "uv_dvc", "closing"), _WHICH_DVC)
 def test_stamped_install_sh_says_which_dvc_runs(
-    tmp_path: Path, other_dvc: bool, uv_dvc: bool, closing: list[str], schema: bool
+    tmp_path: Path, has_mintd: bool, other_dvc: bool, uv_dvc: bool, closing: list[str], schema: bool
 ) -> None:
     bin_dir, other_dir = tmp_path / "home" / "bin", tmp_path / "other"
-    _exe(bin_dir, "mintd", "mintd 9.9.9")
+    mintd = _exe(bin_dir, "mintd", "mintd 9.9.9") if has_mintd else None
     ours = _exe(bin_dir, "dvc", "3.67.1") if uv_dvc else None
     other = _exe(other_dir, "dvc", "3.50.0") if other_dvc else None
     path = f"{tmp_path / 'stubs'}:{other_dir}:{bin_dir}:/usr/bin:/bin"
@@ -202,7 +250,77 @@ def test_stamped_install_sh_says_which_dvc_runs(
     if runs:
         assert f"  dvc on PATH: {runs} ({'3.50.0' if other else '3.67.1'})\n" in result.stdout
     assert ("WARNING: PATH shadowing detected!" in result.stderr) is other_dvc
-    assert f"  mintd on PATH: {bin_dir / 'mintd'} (mintd 9.9.9)\n" in result.stdout
+    assert (f"  mintd on PATH: {mintd} (mintd 9.9.9)\n" in result.stdout) is has_mintd
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+def test_stamped_install_sh_takes_a_link_to_uvs_own_dvc_for_that_dvc(tmp_path: Path) -> None:
+    bin_dir, other_dir = tmp_path / "home" / "bin", tmp_path / "other"
+    _exe(bin_dir, "mintd", "mintd 9.9.9")
+    _exe(bin_dir, "dvc", "3.67.1")
+    other_dir.mkdir()
+    (other_dir / "dvc").symlink_to(bin_dir / "dvc")
+    path = f"{tmp_path / 'stubs'}:{other_dir}:{bin_dir}:/usr/bin:/bin"
+    result, _ = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets(), PATH=path)
+    assert result.returncode == 0, result.stderr
+    assert f"  dvc on PATH: {other_dir / 'dvc'} (3.67.1)\n" in result.stdout
+    assert "shadowing" not in result.stderr
+    assert result.stdout.splitlines()[-1].startswith("mintd installed successfully"), result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+def test_install_sh_that_installs_uv_checks_the_callers_path(tmp_path: Path) -> None:
+    """With no uv, the script installs one and puts ~/.local/bin on its own PATH
+    only: the caller's shell finds mintd and dvc there after a new shell."""
+    local_bin = tmp_path / "home" / ".local" / "bin"
+    _exe(local_bin, "mintd", "mintd 9.9.9")
+    _exe(local_bin, "dvc", "3.67.1")
+    uv_src = tmp_path / "uv-release"
+    installer = f'mkdir -p "$HOME/.local/bin" && cp "{uv_src}/uv" "$HOME/.local/bin/uv"\n'.encode()
+    result, log = _run_sh(
+        tmp_path, _STAMPED_SH, assets={**_release_assets(), "install.sh": installer}, uv_dir=uv_src,
+        STUB_UV_BIN=str(local_bin),
+    )
+    assert result.returncode == 0, result.stderr
+    assert log.startswith("curl https://astral.sh/uv/0.13.9/install.sh\n"), log
+    assert "uv tool install " in log
+    assert result.stdout.splitlines()[-3:] == [
+        "mintd installed (with dvc), but:",
+        _NOT_ON_PATH.format(name="mintd", bin=local_bin),
+        _NOT_ON_PATH.format(name="dvc", bin=local_bin),
+    ], result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.parametrize("python_there", [True, False])
+def test_stamped_install_sh_finds_the_tool_python_where_uv_keeps_its_tools(tmp_path: Path, python_there: bool) -> None:
+    tools = tmp_path / "mytools"  # UV_TOOL_DIR, as `uv tool dir` reports it
+    if python_there:
+        (tools / "mintd" / "bin").mkdir(parents=True)
+        (tools / "mintd" / "bin" / "python").touch()
+    result, log = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets(), STUB_UV_TOOLS=str(tools))
+    assert result.returncode == 0, result.stderr
+    assert (f"uv pip install --python {tools}/mintd/bin/python " in log) is python_there
+    assert ("could not locate mintd tool Python" in result.stderr) is not python_there
+    assert "mintd installed (with dvc), but:" in result.stdout  # the closing line, either way
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.parametrize("before", ["none", "mintd's", "uv tool", "file"])
+def test_stamped_install_sh_names_a_dvc_it_replaces(tmp_path: Path, before: str) -> None:
+    bin_dir, tools = tmp_path / "home" / "bin", tmp_path / "home" / ".local" / "share" / "uv" / "tools"
+    bin_dir.mkdir(parents=True)
+    if before == "mintd's":
+        (bin_dir / "dvc").symlink_to(tools / "mintd" / "bin" / "dvc")
+    elif before == "uv tool":
+        (bin_dir / "dvc").symlink_to(tools / "dvc" / "bin" / "dvc")
+    elif before == "file":  # what `pip install --user dvc` leaves in ~/.local/bin
+        _exe(bin_dir, "dvc", "3.50.0")
+    result, _ = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets())
+    assert result.returncode == 0, result.stderr
+    was = {"uv tool": f"a link to {tools / 'dvc' / 'bin' / 'dvc'}", "file": "a file of its own"}.get(before)
+    replaced = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
+    assert replaced == ([f"Replaced {bin_dir / 'dvc'}, {was}, with the dvc installed with mintd."] if was else [])
 
 
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
@@ -310,33 +428,63 @@ def test_unstamped_install_ps1_stops_without_a_release_or_a_tag(setup: str, erro
     assert "forwarded" not in result.stdout
 
 
+def _ps(text: str) -> str:
+    """`text` as a PowerShell single-quoted string."""
+    return "'" + text.replace("'", "''") + "'"
+
+
+def _run_stamped_ps1(
+    tmp_path: Path,
+    *,
+    sha256: str | None = None,
+    uv_says: str = "uv 0.13.9",
+    uv_fails: bool = False,
+    path: tuple[Path, ...] = (),
+    tool_list: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], str]:
+    """The stamped install.ps1 under `irm | iex`, from a session whose
+    preferences are not the defaults. Downloads come from tmp_path; `uv` only
+    records what it was asked, says `uv_says` for --version, tmp_path/bin for
+    `tool dir --bin` and `tool_list` for `tool list`; PATH is `path` alone.
+    Returns the run, its last line of output the session check, and the log."""
+    for name, data in _release_assets(sha256).items():
+        (tmp_path / name).write_bytes(data)
+    (tmp_path / "install.ps1").write_text(PS1.replace('\n$MintdTag = ""\n', '\n$MintdTag = "v9.9.9"\n'))
+    tool_python = tmp_path / "local" / "uv" / "tools" / "mintd" / "Scripts" / "python.exe"
+    tool_python.parent.mkdir(parents=True, exist_ok=True)
+    tool_python.touch()
+    log = tmp_path / "log"
+    script = (
+        f"$env:LOCALAPPDATA = {_ps(str(tmp_path / 'local'))}\n"
+        f"$env:PATH = {_ps(os.pathsep.join(map(str, path)))}\n"
+        "function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) "
+        f"Add-Content {_ps(str(log))} \"get $Uri\"; Copy-Item (Join-Path {_ps(str(tmp_path))} ($Uri -split '/')[-1]) $OutFile }}\n"
+        f"function uv {{ Add-Content {_ps(str(log))} \"uv $($args -join ' ')\"; $global:LASTEXITCODE = 0\n"
+        f"  if ($args[0] -eq '--version') {{ {_ps(uv_says)} }}\n"
+        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ {_ps(str(tmp_path / 'bin'))} }}\n"
+        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'list') {{ {', '.join(map(_ps, tool_list))} }}\n"
+        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'install') {{ $global:LASTEXITCODE = {int(uv_fails)} }} }}\n"
+        + _SESSION_BEFORE
+        + f"try {{ Invoke-Expression (Get-Content -Raw {_ps(str(tmp_path / 'install.ps1'))}) *>&1 | ForEach-Object {{ \"$_\" }} }}"
+        " catch { \"caught: $_\" }\n"
+        + _SESSION_AFTER
+    )
+    result = _pwsh(script)
+    return result, log.read_text() if log.exists() else ""
+
+
 @_NEEDS_PWSH
 @pytest.mark.parametrize("case", ["installs", "wrong hash", "uv fails", "old uv"])
 def test_stamped_install_ps1_installs_only_a_matching_wheel_and_leaves_the_session_as_it_was(
     tmp_path: Path, case: str
 ) -> None:
-    for name, data in _release_assets("0" * 64 if case == "wrong hash" else None).items():
-        (tmp_path / name).write_bytes(data)
-    (tmp_path / "install.ps1").write_text(PS1.replace('\n$MintdTag = ""\n', '\n$MintdTag = "v9.9.9"\n'))
-    tool_python = tmp_path / "local" / "uv" / "tools" / "mintd" / "Scripts" / "python.exe"
-    tool_python.parent.mkdir(parents=True)
-    tool_python.touch()
-    log = tmp_path / "log"
-    fail = "$true" if case == "uv fails" else "$false"
-    uv_version = "0.12.0" if case == "old uv" else "0.13.9"
-    script = (
-        f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
-        # Downloads come from tmp_path; `uv` only records what it was asked.
-        f"function Invoke-WebRequest {{ param($Uri, $OutFile, [switch]$UseBasicParsing) "
-        f"Add-Content '{log}' \"get $Uri\"; Copy-Item (Join-Path '{tmp_path}' ($Uri -split '/')[-1]) $OutFile }}\n"
-        f"function uv {{ Add-Content '{log}' \"uv $($args -join ' ')\"; if ($args[0] -eq '--version') {{ 'uv {uv_version}' }}; "
-        f"$global:LASTEXITCODE = [int]({fail} -and $args[0] -eq 'tool' -and $args[1] -eq 'install') }}\n"
-        + _SESSION_BEFORE
-        + f"try {{ Invoke-Expression (Get-Content -Raw '{tmp_path / 'install.ps1'}') *> $null }} catch {{ \"caught: $_\" }}\n"
-        + _SESSION_AFTER
+    result, ran = _run_stamped_ps1(
+        tmp_path,
+        sha256="0" * 64 if case == "wrong hash" else None,
+        uv_says="uv 0.12.0" if case == "old uv" else "uv 0.13.9",
+        uv_fails=case == "uv fails",
     )
-    result = _pwsh(script)
-    out, ran = result.stdout, log.read_text() if log.exists() else ""
+    out = result.stdout
     assert out.splitlines()[-1] == _SESSION_UNCHANGED, out + result.stderr
     # Every file from the tag's own release, never latest; none for a uv too old.
     assert [line for line in ran.splitlines() if line.startswith("get ")] == [] if case == "old uv" else [
@@ -352,45 +500,76 @@ def test_stamped_install_ps1_installs_only_a_matching_wheel_and_leaves_the_sessi
         assert "does not match its SHA-256; nothing was installed" in out
         assert "tool install" not in ran
     elif case == "old uv":
-        assert (
-            "caught: this installer needs uv 0.13.9 or newer, and you have 0.12.0. Upgrade it with "
-            "'uv self update', then run the install line again. Nothing was installed."
-        ) in out
+        assert "caught: this installer needs uv 0.13.9 or newer, and you have 0.12.0. " in out
         assert ran == "uv --version\n"
     else:
         assert "caught: Failed to install mintd" in out
         assert install.search(ran) and not reflink.search(ran)
 
 
+_PS1_UPGRADE = (
+    "Upgrade it with 'uv self update', then run the install line again. Nothing was installed. "
+    "If uv refuses to update itself (installed with pip, pipx, winget, scoop or conda), upgrade it with the tool that installed it."
+)
+
+
 @_NEEDS_PWSH
-@pytest.mark.parametrize(("other_dvc", "uv_dvc", "closing"), _WHICH_DVC)
-def test_stamped_install_ps1_says_which_dvc_runs(tmp_path: Path, other_dvc: bool, uv_dvc: bool, closing: list[str]) -> None:
-    for name, data in _release_assets().items():
-        (tmp_path / name).write_bytes(data)
-    (tmp_path / "install.ps1").write_text(PS1.replace('\n$MintdTag = ""\n', '\n$MintdTag = "v9.9.9"\n'))
-    tool_python = tmp_path / "local" / "uv" / "tools" / "mintd" / "Scripts" / "python.exe"
-    tool_python.parent.mkdir(parents=True)
-    tool_python.touch()
+@pytest.mark.parametrize(
+    ("says", "stop"),
+    [
+        ("uv 0.12.19", "this installer needs uv 0.13.9 or newer, and you have 0.12.19."),
+        ("uv 0.13.8", "this installer needs uv 0.13.9 or newer, and you have 0.13.8."),
+        ("uv 0.13.9", None),
+        ("uv 0.13.10", None),  # newer by number, older as a string
+        ("uv 1.0.0", None),
+        ("", "could not read your uv's version from 'uv --version'; this installer needs uv 0.13.9 or newer."),
+        ("uv", "could not read your uv's version from 'uv --version'; this installer needs uv 0.13.9 or newer."),
+    ],
+)
+def test_stamped_install_ps1_compares_uv_versions_by_number(tmp_path: Path, says: str, stop: str | None) -> None:
+    result, ran = _run_stamped_ps1(tmp_path, uv_says=says)
+    if stop:
+        assert f"caught: {stop} {_PS1_UPGRADE}" in result.stdout, result.stdout + result.stderr
+        assert ran == "uv --version\n"
+    else:
+        assert "caught" not in result.stdout, result.stdout + result.stderr
+        assert "uv tool install " in ran
+
+
+@_NEEDS_PWSH
+@pytest.mark.parametrize(("has_mintd", "other_dvc", "uv_dvc", "closing"), _WHICH_DVC)
+def test_stamped_install_ps1_says_which_dvc_runs(
+    tmp_path: Path, has_mintd: bool, other_dvc: bool, uv_dvc: bool, closing: list[str]
+) -> None:
     bin_dir, other_dir = tmp_path / "bin", tmp_path / "other"
-    mintd = _exe(bin_dir, "mintd", "mintd 9.9.9")
+    mintd = _exe(bin_dir, "mintd", "mintd 9.9.9") if has_mintd else None
     ours = _exe(bin_dir, "dvc", "3.67.1") if uv_dvc else None
     other = _exe(other_dir, "dvc", "3.50.0") if other_dvc else None
-    script = (
-        f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
-        f"$env:PATH = '{other_dir}{os.pathsep}{bin_dir}'\n"
-        f"function Invoke-WebRequest {{ param($Uri, $OutFile, [switch]$UseBasicParsing) "
-        f"Copy-Item (Join-Path '{tmp_path}' ($Uri -split '/')[-1]) $OutFile }}\n"
-        f"function uv {{ if ($args[0] -eq '--version') {{ 'uv 0.13.9' }} elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ '{bin_dir}' }}; "
-        "$global:LASTEXITCODE = 0 }\n"
-        f"Invoke-Expression (Get-Content -Raw '{tmp_path / 'install.ps1'}') *>&1 | ForEach-Object {{ \"$_\" }}\n"
-    )
-    result = _pwsh(script)
-    out = result.stdout
-    assert result.returncode == 0, out + result.stderr
+    result, _ = _run_stamped_ps1(tmp_path, path=(other_dir, bin_dir))
+    lines = result.stdout.splitlines()[:-1]  # the last is the session check
+    assert "caught" not in result.stdout, result.stdout + result.stderr
     want = [line.format(with_="dvc", bin=bin_dir, other=other) for line in closing]
-    assert out.splitlines()[-len(want):] == want, out
+    assert lines[-len(want):] == want, result.stdout
     runs = other or ours
     if runs:
-        assert f"  dvc on PATH: {runs} ({'3.50.0' if other else '3.67.1'})\n" in out
-    assert ("PATH shadowing detected!" in out) is other_dvc
-    assert f"  mintd on PATH: {mintd} (mintd 9.9.9)\n" in out
+        assert f"  dvc on PATH: {runs} ({'3.50.0' if other else '3.67.1'})" in lines
+    assert ("PATH shadowing detected!" in result.stdout) is other_dvc
+    assert (f"  mintd on PATH: {mintd} (mintd 9.9.9)" in lines) is has_mintd
+
+
+@_NEEDS_PWSH
+@pytest.mark.parametrize(
+    ("tool_list", "was"),
+    [
+        (("mintd v9.9.8", "- dvc", "- mintd"), None),
+        (("dvc v3.60.0", "- dvc", "mintd v9.9.8", "- mintd"), "from uv tool 'dvc'"),
+        ((), "which uv did not install"),
+    ],
+)
+def test_stamped_install_ps1_names_a_dvc_it_replaces(tmp_path: Path, tool_list: tuple[str, ...], was: str | None) -> None:
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "dvc.exe").touch()
+    result, _ = _run_stamped_ps1(tmp_path, tool_list=tool_list)
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    replaced = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
+    assert replaced == ([f"Replaced {tmp_path / 'bin' / 'dvc.exe'}, {was}, with the dvc installed with mintd."] if was else [])

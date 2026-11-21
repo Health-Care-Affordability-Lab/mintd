@@ -58,7 +58,8 @@ irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/downl
 
 These install the newest release the maintainer has promoted, with `dvc`:
 there is no separate DVC install. Both scripts install `uv` 0.13.9 if it is
-missing, and stop if your `uv` is older, naming the command that upgrades it.
+missing, and stop if your `uv` is older or doesn't report its version, naming
+the command that upgrades it.
 They download the release's wheel, check it against the release's SHA-256, and
 run `uv tool install --python 3.13 --with-executables-from dvc` with the
 release's `constraints.txt`, which pins every dependency (DVC included) to the
