@@ -532,7 +532,7 @@ def test_a_pointer_dvc_did_not_write_where_it_belongs_is_never_a_success(tmp_pat
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     with pytest.raises(ImportDestinationExists, match=r"dvc wrote no pointer at data_demo_xw/outputs/cms_based\.dvc") as nested:
         import_product(client, _FolderAppears(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
-    assert "this import left" not in str(nested.value), "late.txt is not this import's to remove"
+    assert "now holds" not in str(nested.value), "late.txt is not this import's to remove"
     assert "data_demo_xw/outputs/cms_based/cms_based.dvc" in nested.value.hint
 
 
@@ -556,10 +556,13 @@ def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_p
     with pytest.raises(DvcImportStorageMissing) as failed:
         import_product(client, _PartWay(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert str(failed.value).endswith(
-        "; this import left data_demo_xw/outputs/cms_based/a.csv in data_demo_xw/outputs/cms_based; "
-        "remove it before re-running: rm -r data_demo_xw/outputs/cms_based"
+        "; the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv"
     )
-    assert failed.value.hint == DvcImportStorageMissing.hint  # its own hint stays, and the CLI's for others
+    assert failed.value.hint.endswith(  # in order: tell the producer, clear it, re-run
+        "that is the producer's to fix: send them this error, then remove it "
+        "(rm -r data_demo_xw/outputs/cms_based), then re-run the import"
+    )
+    assert DvcImportStorageMissing.hint.endswith("send them this error, then re-run the import")  # per instance
 
     with pytest.raises(ImportDestinationExists) as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
@@ -630,7 +633,26 @@ def test_an_import_that_never_got_dvcs_lock_names_no_leftovers(tmp_path: Path) -
     locked = DvcOpError("dvc import failed (exit 1): ERROR: Unable to acquire lock. Most likely another DVC process is running")
     with pytest.raises(DvcOpError) as failed:
         import_product(client, _failing_after(theirs, locked)(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
-    assert "this import left" not in str(failed.value)
+    assert "now holds" not in str(failed.value)
+
+
+def test_another_runs_finished_import_is_not_named_as_left(tmp_path: Path) -> None:
+    """A second run imported the same output while this one ran: its payload
+    and pointer are there when this one fails, and are not this import's to
+    remove. Mutation: drop the pointer condition -> "rm -r" on it, red."""
+    from mintd._dvc_ops import DvcImportDestinationExists
+
+    def theirs(dest: Path) -> None:
+        dest.mkdir()
+        (dest / "a.csv").write_text("the other run's\n")
+        (dest.parent / "cms_based.dvc").write_text("the other run's pointer\n")
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    raced = DvcImportDestinationExists("dvc import failed (exit 1): output 'cms_based' already exists")
+    with pytest.raises(DvcImportDestinationExists) as failed:
+        import_product(client, _failing_after(theirs, raced)(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert "now holds" not in str(failed.value) and "rm -r" not in str(failed.value)
 
 
 def test_an_interrupted_import_names_what_it_left_as_a_warning(tmp_path: Path) -> None:
@@ -646,7 +668,7 @@ def test_an_interrupted_import_names_what_it_left_as_a_warning(tmp_path: Path) -
     with pytest.raises(KeyboardInterrupt):
         import_product(client, _failing_after(landed, KeyboardInterrupt())(), "demo_xw", cwd=tmp_path,
                        dest_root=tmp_path, reporter=reporter)
-    assert reporter.warns == ["this import left data_demo_xw/outputs/cms_based/a.csv in data_demo_xw/outputs/cms_based; "
+    assert reporter.warns == ["the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv; "
                               "remove it before re-running: rm -r data_demo_xw/outputs/cms_based"]
 
 
@@ -659,7 +681,7 @@ def test_a_failed_single_file_import_names_the_file_it_left(tmp_path: Path) -> N
     fails = _failing_after(lambda dest: dest.write_text("half\n"), DvcOpError("dvc import failed (exit 1): reset"))
     with pytest.raises(DvcOpError) as failed:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
-    assert str(failed.value).endswith("; this import left data_demo_xw/outputs/main.parquet; remove it before "
+    assert str(failed.value).endswith("; the file data_demo_xw/outputs/main.parquet is now there; remove it before "
                                       "re-running: rm data_demo_xw/outputs/main.parquet")
 
 

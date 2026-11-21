@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
-from ._dvc_ops import DvcOpError, DvcOps
+from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import delivery, outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
@@ -386,22 +386,27 @@ def import_product(
             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
         _remove_empty_dirs(created_dirs)
         # dvc never got its lock (another dvc held it): it wrote nothing here.
+        # A pointer at the destination by now is another run's finished import.
         lock = isinstance(exc, DvcOpError) and "Unable to acquire lock" in str(exc)
-        if new_dest is not None and not lock and (new_dest.is_file() or new_dest.is_dir()):
-            # What stays is this import's (its destination was not there
-            # before), and a re-run refuses it: say so, and how to clear it.
-            # In the message, so the error's own hint (or the CLI's) stays.
+        if new_dest is not None and not lock and not target_dvc.exists() and (new_dest.is_file() or new_dest.is_dir()):
+            # Not there before this import, and a re-run refuses it: say what is
+            # there and how to clear it. "Now holds", not "left": a file another
+            # run put there with no pointer can't be told apart. In the
+            # message, so the error's own hint (or the CLI's) stays.
             where = _shown(dest, cwd)
             if new_dest.is_dir():
                 left = _first_files(Path(os.path.abspath(dest)))
-                held = _named(left, cwd) if left else "only empty folders"
-                note = f"this import left {held} in {where}; remove it before re-running: {shlex.join(['rm', '-r', where])}"
+                there = f"the folder {where} now holds {_named(left, cwd) if left else 'only empty folders'}"
+                clear = shlex.join(["rm", "-r", where])
             else:
-                note = f"this import left {where}; remove it before re-running: {shlex.join(['rm', where])}"
-            if isinstance(exc, MintdError):
-                exc.args = (f"{exc}; {note}", *exc.args[1:])
+                there, clear = f"the file {where} is now there", shlex.join(["rm", where])
+            if isinstance(exc, DvcImportStorageMissing):
+                exc.args = (f"{exc}; {there}", *exc.args[1:])
+                exc.clear_first(f"remove it ({clear})")  # in order: tell the producer, clear, re-run
+            elif isinstance(exc, MintdError):
+                exc.args = (f"{exc}; {there}; remove it before re-running: {clear}", *exc.args[1:])
             elif reporter is not None:
-                reporter.warn(note)
+                reporter.warn(f"{there}; remove it before re-running: {clear}")
         if produced and reporter is not None:
             # EARLIER outputs are not rolled back — the failing one is, by
             # `_payload_backup`. Say what landed, so the user is not left
