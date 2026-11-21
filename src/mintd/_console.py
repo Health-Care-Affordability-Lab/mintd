@@ -165,8 +165,10 @@ class Reporter:
     def error(self, msg: str, *, hint: Optional[str] = None) -> None:
         self._stderr.print(strip_userinfo(f"error: {msg}"))
         if hint:
+            # soft_wrap: no newlines inserted, so a command in a hint
+            # (the install line) stays one line when copied.
             for line in hint.splitlines():
-                self._stderr.print(strip_userinfo(f"  hint: {line}"))
+                self._stderr.print(strip_userinfo(f"  hint: {line}"), soft_wrap=True)
 
     def result(self, payload: Any, *, pretty: Optional[Callable[[Any], str]] = None) -> None:
         if self.json_mode:
