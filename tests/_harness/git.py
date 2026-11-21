@@ -16,8 +16,11 @@ repo builder, not a git runner) and is deliberately not merged here.
 
 from __future__ import annotations
 
+import atexit
+import functools
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from tests._harness import HarnessError
@@ -38,6 +41,17 @@ IDENT: tuple[str, ...] = (
     "-c", "user.name=test",
     "-c", "commit.gpgsign=false",
 )
+
+
+@functools.cache
+def _nothing() -> str:
+    """An empty file, made once per process in the temp folder: git reads it as
+    no config and no ignore patterns. Not os.devnull, which is `nul` on
+    Windows, where git refuses it as an exclude file."""
+    fd, path = tempfile.mkstemp(prefix="mintd-harness-git-")
+    os.close(fd)
+    atexit.register(os.remove, path)
+    return path
 
 
 def _git(
@@ -61,9 +75,9 @@ def _git(
     # so what `git status` calls new never depends on the host.
     env = dict(os.environ)
     if not host:
-        env.setdefault("GIT_CONFIG_GLOBAL", os.devnull)
+        env.setdefault("GIT_CONFIG_GLOBAL", _nothing())
     result = subprocess.run(
-        ["git", *([] if host else ["-c", f"core.excludesFile={os.devnull}"]), *ident, *args],
+        ["git", *([] if host else ["-c", f"core.excludesFile={_nothing()}"]), *ident, *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
