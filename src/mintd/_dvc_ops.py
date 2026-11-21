@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -387,15 +388,21 @@ def _require_github_access(repo_urls: list[str], what: str, *, pull: bool = Fals
     """dvc clones an import's producer itself, so GitHub access is checked
     here, for exactly the URL dvc will use, before dvc runs. Refused as this
     seam's own error, so its callers handle it: for a pull, a failed target."""
-    from ._registry_git_ops import github_refusal
+    from ._registry_git_ops import producer_refusal
 
     for url in dict.fromkeys(repo_urls):
-        refused = github_refusal(url)
+        refused = producer_refusal(url)
         if refused is None:
             continue
         if pull:
             raise DvcPullRefused(f"{what} not run: {refused}", hint=refused.hint) from refused
         raise DvcImportRepoUnreachable(f"{what} not run: {refused}", url) from refused
+
+
+def _canonical(path: Path) -> Path:
+    """``path`` absolute, with "." and ".." resolved as text and symlinks
+    kept: the form dvc's own ``find_root`` walks (``os.path.abspath``)."""
+    return Path(os.path.abspath(path))
 
 
 def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
@@ -412,24 +419,31 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
     from ._fast_sync_ops import discover_all_outs
     from .imports import DataDependency, NotAnImportError
 
-    cwd = cwd.absolute()  # `data verify` passes "." as given; a relative path has no parents to walk
-    root = dvc_root(cwd)
+    from ._push_verify import _in_subrepo
+
+    # Every path here, the working folder, the project, each target and each
+    # pointer, goes through `_canonical` once, so none is compared with
+    # another in a different form ("..", a relative --path, ".").
+    cwd = _canonical(cwd)
+    root = _canonical(dvc_root(cwd))
     if not targets:
-        pointers = [root / rel for rel in discover_all_outs(root)]
+        pointers = [_canonical(root / rel) for rel in discover_all_outs(root)]
     else:
         pointers = []
         for target in targets:
-            path = cwd / target
+            path = _canonical(cwd / target)
             if target.endswith(".dvc"):
                 pointers.append(path)
             if path.is_dir():
-                pointers += [path / rel for rel in discover_all_outs(path)]
+                pointers += [_canonical(path / rel) for rel in discover_all_outs(path)]
             pointers += [
                 beside for p in (path, *path.parents)
                 if p.is_relative_to(root) and p != root and (beside := p.with_name(p.name + ".dvc")).is_file()
             ]
     urls = []
     for pointer in dict.fromkeys(pointers):
+        if pointer.is_relative_to(root) and _in_subrepo(root, pointer.relative_to(root).as_posix()):
+            continue  # a nested project's own import: dvc, run from this project, never reads it
         try:
             urls.append(DataDependency.from_dvc_file(pointer).producer_repo)
         except (NotAnImportError, OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
@@ -568,7 +582,7 @@ class SubprocessDvcOps:
             # Before the path checks: a git error such as "Unable to find
             # remote helper" would otherwise read as a missing path.
             if "Failed to clone repo" in stderr:
-                raise DvcImportRepoUnreachable(failed, repo_url)
+                raise DvcImportRepoUnreachable(failed, source)
             if "No storage files available" in stderr:
                 raise DvcImportStorageMissing(failed)
             if (
@@ -577,7 +591,7 @@ class SubprocessDvcOps:
                 or _IMPORT_MISSING_PATH_RE.search(stderr)
             ):
                 raise DvcImportPathNotFound(
-                    f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{repo_url}'"
+                    f"path '{path}' not found at rev '{rev or 'HEAD'}' in '{source}'"
                 )
             # `is git-ignored` means two different things and the string
             # cannot tell them apart — but the filesystem can. With the dest

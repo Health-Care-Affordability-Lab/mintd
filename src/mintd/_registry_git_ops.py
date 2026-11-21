@@ -20,10 +20,10 @@ import subprocess
 from dataclasses import dataclass
 
 from ._git_invoke import git_env
-from .errors import MintdError, strip_userinfo
+from .errors import MintdError
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -116,8 +116,9 @@ class RepoURL(NamedTuple):
 
 #: The URL schemes git takes for a remote, by the transport each one uses.
 _SCHEMES = {"https": "https", "http": "http", "git": "git", "ssh": "ssh", "git+ssh": "ssh", "ssh+git": "ssh"}
-#: GitHub's hosts: the web host, its www alias and its SSH-over-443 host.
-_GITHUB_HOSTS = frozenset({"github.com", "www.github.com", "ssh.github.com"})
+#: GitHub's hosts: the web host, its www alias, its SSH-over-443 host and gists.
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com", "ssh.github.com", "gist.github.com"})
+_GIST = "gist.github.com"
 
 
 def parse_repo_url(url: str) -> RepoURL | None:
@@ -140,14 +141,23 @@ def parse_repo_url(url: str) -> RepoURL | None:
         return None
     userinfo, _, hostport = authority.rpartition("@")
     host, _, port = hostport.partition(":")
+    host = host.lower().rstrip(".")  # "github.com." is github.com, fully qualified
     parts = [p for p in path.split("/") if p]
-    if not host or len(parts) < 2:
+    if not host or len(parts) < (1 if host == _GIST else 2):  # a gist is one part: its id
         return None
-    return RepoURL(transport, host.lower(), parts[0], "/".join(parts[1:]).removesuffix(".git"), userinfo, port)
+    owner, repo = (parts[0], "/".join(parts[1:])) if len(parts) > 1 else ("", parts[0])
+    return RepoURL(transport, host, owner, repo.removesuffix(".git"), userinfo, port)
 
 
 def _on_github(repo: RepoURL | None) -> bool:
     return repo is not None and repo.host in _GITHUB_HOSTS
+
+
+def _credential_host(repo: RepoURL) -> str:
+    """The host git sends credentials to for a GitHub repository: a gist's
+    own host, else github.com (GitHub answers www.github.com with a redirect
+    there, and git then asks github.com's credential helper)."""
+    return _GIST if repo.host == _GIST else "github.com"
 
 
 def _credentials_out(url: str) -> str:
@@ -157,12 +167,17 @@ def _credentials_out(url: str) -> str:
     ``user:pw@host:path`` becomes ``user@host:path``."""
     url = url.strip()
     if "://" in url:
-        parts = urlsplit(url)
-        userinfo, at, hostport = parts.netloc.rpartition("@")
+        # The userinfo ends at the last "@" before the first "/" after the
+        # scheme, as git reads it. Not urlsplit's netloc, which also stops at
+        # a "#" or "?" a password may hold.
+        scheme, _, rest = url.partition("://")
+        authority = rest.split("/", 1)[0]
+        userinfo, at, hostport = authority.rpartition("@")
         if not at:
             return url
-        login = "" if parts.scheme.lower() in ("http", "https") else f"{userinfo.split(':', 1)[0]}@"
-        return urlunsplit(parts._replace(netloc=login + hostport))
+        http = scheme.lower() in ("http", "https", "git+http", "git+https")
+        login = "" if http else f"{userinfo.split(':', 1)[0]}@"
+        return f"{scheme}://{login}{hostport}{rest[len(authority):]}"
     userinfo, at, rest = url.rpartition("@")
     if at and ":" in rest and "/" not in userinfo:  # scp-like with userinfo; not an "@" in a path
         return f"{userinfo.split(':', 1)[0]}@{rest}"
@@ -181,11 +196,11 @@ def https_remote(raw: str) -> str:
     if repo is None:
         return raw.removesuffix(".git")
     if _on_github(repo):
-        host = "github.com"
+        host = _credential_host(repo)
     else:  # another host keeps an https port; an ssh port means nothing to https
         keep_port = repo.port and repo.transport in ("https", "http")
         host = f"{repo.host}:{repo.port}" if keep_port else repo.host
-    return f"https://{host}/{repo.owner}/{repo.repo}"
+    return f"https://{host}/{'/'.join(filter(None, (repo.owner, repo.repo)))}"
 
 
 def without_credentials(url: str) -> str:
@@ -203,7 +218,7 @@ def github_owner(url: str) -> str | None:
     """The owner (org or user) of a GitHub repository URL, in any form, or
     None for anything else: a local path, another host."""
     repo = parse_repo_url(url)
-    return repo.owner if _on_github(repo) and repo is not None else None
+    return (repo.owner or repo.host) if _on_github(repo) and repo is not None else None
 
 
 def _git_output(argv: list[str], cwd: Path | None) -> list[str]:
@@ -228,10 +243,12 @@ def urls_git_uses(url: str, *, cwd: Path | None = None, push: bool = False) -> l
         if not urls:
             urls = _git_output(["git", "ls-remote", "--get-url", url], cwd)
     except FileNotFoundError as e:
-        raise GitHubAccessMissing(strip_userinfo(url), hint="git isn't installed, and mintd runs git: install it") from e
+        raise GitHubAccessMissing(_credentials_out(url), hint="git isn't installed, and mintd runs git: install it") from e
     except (OSError, subprocess.TimeoutExpired) as e:
+        # No exception text: a timeout's repeats git's argv, URL and all.
+        late = "didn't say in time" if isinstance(e, subprocess.TimeoutExpired) else "couldn't say"
         raise GitHubAccessMissing(
-            strip_userinfo(url), hint=f"git couldn't say which URL it uses for this ({e}): check that `git remote -v` works",
+            _credentials_out(url), hint=f"git {late} which URL it uses for this: check that `git remote -v` works",
         ) from e
     return urls or [url]
 
@@ -308,17 +325,19 @@ def _gh_state() -> tuple[str, str | None, tuple[str, ...]]:
     return _gh_login(), *_gh_accounts()
 
 
-def _is_github_root(scope: str) -> bool:
-    """Whether a ``credential.<url>.helper`` scope applies to https://github.com."""
+def _scope_covers(scope: str, host: str) -> bool:
+    """Whether a ``credential.<url>.helper`` scope applies to ``https://<host>``:
+    git matches the host exactly, so github.com's scope doesn't cover a gist."""
     parts = urlsplit(scope)
-    return parts.scheme == "https" and (parts.hostname or "") == "github.com" and parts.path in ("", "/")
+    return parts.scheme == "https" and (parts.hostname or "").rstrip(".") == host and parts.path in ("", "/")
 
 
-def _git_uses_gh(cwd: Path | None) -> bool:
+def _git_uses_gh(cwd: Path | None, host: str = "github.com") -> bool:
     """Whether gh's helper is among the credential helpers git runs for
-    https://github.com: every ``credential.helper`` that applies, in git's
+    ``https://<host>``: every ``credential.helper`` that applies, in git's
     order, an empty value clearing the list, read with the repository's own
-    config."""
+    config. (`gh auth setup-git` writes one for github.com and one for
+    gist.github.com.)"""
     try:
         out = subprocess.run(
             ["git", "config", "-z", "--get-regexp", r"^credential\..*helper$"],
@@ -330,7 +349,7 @@ def _git_uses_gh(cwd: Path | None) -> bool:
     for entry in filter(None, out.split("\0")):
         key, _, value = entry.partition("\n")
         scope = key[len("credential."):-len(".helper")]
-        if scope and not _is_github_root(scope):
+        if scope and not _scope_covers(scope, host):
             continue
         helpers = [*helpers, value] if value else []
     return any("gh auth git-credential" in helper for helper in helpers)
@@ -341,8 +360,8 @@ def github_access_hint(url: str, *, cwd: Path | None = None) -> str:
     account when gh's config says it, and the account to switch to. Nothing
     is recorded, and nothing switches accounts by itself."""
     repo = parse_repo_url(url)
-    owner = repo.owner if repo is not None else "its owner's org"
-    https = f"https://github.com/{owner}/{repo.repo}" if repo is not None else "https://github.com/<org>/<repo>"
+    owner = (repo.owner or repo.host) if repo is not None else "its owner's org"
+    https = https_remote(url) if repo is not None else "https://github.com/<org>/<repo>"
     if repo is not None and repo.transport == "ssh":
         return (
             f"mintd reaches GitHub through gh only, and git would use SSH for this repo: run {SSH_TO_HTTPS}; "
@@ -360,7 +379,7 @@ def github_access_hint(url: str, *, cwd: Path | None = None) -> str:
         return "gh didn't answer `gh auth token` in time (a locked keychain?): check `gh auth status`, then retry"
     if login == "logged out":
         return "log in to GitHub with gh: run `gh auth login`, then `gh auth setup-git`"
-    if not _git_uses_gh(cwd):
+    if not _git_uses_gh(cwd, _credential_host(repo) if repo is not None else "github.com"):
         return "git doesn't use gh yet: run `gh auth setup-git`"
     if active is None:
         return f"this repo is in {owner}; check that your active gh account can see it: `gh auth status`, then `gh auth switch`"
@@ -386,10 +405,18 @@ def github_refusal(url: str, *, cwd: Path | None = None, push: bool = False) -> 
         repo = parse_repo_url(used)
         if not _on_github(repo) or repo is None:
             continue
-        if repo.transport == "https" and _gh_state()[0] == "ready" and _git_uses_gh(cwd):
+        if repo.transport == "https" and _gh_state()[0] == "ready" and _git_uses_gh(cwd, _credential_host(repo)):
             continue
-        return GitHubAccessMissing(strip_userinfo(used), hint=github_access_hint(used, cwd=cwd))
+        return GitHubAccessMissing(_credentials_out(used), hint=github_access_hint(used, cwd=cwd))
     return None
+
+
+@functools.lru_cache(maxsize=None)
+def producer_refusal(url: str) -> GitHubAccessMissing | None:
+    """``github_refusal`` for a producer's URL (no repository, a fetch), once
+    per process: dvc's seam asks for every import on every pull, which is one
+    call per target."""
+    return github_refusal(url)
 
 
 def require_github_access(url: str, *, cwd: Path | None = None, push: bool = False) -> None:

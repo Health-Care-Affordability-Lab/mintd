@@ -35,6 +35,12 @@ from mintd.producer import FetchError
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the stub gh is a POSIX script")
 
 _GH_STATE = _registry_git_ops._gh_state
+
+
+def _clear_caches() -> None:
+    """What mintd reads once per process: gh's login, and each producer's check."""
+    _GH_STATE.cache_clear()
+    _registry_git_ops.producer_refusal.cache_clear()
 _REPO = "https://github.com/example-lab/demo"
 _HELPER = "!gh auth git-credential"
 
@@ -65,11 +71,11 @@ class GitHub:
         users = "".join(f"            {u}: {{}}\n" for u in ([active] if active else []) + list(others))
         hosts = f"github.com:\n    users:\n{users}    user: {active}\n" if active else "{}\n"
         (self.config / "hosts.yml").write_text(hosts)
-        _GH_STATE.cache_clear()
+        _clear_caches()
 
     def git_config(self, key: str, value: str) -> None:
         subprocess.run(["git", "config", "--file", str(self.gitconfig), "--add", key, value], check=True)
-        _GH_STATE.cache_clear()
+        _clear_caches()
 
     def ready(self, active: str = "alice-lab", *others: str) -> None:
         self.accounts(active, *others)
@@ -101,9 +107,9 @@ def github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[GitHub]:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         monkeypatch.setenv(var, f"http://127.0.0.1:{closed}")
-    _GH_STATE.cache_clear()
+    _clear_caches()
     yield gh
-    _GH_STATE.cache_clear()
+    _clear_caches()
 
 
 def _refused(url: str) -> str:
@@ -170,7 +176,7 @@ def test_no_gh_says_to_install_it(github: GitHub, tmp_path: Path, monkeypatch: p
 def test_a_gh_too_old_for_auth_token_says_to_upgrade_gh(github: GitHub, monkeypatch: pytest.MonkeyPatch) -> None:
     github.ready()
     monkeypatch.setenv("GH_STUB_OLD", "1")
-    _GH_STATE.cache_clear()
+    _clear_caches()
     hint = _refused(_REPO)
     assert "gh 2.17 or newer" in hint and "gh auth login" not in hint
 
@@ -185,11 +191,11 @@ def test_the_account_name_never_decides(github: GitHub) -> None:
     """Only `gh auth token` says logged in; hosts.yml's account is for the hint."""
     github.ready("alice-lab")
     github.token.write_text("")  # gh's config names an account, but gh has no token
-    _GH_STATE.cache_clear()
+    _clear_caches()
     assert "gh auth login" in _refused(_REPO)
     github.ready("alice-lab")
     (github.config / "hosts.yml").unlink()  # a token, but no readable account name
-    _GH_STATE.cache_clear()
+    _clear_caches()
     require_github_access(_REPO)
     assert github_access_hint(_REPO) == (
         "this repo is in example-lab; check that your active gh account can see it: `gh auth status`, then `gh auth switch`"
@@ -199,7 +205,7 @@ def test_the_account_name_never_decides(github: GitHub) -> None:
 def test_gh_token_in_the_environment_hides_the_account_name(github: GitHub, monkeypatch: pytest.MonkeyPatch) -> None:
     github.ready("bob-personal", "alice-lab")
     monkeypatch.setenv("GH_TOKEN", "from-the-environment")  # it picks the account, not hosts.yml
-    _GH_STATE.cache_clear()
+    _clear_caches()
     assert "bob-personal" not in github_access_hint(_REPO)
 
 
@@ -574,6 +580,8 @@ _GITHUB_FORMS = [
     ("ssh://git@ssh.github.com:443/o/r", "ssh", "ssh.github.com"),
     ("ssh://github.com/o/r", "ssh", "github.com"),
     ("git+ssh://git@github.com/o/r", "ssh", "github.com"),
+    ("https://github.com./o/r", "https", "github.com"),  # a fully qualified host's trailing dot
+    ("git@github.com.:o/r.git", "ssh", "github.com"),
 ]
 _SSH_FORMS = [url for url, transport, _ in _GITHUB_FORMS if transport == "ssh"]
 
@@ -669,7 +677,10 @@ def test_a_url_lookup_that_times_out_is_refused(github: GitHub, monkeypatch: pyt
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(GitHubAccessMissing) as raised:
         require_github_access("origin")
-    assert "timed out" in (raised.value.hint or "")
+    assert "in time" in (raised.value.hint or "")
+    with pytest.raises(GitHubAccessMissing) as raised:  # the hint repeats no argv, so no password
+        require_github_access("https://u:SECRET#x@github.com/example-lab/demo")
+    assert "SECRET" not in f"{raised.value} {raised.value.hint}"
 
 
 @pytest.mark.parametrize(
@@ -836,6 +847,12 @@ def test_dvc_pull_of_a_local_import_never_asks_gh(github: GitHub, tmp_path: Path
         ("lab@lab-server:repos/demo.git", "lab@lab-server:repos/demo.git"),
         ("lab:p@SECRET@lab-server:repos/demo.git", "lab@lab-server:repos/demo.git"),  # an "@" in the password
         ("git:SECRET@github.com:example-lab/demo.git", _REPO),  # GitHub, so https whatever the credentials
+        # The userinfo ends at the last "@" before the first "/": a "#" or "?"
+        # in the password doesn't hide it, and git+https drops it all.
+        ("https://u:SECRET#x@gitlab.example/example-lab/demo.git", "https://gitlab.example/example-lab/demo.git"),
+        ("https://u:SECRET?x@gitlab.example/example-lab/demo.git", "https://gitlab.example/example-lab/demo.git"),
+        ("git+https://SECRET@gitlab.example/example-lab/demo.git", "git+https://gitlab.example/example-lab/demo.git"),
+        ("https://u:SECRET#x@github.com/example-lab/demo.git", _REPO),
     ],
 )
 def test_dvc_never_gets_the_catalog_urls_credentials(
@@ -1050,3 +1067,169 @@ def test_an_import_refused_for_another_imports_sake_keeps_the_gh_fix_when_rescue
     [(msg, hint)] = reporter.errors
     assert SSH_TO_HTTPS in (hint or "") and "rescue" not in (hint or "")
     assert "example-lab/bad" in msg and "rescue" not in msg  # names the import that caused the refusal
+
+
+@pytest.mark.parametrize(("url", "transport"), [("https://gist.github.com/abc123.git", "https"), ("git@gist.github.com:abc123.git", "ssh")])
+def test_a_gist_is_on_github(github: GitHub, url: str, transport: str) -> None:
+    from mintd._registry_git_ops import github_owner, https_remote, parse_repo_url
+
+    repo = parse_repo_url(url)
+    assert repo is not None and (repo.transport, repo.host, repo.repo) == (transport, "gist.github.com", "abc123")
+    assert github_owner(url) == "gist.github.com"
+    assert https_remote(url) == "https://gist.github.com/abc123"
+    assert _refused(url)  # logged out
+    github.ready()
+    if transport == "ssh":
+        assert "change it to https://gist.github.com/abc123" in _refused(url)
+    else:  # git matches a helper's host exactly: github.com's doesn't cover gists
+        assert "gh auth setup-git" in _refused(url)
+        github.git_config("credential.https://gist.github.com.helper", _HELPER)  # as `gh auth setup-git` writes it
+        require_github_access(url)
+
+
+def test_a_nested_dvc_projects_import_is_not_the_outer_projects(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """dvc, run from the outer project, never reads a nested project's own
+    pointers, so the outer pull isn't refused for them; the nested project's
+    own pull is."""
+    from types import SimpleNamespace
+
+    spawned: list[list[str]] = []
+
+    def spawn(self: SubprocessDvcOps, cmd: list[str], **kwargs: object) -> object:
+        spawned.append(cmd)
+        return SimpleNamespace(returncode=0, stderr_lines=[], stdout_lines=[])
+
+    monkeypatch.setattr(SubprocessDvcOps, "_spawn", spawn)
+    (tmp_path / ".dvc").mkdir()
+    inner = tmp_path / "inner"
+    (inner / ".dvc").mkdir(parents=True)
+    _import_pointer(inner / "demo.dvc", "git@github.com:example-lab/demo.git")
+    ops = SubprocessDvcOps(timeouts=Timeouts())
+    ops.pull(cwd=tmp_path, targets=["out.txt"])
+    assert len(spawned) == 1 and github.calls() == []
+    with pytest.raises(DvcPullRefused):
+        ops.pull(cwd=inner, targets=["out.txt"])
+
+
+def test_each_producer_is_checked_once_per_process(github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pull per target asks for every import: the answer is kept."""
+    from types import SimpleNamespace
+
+    github.ready()
+    monkeypatch.setattr(
+        SubprocessDvcOps, "_spawn", lambda self, cmd, **kw: SimpleNamespace(returncode=0, stderr_lines=[], stdout_lines=[]),
+    )
+    (tmp_path / ".dvc").mkdir()
+    for name in ("a", "b", "c"):
+        _import_pointer(tmp_path / f"{name}.dvc", f"https://github.com/example-lab/{name}")
+    lookups: list[list[str]] = []
+    real = subprocess.run
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        if argv[:3] == ["git", "ls-remote", "--get-url"]:
+            lookups.append(argv)
+        return real(argv, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", run)
+    ops = SubprocessDvcOps(timeouts=Timeouts())
+    for target in ("x.csv", "y.csv", "z.csv"):
+        ops.pull(cwd=tmp_path, targets=[target])
+    assert len(lookups) == 3  # one per producer, not one per producer per pull
+
+
+@pytest.mark.parametrize("target", ["../data/demo.dvc", "../data/demo"])
+def test_a_target_above_the_folder_mintd_runs_in_is_checked(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """`data verify ../data/demo.dvc` from a subfolder: the ".." is resolved
+    before deciding which project the pointer is in."""
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(SubprocessDvcOps, "_spawn", lambda self, cmd, **kw: spawned.append(cmd))
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / "analysis").mkdir()
+    (tmp_path / "data").mkdir()
+    _import_pointer(tmp_path / "data" / "demo.dvc", "git@github.com:example-lab/demo.git")
+    with pytest.raises(DvcImportRepoUnreachable):
+        SubprocessDvcOps(timeouts=Timeouts()).status([target], cwd=tmp_path / "analysis")
+    assert spawned == []
+
+
+def test_no_message_carries_a_password_with_a_hash_in_it(github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The print filter stops a URL's userinfo at "#" or "?"; the refusal and
+    dvc import's own errors take credentials out of the URL's structure."""
+    from types import SimpleNamespace
+
+    with pytest.raises(GitHubAccessMissing) as raised:  # logged out
+        require_github_access("https://u:SECRET#x@github.com/example-lab/demo")
+    assert "SECRET" not in f"{raised.value} {raised.value.hint}"
+
+    stderr = ["ERROR: failed to import - SCM error: Failed to clone repo\n"]
+    monkeypatch.setattr(
+        SubprocessDvcOps, "_spawn", lambda self, cmd, **kw: SimpleNamespace(returncode=1, stderr_lines=stderr, stdout_lines=[]),
+    )
+    with pytest.raises(DvcImportRepoUnreachable) as failed:
+        SubprocessDvcOps(timeouts=Timeouts()).import_(
+            repo_url="https://u:SECRET#x@gitlab.example/example-lab/demo.git", path="data", dest=tmp_path / "out", cwd=tmp_path,
+        )
+    assert "SECRET" not in f"{failed.value} {failed.value.hint}"
+
+
+_DEMO = "git@github.com:example-lab/demo.git"
+_NESTED = "git@github.com:example-lab/nested.git"
+
+
+@pytest.mark.parametrize(
+    ("run_in", "cwd", "targets", "found"),
+    [
+        ("proj/analysis", ".", ["../data/demo.dvc"], [_DEMO]),
+        ("proj/analysis", ".", ["../data/demo"], [_DEMO]),
+        ("sib", "../proj", ["data/demo"], [_DEMO]),  # `data verify --path ../proj data/demo`
+        ("sib", "../proj", ["data/demo/inside.csv"], [_DEMO]),
+        ("proj", ".", ["."], [_DEMO]),  # `data verify .`; the nested project's import isn't this one's
+        ("proj", ".", None, [_DEMO]),
+        ("proj/analysis", ".", None, [_DEMO]),
+        ("link/analysis", ".", ["../data/demo"], [_DEMO]),  # a symlinked working folder
+        ("proj/inner", ".", None, [_NESTED]),  # inside the nested project, its own import
+    ],
+)
+def test_every_path_is_compared_in_one_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_in: str, cwd: str, targets: list[str] | None, found: list[str]
+) -> None:
+    from mintd._dvc_ops import _import_urls
+
+    project = tmp_path / "proj"
+    for folder in (project / ".dvc", project / "analysis", project / "data" / "demo", project / "inner" / ".dvc", tmp_path / "sib"):
+        folder.mkdir(parents=True)
+    _import_pointer(project / "data" / "demo.dvc", _DEMO)
+    _import_pointer(project / "inner" / "nested.dvc", _NESTED)
+    (tmp_path / "link").symlink_to(project)
+    monkeypatch.chdir(tmp_path / run_in)
+    assert _import_urls(Path(cwd), targets) == found
+
+
+def test_www_github_passes_on_github_coms_helper(github: GitHub) -> None:
+    """GitHub answers www.github.com with a redirect to github.com, and git
+    then asks github.com's credential helper, as `gh auth setup-git` writes it."""
+    github.ready()
+    require_github_access("https://www.github.com/example-lab/demo")
+
+
+def test_dvc_imports_missing_path_error_names_the_url_dvc_was_given(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from mintd._dvc_ops import DvcImportPathNotFound
+
+    stderr = ["ERROR: failed to import 'data' - 'data' Does not exist\n"]
+    monkeypatch.setattr(
+        SubprocessDvcOps, "_spawn", lambda self, cmd, **kw: SimpleNamespace(returncode=1, stderr_lines=stderr, stdout_lines=[]),
+    )
+    with pytest.raises(DvcImportPathNotFound) as raised:
+        SubprocessDvcOps(timeouts=Timeouts()).import_(
+            repo_url="https://u:SECRET#x@gitlab.example/example-lab/demo.git", path="data", dest=tmp_path / "out", cwd=tmp_path,
+        )
+    assert "https://gitlab.example/example-lab/demo.git" in str(raised.value)
+    assert "SECRET" not in str(raised.value)

@@ -134,10 +134,17 @@ def _real_aws_credentials_are_unreachable(monkeypatch):
 
 @pytest.fixture(scope="session")
 def _hermetic_gitconfig(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The global git config every test sees: gh's helper for github.com and
-    nothing else. Outside each test's tmp_path, which some tests list."""
+    """The global git config every test sees: gh's helper, as `gh auth
+    setup-git` writes it, and a committer. Outside each test's tmp_path,
+    which some tests list."""
     path = tmp_path_factory.mktemp("gh-hermetic") / "gitconfig"
-    path.write_text('[credential "https://github.com"]\n\thelper = !gh auth git-credential\n')
+    # A committer of its own too: git tag -a needs one, and this file replaces
+    # the global config where a CI runner or a developer keeps theirs.
+    path.write_text(
+        '[credential "https://github.com"]\n\thelper = !gh auth git-credential\n'
+        '[credential "https://gist.github.com"]\n\thelper = !gh auth git-credential\n'
+        "[user]\n\tname = mintd tests\n\temail = tests@example.invalid\n"
+    )
     return path
 
 
