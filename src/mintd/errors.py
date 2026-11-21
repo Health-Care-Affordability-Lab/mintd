@@ -32,10 +32,16 @@ def unreachable_repo_hint(repo_url: str) -> str:
     """What to do when a producer's repository can't be reached. One wording
     for every verb that meets it; the URL is quoted where it sits in a command,
     since the producer controls it."""
+    from ._registry_git_ops import NETWORK_TOO, github_access_hint, github_owner, url_git_uses
+
     url = strip_userinfo(repo_url)
+    moved = "if it moved, the catalog entry is out of date, so tell the producer"
+    used = url_git_uses(repo_url)
+    if github_owner(used):  # GitHub is reached through gh: say which account to use
+        return f"could not reach the producer's repository {url}: {github_access_hint(used)}; {NETWORK_TOO}; {moved}"
     return (
         f"could not reach the producer's repository {url}: check your network and git access "
-        f"(git ls-remote {shlex.quote(url)}); if it moved, the catalog entry is out of date, so tell the producer"
+        f"(git ls-remote {shlex.quote(url)}); {moved}"
     )
 
 

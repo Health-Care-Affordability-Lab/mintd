@@ -13,14 +13,19 @@ This seam:
 
 from __future__ import annotations
 
+import functools
 import json
+import os
+import re
 import subprocess
 from dataclasses import dataclass
 
 from ._git_invoke import git_env
-from .errors import MintdError
+from .errors import MintdError, strip_userinfo
 from pathlib import Path
 from typing import Any, Protocol
+
+import yaml
 
 
 # ---------------------------------------------------------------------------
@@ -54,15 +59,229 @@ class BranchInfo:
     ahead: int | None
 
 
+#: The hint for a git failure where no repository URL is known; with one,
+#: ``github_access_hint`` says more.
+GITHUB_ACCESS_HINT = "check GitHub access with `gh auth status`; git uses gh after `gh auth setup-git`"
+
+
 class GitOpError(MintdError):
     """A `git` invocation failed (non-zero exit). Carries stderr for diagnostics."""
 
-    hint = "check git auth (gh auth status / ssh -T git@github.com)"
+    hint = GITHUB_ACCESS_HINT
 
-    def __init__(self, command: list[str], stderr: str) -> None:
-        super().__init__(f"git command failed: {' '.join(command)}\n{stderr}")
+    def __init__(self, command: list[str], stderr: str, hint: str | None = None) -> None:
+        super().__init__(f"git command failed: {' '.join(command)}\n{stderr}", hint=hint)
         self.command = command
         self.stderr = stderr
+
+
+# ---------------------------------------------------------------------------
+# GitHub access: through gh, the one supported way
+# ---------------------------------------------------------------------------
+
+#: A github.com repository in any form git takes; group 1 is its owner.
+_GITHUB_REPO = re.compile(r"^(?:https://(?:[^@/\s]+@)?github\.com/|ssh://git@github\.com(?::\d+)?/|git@github\.com:)([^/\s]+)/")
+#: What turns both SSH forms into https, so git reaches GitHub through gh.
+SSH_TO_HTTPS = (
+    'git config --global --add url."https://github.com/".insteadOf git@github.com: ; '
+    'git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/'
+)
+
+
+#: Said after the GitHub access hint where git failed to reach the repo: the
+#: same failure can be the network.
+NETWORK_TOO = "if GitHub access is fine, check your network"
+
+
+class GitHubAccessMissing(GitOpError):
+    """mintd reaches GitHub through gh only, and gh isn't ready for this
+    repository. Raised before git runs, as a ``GitOpError``, so every caller
+    of the git seam handles it as it handles git failing."""
+
+    def __init__(self, url: str, hint: str) -> None:
+        reason = f"mintd reaches GitHub through gh, and it isn't ready for {url}"
+        MintdError.__init__(self, reason, hint=hint)
+        self.command: list[str] = []
+        self.stderr = reason
+
+
+def https_remote(raw: str) -> str:
+    """A git remote URL in its https form, the one repo identity mintd compares.
+
+    ``git@github.com:org/repo.git`` and ``ssh://git@github.com/org/repo`` ->
+    ``https://github.com/org/repo``. A trailing ``.git`` always comes off;
+    anything else keeps its shape -- a bare path, another host's ``ssh://`` URL.
+    """
+    url = raw.strip()
+    if url.startswith("git@") and ":" in url:
+        host, _, path = url[len("git@"):].partition(":")
+        url = f"https://{host}/{path}"
+    elif url.startswith("ssh://git@github.com/"):
+        url = "https://github.com/" + url[len("ssh://git@github.com/"):]
+    return url.removesuffix(".git")
+
+
+def github_owner(url: str) -> str | None:
+    """The owner (org or user) of a github.com repository URL, or None for
+    anything else: a local path, another host."""
+    match = _GITHUB_REPO.match(url.strip())
+    return match[1] if match else None
+
+
+def url_git_uses(url: str, *, cwd: Path | None = None, push: bool = False) -> str:
+    """What git will actually reach for ``url`` (a URL or a remote name), with
+    ``insteadOf`` applied; for a push to a remote, its ``pushurl`` and
+    ``pushInsteadOf`` too. Local: neither command talks to a remote."""
+    commands = [["git", "ls-remote", "--get-url", url]]
+    if push:  # names a remote only; for a URL it fails and the fetch form stands
+        commands.insert(0, ["git", "remote", "get-url", "--push", url])
+    for argv in commands:
+        try:
+            out = subprocess.run(
+                argv, cwd=str(cwd) if cwd else None,
+                capture_output=True, text=True, timeout=10, env=git_env(), check=False,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return url
+        if out:
+            return out
+    return url
+
+
+def _gh_login() -> str:
+    """Whether gh has a token for github.com: "ready", "logged out", "too old"
+    (no ``gh auth token``, before gh 2.17) or "missing". ``gh auth token`` is
+    offline; the token is never kept."""
+    try:
+        token = subprocess.run(
+            ["gh", "auth", "token", "--hostname", "github.com"],
+            capture_output=True, text=True, timeout=15, env=git_env(), check=False,
+        )
+    except FileNotFoundError:
+        return "missing"
+    except subprocess.TimeoutExpired:
+        return "logged out"
+    if token.returncode == 0 and token.stdout.strip():
+        return "ready"
+    # gh before 2.17 has no `auth token`: given `--hostname`, it says "unknown flag".
+    old = "unknown flag" in token.stderr or "unknown command" in token.stderr
+    return "too old" if old else "logged out"
+
+
+def _gh_accounts() -> tuple[str | None, tuple[str, ...]]:
+    """The active gh account for github.com and the others, read from gh's
+    hosts.yml, for the hint only. (None, ()) when it can't be read, or when
+    GH_TOKEN or GITHUB_TOKEN picks the account instead."""
+    if os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"):
+        return None, ()
+    if os.environ.get("GH_CONFIG_DIR"):
+        config = Path(os.environ["GH_CONFIG_DIR"])
+    elif os.environ.get("XDG_CONFIG_HOME"):
+        config = Path(os.environ["XDG_CONFIG_HOME"], "gh")
+    elif os.name == "nt" and os.environ.get("APPDATA"):
+        config = Path(os.environ["APPDATA"], "GitHub CLI")
+    else:
+        config = Path.home() / ".config" / "gh"
+    try:
+        host = yaml.safe_load((config / "hosts.yml").read_text(encoding="utf-8"))["github.com"]
+        active, users = host.get("user"), host.get("users") or {}
+    except (OSError, ValueError, yaml.YAMLError, KeyError, TypeError, AttributeError):
+        return None, ()
+    if not isinstance(active, str):
+        return None, ()
+    return active, tuple(str(u) for u in users if u != active)
+
+
+@functools.lru_cache(maxsize=None)
+def _gh_state() -> tuple[str, str | None, tuple[str, ...], bool]:
+    """(gh's login, as ``_gh_login``; the active and the other accounts, for
+    the hint only; git uses gh) for github.com, read once per process and
+    never over the network."""
+    active, others = _gh_accounts()
+    helper = subprocess.run(
+        ["git", "config", "--get-urlmatch", "credential.helper", "https://github.com"],
+        capture_output=True, text=True, env=git_env(), check=False,
+    ).stdout
+    return _gh_login(), active, others, "gh auth git-credential" in helper
+
+
+def github_access_hint(url: str) -> str:
+    """The one hint for GitHub access: names the repo's org, the active gh
+    account when gh's config says it, and the account to switch to. Nothing
+    is recorded, and nothing switches accounts by itself."""
+    owner = github_owner(url) or "its owner's org"
+    if not url.strip().startswith("https://"):
+        return (
+            f"mintd reaches GitHub through gh only, and git would use SSH for this repo: run {SSH_TO_HTTPS}; "
+            "if your git config points https://github.com/ at SSH (a url.<base>.insteadOf or "
+            "pushInsteadOf rule), remove that rule"
+        )
+    login, active, others, uses_gh = _gh_state()
+    if login == "missing":
+        return "install gh (https://cli.github.com), then run `gh auth login`, then `gh auth setup-git`"
+    if login == "too old":
+        return "upgrade gh: mintd needs gh 2.17 or newer (`gh --version`), then run `gh auth setup-git`"
+    if login == "logged out":
+        return "log in to GitHub with gh: run `gh auth login`, then `gh auth setup-git`"
+    if not uses_gh:
+        return "git doesn't use gh yet: run `gh auth setup-git`"
+    if active is None:
+        return f"this repo is in {owner}; check that your active gh account can see it: `gh auth status`, then `gh auth switch`"
+    if len(others) == 1:
+        switch = f"run `gh auth switch -u {others[0]}`"
+    elif others:
+        switch = f"switch to one of {', '.join(others)} with `gh auth switch -u <account>`"
+    else:
+        switch = f"log in with an account in {owner}: `gh auth login`"
+    return f"this repo is in {owner}; your active gh account is {active}; {switch}"
+
+
+def require_github_access(url: str, *, cwd: Path | None = None, push: bool = False) -> None:
+    """Before git reaches a GitHub repository: gh has a token and git uses
+    it, and the URL git will use (to push, with ``push``) is https, since an
+    SSH URL bypasses gh. A local path or another host passes untouched. The
+    account's name never decides."""
+    used = url_git_uses(url, cwd=cwd, push=push)
+    if github_owner(used) is None:
+        return
+    login, _, _, uses_gh = _gh_state()
+    if used.strip().startswith("https://") and login == "ready" and uses_gh:
+        return
+    raise GitHubAccessMissing(strip_userinfo(used), hint=github_access_hint(used))
+
+
+#: git subcommands that reach a remote. Every other one stays local.
+_NETWORK_SUBCOMMANDS = frozenset({"clone", "fetch", "pull", "push", "ls-remote"})
+
+
+def _network_target(args: list[str]) -> tuple[str, str] | None:
+    """(subcommand, the remote it reaches: a URL or a remote name, default
+    ``origin``) for a git argv, or None for a local subcommand."""
+    i = 0
+    while i < len(args) and args[i] in ("-c", "-C"):
+        i += 2
+    if i >= len(args) or args[i] not in _NETWORK_SUBCOMMANDS:
+        return None
+    return args[i], next((a for a in args[i + 1:] if not a.startswith("-")), "origin")
+
+
+def specific_hint(exc: BaseException) -> str | None:
+    """The hint this error carries itself -- a GitHub refusal's, or the account
+    hint ``_git`` attaches when GitHub turns git away -- not its class's
+    default. A caller with advice of its own keeps this one first."""
+    hint = vars(exc).get("hint")
+    return hint if isinstance(hint, str) else None
+
+
+def _unreachable_hint(target: str, stderr: str, *, cwd: Path | None, push: bool = False) -> str | None:
+    """github_access_hint for a GitHub remote git couldn't reach, else None
+    (the class hint stands)."""
+    from ._producer_git_ops import FetchError, _classify_stderr
+
+    if _classify_stderr(stderr) is not FetchError.Reason.UNREACHABLE:
+        return None
+    used = url_git_uses(target, cwd=cwd, push=push)
+    return f"{github_access_hint(used)}; {NETWORK_TOO}" if github_owner(used) else None
 
 
 class GitPushRejected(GitOpError):
@@ -233,6 +452,7 @@ class SubprocessRegistryGitOps:
         if branch:
             argv.extend(["--branch", branch])
         argv.extend([url, str(dest)])
+        require_github_access(url)
 
         # Pick wall_timeout from the structured Timeouts object if present;
         # WallTimeoutExceeded propagates unwrapped per slice 25 spec.
@@ -252,7 +472,8 @@ class SubprocessRegistryGitOps:
             # run_streaming strips the newline off every captured segment,
             # so joining with "" welds git's lines together
             # ("...a git repositoryfatal: Could not read...").
-            raise GitOpError(argv, "\n".join(r.stderr_lines))
+            stderr = "\n".join(r.stderr_lines)
+            raise GitOpError(argv, stderr, hint=_unreachable_hint(url, stderr, cwd=None))
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)
@@ -587,6 +808,9 @@ class SubprocessRegistryGitOps:
         default), for a commit whose hooks or a push whose remote can take
         longer than 30 s. ``env`` is merged over ``git_env()``."""
         cmd = ["git", *args]
+        network = _network_target(args)
+        if network is not None:  # every call that reaches a remote, present or future
+            require_github_access(network[1], cwd=cwd, push=network[0] == "push")
         timeout = (self._timeouts.transfer if self._timeouts is not None else None) if slow else self._fast_timeout
         try:
             # git writes paths as raw bytes under `-z` (UTF-8 for any name it
@@ -611,7 +835,12 @@ class SubprocessRegistryGitOps:
         except subprocess.TimeoutExpired as e:
             raise GitOpError(cmd, f"timed out after {timeout}s") from e
         except subprocess.CalledProcessError as e:
-            raise GitOpError(cmd, e.stderr or e.stdout or "") from e
+            stderr = e.stderr or e.stdout or ""
+            hint = (
+                _unreachable_hint(network[1], stderr, cwd=cwd, push=network[0] == "push")
+                if network is not None else None
+            )
+            raise GitOpError(cmd, stderr, hint=hint) from e
         return result.stdout
 
     def _gh(self, args: list[str], *, cwd: Path) -> str:

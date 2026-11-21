@@ -57,7 +57,7 @@ from ._dvc_state import (
     unlisted_on_disk,
 )
 from ._import_rescue_ops import RescueResult, rescue_import_pull
-from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
+from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path, specific_hint
 from ._storage_state import inspect_storage
 from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
@@ -1392,7 +1392,7 @@ def commit_pushed_pointers(
             commit=sha, hint="git pull --rebase, then git push (mintd never pulls, rebases or forces)",
         )
     except GitOpError as exc:
-        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint="git push")
+        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint=specific_hint(exc) or "git push")
     upstream = info.merge_ref.removeprefix("refs/heads/")
     note = None
     reads = git_ops.remote_default_branch(root, info.remote)

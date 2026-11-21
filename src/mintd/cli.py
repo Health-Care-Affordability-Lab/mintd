@@ -45,6 +45,7 @@ from ._registry_git_ops import (
     GitOpError,
     PRConflictError,
     RegistryBranchExists,
+    specific_hint,
 )
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
@@ -2224,7 +2225,8 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
             # than as a BumpBlocked finding.
             _hint(
                 (ProducerError, ValueError),
-                "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
+                lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+                or "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
             ),
             # A pydantic ValidationError is a ValueError: inside the clause
             # above, so it keeps this hint. The manifest is human-editable.
@@ -2253,7 +2255,11 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     with (
-        _hint((ProducerError, ValueError), "check the repo/pin arguments"),
+        _hint(
+            (ProducerError, ValueError),
+            lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+            or "check the repo/pin arguments",
+        ),
         # `--path` is not a flag on this parser; following the old hint exited
         # 64 with `unrecognized arguments`.
         _hint(MissingPrimaryDataProduct, "pass --source-path <output> or --all"),
@@ -2594,7 +2600,7 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
         except (GitOpError, GhAuthError, GhNotInstalled) as exc:
             raise MintdError(
                 f"could not update the registry entry for {metadata.project.name!r}: {exc}",
-                hint=(
+                hint=specific_hint(exc) or (
                     "check `gh auth status` and network access to the registry, then rerun "
                     "`mintd registry update` — nothing in this project changed"
                 ),

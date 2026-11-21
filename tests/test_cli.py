@@ -838,6 +838,32 @@ def test_registry_update_prints_diff(
     assert "→" in out_combined
 
 
+@pytest.mark.parametrize("refused_before_git", [True, False])
+def test_a_gh_failed_registry_update_keeps_its_own_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch,
+    refused_before_git: bool,
+) -> None:
+    from mintd._registry_git_ops import GitHubAccessMissing
+
+    client, _ = patched_clients
+    _register_demo_xw(client, primary="outputs/old.parquet")
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
+    data["data_products"]["primary"] = "outputs/new.parquet"
+    (tmp_path / "metadata.json").write_text(json.dumps(data))
+
+    def refused(*args: Any, **kwargs: Any) -> None:
+        if refused_before_git:
+            raise GitHubAccessMissing("git@github.com:example-lab/registry", hint="THE GH FIX")
+        raise GitOpError(["git", "push"], "remote: Repository not found.", hint="THE GH FIX")
+
+    monkeypatch.setattr(client, "update", refused)
+    assert cli.main(["registry", "update", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "THE GH FIX" in err and "network access to the registry" not in err
+
+
 def test_registry_sync_prints_count(
     capsys: pytest.CaptureFixture[str],
     patched_clients,
@@ -3067,6 +3093,24 @@ def test_cli_enclave_bump_force_producer_error_is_clean(
     assert "Traceback" not in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("argv", "verb"),
+    [(["enclave", "add", "demo-xw", "--pin", "a" * 40], "enclave_add"), (["enclave", "bump", "demo-xw", "--force"], "enclave_bump")],
+)
+def test_enclave_add_and_bump_force_give_an_unreachable_producer_the_shared_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter, argv: list[str], verb: str,
+) -> None:
+    """Not "check the repo/pin arguments": the shared hint names the gh fix,
+    here the insteadOf lines for an SSH catalog URL."""
+    from mintd.errors import unreachable_repo_hint
+    from mintd.producer import ProducerError
+
+    url = "git@github.com:example-lab/demo.git"
+    monkeypatch.setattr(cli, verb, _raises(ProducerError.unreachable(url, "a" * 40)))
+    assert cli.main([*argv, "--manifest", str(tmp_path / "m.yaml")]) == 1
+    assert recording_reporter.events_of("error")[0][2] == unreachable_repo_hint(url)
+
+
 def test_cli_enclave_bump_force_catalog_not_found_is_clean(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients,
     recording_reporter, capsys: pytest.CaptureFixture[str],
@@ -4612,7 +4656,8 @@ def test_data_import_reads_the_producer_only_when_nothing_landed(
         assert pointer.is_file()
     else:
         assert rc == 1, err
-        assert "could not be read" in err and "check git access" in err
+        # The shared unreachable-producer hint (`unreachable_repo_hint`).
+        assert "could not be read" in err and "could not reach the producer's repository" in err
         assert "Traceback" not in err
         assert not pointer.exists()
 
@@ -4828,7 +4873,7 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # Raised behind `client.fetch` (`CatalogCache.ensure_fresh` -> git
     # clone/fetch/reset), so it is inside the handler's `try` without being
     # visible to a scan of data.py.
-    "GitOpError": "check git auth",
+    "GitOpError": "check GitHub access with `gh auth status`",
     "ImportDestinationExists": None,
     # D16 made the stale-backup refusal reachable from the PLAIN import arm as
     # well as `--bump`. Its own type, and its own hint, because the general

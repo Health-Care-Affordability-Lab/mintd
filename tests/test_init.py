@@ -1221,9 +1221,11 @@ def test_https_remote_normalizes_the_forms_git_prints() -> None:
     assert _https_remote("https://github.com/acme/foo.git") == "https://github.com/acme/foo"
     assert _https_remote("git@gitlab.com:acme/foo.git") == "https://gitlab.com/acme/foo"
     assert _https_remote("  git@github.com:acme/foo  ") == "https://github.com/acme/foo"
-    # Not scp-like: kept as found rather than guessed at.
+    # GitHub is reached through gh over https, so its ssh:// form maps too.
+    assert _https_remote("ssh://git@github.com/acme/foo") == "https://github.com/acme/foo"
+    # Anything else is kept as found rather than guessed at.
     assert _https_remote("/srv/git/foo.git") == "/srv/git/foo"
-    assert _https_remote("ssh://git@github.com/acme/foo") == "ssh://git@github.com/acme/foo"
+    assert _https_remote("ssh://git@gitlab.example/acme/foo") == "ssh://git@gitlab.example/acme/foo"
 
 
 def test_git_origin_url_argv_and_absent_remote(

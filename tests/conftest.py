@@ -133,6 +133,31 @@ def _real_aws_credentials_are_unreachable(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _github_access_is_hermetic():
+    """Every test sees gh logged in as a made-up account, with git using it,
+    and every URL as git would use it unchanged.
+
+    mintd checks GitHub access through gh before git reaches github.com
+    (``_registry_git_ops.require_github_access``). Left real, that check reads
+    the developer's own gh login and git config: green on a laptop that is
+    logged in, red on a CI runner that isn't. The two functions replaced here
+    are that check's whole boundary with gh and git. ``tests/test_github_access.py``
+    puts the real ones back to test the check itself.
+    """
+    from mintd import _registry_git_ops as git_ops
+
+    # Swapped by hand, not with `monkeypatch`: an autouse fixture that requests
+    # it inverts teardown order (see `_in_process_dvc_is_hermetic`).
+    saved = git_ops._gh_state, git_ops.url_git_uses
+    git_ops._gh_state = lambda: ("ready", "test-account", (), True)  # type: ignore[assignment]
+    git_ops.url_git_uses = lambda url, *, cwd=None, push=False: url
+    try:
+        yield
+    finally:
+        git_ops._gh_state, git_ops.url_git_uses = saved
+
+
+@pytest.fixture(autouse=True)
 def _in_process_dvc_is_hermetic(tmp_path: Path):
     """Redirect dvc's config and site cache for EVERY test, in-process included.
 

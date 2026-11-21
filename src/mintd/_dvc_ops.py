@@ -476,10 +476,21 @@ class SubprocessDvcOps:
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
+        from ._registry_git_ops import GitHubAccessMissing, github_owner, https_remote, require_github_access
+
+        # dvc clones the producer itself, so GitHub access is checked here.
+        try:
+            require_github_access(repo_url)
+        except GitHubAccessMissing as e:  # this seam's own error, so its callers handle it
+            raise DvcImportRepoUnreachable(f"dvc import not run: {e}", repo_url) from e
+        # dvc gets the catalog's URL, an SSH one as https: dvc's own clone may
+        # not apply insteadOf, and the user's own rewrite (a mirror, a token)
+        # must not land in the pointer, which gets committed.
+        source = https_remote(repo_url) if github_owner(repo_url) else repo_url
         # `-o` is absolutized against the PROCESS cwd, not `cwd` -- see the
         # argument rule on `DvcOps`. The return value below stays computed from
         # the original `dest`, so this is invisible to callers.
-        cmd: list[str] = [*dvc_cmd(), "import", repo_url, path, "-o", str(dest.absolute())]
+        cmd: list[str] = [*dvc_cmd(), "import", source, path, "-o", str(dest.absolute())]
         if rev:
             cmd.extend(["--rev", rev])
         if force:

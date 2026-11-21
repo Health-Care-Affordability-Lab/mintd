@@ -85,7 +85,26 @@ mintd --help
 
 ## First-time setup
 
-Point `mintd` at your lab's registry and your S3 storage:
+mintd reaches GitHub through [gh](https://cli.github.com) only. Log in, and let git
+use gh for GitHub:
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+If your clones use SSH (`git@github.com:` or `ssh://git@github.com/`), point them at
+https once, so git goes through gh too:
+
+```bash
+git config --global --add url."https://github.com/".insteadOf git@github.com:
+git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/
+```
+
+When GitHub refuses access, mintd names the repo's org and your active gh account,
+and the account to switch to with `gh auth switch -u <account>`.
+
+Then point `mintd` at your lab's registry and your S3 storage:
 
 ```bash
 mintd config setup            # interactive walkthrough

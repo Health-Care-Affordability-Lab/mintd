@@ -1244,6 +1244,25 @@ def test_commit_that_landed_despite_a_git_error_is_still_pushed(tmp_path: Path) 
     assert _head(tmp_path / "origin.git", "main") == _head(proj)
 
 
+@pytest.mark.parametrize("refused_before_git", [True, False])
+def test_a_gh_failed_push_keeps_its_own_hint(tmp_path: Path, refused_before_git: bool) -> None:
+    """Not "git push": the hint names what to fix in gh first."""
+    from mintd._registry_git_ops import GitHubAccessMissing
+
+    proj = _producer(tmp_path)
+    write_pointer(proj, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})
+
+    class _Refused(SubprocessRegistryGitOps):
+        def push_to(self, work_dir: Path, remote: str, ref: str) -> None:
+            if refused_before_git:
+                raise GitHubAccessMissing("git@github.com:example-lab/proj.git", hint="THE GH FIX")
+            raise GitOpError(["git", "push"], "fatal: unable to access ... 403", hint="THE GH FIX")
+
+    outcome = commit_pushed_pointers(proj, ["data/final.dvc"], git_ops=_Refused(), remote=None, selection=None)
+    assert outcome.state == "push_failed"
+    assert outcome.hint == "THE GH FIX"
+
+
 def test_real_dvc_push_of_one_file_commits_the_whole_folder(
     push_clients: _FakeDvcOps, tmp_path: Path, real_dvc, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

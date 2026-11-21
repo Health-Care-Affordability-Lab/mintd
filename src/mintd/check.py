@@ -56,7 +56,7 @@ from ._fast_sync_ops import (
     stage_wdir,
     wdir_map,
 )
-from ._registry_git_ops import GitOpError
+from ._registry_git_ops import GitOpError, specific_hint
 from .catalog import CatalogClient, CatalogNotFound
 from .errors import unreachable_repo_hint
 from .imports import DataDependency, scan_imports
@@ -865,7 +865,7 @@ def _consumer_findings_from_enclave_manifest(
                     f"cannot read the catalog to resolve producer URL for "
                     f"{ap.repo}: {_git_error_summary(e)}"
                 )
-                hint = (
+                hint = specific_hint(e) or (
                     "check your network and `registry_url` in "
                     "~/.config/mintd/config.yaml; if both are fine, delete the "
                     "local registry cache (~/.cache/mintd/registry by default) "
