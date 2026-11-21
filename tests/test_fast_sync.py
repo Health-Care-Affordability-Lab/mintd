@@ -299,15 +299,17 @@ def test_parse_dvc_outs_deps_without_repo_is_not_import(tmp_path: Path) -> None:
 # ---------- cache (2) ----------
 
 def test_cache_path_layout(tmp_path: Path) -> None:
-    assert cache_path_for(tmp_path, "abcdef") == tmp_path / "files" / "md5" / "ab" / "cdef"
+    md5 = "9a0364b9e99bb480dd25e1f0284c8555"
+    assert cache_path_for(tmp_path, md5) == tmp_path / "files" / "md5" / "9a" / md5[2:]
 
 
 def test_is_cached_missing_vs_present(tmp_path: Path) -> None:
-    assert is_cached(tmp_path, "xyz") is False
-    p = cache_path_for(tmp_path, "xyz")
+    md5 = "9a0364b9e99bb480dd25e1f0284c8555"
+    assert is_cached(tmp_path, md5) is False
+    p = cache_path_for(tmp_path, md5)
     p.parent.mkdir(parents=True)
     p.write_bytes(b"")
-    assert is_cached(tmp_path, "xyz") is True
+    assert is_cached(tmp_path, md5) is True
 
 
 # ---------- s3 config (5) ----------
@@ -476,10 +478,11 @@ def test_fetch_to_cache_md5_mismatch_unlinks(s3_versioned, tmp_path: Path) -> No
 
 def test_fetch_to_cache_non_retryable_propagates(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
-    cp = cache_path_for(tmp_path / ".dvc" / "cache", "deadbeef")
+    md5 = "deadbeef" * 4
+    cp = cache_path_for(tmp_path / ".dvc" / "cache", md5)
     # No such key — boto3 raises ClientError with NoSuchKey (404), non-retryable.
     with pytest.raises(ClientError):
-        fetch_to_cache(s3, bucket, "files/md5/de/adbeef", cp, "deadbeef")
+        fetch_to_cache(s3, bucket, f"files/md5/de/{md5[2:]}", cp, md5)
 
 
 # ---------- slice 28: byte-granular progress ----------
@@ -912,7 +915,7 @@ def test_try_fast_pull_partial_failure_preserves_original_target_string(tmp_path
             Bucket=bucket, VersioningConfiguration={"Status": "Enabled"}
         )
         _write_dvc_config(tmp_path, bucket)
-        _write_dvc_file_md5(tmp_path, "data/foo.csv", "deadbeef")
+        _write_dvc_file_md5(tmp_path, "data/foo.csv", "deadbeef" * 4)
         # Do NOT upload the object — fetch will fail with NoSuchKey
         with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
             result = SubprocessFastSyncOps().try_fast_pull(
@@ -1031,14 +1034,14 @@ def test_fetch_dir_manifest_returns_entries(s3_versioned, tmp_path: Path) -> Non
 
 def test_fetch_dir_manifest_unverifiable_returns_none(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
-    dir_md5 = "bad.dir"
+    dir_md5 = "bad".ljust(32, "0") + ".dir"
     # Put garbage at the .dir-suffixed key (DVC's layout).
-    s3.put_object(Bucket=bucket, Key="files/md5/ba/d.dir", Body=b"garbage")
+    s3.put_object(Bucket=bucket, Key=f"files/md5/ba/{dir_md5[2:]}", Body=b"garbage")
     cache_dir = tmp_path / "cache"
     res = fetch_dir_manifest(s3, bucket, "", dir_md5, cache_dir)
     assert res is None
     # And the corrupt download is unlinked from cache.
-    assert not (cache_dir / "files" / "md5" / "ba" / "d.dir").exists()
+    assert not (cache_dir / "files" / "md5" / "ba" / dir_md5[2:]).exists()
 
 
 def test_try_fast_pull_md5_dir_happy(s3_versioned, tmp_path: Path) -> None:
@@ -1078,7 +1081,7 @@ def test_fetch_files_dir_uses_real_paths(s3_versioned, tmp_path: Path) -> None:
     out = DvcOut(
         target="data/f", path="data/f", md5="", is_dir=False,
         is_files_format=True,
-        files=[DvcFileEntry("a", "a.csv", 1, "v1")]
+        files=[DvcFileEntry("a" * 32, "a.csv", 1, "v1")]
     )
     s3.put_object(Bucket=bucket, Key="data/f/a.csv", Body=b"content")
     with patch.object(s3, 'download_file', wraps=s3.download_file) as mock:
@@ -1214,7 +1217,7 @@ def test_try_fast_pull_mixed_target_types_partial_failure_preserves_originals(s3
     s3.put_object(Bucket=bucket, Key="files/md5/9a/0364b9e99bb480dd25e1f0284c8555", Body=b"content")
 
     # md5-dir whose manifest object isn't in S3 → fallback.
-    _write_dvc_file_md5(tmp_path, "data/mdir", "bad.dir")
+    _write_dvc_file_md5(tmp_path, "data/mdir", "bad".ljust(32, "0") + ".dir")
 
     (tmp_path / "data" / "ffdir.dvc").write_text(
         "outs:\n  - path: data/ffdir\n    files:\n"
@@ -1308,6 +1311,33 @@ def test_try_fast_pull_md5_dir_local_manifest_no_refetch(s3_versioned, tmp_path:
     assert result.fallback_targets == []
     # No S3 GETs — both manifest and constituent are pre-cached.
     assert mock.call_count == 0
+
+
+def test_a_pointer_hash_that_names_a_file_outside_the_cache_is_refused(s3_versioned, tmp_path: Path) -> None:
+    """A hash dvc never writes, ``ab/home/u/notes.dir``, joined onto the
+    cache names ``/home/u/notes.dir``. The pull read it as a broken
+    manifest, failed to fetch one, and its cleanup deleted that file and
+    its ``.tmp``. Now the pull refuses the pointer and both files stay."""
+    s3, bucket = s3_versioned
+    project = tmp_path / "project"
+    (project / "data").mkdir(parents=True)
+    (project / ".dvc").mkdir()
+    (project / ".dvc" / "config").write_text(f'[remote "origin"]\nurl = s3://{bucket}\n')
+    planted = {tmp_path / "notes.dir": "my notes\n", tmp_path / "notes.tmp": "my draft\n"}
+    for path, text in planted.items():
+        path.write_text(text)
+    # "ab/" then the file's path without its drive: pathlib's join drops the cache before it
+    md5 = "ab/" + (tmp_path / "notes.dir").relative_to(tmp_path.anchor).as_posix()
+    (project / "data" / "dir.dvc").write_text(f"outs:\n  - path: data/dir\n    md5: {md5}\n")
+
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3), \
+         pytest.raises(PointerCutShort, match="not in the shape dvc writes"):
+        try:
+            SubprocessFastSyncOps().try_fast_pull(
+                project_path=project, targets=["data/dir"], remote_name="origin"
+            )
+        finally:  # refused or not, the files outside the cache are untouched
+            assert {p: p.read_text() for p in planted if p.is_file()} == planted
 
 
 def test_fetch_dir_contents_dedups_by_md5(s3_versioned, tmp_path: Path) -> None:

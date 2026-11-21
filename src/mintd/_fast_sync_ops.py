@@ -11,6 +11,7 @@ import logging
 import os
 import posixpath
 import random
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -901,8 +902,14 @@ def _walk_pointers(
 
 
 def cache_path_for(cache_dir: Path, md5: str) -> Path:
-    if not md5 or len(md5) < 3:
-        return cache_dir / "files" / "md5" / md5
+    """Where DVC keeps the object ``md5`` under ``cache_dir``.
+
+    ``PointerCutShort`` unless ``md5`` is 32 lowercase hex, with or without
+    ``.dir``, the shape dvc writes: joined unchecked, ``ab/home/u/notes.dir``
+    names ``/home/u/notes.dir`` and ``ab/../../x`` climbs out, and the
+    callers' cleanup would delete that file outside the cache."""
+    if not re.fullmatch(r"[0-9a-f]{32}(\.dir)?", md5):
+        raise PointerCutShort("a pointer", f"the hash {md5!r} is not in the shape dvc writes")
     return cache_dir / "files" / "md5" / md5[:2] / md5[2:]
 
 
@@ -2035,6 +2042,8 @@ class SubprocessFastSyncOps:
                     _record_per_file_failures(out, failures)
                     continue
                 synced += 1
+            except PointerCutShort:
+                raise  # a hash that would name a path outside the cache: the user's to fix, not dvc pull's
             except _UnsyncableOut as exc:
                 _route_out(
                     out, exc.why,

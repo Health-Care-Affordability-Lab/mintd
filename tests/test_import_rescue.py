@@ -546,7 +546,7 @@ def test_mixed_pull_non_import_batched_and_import_rescued(producer_bucket, tmp_p
     # A plain (non-import) dvc-tracked target alongside the import.
     own = consumer / "data" / "own.csv.dvc"
     own.parent.mkdir(parents=True, exist_ok=True)
-    own.write_text("outs:\n  - md5: abc\n    size: 3\n    path: own.csv\n")
+    own.write_text("outs:\n  - md5: " + "a" * 32 + "\n    size: 3\n    path: own.csv\n")
     non_import = "data/own.csv.dvc"
 
     fake = _FakeDvcOps()

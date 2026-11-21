@@ -590,7 +590,7 @@ def test_data_pull_catch_all_excludes_fallback_targets(
     again — it's already in `covered`, so `uncovered` is empty."""
     out = DvcOut(
         target="data/final/a.parquet", path="data/final/a.parquet",
-        md5="a", is_dir=False, version_id="v1",
+        md5="a" * 32, is_dir=False, version_id="v1",
     )
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     monkeypatch.setattr(
