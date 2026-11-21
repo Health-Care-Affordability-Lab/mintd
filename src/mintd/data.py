@@ -98,8 +98,9 @@ class CloneResult:
 
 
 class ImportDestinationExists(MintdError):
-    """A `.dvc` file already exists at the destination. The consumer resolves
-    by passing `force=True` or removing the file first."""
+    """A `.dvc` file already exists at the destination (resolved by passing
+    `force=True` or removing it), or a folder no pointer records does (resolved
+    only by moving or removing it: dvc would import into it, a level down)."""
 
 
 class StaleBackupExists(ImportDestinationExists):
@@ -1037,9 +1038,13 @@ def _unrecorded_folder(dest: Path, cwd: Path) -> str:
     files = sorted(f for f in folder.rglob("*") if f.is_file())
 
     def shown(p: Path) -> str:
-        return Path(os.path.relpath(p, os.path.abspath(cwd))).as_posix()
+        try:
+            return Path(os.path.relpath(p, os.path.abspath(cwd))).as_posix()
+        except ValueError:  # on another drive than the project (Windows)
+            return p.as_posix()
 
-    held = f"it holds {abbreviate([shown(f) for f in files])}" if files else "it is empty"
+    more = f" and {len(files) - 8} more" if len(files) > 8 else ""
+    held = f"it holds {abbreviate([shown(f) for f in files], limit=8)}{more}" if files else "it is empty"
     return (f"{shown(folder)} is already a folder and no pointer records it ({held}), so dvc would "
             "import into it, a level down; nothing was imported there")
 

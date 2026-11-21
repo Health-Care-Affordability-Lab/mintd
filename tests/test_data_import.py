@@ -462,6 +462,34 @@ def test_an_import_over_a_folder_no_pointer_records_is_refused_naming_it(
     assert [p.relative_to(dest).as_posix() for p in sorted(dest.rglob("*"))] == ["sub", "sub/keep.txt"]
 
 
+def test_a_forced_reimport_through_a_dotdot_dest_root_is_not_taken_for_a_stray_folder(tmp_path: Path) -> None:
+    """With a pointer beside the folder, a forced re-import goes ahead. Through
+    `foo/..` with `foo` missing, the pointer reads as absent unless resolved.
+    Mutation: check `target_dvc.exists()` unresolved -> refused, red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    (dest / "old.csv").write_text("the last import\n")
+    (dest.parent / "cms_based.dvc").write_text("preexisting")
+
+    import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path / "foo" / "..", force=True)
+
+    assert len(fake.calls) == 1
+
+
+def test_a_refusal_over_a_big_folder_counts_the_files_it_does_not_name(tmp_path: Path) -> None:
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    for i in range(10):
+        (dest / f"f{i}.csv").write_text("x\n")
+    with pytest.raises(ImportDestinationExists, match=r"cms_based/f7\.csv … and 2 more\)"):
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+
+
 def test_import_product_force_overwrites(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
