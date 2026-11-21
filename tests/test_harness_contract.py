@@ -49,8 +49,8 @@ from tests._harness.expect import Mismatch, assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
 from tests._harness.live import (
-    MARKER, LiveMintd, Product, catalog_entry, check_basetemp, read_only, readonly_credentials, redact,
-    run_read_only,
+    BUCKET_VAR, MARKER, TEST_BUCKET, TEST_PROFILE, LiveMintd, Product, catalog_entry, check_basetemp,
+    profile_endpoint, read_only, readonly_credentials, redact, run_read_only, story_bucket,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1854,28 +1854,81 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_a_live_tier_failure_prints_no_frame_arguments(tmp_path: Path) -> None:
+@pytest.mark.parametrize("tier", ["tests/live", "tests/stories/test_story_11_multipart.py"],
+                         ids=["live", "story-bucket"])
+def test_a_tier_failure_on_real_storage_prints_no_frame_arguments(tmp_path: Path, tier: str) -> None:
     """A refusal, under pytest's defaults and under `--tb=long -l --full-trace`,
-    names the missing file and prints none of the operator's environment.
-    Mutations that turn it red: dropping any one of the traceback overrides in
-    `tests/live/conftest.py`'s `pytest_configure` (`auto` or `long` to short,
-    no locals, no full trace)."""
+    names the missing file and prints none of the operator's environment: in
+    the live tier, and in story 11 pointed at the test bucket. Mutations that
+    turn it red: dropping `quiet_tracebacks` from either conftest, or any one
+    override inside it (`auto` or `long` to short, no locals, no full trace)."""
     planted = {"AWS_ACCESS_KEY_ID": "AKIAPLANTEDWRITE", "AWS_SECRET_ACCESS_KEY": "planted-write-secret"}
     creds = tmp_path / "readonly"
-    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
+    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n"
+                     "[mintd-test]\naws_access_key_id = AKIATEST\naws_secret_access_key = test-secret\n",
                      encoding="utf-8")
     (tmp_path / "config.yaml").write_text("registry_url: https://example.invalid/registry.git\n", encoding="utf-8")
     env = {**planted, **{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
-           "MINTD_CONFIG_DIR": str(tmp_path), "AWS_SHARED_CREDENTIALS_FILE": str(creds)}  # no AWS_CONFIG_FILE
+           "MINTD_CONFIG_DIR": str(tmp_path), "AWS_SHARED_CREDENTIALS_FILE": str(creds),  # no AWS_CONFIG_FILE
+           BUCKET_VAR: TEST_BUCKET, "MINTD_BIN": str(tmp_path / "no-mintd")}  # no wheel is built for a refusal
     for i, flags in enumerate(([], ["--tb=long", "-l", "--full-trace"])):
         got = subprocess.run(
-            [sys.executable, "-m", "pytest", "tests/live", "-x", *flags, "-p", "no:cacheprovider",
+            [sys.executable, "-m", "pytest", tier, "-x", *flags, "-p", "no:cacheprovider",
              f"--basetemp={tmp_path / f'base{i}'}"],
             cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
         )
         out = got.stdout + got.stderr
         assert got.returncode != 0 and "set AWS_CONFIG_FILE" in out, out
-        assert not any(v in out for v in (*planted.values(), "readonly-secret")), out
+        assert not any(v in out for v in (*planted.values(), "readonly-secret", "test-secret")), out
+
+
+def test_a_story_writes_only_to_the_test_bucket() -> None:
+    """Mutations that turn it red: `story_bucket` returning the value unchecked, or matching with
+    `startswith`, `in` or `lower()`; a delete, an abort or a transfer-manager upload added to story 11."""
+    assert story_bucket(None) is None and story_bucket("") is None
+    assert story_bucket(TEST_BUCKET) == TEST_BUCKET
+    for named in ("journey-bucket", f"{TEST_BUCKET}2", "cooper-mintd", TEST_BUCKET.upper(), f" {TEST_BUCKET}",
+                  f"{TEST_BUCKET}/"):
+        with pytest.raises(HarnessError, match=TEST_BUCKET):
+            story_bucket(named)
+    story = (Path(__file__).parent / "stories" / "test_story_11_multipart.py").read_text(encoding="utf-8")
+    assert re.search(r"\.(delete_\w+|abort_multipart_upload|upload_file\w*)\(", story) is None
+
+
+def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutations that turn it red: `readonly_credentials` ignoring `profile`; the default-file check
+    dropped, or comparing paths rather than files (a hard link to the default file gets through);
+    `profile_endpoint` accepting a missing endpoint."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))  # never the real ~/.aws
+    monkeypatch.setenv("USERPROFILE", str(home))
+    key = "[mintd-test]\naws_access_key_id = AKIATEST\naws_secret_access_key = test-secret\n"
+    conf = "[profile mintd-test]\nregion = us-east-1\nendpoint_url = https://s3.example.test\n"
+    (home / ".aws").mkdir(parents=True)
+    for path, text in ((tmp_path / "key", key), (tmp_path / "conf", conf),
+                       (home / ".aws" / "credentials", key), (home / ".aws" / "config", conf)):
+        path.write_text(text, encoding="utf-8")
+    good = {"AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"), "AWS_CONFIG_FILE": str(tmp_path / "conf")}
+
+    copy = readonly_credentials(good, tmp_path / "out", profile=TEST_PROFILE)
+    assert copy.read_text(encoding="utf-8").split() == ["[mintd]", "aws_access_key_id", "=", "AKIATEST",
+                                                        "aws_secret_access_key", "=", "test-secret"]
+    assert "[profile mintd]" in copy.with_name("config").read_text(encoding="utf-8")
+    assert profile_endpoint(copy) == "https://s3.example.test"
+    with pytest.raises(HarnessError, match="no \\[mintd-live-readonly\\] section"):
+        readonly_credentials(good, tmp_path / "out2")  # the live tier still takes only its read-only key
+    os.link(home / ".aws" / "credentials", tmp_path / "linked")  # the default file under another name
+    for named in ({**good, "AWS_SHARED_CREDENTIALS_FILE": "~/.aws/credentials"},
+                  {**good, "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials")},
+                  {**good, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "linked")},
+                  {**good, "AWS_CONFIG_FILE": "~/.aws/config"}):
+        with pytest.raises(HarnessError, match="default AWS file") as refused:
+            readonly_credentials(named, tmp_path / "out3", profile=TEST_PROFILE)
+        assert not any(v in str(refused.value) for v in ("AKIATEST", "test-secret", "s3.example.test"))
+    (tmp_path / "conf").write_text("[profile mintd-test]\nregion = us-east-1\n", encoding="utf-8")
+    bare = readonly_credentials(good, tmp_path / "out4", profile=TEST_PROFILE)
+    with pytest.raises(HarnessError, match="endpoint_url"):
+        profile_endpoint(bare)
 
 
 #: A fake mintd for the live tier's own tests. It records each call's argv,

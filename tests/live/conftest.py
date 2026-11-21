@@ -76,7 +76,7 @@ from tests._harness import HarnessError
 from tests._harness.consumer import fresh_project  # noqa: F401
 from tests._harness.live import (
     MARKER, RESULTS, SEEN, STARTED, LiveMintd, Product, catalog_entry, check_basetemp, readonly_credentials,
-    redact, run_read_only,
+    quiet_tracebacks, redact, run_read_only,
 )
 from tests._harness.mintd import mintd_bin  # noqa: F401
 
@@ -112,11 +112,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    # A long traceback prints each frame's arguments, and -l its locals: the
-    # operator's environment among them, with any key or token it holds.
-    config.option.showlocals = config.option.fulltrace = False
-    if config.option.tbstyle in ("auto", "long"):
-        config.option.tbstyle = "short"
+    quiet_tracebacks(config)
     if config.option.help or config.option.collectonly:
         return
     try:

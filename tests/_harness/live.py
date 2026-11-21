@@ -1,6 +1,7 @@
 """The live tier's rules: what it may run, which key it runs with, and what a
-report may show. Kept apart from `tests/live` so the unit suite can test them
-without real storage.
+report may show. Also story 11's rules for its run on the lab's test bucket:
+which bucket, and which key. Kept apart from `tests/live` so the unit suite can
+test them without real storage.
 """
 
 from __future__ import annotations
@@ -27,6 +28,8 @@ READ_ONLY = (
 )
 #: The profile of the lab's read-only key, in the files AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE name.
 READONLY_PROFILE = "mintd-live-readonly"
+#: Story 11's opt-in to the lab's test bucket, the one bucket a story may write to, and its key's profile.
+BUCKET_VAR, TEST_BUCKET, TEST_PROFILE = "MINTD_STORY_BUCKET", "cooper-mintd-test", "mintd-test"
 #: Classifications whose paths, md5s, bytes and times a report may show.
 DETAILED = frozenset({"public", "labonly"})
 #: The file the live tier leaves in its --basetemp, so a later run knows the folder is its own.
@@ -97,13 +100,18 @@ class LiveMintd(Mintd):
         return run
 
 
-def _named_file(operator_env: Mapping[str, str], var: str) -> tuple[Path, configparser.ConfigParser]:
+def _named_file(operator_env: Mapping[str, str], var: str, profile: str) -> tuple[Path, configparser.ConfigParser]:
     """The AWS file `var` names, parsed. A refusal names the file, never what is in it."""
     named = operator_env.get(var)
     if not named:
-        raise HarnessError(f"the live tier runs only with the lab's read-only key: set {var} to its file, the one "
-                           f"holding the {READONLY_PROFILE} profile")
+        raise HarnessError(f"this run uses only the {profile} key: set {var} to its file, the one holding the "
+                           f"{profile} profile")
     src = Path(named).expanduser()
+    defaults = [Path.home() / ".aws" / n for n in ("credentials", "config")]
+    # The same file, not the same path: a link to it, or another case on a case-insensitive disk, is refused too.
+    if src.is_file() and any(d.is_file() and src.samefile(d) for d in defaults):
+        raise HarnessError(f"{src} ({var}) is a default AWS file, which can hold any key: name a file of its own, "
+                           f"holding only the {profile} profile")
     # No default section: a [DEFAULT] is a section like any other, so no key falls through from it.
     found = configparser.ConfigParser(interpolation=None, default_section="\n")
     try:
@@ -115,45 +123,79 @@ def _named_file(operator_env: Mapping[str, str], var: str) -> tuple[Path, config
     return src, found
 
 
-def readonly_credentials(operator_env: Mapping[str, str], dest: Path) -> Path:
-    """The read-only key and its profile, where the live tier's mintd and dvc read them.
+def readonly_credentials(operator_env: Mapping[str, str], dest: Path, profile: str = READONLY_PROFILE) -> Path:
+    """The key of `profile` and its settings, where mintd and dvc read them: by
+    default the live tier's read-only key; story 11's bucket run passes
+    `TEST_PROFILE`.
 
-    Only from the two files the operator names, never `~/.aws`:
-    `AWS_SHARED_CREDENTIALS_FILE` must hold a `[mintd-live-readonly]` section with
-    both halves of a key and no `[mintd]` one (the lab's key, which can write),
-    and `AWS_CONFIG_FILE` a `[profile mintd-live-readonly]` section. The key's
+    Only from the two files the operator names, never `~/.aws` (named by path,
+    it is refused): `AWS_SHARED_CREDENTIALS_FILE` must hold a `[<profile>]`
+    section with both halves of a key, no `[mintd]` one (the lab's key, which
+    can write) and no `[DEFAULT]`, and `AWS_CONFIG_FILE` a `[profile <profile>]`
+    section. The key's
     two halves, and nothing else from the section, are copied under `[mintd]`,
     the profile mintd looks for and product remotes name, to `dest/credentials`
     (mode 0600); the profile's `region` and `endpoint_url`, and nothing else,
     under `[profile mintd]` to `dest/config`. Returns the credentials copy.
     """
-    src, found = _named_file(operator_env, "AWS_SHARED_CREDENTIALS_FILE")
+    src, found = _named_file(operator_env, "AWS_SHARED_CREDENTIALS_FILE", profile)
     if found.has_section("mintd"):
-        raise HarnessError(f"{src} holds [mintd], the lab's key, which can write; give the live tier a file with only "
-                           f"[{READONLY_PROFILE}]")
+        raise HarnessError(f"{src} holds [mintd], the lab's key, which can write; name a file with only [{profile}]")
     if found.has_section("DEFAULT"):  # botocore lets every profile inherit its keys
-        raise HarnessError(f"{src} has a [DEFAULT] section, whose keys every profile inherits; give the live tier a "
-                           f"file with only [{READONLY_PROFILE}]")
-    if not found.has_section(READONLY_PROFILE):
-        raise HarnessError(f"{src} has no [{READONLY_PROFILE}] section")
-    key = {k: found[READONLY_PROFILE].get(k, "").strip() for k in ("aws_access_key_id", "aws_secret_access_key")}
+        raise HarnessError(f"{src} has a [DEFAULT] section, whose keys every profile inherits; name a file with only "
+                           f"[{profile}]")
+    if not found.has_section(profile):
+        raise HarnessError(f"{src} has no [{profile}] section")
+    key = {k: found[profile].get(k, "").strip() for k in ("aws_access_key_id", "aws_secret_access_key")}
     if not all(key.values()):  # else boto would look for a key further along its chain
-        raise HarnessError(f"{src}'s [{READONLY_PROFILE}] section lacks aws_access_key_id or aws_secret_access_key")
-    conf, settings = _named_file(operator_env, "AWS_CONFIG_FILE")
-    section = f"profile {READONLY_PROFILE}"
+        raise HarnessError(f"{src}'s [{profile}] section lacks aws_access_key_id or aws_secret_access_key")
+    conf, settings = _named_file(operator_env, "AWS_CONFIG_FILE", profile)
+    section = f"profile {profile}"
     if not settings.has_section(section):
         raise HarnessError(f"{conf} has no [{section}] section")
     copy = configparser.ConfigParser(interpolation=None)
     copy["mintd"] = key
-    profile = configparser.ConfigParser(interpolation=None)
-    profile["profile mintd"] = {k: v for k, v in settings[section].items() if k in ("region", "endpoint_url")}
+    config = configparser.ConfigParser(interpolation=None)
+    config["profile mintd"] = {k: v for k, v in settings[section].items() if k in ("region", "endpoint_url")}
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / "credentials"
     with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
         copy.write(fh)
     with (dest / "config").open("w", encoding="utf-8") as fh:
-        profile.write(fh)
+        config.write(fh)
     return path
+
+
+def story_bucket(named: str | None) -> str | None:
+    """The bucket story 11 writes to: None for the emulator, else only the lab's
+    test bucket. Takes the variable's value, so no environment sits in its frame."""
+    if not named:
+        return None
+    if named != TEST_BUCKET:
+        raise HarnessError(f"{BUCKET_VAR}={named!r}: a story writes only to {TEST_BUCKET}")
+    return named
+
+
+def profile_endpoint(credentials: Path) -> str:
+    """The `endpoint_url` of the `[profile mintd]` copy beside `credentials`, a
+    file the harness wrote: refused when missing, so no request can fall back to
+    AWS's own endpoint."""
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(credentials.with_name("config"), encoding="utf-8")
+    endpoint = config.get("profile mintd", "endpoint_url", fallback="").strip()
+    if not endpoint:
+        raise HarnessError(f"[profile {TEST_PROFILE}] in AWS_CONFIG_FILE has no endpoint_url: name the endpoint, or "
+                           "every request would go to AWS's own")
+    return endpoint
+
+
+def quiet_tracebacks(config: Any) -> None:
+    """A run that holds a real key prints no frame's arguments or locals."""
+    # A long traceback prints each frame's arguments, and -l its locals: the
+    # operator's environment among them, with any key or token it holds.
+    config.option.showlocals = config.option.fulltrace = False
+    if config.option.tbstyle in ("auto", "long"):
+        config.option.tbstyle = "short"
 
 
 @dataclasses.dataclass(frozen=True)
