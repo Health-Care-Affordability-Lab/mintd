@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
-from ._dvc_ops import DvcOps
+from ._dvc_ops import DvcOpError, DvcOps
 from ._dvc_state import delivery, outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
@@ -331,9 +331,13 @@ def import_product(
                     # that appeared since the check above, a level down: never a
                     # success, whatever landed.
                     if not target_dvc.is_file():
+                        new_dest = None  # someone else's folder: no "this import left" note below
+                        nested = dest / (Path(p.rstrip("/")).name + ".dvc")
                         raise ImportDestinationExists(
                             f"dvc wrote no pointer at {_shown(target_dvc, cwd)}: a folder appeared at "
                             f"{_shown(dest, cwd)} while it ran, and the import went into it, a level down",
+                            hint=f"move {_shown(dest, cwd)} aside, with what dvc wrote into it "
+                                 f"({_shown(nested, cwd)} and its data), then import again",
                         )
                     # The import twin of `clone_and_pull_product`'s `missing`
                     # check. A file, not `outs_materialized`: on an unpinned
@@ -381,16 +385,21 @@ def import_product(
         if new_dest is not None:
             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
         _remove_empty_dirs(created_dirs)
-        if new_dest is not None and (new_dest.is_file() or new_dest.is_dir()):
+        # dvc never got its lock (another dvc held it): it wrote nothing here.
+        lock = isinstance(exc, DvcOpError) and "Unable to acquire lock" in str(exc)
+        if new_dest is not None and not lock and (new_dest.is_file() or new_dest.is_dir()):
             # What stays is this import's (its destination was not there
             # before), and a re-run refuses it: say so, and how to clear it.
-            where = _shown(new_dest, cwd)
-            left = [new_dest] if new_dest.is_file() else _first_files(new_dest)
-            clear = shlex.join(["rm", "-r", where] if new_dest.is_dir() else ["rm", where])
-            note = (f"this import left {_named(left, cwd) if left else 'empty folders'} in {where}; "
-                    f"remove it before re-running: {clear}")
+            # In the message, so the error's own hint (or the CLI's) stays.
+            where = _shown(dest, cwd)
+            if new_dest.is_dir():
+                left = _first_files(Path(os.path.abspath(dest)))
+                held = _named(left, cwd) if left else "only empty folders"
+                note = f"this import left {held} in {where}; remove it before re-running: {shlex.join(['rm', '-r', where])}"
+            else:
+                note = f"this import left {where}; remove it before re-running: {shlex.join(['rm', where])}"
             if isinstance(exc, MintdError):
-                exc.hint = f"{exc.hint}; {note}" if exc.hint else note
+                exc.args = (f"{exc}; {note}", *exc.args[1:])
             elif reporter is not None:
                 reporter.warn(note)
         if produced and reporter is not None:
@@ -1042,7 +1051,7 @@ def _import_destination(
         if not force:
             raise ImportDestinationExists(
                 f"{existing} already imports {p!r} of {name!r}; "
-                f"pass --force to re-import it, or remove that pointer and its folder"
+                f"pass --force to re-import it, or remove that pointer and what it imported"
             )
         # Rewrite the pointer that exists rather than adding a sibling
         # beside it: the layout change deliberately moves nothing on
@@ -1060,8 +1069,10 @@ def _import_destination(
         # (exit 0, data nested); `--force` replaces a file. With or without
         # `force`, which never clears what no pointer records. Resolved:
         # `foo/..` reads as absent while `foo` is missing.
-        held = [q for q in index.values() if q.resolve().is_relative_to(dest.resolve())]
-        why, hint = _occupied(dest, cwd, pointers=held)
+        here = dest.resolve()
+        holds = [q for q in index.values() if q.resolve().is_relative_to(here)]
+        within = [q for q in index.values() if here.is_relative_to(q.resolve().with_suffix(""))]
+        why, hint = _occupied(dest, cwd, holds=holds, within=within)
         raise ImportDestinationExists(why, hint=hint)
     return dest, target_dvc
 
@@ -1097,32 +1108,35 @@ def _named(paths: list[Path], cwd: Path) -> str:
     return ", ".join(_shown(p, cwd) for p in paths[:_NAMED]) + (" and more" if len(paths) > _NAMED else "")
 
 
-def _occupied(dest: Path, cwd: Path, *, pointers: list[Path]) -> tuple[str, str]:
+def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -> tuple[str, str]:
     """The refusal, message and hint, for something at ``dest`` that no pointer
-    at its own place records: what is there and what to do about it."""
+    at its own place records: what is there and what to do about it. ``holds``
+    are this product's import pointers inside it, ``within`` those whose
+    folder it is in."""
     where = _shown(dest, cwd)
+    nothing = "nothing was imported there"
+    pointers = "import somewhere else with --dest-root, or remove those imports first"
+    if holds:
+        return f"{where} already holds imports ({_named(sorted(holds), cwd)}); {nothing}", pointers
+    if within:
+        return f"{where} is inside an earlier import ({_named(sorted(within), cwd)}); {nothing}", pointers
     folder = Path(os.path.abspath(dest))
     if not folder.is_dir():
         kind = "link" if dest.is_symlink() else "file"
         return (
-            f"{where} is already a {kind} and no pointer records it, so the import would replace it",
+            f"{where} is already a {kind} and no pointer records it, so the import would replace it; {nothing}",
             "move or remove it, or import somewhere else with --dest-root",
         )
-    down = "so dvc would import into it, a level down; nothing was imported there"
-    if pointers:
-        return (
-            f"{where} already holds imports ({_named(sorted(pointers), cwd)}), {down}",
-            "import somewhere else with --dest-root, or remove those imports first",
-        )
+    down = f"so dvc would import into it, a level down; {nothing}"
     files = _first_files(folder)
-    if not files and next(folder.iterdir(), None) is None:
-        return (
-            f"{where} is already a folder, an empty one, {down}",
-            f"it is empty and safe to remove: {shlex.join(['rmdir', where])}",
-        )
-    held = _named(files, cwd) if files else "only empty folders"
+    if not files:
+        if next(folder.iterdir(), None) is None:
+            return (f"{where} is already a folder, an empty one, {down}",
+                    f"it is empty and safe to remove: {shlex.join(['rmdir', where])}")
+        return (f"{where} is already a folder holding only empty folders, {down}",
+                f"it holds no files and is safe to remove: {shlex.join(['rm', '-r', where])}")
     return (
-        f"{where} is already a folder and no pointer records it (it holds {held}), {down}",
+        f"{where} is already a folder and no pointer records it (it holds {_named(files, cwd)}), {down}",
         "if an earlier mintd data import failed partway, these are the files it left and are safe to remove: "
         f"{shlex.join(['rm', '-r', where])}; otherwise move that folder, or import somewhere else with --dest-root",
     )
