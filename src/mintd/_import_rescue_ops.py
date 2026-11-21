@@ -45,6 +45,7 @@ from ._fast_sync_ops import (
     DvcFileEntry,
     PointerCutShort,
     cache_path_for,
+    hash_in_dvc_shape,
     ensure_dir_manifest,
     is_cached,
     outs_for_target,
@@ -223,7 +224,8 @@ def _entries_from_producer_pointer(
     Tries ``<output_path>.dvc``, then ``dvc.lock`` on PATH_MISSING. Reads the
     matching out's ``files:`` list (md5/relpath/size, and version_id when the
     pinned rev recorded one). Best-effort: any fetch/parse failure returns
-    ``None`` so the caller falls through to the locally-cached manifest."""
+    ``None`` so the caller falls through to the locally-cached manifest. A
+    hash dvc never writes is ``PointerCutShort``, naming the producer's file."""
     output_path = dep.output_path
     for candidate in (f"{output_path}.dvc", "dvc.lock"):
         try:
@@ -235,6 +237,10 @@ def _entries_from_producer_pointer(
         except yaml.YAMLError:
             continue
         entries = _match_out_files(data, output_path, producer.remote_name)
+        bad = next((e.md5 for e in entries or [] if e.md5 and not hash_in_dvc_shape(e.md5)), None)
+        if bad is not None:  # an empty one is the caller's "missing a file hash"
+            raise PointerCutShort(f"{candidate} in {dep.producer_repo} at {dep.contract_pin[:7]}",
+                                  f"a hash in it is not in the shape dvc writes: {bad!r}")
         if entries is not None:
             return entries
     return None
