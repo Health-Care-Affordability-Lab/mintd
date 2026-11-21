@@ -151,10 +151,16 @@ class DvcImportStorageMissing(DvcOpError):
     upstream product's (dvc's stderr is the same). No repair command: nothing
     has shown the producer's `check` or `push` would restore a deleted version."""
 
-    hint = (
+    _WHOSE = (
         "the producer's data, or data it imports from another product, is missing from storage; "
-        "that is the producer's to fix: send them this error, then re-run the import"
+        "that is the producer's to fix: send them this error"
     )
+    hint = f"{_WHOSE}, then re-run the import"
+
+    def clear_first(self, step: str) -> None:
+        """The hint with ``step`` (clearing what the failed import left) in
+        its place: after telling the producer, before re-running."""
+        self.hint = f"{self._WHOSE}, then {step}, then re-run the import"
 
 
 class DvcDestinationGitIgnored(DvcOpError):
