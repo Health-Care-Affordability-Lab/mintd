@@ -462,6 +462,111 @@ def test_an_import_over_a_folder_no_pointer_records_is_refused_naming_it(
     assert [p.relative_to(dest).as_posix() for p in sorted(dest.rglob("*"))] == ["sub", "sub/keep.txt"]
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+def test_an_import_over_a_file_no_pointer_records_is_refused_and_the_file_kept(tmp_path: Path, force: bool) -> None:
+    """`--force` over a plain file at the destination, with no pointer, used to
+    replace it and exit 0: the user's file gone. Refused, plain or forced.
+    Mutation: refuse only a folder (`is_dir()`) -> the force case loses the file, red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/main.parquet"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_demo_xw" / "outputs" / "main.parquet"
+    dest.parent.mkdir(parents=True)
+    dest.write_text("mine\n")
+    with pytest.raises(ImportDestinationExists, match=r"main\.parquet is already a file and no pointer records it"):
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path, force=force)
+    assert dest.read_text() == "mine\n" and fake.calls == []
+
+
+def test_an_empty_folder_is_refused_with_the_command_that_removes_it(tmp_path: Path) -> None:
+    """dvc imports into an empty folder too, a level down. Mutation: let an empty folder through -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    (tmp_path / "data_demo_xw" / "outputs" / "cms_based").mkdir(parents=True)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a folder, an empty one") as refused:
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert refused.value.hint == "it is empty and safe to remove: rmdir data_demo_xw/outputs/cms_based"
+
+
+def test_a_folder_holding_earlier_imports_names_them_not_a_stray(tmp_path: Path) -> None:
+    """A file imported with --path earlier leaves its pointer inside the folder a
+    whole-folder import lands in. Name it, and don't call the folder unrecorded
+    or say to remove it. Mutation: ignore the pointers it holds -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    import_product(client, fake, "demo_xw", path="outputs/cms_based/a.csv", cwd=tmp_path, dest_root=tmp_path)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based already holds imports "
+                                                      r"\(data_demo_xw/outputs/cms_based/a\.csv\.dvc\)") as refused:
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert "no pointer records" not in str(refused.value)
+    assert refused.value.hint == "import somewhere else with --dest-root, or remove those imports first"
+
+
+def test_every_destination_is_checked_before_the_first_dvc_call(tmp_path: Path) -> None:
+    """A stray folder at the second output of --all used to stop the import
+    after the first had landed. Mutation: check each output as it is imported -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("outputs/a/", "outputs/b/"))
+    fake = _FakeDvcOps()
+    stray = tmp_path / "data_demo_xw" / "outputs" / "b"
+    stray.mkdir(parents=True)
+    (stray / "mine.txt").write_text("x\n")
+    with pytest.raises(ImportDestinationExists, match=r"outputs/b is already a folder"):
+        import_product(client, fake, "demo_xw", all_outputs=True, cwd=tmp_path, dest_root=tmp_path)
+    assert fake.calls == [] and not (tmp_path / "data_demo_xw" / "outputs" / "a").exists()
+
+
+def test_a_pointer_dvc_did_not_write_where_it_belongs_is_never_a_success(tmp_path: Path) -> None:
+    """A folder that appears at the destination while dvc runs takes the import,
+    a level down. The pointer is checked where it belongs after dvc, so that is
+    reported, never a success. Mutation: drop the check -> it returns, red."""
+
+    class _FolderAppears(_FakeDvcOps):
+        def import_(self, *, dest: Path, **kw: Any) -> Path:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "late.txt").write_text("x\n")
+            return super().import_(dest=dest, **kw)
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    with pytest.raises(ImportDestinationExists, match=r"dvc wrote no pointer at data_demo_xw/outputs/cms_based\.dvc"):
+        import_product(client, _FolderAppears(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+
+
+def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_path: Path) -> None:
+    """A failed fresh import keeps the files that landed (it never deletes a
+    file), and its own error used to say to re-run, which is then refused. Its
+    error names the files and the command that clears them; the refusal says
+    they may be what a failed import left.
+    Mutations: drop the note -> the first assertion red; drop that case from
+    the refusal's hint -> the last red."""
+    from mintd._dvc_ops import DvcImportStorageMissing
+
+    class _PartWay(_FakeDvcOps):
+        def import_(self, *, dest: Path, **kw: Any) -> Path:
+            dest.mkdir()
+            (dest / "a.csv").write_text("landed\n")
+            raise DvcImportStorageMissing("dvc import failed (exit 1): No storage files available: data/b.csv")
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    with pytest.raises(DvcImportStorageMissing) as failed:
+        import_product(client, _PartWay(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert failed.value.hint.endswith(
+        "; this import left data_demo_xw/outputs/cms_based/a.csv in data_demo_xw/outputs/cms_based; "
+        "remove it before re-running: rm -r data_demo_xw/outputs/cms_based"
+    )
+    assert "send them this error" in failed.value.hint
+
+    with pytest.raises(ImportDestinationExists) as refused:
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert refused.value.hint.startswith(
+        "if an earlier mintd data import failed partway, these are the files it left and are safe to remove: "
+        "rm -r data_demo_xw/outputs/cms_based"
+    )
+
+
 def test_a_forced_reimport_through_a_dotdot_dest_root_is_not_taken_for_a_stray_folder(tmp_path: Path) -> None:
     """With a pointer beside the folder, a forced re-import goes ahead. Through
     `foo/..` with `foo` missing, the pointer reads as absent unless resolved.
@@ -479,15 +584,21 @@ def test_a_forced_reimport_through_a_dotdot_dest_root_is_not_taken_for_a_stray_f
     assert len(fake.calls) == 1
 
 
-def test_a_refusal_over_a_big_folder_counts_the_files_it_does_not_name(tmp_path: Path) -> None:
+def test_a_refusal_over_a_big_folder_names_eight_files_and_stops_walking(tmp_path: Path) -> None:
+    """It names the first eight files, a folder's own before its subfolders',
+    and says there are more, from a walk that stops at the ninth.
+    Mutation: list the whole tree sorted (`rglob`) -> `a/z.csv` sorts first, red."""
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
-    dest.mkdir(parents=True)
+    (dest / "a").mkdir(parents=True)
+    (dest / "a" / "z.csv").write_text("x\n")
     for i in range(10):
         (dest / f"f{i}.csv").write_text("x\n")
-    with pytest.raises(ImportDestinationExists, match=r"cms_based/f7\.csv … and 2 more\)"):
+    with pytest.raises(ImportDestinationExists, match=r"it holds data_demo_xw/outputs/cms_based/f0\.csv, .*"
+                                                      r"cms_based/f7\.csv and more\)") as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert "z.csv" not in str(refused.value)
 
 
 def test_import_product_force_overwrites(tmp_path: Path) -> None:
