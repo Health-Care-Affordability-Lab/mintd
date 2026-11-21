@@ -292,6 +292,22 @@ def test_install_sh_that_installs_uv_checks_the_callers_path(tmp_path: Path) -> 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+def test_install_sh_reads_the_callers_path_without_globbing(tmp_path: Path) -> None:
+    """A PATH entry is a directory name, never a pattern: 'globt/*' is not globt/sub."""
+    bin_dir, sub_dir = tmp_path / "home" / "bin", tmp_path / "globt" / "sub"
+    _exe(sub_dir, "mintd", "mintd 9.9.9")
+    _exe(sub_dir, "dvc", "3.67.1")
+    path = f"{tmp_path / 'stubs'}:{tmp_path / 'globt'}/*:/usr/bin:/bin"
+    result, _ = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets(), PATH=path)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-3:] == [
+        "mintd installed (with dvc), but:",
+        _NOT_ON_PATH.format(name="mintd", bin=bin_dir),
+        _NOT_ON_PATH.format(name="dvc", bin=bin_dir),
+    ], result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
 @pytest.mark.parametrize("python_there", [True, False])
 def test_stamped_install_sh_finds_the_tool_python_where_uv_keeps_its_tools(tmp_path: Path, python_there: bool) -> None:
     tools = tmp_path / "mytools"  # UV_TOOL_DIR, as `uv tool dir` reports it
@@ -440,12 +456,11 @@ def _run_stamped_ps1(
     uv_says: str = "uv 0.13.9",
     uv_fails: bool = False,
     path: tuple[Path, ...] = (),
-    tool_list: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """The stamped install.ps1 under `irm | iex`, from a session whose
     preferences are not the defaults. Downloads come from tmp_path; `uv` only
-    records what it was asked, says `uv_says` for --version, tmp_path/bin for
-    `tool dir --bin` and `tool_list` for `tool list`; PATH is `path` alone.
+    records what it was asked, and says `uv_says` for --version, tmp_path/bin
+    for `tool dir --bin` and tmp_path/tools for `tool dir`; PATH is `path` alone.
     Returns the run, its last line of output the session check, and the log."""
     for name, data in _release_assets(sha256).items():
         (tmp_path / name).write_bytes(data)
@@ -461,8 +476,8 @@ def _run_stamped_ps1(
         f"Add-Content {_ps(str(log))} \"get $Uri\"; Copy-Item (Join-Path {_ps(str(tmp_path))} ($Uri -split '/')[-1]) $OutFile }}\n"
         f"function uv {{ Add-Content {_ps(str(log))} \"uv $($args -join ' ')\"; $global:LASTEXITCODE = 0\n"
         f"  if ($args[0] -eq '--version') {{ {_ps(uv_says)} }}\n"
-        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ {_ps(str(tmp_path / 'bin'))} }}\n"
-        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'list') {{ {', '.join(map(_ps, tool_list))} }}\n"
+        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ if ($args -contains '--bin') {{ {_ps(str(tmp_path / 'bin'))} }}"
+        f" else {{ {_ps(str(tmp_path / 'tools'))} }} }}\n"
         f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'install') {{ $global:LASTEXITCODE = {int(uv_fails)} }} }}\n"
         + _SESSION_BEFORE
         + f"try {{ Invoke-Expression (Get-Content -Raw {_ps(str(tmp_path / 'install.ps1'))}) *>&1 | ForEach-Object {{ \"$_\" }} }}"
@@ -559,17 +574,26 @@ def test_stamped_install_ps1_says_which_dvc_runs(
 
 @_NEEDS_PWSH
 @pytest.mark.parametrize(
-    ("tool_list", "was"),
+    ("in_bin", "mintds", "replaced"),
     [
-        (("mintd v9.9.8", "- dvc", "- mintd"), None),
-        (("dvc v3.60.0", "- dvc", "mintd v9.9.8", "- mintd"), "from uv tool 'dvc'"),
-        ((), "which uv did not install"),
+        (None, b"mintd's dvc", False),
+        (b"mintd's dvc", b"mintd's dvc", False),  # a copy of mintd's own, as uv makes on Windows
+        # `uv tool install --force dvc` after mintd: uv tool list shows dvc under both tools.
+        (b"dvc 3.60.0's dvc", b"mintd's dvc", True),
+        (b"a dvc of its own", None, True),
     ],
 )
-def test_stamped_install_ps1_names_a_dvc_it_replaces(tmp_path: Path, tool_list: tuple[str, ...], was: str | None) -> None:
+def test_stamped_install_ps1_names_a_dvc_it_replaces(
+    tmp_path: Path, in_bin: bytes | None, mintds: bytes | None, replaced: bool
+) -> None:
     (tmp_path / "bin").mkdir()
-    (tmp_path / "bin" / "dvc.exe").touch()
-    result, _ = _run_stamped_ps1(tmp_path, tool_list=tool_list)
+    if in_bin is not None:
+        (tmp_path / "bin" / "dvc.exe").write_bytes(in_bin)
+    if mintds is not None:
+        (tmp_path / "tools" / "mintd" / "Scripts").mkdir(parents=True)
+        (tmp_path / "tools" / "mintd" / "Scripts" / "dvc.exe").write_bytes(mintds)
+    result, _ = _run_stamped_ps1(tmp_path)
     assert "caught" not in result.stdout, result.stdout + result.stderr
-    replaced = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
-    assert replaced == ([f"Replaced {tmp_path / 'bin' / 'dvc.exe'}, {was}, with the dvc installed with mintd."] if was else [])
+    lines = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
+    want = f"Replaced {tmp_path / 'bin' / 'dvc.exe'}, a dvc that was not mintd's, with the dvc installed with mintd."
+    assert lines == ([want] if replaced else [])

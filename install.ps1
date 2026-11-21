@@ -85,26 +85,20 @@ try {
     }
 
     # --force below replaces a dvc already in uv's bin dir. One that isn't
-    # mintd's own (another uv tool's, or one uv didn't install) is named below.
+    # mintd's own is named below. On Windows uv copies each executable from the
+    # tool's Scripts folder into its bin dir, so mintd's own dvc.exe is a copy
+    # of mintd\Scripts\dvc.exe.
     $OldDvc = Join-Path "$(uv tool dir --bin)".Trim() "dvc.exe"
-    $ReplacedDvc = $null
-    if (Test-Path $OldDvc) {
-        $Owner = $null
-        # uv tool list: each tool's "name vX.Y.Z" line, then its "- executable" lines.
-        try {
-            foreach ($Line in @(uv tool list)) {
-                if ($Line -match '^(\S+) v') { $Tool = $Matches[1] } elseif ($Line -match '^- dvc(\.exe)?$') { $Owner = $Tool }
-            }
-        } catch { }
-        if (-not $Owner) { $ReplacedDvc = "which uv did not install" } elseif ($Owner -ne "mintd") { $ReplacedDvc = "from uv tool '$Owner'" }
-    }
+    $MintdDvc = Join-Path "$(uv tool dir)".Trim() "mintd\Scripts\dvc.exe"
+    $ReplacedDvc = (Test-Path $OldDvc) -and -not (
+        (Test-Path $MintdDvc) -and (Get-FileHash $OldDvc).Hash -eq (Get-FileHash $MintdDvc).Hash)
 
     Write-Host "Installing mintd $MintdTag..."
     # Pin Python to the newest version CI tests, and put dvc on PATH beside
     # mintd (see install.sh).
     uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc --constraints $Constraints $InstallSpec
     if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
-    if ($ReplacedDvc) { Write-Host "Replaced $OldDvc, $ReplacedDvc, with the dvc installed with mintd." }
+    if ($ReplacedDvc) { Write-Host "Replaced $OldDvc, a dvc that was not mintd's, with the dvc installed with mintd." }
 
     # Locate the tool's Python interpreter
     $ToolPython = Join-Path $env:LOCALAPPDATA "uv\tools\mintd\Scripts\python.exe"

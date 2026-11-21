@@ -43,8 +43,9 @@ physical() {
 # below changes only for this script. (`PATH=... command -v` would answer
 # from bash's hash table.)
 on_caller_path() {
-    local dir IFS=:
-    for dir in $CALLER_PATH; do
+    local dir dirs
+    IFS=: read -r -a dirs <<< "$CALLER_PATH"   # split without globbing
+    for dir in ${dirs[@]+"${dirs[@]}"}; do
         if [[ -f "${dir:-.}/$1" && -x "${dir:-.}/$1" ]]; then
             echo "${dir:-.}/$1"
             return 0
