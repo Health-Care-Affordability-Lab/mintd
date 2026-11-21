@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
-from ._dvc_state import delivery, outs_matching, path_covers
+from ._dvc_state import abbreviate, delivery, outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
 from ._registry_git_ops import GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
@@ -309,6 +309,16 @@ def import_product(
                 elif target_dvc.exists() and not force:
                     raise ImportDestinationExists(
                         f"{target_dvc} already exists; pass force=True or remove it"
+                    )
+                elif dest.resolve().is_dir() and not target_dvc.resolve().exists():
+                    # dvc imports INTO a folder already there, a level down, and
+                    # the landed check below counts what it held: exit 0, data
+                    # nested. With or without `force`, which never clears a folder
+                    # no pointer records. Resolved: `foo/..` reads as absent while
+                    # `foo` is missing.
+                    raise ImportDestinationExists(
+                        _unrecorded_folder(dest, cwd),
+                        hint="move or remove that folder, or import somewhere else with --dest-root",
                     )
                 # `dvc import` requires the destination's parent directory to
                 # already exist; it doesn't auto-create it. Create here so a
@@ -1017,6 +1027,21 @@ def _remove_payload(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     else:
         path.unlink(missing_ok=True)
+
+
+def _unrecorded_folder(dest: Path, cwd: Path) -> str:
+    """The refusal for a folder already at ``dest`` that no pointer records,
+    naming it and the files in it relative to the project (``abspath`` folds a
+    ``..`` without following links, so a linked folder is named as given)."""
+    folder = Path(os.path.abspath(dest))
+    files = sorted(f for f in folder.rglob("*") if f.is_file())
+
+    def shown(p: Path) -> str:
+        return Path(os.path.relpath(p, os.path.abspath(cwd))).as_posix()
+
+    held = f"it holds {abbreviate([shown(f) for f in files])}" if files else "it is empty"
+    return (f"{shown(folder)} is already a folder and no pointer records it ({held}), so dvc would "
+            "import into it, a level down; nothing was imported there")
 
 
 def _missing_dirs(path: Path) -> list[Path]:

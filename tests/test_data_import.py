@@ -432,6 +432,36 @@ def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
     assert fake.calls == []
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["plain", "force"])
+@pytest.mark.parametrize("via", ["root", "dotdot"])
+def test_an_import_over_a_folder_no_pointer_records_is_refused_naming_it(
+    tmp_path: Path, via: str, force: bool,
+) -> None:
+    """A folder already at the destination with no pointer beside it (a stray
+    copy, or the files a failed import left) made dvc import into it, a level
+    down, and the landed check counted what was there: exit 0, data nested.
+    It is refused before dvc runs, naming the folder and its files, with or
+    without `force` (which never clears a folder no pointer records), and with
+    a `..` in the dest root, which reads as absent while `foo` is missing.
+    Mutation: drop the refusal -> red, dvc runs."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    (dest / "sub").mkdir(parents=True)
+    (dest / "sub" / "keep.txt").write_text("mine\n")
+
+    with pytest.raises(ImportDestinationExists, match=r"^data_demo_xw/outputs/cms_based is already a folder and no "
+                                                      r"pointer records it \(it holds data_demo_xw/outputs/cms_based/"
+                                                      r"sub/keep\.txt\), so dvc would import into it") as refused:
+        import_product(client, fake, "demo_xw", cwd=tmp_path, force=force,
+                       dest_root=tmp_path / "foo" / ".." if via == "dotdot" else tmp_path)
+
+    assert refused.value.hint and "--dest-root" in refused.value.hint
+    assert fake.calls == []
+    assert [p.relative_to(dest).as_posix() for p in sorted(dest.rglob("*"))] == ["sub", "sub/keep.txt"]
+
+
 def test_import_product_force_overwrites(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
@@ -664,14 +694,14 @@ def test_import_product_force_never_destroys_a_stray_directory(
     destination that mintd did NOT import (no pointer beside it) is user
     data and must survive a forced re-import.
 
-    This test used to expect `DvcImportDestinationExists` here — a refusal
-    the fake invented. Real dvc treats an untracked directory dest as a
-    *container*: it nests the source basename inside and exits 0 (licensed
-    on both arms by `test_import_into_an_untracked_directory_dest_nests_inside`
-    in tests/test_dvc_ops_contract.py). So the import PROCEEDS, one level
-    deep, and the stray's contents survive twice over: mintd's rmtree never
-    fires (drop the `target_dvc.exists()` conjunct and the precious.csv
-    assertion reddens), and dvc itself never clears the container."""
+    Real dvc treats an untracked directory dest as a *container*: it nests the
+    source basename inside and exits 0 (licensed on both arms by
+    `test_import_into_an_untracked_directory_dest_nests_inside` in
+    tests/test_dvc_ops_contract.py). This test used to expect exactly that:
+    the import went through, one level deep, and the pointer the seam
+    returned was never written. That nested layout is a false success, so a
+    forced import over such a folder is refused before dvc runs, and the
+    stray's contents survive. Mutation: drop the refusal -> red."""
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
     fake = _FakeDvcOps()
@@ -679,20 +709,15 @@ def test_import_product_force_never_destroys_a_stray_directory(
     dest.mkdir(parents=True)
     (dest / "precious.csv").write_text("not mintd's to delete")
 
-    produced = import_product(
-        client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path,
-        force=True,
-    )
+    with pytest.raises(ImportDestinationExists, match="no pointer records it"):
+        import_product(
+            client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path,
+            force=True,
+        )
 
     assert (dest / "precious.csv").read_text() == "not mintd's to delete"
-    # The import went through, nested inside the container as real dvc
-    # nests it, rather than failing on a rule dvc does not have.
-    assert len(fake.calls) == 1
-    assert (dest / "cms_based.dvc").is_file()
-    # The seam's return is computed from the original dest, so it names the
-    # un-nested pointer — which was never written (contract-pinned wart).
-    assert produced == [dest.parent / "cms_based.dvc"]
-    assert not produced[0].exists()
+    assert fake.calls == []
+    assert not (dest / "cms_based.dvc").exists()
 
 
 @pytest.mark.parametrize(
