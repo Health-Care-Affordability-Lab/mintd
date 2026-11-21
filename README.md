@@ -56,15 +56,19 @@ Windows PowerShell:
 irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1 | iex
 ```
 
-These install the newest release the maintainer has promoted. Both scripts
-install `uv` 0.13.9 if it is missing, download the release's wheel, check it
-against the release's SHA-256, and run `uv tool install --python 3.13` with the
+These install the newest release the maintainer has promoted, with `dvc`:
+there is no separate DVC install. Both scripts install `uv` 0.13.9 if it is
+missing, and stop if your `uv` is older or doesn't report its version, naming
+the command that upgrades it.
+They download the release's wheel, check it against the release's SHA-256, and
+run `uv tool install --python 3.13 --with-executables-from dvc` with the
 release's `constraints.txt`, which pins every dependency (DVC included) to the
 versions that release was tested with. `uv tool install` does not check the
 hashes in that file, so the dependencies are pinned by version, not by hash.
 Then the scripts add `cffi` (pinned the same way) and `reflink` (built on your
 machine, not pinned) to the tool's environment, so DVC's reflink cache mode
-works on APFS / XFS / Btrfs.
+works on APFS / XFS / Btrfs. Their last line says whether `mintd` and `dvc`
+are both on your PATH, or which one is missing or shadowed by another copy.
 
 - To update, run the same line again. `uv tool upgrade mintd` does not apply.
 - For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on
@@ -77,6 +81,7 @@ Verify:
 
 ```bash
 mintd --version
+dvc --version
 mintd --help
 ```
 
