@@ -12,8 +12,8 @@
 # constraints.txt. Nothing is built from mintd's source.
 set -euo pipefail
 
-# The uv this script installs when none is found, and the oldest it accepts
-# without a warning. To bump: set it to the newest release
+# The uv this script installs when none is found, and the oldest it accepts.
+# To bump: set it to the newest release
 # (`gh api repos/astral-sh/uv/releases/latest --jq .tag_name`) here and in
 # install.ps1; tests/test_install_scripts.py checks the two match.
 UV_VERSION="0.13.9"
@@ -67,7 +67,16 @@ if ! command -v uv &>/dev/null; then
 else
     UV_HAVE="$(uv --version | awk '{print $2}')"
     if version_lt "$UV_HAVE" "$UV_VERSION"; then
-        echo "Warning: uv ${UV_HAVE} is older than ${UV_VERSION}; upgrade it with 'uv self update'." >&2
+        # A Homebrew uv is a link into brew's Cellar and can't update itself.
+        UV_PATH="$(command -v uv)"
+        if [[ "$UV_PATH" == */Cellar/uv/* || "$(readlink "$UV_PATH" || true)" == */Cellar/uv/* ]]; then
+            UV_UPGRADE="brew upgrade uv"
+        else
+            UV_UPGRADE="uv self update"
+        fi
+        echo "error: this installer needs uv ${UV_VERSION} or newer, and you have ${UV_HAVE}." >&2
+        echo "Upgrade it with '${UV_UPGRADE}', then run the install line again. Nothing was installed." >&2
+        exit 1
     fi
 fi
 
@@ -93,7 +102,9 @@ echo "Installing mintd ${MINTD_TAG}..."
 # Unpinned, uv uses the first Python it finds or downloads the newest, which
 # can outrun wheels for dvc's compiled deps (pygit2 had none for 3.15 at
 # first, and its source build needs libgit2).
-uv tool install --force --reinstall --refresh --python 3.13 \
+# --with-executables-from puts dvc on PATH beside mintd, so nobody installs
+# DVC separately.
+uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc \
     --constraints "$TMP/constraints.txt" "$INSTALL_SPEC"
 
 # Locate the tool's Python interpreter
@@ -115,60 +126,61 @@ uv pip install --python "$TOOL_PYTHON" --constraints "$TMP/constraints.txt" cffi
     echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
 }
 
-echo ""
-if [[ "$WITH_SCHEMA" -eq 1 ]]; then
-    echo "mintd installed successfully (with bundled dvc + [schema] extra). Run 'mintd --help' to get started."
-else
-    echo "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
-fi
-
 # --- Post-install verification (non-fatal diagnostics) -----------------------
-# Help users catch the common Windows/Unix failure mode where a successful
-# reinstall still leaves an OLDER mintd winning on PATH (pipx / pip --user /
-# another bin dir resolving before the uv tool shim).
+# Help users catch the common failure mode where a successful reinstall still
+# leaves another mintd or dvc winning on PATH (pipx / pip --user / brew /
+# another bin dir resolving before the uv tool bin dir), or neither on PATH yet.
 echo ""
 echo "Verifying installation..."
-
-# (a) Resolved version of whatever 'mintd' is first on PATH.
-if command -v mintd >/dev/null 2>&1; then
-    RESOLVED_MINTD="$(command -v mintd)"
-    echo "  mintd on PATH: ${RESOLVED_MINTD}"
-    if MINTD_VERSION="$(mintd --version 2>/dev/null)"; then
-        echo "  ${MINTD_VERSION}"
-    else
-        echo "  Warning: 'mintd --version' did not run cleanly." >&2
-    fi
-else
-    echo "  Warning: 'mintd' is not on your PATH yet." >&2
-    echo "           Open a new shell, or add the uv tool bin dir to PATH (see below)." >&2
-fi
-
-# (b) PATH-shadowing check: does the resolved 'mintd' live in uv's tool bin dir?
 UV_BIN_DIR="$(uv tool dir --bin 2>/dev/null || true)"
-if [[ -n "${UV_BIN_DIR}" ]]; then
-    echo "  uv tool bin dir: ${UV_BIN_DIR}"
-    if [[ -n "${RESOLVED_MINTD:-}" ]]; then
-        # Compare the directory the resolved shim sits in against uv's bin dir.
-        RESOLVED_DIR="$(cd "$(dirname "${RESOLVED_MINTD}")" 2>/dev/null && pwd -P || dirname "${RESOLVED_MINTD}")"
-        UV_BIN_DIR_REAL="$(cd "${UV_BIN_DIR}" 2>/dev/null && pwd -P || echo "${UV_BIN_DIR}")"
-        if [[ "${RESOLVED_DIR}" != "${UV_BIN_DIR_REAL}" ]]; then
-            echo "" >&2
-            echo "  WARNING: PATH shadowing detected!" >&2
-            echo "    The 'mintd' on your PATH resolves to:" >&2
-            echo "      ${RESOLVED_MINTD}" >&2
-            echo "    but uv installed mintd into:" >&2
-            echo "      ${UV_BIN_DIR_REAL}" >&2
-            echo "    You are likely running an OLDER mintd (pipx / pip --user / another" >&2
-            echo "    install) that wins on PATH. Remove the stale copy, or put" >&2
-            echo "    '${UV_BIN_DIR_REAL}' earlier on your PATH, then re-open your shell." >&2
-        fi
-    fi
-fi
+UV_BIN_DIR_REAL="$(cd "${UV_BIN_DIR}" 2>/dev/null && pwd -P || echo "${UV_BIN_DIR}")"
+[[ -z "${UV_BIN_DIR}" ]] || echo "  uv tool bin dir: ${UV_BIN_DIR}"
+PROBLEMS=""   # one "  - " line per problem, for the closing line
 
-# (c) Surface what uv knows about the install.
+# Says which $1 runs and warns when it is not the one uv installed; $2 says
+# what that means for $1.
+check_on_path() {
+    local found version dir
+    if ! found="$(command -v "$1")"; then
+        echo "  Warning: '$1' is not on your PATH yet." >&2
+        PROBLEMS+=$'\n'"  - '$1' is not on your PATH yet: open a new shell, or add ${UV_BIN_DIR:-the uv tool bin dir} to your PATH."
+        return 0
+    fi
+    if version="$("$1" --version 2>/dev/null)"; then
+        echo "  $1 on PATH: ${found} (${version})"
+    else
+        echo "  $1 on PATH: ${found}"
+        echo "  Warning: '$1 --version' did not run cleanly." >&2
+    fi
+    dir="$(cd "$(dirname "${found}")" 2>/dev/null && pwd -P || dirname "${found}")"
+    if [[ -n "${UV_BIN_DIR}" && "${dir}" != "${UV_BIN_DIR_REAL}" ]]; then
+        echo "" >&2
+        echo "  WARNING: PATH shadowing detected!" >&2
+        echo "    The '$1' on your PATH resolves to:" >&2
+        echo "      ${found}" >&2
+        echo "    but uv installed $1 into:" >&2
+        echo "      ${UV_BIN_DIR_REAL}" >&2
+        echo "    $2" >&2
+        echo "    Remove the other copy, or put '${UV_BIN_DIR_REAL}' earlier on your PATH," >&2
+        echo "    then re-open your shell." >&2
+        PROBLEMS+=$'\n'"  - '$1' runs ${found}, not the $1 installed with mintd (see the warning above)."
+    fi
+}
+check_on_path mintd "You are likely running an OLDER mintd (pipx / pip --user / another install)."
+check_on_path dvc "Typing 'dvc' (as in 'dvc repro') runs that one; mintd itself runs the dvc installed with it."
+
+# Surface what uv knows about the install.
 echo ""
 echo "Installed uv tools:"
 uv tool list 2>/dev/null || echo "  (could not run 'uv tool list')" >&2
+
+echo ""
+if [[ "$WITH_SCHEMA" -eq 1 ]]; then WITH="dvc + [schema] extra"; else WITH="dvc"; fi
+if [[ -z "$PROBLEMS" ]]; then
+    echo "mintd installed successfully (with ${WITH}, both on your PATH). Run 'mintd --help' to get started."
+else
+    echo "mintd installed (with ${WITH}), but:${PROBLEMS}"
+fi
 
 }
 

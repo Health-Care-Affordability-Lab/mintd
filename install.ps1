@@ -40,8 +40,8 @@ if (-not $MintdTag) {
 }
 
 $ErrorActionPreference = "Stop"
-# The uv to install when none is found, and the oldest accepted without a
-# warning. Bump it together with UV_VERSION in install.sh (see there).
+# The uv to install when none is found, and the oldest accepted. Bump it
+# together with UV_VERSION in install.sh (see there).
 $UvVersion = "0.13.9"
 
 # Ensure uv is installed
@@ -50,7 +50,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     irm "https://astral.sh/uv/$UvVersion/install.ps1" | iex
     $env:PATH = "$env:USERPROFILE\.local\bin;$env:PATH"
 } elseif ((uv --version) -match '(\d+\.\d+\.\d+)' -and [version]$Matches[1] -lt [version]$UvVersion) {
-    Write-Warning "uv $($Matches[1]) is older than $UvVersion; upgrade it with 'uv self update'."
+    throw "this installer needs uv $UvVersion or newer, and you have $($Matches[1]). Upgrade it with 'uv self update', then run the install line again. Nothing was installed."
 }
 
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is slow with a progress bar
@@ -77,8 +77,9 @@ try {
     }
 
     Write-Host "Installing mintd $MintdTag..."
-    # Pin Python to the newest version CI tests (see install.sh).
-    uv tool install --force --reinstall --refresh --python 3.13 --constraints $Constraints $InstallSpec
+    # Pin Python to the newest version CI tests, and put dvc on PATH beside
+    # mintd (see install.sh).
+    uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc --constraints $Constraints $InstallSpec
     if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
 
     # Locate the tool's Python interpreter
@@ -103,17 +104,10 @@ try {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }
 
-Write-Host ""
-if ($WithSchema) {
-    Write-Host "mintd installed successfully (with bundled dvc + [schema] extra). Run 'mintd --help' to get started."
-} else {
-    Write-Host "mintd installed successfully (with bundled dvc). Run 'mintd --help' to get started."
-}
-
 # --- Post-install verification (non-fatal diagnostics) -----------------------
 # Catch the common Windows failure mode where a successful reinstall still
-# leaves an OLDER mintd winning on PATH (pipx / pip --user / another bin dir
-# resolving before the uv tool shim).
+# leaves another mintd or dvc winning on PATH (pipx / pip --user / winget /
+# another bin dir resolving before the uv tool shim), or neither on PATH yet.
 #
 # Everything below is diagnostics only, so relax the script-wide EAP=Stop:
 # in Windows PowerShell 5.1, `2>$null` on a native command turns each stderr
@@ -124,61 +118,67 @@ if ($WithSchema) {
 $ErrorActionPreference = "Continue"
 Write-Host ""
 Write-Host "Verifying installation..."
-
-# (a) Resolved 'mintd' first on PATH + its version.
-$ResolvedCmd = Get-Command mintd -ErrorAction SilentlyContinue
-if ($ResolvedCmd) {
-    $ResolvedMintd = $ResolvedCmd.Source
-    Write-Host "  mintd on PATH: $ResolvedMintd"
-    $MintdVersion = (& mintd --version 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $MintdVersion) {
-        Write-Host "  $MintdVersion"
-    } else {
-        Write-Warning "'mintd --version' did not run cleanly."
-    }
-} else {
-    Write-Warning "'mintd' is not on your PATH yet."
-    Write-Warning "Open a new shell, or add the uv tool bin dir to PATH (see below)."
-}
-
-# (b) PATH-shadowing check against uv's tool bin dir.
 $UvBinDir = (& uv tool dir --bin 2>$null)
 if ($LASTEXITCODE -eq 0 -and $UvBinDir) {
-    $UvBinDir = $UvBinDir.Trim()
+    $UvBinDir = "$UvBinDir".Trim()
     Write-Host "  uv tool bin dir: $UvBinDir"
-    if ($ResolvedMintd) {
-        $ResolvedDir = Split-Path -Parent $ResolvedMintd
-        # Normalize both paths for a case-insensitive, separator-tolerant compare.
-        try { $ResolvedDirFull = (Resolve-Path -LiteralPath $ResolvedDir -ErrorAction Stop).Path } catch { $ResolvedDirFull = $ResolvedDir }
-        try { $UvBinDirFull = (Resolve-Path -LiteralPath $UvBinDir -ErrorAction Stop).Path } catch { $UvBinDirFull = $UvBinDir }
-        $ResolvedNorm = $ResolvedDirFull.TrimEnd('\').ToLowerInvariant()
-        $UvBinNorm = $UvBinDirFull.TrimEnd('\').ToLowerInvariant()
-        if ($ResolvedNorm -ne $UvBinNorm) {
-            Write-Host ""
-            Write-Warning "PATH shadowing detected!"
-            Write-Warning "  The 'mintd' on your PATH resolves to:"
-            Write-Warning "    $ResolvedMintd"
-            Write-Warning "  but uv installed mintd into:"
-            Write-Warning "    $UvBinDirFull"
-            Write-Warning "  You are likely running an OLDER mintd (pipx / pip --user / another"
-            Write-Warning "  install) that wins on PATH. Inspect duplicates with:"
-            Write-Warning "    where.exe mintd"
-            Write-Warning "  Remove the stale copy, or put '$UvBinDirFull' earlier on your PATH,"
-            Write-Warning "  then open a new shell."
-            # Surface every mintd on PATH so the user can see the duplicates.
-            $AllMintd = (& where.exe mintd 2>$null)
-            if ($LASTEXITCODE -eq 0 -and $AllMintd) {
-                Write-Warning "  All 'mintd' entries on PATH:"
-                foreach ($line in $AllMintd) { Write-Warning "    $line" }
-            }
-        }
-    }
+    try { $UvBinDirFull = (Resolve-Path -LiteralPath $UvBinDir -ErrorAction Stop).Path } catch { $UvBinDirFull = $UvBinDir }
+} else {
+    $UvBinDir = $null
 }
 
-# (c) Surface what uv knows about the install.
+# Says which $Name runs and warns when it is not the one uv installed; $Means
+# says what that means for $Name. Returns the problem, if any, for the last line.
+function Test-OnPath($Name, $Means) {
+    $Cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $Cmd) {
+        Write-Warning "'$Name' is not on your PATH yet."
+        $AddDir = if ($UvBinDir) { $UvBinDir } else { "the uv tool bin dir" }
+        return "'$Name' is not on your PATH yet: open a new shell, or add $AddDir to your PATH."
+    }
+    $Version = (& $Cmd.Source --version 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $Version) {
+        Write-Host "  $Name on PATH: $($Cmd.Source) ($Version)"
+    } else {
+        Write-Host "  $Name on PATH: $($Cmd.Source)"
+        Write-Warning "'$Name --version' did not run cleanly."
+    }
+    if (-not $UvBinDir) { return }
+    # Normalize both paths for a case-insensitive, separator-tolerant compare.
+    $Dir = Split-Path -Parent $Cmd.Source
+    try { $DirFull = (Resolve-Path -LiteralPath $Dir -ErrorAction Stop).Path } catch { $DirFull = $Dir }
+    if ($DirFull.TrimEnd('\').ToLowerInvariant() -ne $UvBinDirFull.TrimEnd('\').ToLowerInvariant()) {
+        Write-Host ""
+        Write-Warning "PATH shadowing detected!"
+        Write-Warning "  The '$Name' on your PATH resolves to:"
+        Write-Warning "    $($Cmd.Source)"
+        Write-Warning "  but uv installed $Name into:"
+        Write-Warning "    $UvBinDirFull"
+        Write-Warning "  $Means"
+        Write-Warning "  Remove the other copy, or put '$UvBinDirFull' earlier on your PATH,"
+        Write-Warning "  then open a new shell. Every '$Name' on your PATH:"
+        foreach ($Each in (Get-Command $Name -CommandType Application -All)) { Write-Warning "    $($Each.Source)" }
+        return "'$Name' runs $($Cmd.Source), not the $Name installed with mintd (see the warning above)."
+    }
+}
+$Problems = @(
+    Test-OnPath mintd "You are likely running an OLDER mintd (pipx / pip --user / another install)."
+    Test-OnPath dvc "Typing 'dvc' (as in 'dvc repro') runs that one; mintd itself runs the dvc installed with it."
+)
+
+# Surface what uv knows about the install.
 Write-Host ""
 Write-Host "Installed uv tools:"
 & uv tool list
 if ($LASTEXITCODE -ne 0) { Write-Warning "Could not run 'uv tool list'." }
+
+$With = if ($WithSchema) { "dvc + [schema] extra" } else { "dvc" }
+Write-Host ""
+if (-not $Problems) {
+    Write-Host "mintd installed successfully (with $With, both on your PATH). Run 'mintd --help' to get started."
+} else {
+    Write-Host "mintd installed (with $With), but:"
+    foreach ($Problem in $Problems) { Write-Host "  - $Problem" }
+}
 
 }
