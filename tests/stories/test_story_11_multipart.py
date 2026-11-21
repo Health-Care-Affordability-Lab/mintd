@@ -28,9 +28,13 @@ Where it runs: on the emulator by default, and in CI. On the lab's test bucket
 only by hand:
 `MINTD_STORY_BUCKET=cooper-mintd-test AWS_SHARED_CREDENTIALS_FILE=~/.aws/mintd-test-credentials AWS_CONFIG_FILE=~/.aws/mintd-test-config uv run pytest tests/stories/test_story_11_multipart.py -rA`.
 The key is checked the way the live tier checks its own, only that bucket is
-accepted, every write goes under `runs/<run id>/<test>/`, and nothing is ever
-deleted or cleaned up: the bucket's lifecycle rule expires `runs/`. One run
-writes 5 object versions under 3 keys, 524,288,035 bytes, in 35 part uploads.
+accepted, and the endpoint may name no path. The key must be refused
+ListObjectVersions, checked before anything is written: with a key that may
+list versions, mintd's push in the second case would delete the object it
+uploads again, a delete marker on the versioned bucket. Every write goes under
+`runs/<run id>/<test>/`, and nothing is ever deleted or cleaned up: the bucket's
+lifecycle rule expires `runs/`. One run writes 5 object versions under 3 keys,
+524,288,035 bytes, in 35 part uploads.
 """
 
 from __future__ import annotations
@@ -50,7 +54,10 @@ import yaml
 from tests._harness import HarnessError
 from tests._harness.expect import assert_landed_match_pointers, md5
 from tests._harness.git import _git
-from tests._harness.live import BUCKET_VAR, TEST_PROFILE, profile_endpoint, readonly_credentials, story_bucket
+from tests._harness.live import (
+    BUCKET_VAR, TEST_PROFILE, lock_down, profile_endpoint, readonly_credentials, require_no_version_listing,
+    story_bucket,
+)
 from tests._harness.payload import publish_payload
 from tests._harness.producer import build_local_producer, register
 from tests._harness.s3 import BUCKET
@@ -126,6 +133,7 @@ def target(request, tmp_path, monkeypatch, mintd):
     bucket = story_bucket(_OPERATOR_ENV.get(BUCKET_VAR))
     if bucket is None:  # the emulator
         s3 = request.getfixturevalue("s3_server")
+        require_no_version_listing(s3.client, BUCKET, prefix)  # the emulator refuses it, as the test key must
         yield Target(BUCKET, f"{prefix}/{BIG}", s3.client,
                      {"url": f"s3://{BUCKET}/{prefix}", "endpointurl": s3.endpoint, "version_aware": "true"})
         # Every object PUT the emulator saw (mintd's, dvc's and the story's, parts included) is in this test's
@@ -137,19 +145,18 @@ def target(request, tmp_path, monkeypatch, mintd):
     creds = readonly_credentials(_OPERATOR_ENV, tmp_path / "aws", profile=TEST_PROFILE)
     request.addfinalizer(lambda: creds.unlink(missing_ok=True))
     endpoint = profile_endpoint(creds)
-    for k in [k for k in os.environ if k.startswith(("AWS_", "BOTO_")) and k != "AWS_CA_BUNDLE"]:
-        monkeypatch.delenv(k)  # in this process too, only the copy's key, region and endpoint count
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(creds.with_name("config")))
-    (tmp_path / "boto").touch()  # BOTO_CONFIG: an empty file, as the live tier sets it
-    for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"):
-        del mintd.env[k]  # the fixture's emulator keys and region
-    mintd.env.update(AWS_SHARED_CREDENTIALS_FILE=str(creds), AWS_CONFIG_FILE=str(creds.with_name("config")),
-                     BOTO_CONFIG=str(tmp_path / "boto"), AWS_EC2_METADATA_DISABLED="true")
-    if _OPERATOR_ENV.get("AWS_CA_BUNDLE"):  # trusted certificates, not a key: the live tier's one exception
-        mintd.env["AWS_CA_BUNDLE"] = _OPERATOR_ENV["AWS_CA_BUNDLE"]
+    here = lock_down(os.environ, creds, tmp_path)  # this process too, for the client below
+    for k in os.environ.keys() - here.keys():
+        monkeypatch.delenv(k)
+    for k, v in here.items():
+        monkeypatch.setenv(k, v)
+    # The fixture's emulator keys and region go; mintd's env inherits nothing, so the operator's certificates are
+    # passed on by name (the one variable `lock_down` keeps).
+    ca = {"AWS_CA_BUNDLE": _OPERATOR_ENV["AWS_CA_BUNDLE"]} if _OPERATOR_ENV.get("AWS_CA_BUNDLE") else {}
+    mintd.env = lock_down(mintd.env, creds, tmp_path) | ca
     mintd.timeout = None  # a real upload takes as long as the link does; Ctrl-C still stops it
     client = boto3.Session(profile_name="mintd").client("s3", endpoint_url=endpoint)
+    require_no_version_listing(client, bucket, prefix)  # before anything is written
     print(f"story 11 writes under s3://{bucket}/{prefix}/")  # shown by -rA, for the PR's record
     yield Target(bucket, f"{prefix}/{BIG}", client,
                  {"url": f"s3://{bucket}/{prefix}", "endpointurl": endpoint, "version_aware": "true",

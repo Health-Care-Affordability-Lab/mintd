@@ -1,7 +1,8 @@
 """The live tier's rules: what it may run, which key it runs with, and what a
 report may show. Also story 11's rules for its run on the lab's test bucket:
-which bucket, and which key. Kept apart from `tests/live` so the unit suite can
-test them without real storage.
+which bucket, and which key. Both tiers run a key copy in the same locked-down
+environment. Kept apart from `tests/live` so the unit suite can test them
+without real storage.
 """
 
 from __future__ import annotations
@@ -10,12 +11,14 @@ import configparser
 import contextlib
 import dataclasses
 import json
+import logging
 import os
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from tests._harness import HarnessError
 from tests._harness.expect import Mismatch
@@ -186,16 +189,70 @@ def profile_endpoint(credentials: Path) -> str:
     if not endpoint:
         raise HarnessError(f"[profile {TEST_PROFILE}] in AWS_CONFIG_FILE has no endpoint_url: name the endpoint, or "
                            "every request would go to AWS's own")
+    parts = urlsplit(endpoint)
+    if parts.path.strip("/") or parts.query or parts.fragment:  # path-style requests would go to the bucket it names
+        raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE has a path: requests would land "
+                           f"in the bucket it names, not {TEST_BUCKET}; name the endpoint's host alone")
     return endpoint
 
 
+def require_no_version_listing(client: Any, bucket: str, prefix: str) -> None:
+    """Refuse a key that may list versions under `prefix`, before anything is
+    written. dvc's push lists an object's versions before it uploads it again,
+    and when it may, it sends DeleteObjects for the key first: on a versioned
+    bucket, a delete marker. A key refused ListObjectVersions gets no further,
+    so the story deletes nothing only with such a key."""
+    from botocore.exceptions import ClientError
+
+    try:
+        client.list_object_versions(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code")
+        if code == "AccessDenied":
+            return
+        raise HarnessError(f"could not check that the key is refused ListObjectVersions under {prefix} ({code})") from None
+    raise HarnessError(f"the key may list versions under {prefix}, so mintd's push would send DeleteObjects for the "
+                       "object it uploads again, a delete marker on a versioned bucket: a story writes only with a key "
+                       "refused ListObjectVersions")
+
+
+def kept(name: str) -> bool:
+    """Whether a variable may sit beside a key copy: no AWS, boto or fsspec
+    setting but the trusted-certificates bundle, so no key but the copy is in
+    reach (fsspec's S3 defaults override a profile's key)."""
+    return name == "AWS_CA_BUNDLE" or not name.startswith(("AWS_", "BOTO_", "FSSPEC_"))
+
+
+def lock_down(env: Mapping[str, str], credentials: Path, work: Path) -> dict[str, str]:
+    """`env` with the key copy at `credentials` (from `readonly_credentials`)
+    as the only key in reach: every other AWS, boto and fsspec variable dropped
+    (`AWS_CA_BUNDLE` stays: it picks trusted certificates, not a key),
+    `BOTO_CONFIG` an empty file, the EC2 metadata service off, no fsspec config
+    folder, and dvc's global and system config empty, so no remote key set
+    there reaches dvc."""
+    (work / "boto").touch()
+    return {k: v for k, v in env.items() if kept(k)} | {
+        "AWS_SHARED_CREDENTIALS_FILE": str(credentials),
+        "AWS_CONFIG_FILE": str(credentials.with_name("config")),  # the profile's region and endpoint only
+        "BOTO_CONFIG": str(work / "boto"),
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "FSSPEC_CONFIG_DIR": str(work / "fsspec"),  # no folder there: no ~/.config/fsspec key
+        "DVC_GLOBAL_CONFIG_DIR": str(work / "dvc-global"),
+        "DVC_SYSTEM_CONFIG_DIR": str(work / "dvc-system"),
+    }
+
+
 def quiet_tracebacks(config: Any) -> None:
-    """A run that holds a real key prints no frame's arguments or locals."""
+    """A run that holds a real key prints no frame's arguments or locals, and
+    no botocore request log."""
     # A long traceback prints each frame's arguments, and -l its locals: the
     # operator's environment among them, with any key or token it holds.
     config.option.showlocals = config.option.fulltrace = False
     if config.option.tbstyle in ("auto", "long"):
         config.option.tbstyle = "short"
+    # botocore's DEBUG log prints each request's headers, the key id in Authorization among them, and pytest's
+    # --log-level=DEBUG would capture and print it.
+    logging.getLogger("botocore").setLevel(logging.WARNING)
 
 
 @dataclasses.dataclass(frozen=True)

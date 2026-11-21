@@ -49,8 +49,9 @@ from tests._harness.expect import Mismatch, assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
 from tests._harness.live import (
-    BUCKET_VAR, MARKER, TEST_BUCKET, TEST_PROFILE, LiveMintd, Product, catalog_entry, check_basetemp,
-    profile_endpoint, read_only, readonly_credentials, redact, run_read_only, story_bucket,
+    BUCKET_VAR, MARKER, TEST_BUCKET, TEST_PROFILE, LiveMintd, Product, catalog_entry, check_basetemp, lock_down,
+    profile_endpoint, read_only, readonly_credentials, redact, require_no_version_listing, run_read_only,
+    story_bucket,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1898,7 +1899,8 @@ def test_a_story_writes_only_to_the_test_bucket() -> None:
 def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutations that turn it red: `readonly_credentials` ignoring `profile`; the default-file check
     dropped, or comparing paths rather than files (a hard link to the default file gets through);
-    `profile_endpoint` accepting a missing endpoint."""
+    `profile_endpoint` accepting a missing endpoint, or one with a path (requests would land in the bucket
+    the path names)."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))  # never the real ~/.aws
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -1929,6 +1931,96 @@ def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypat
     bare = readonly_credentials(good, tmp_path / "out4", profile=TEST_PROFILE)
     with pytest.raises(HarnessError, match="endpoint_url"):
         profile_endpoint(bare)
+    for endpoint, ok in (("https://s3.example.test/", True), ("https://s3.example.test/other-bucket", False),
+                         ("https://s3.example.test?bucket=other", False)):
+        (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {endpoint}\n",
+                                       encoding="utf-8")
+        copy = readonly_credentials(good, tmp_path / "out5", profile=TEST_PROFILE)
+        if ok:
+            assert profile_endpoint(copy) == endpoint
+        else:
+            with pytest.raises(HarnessError, match="has a path"):
+                profile_endpoint(copy)
+
+
+def test_a_key_copy_runs_with_no_other_key_in_reach(tmp_path: Path) -> None:
+    """Both tiers' environment lock-down. Mutations that turn it red: an AWS, boto or fsspec variable kept
+    (fsspec's S3 defaults override a profile's key); `AWS_CA_BUNDLE` dropped; a key source left open."""
+    creds = tmp_path / "aws" / "credentials"
+    got = lock_down({**_PLANTED_ENV, "AWS_CA_BUNDLE": "/certs.pem", "HOME": "/home/op"}, creds, tmp_path)
+    assert got == {
+        "AWS_CA_BUNDLE": "/certs.pem", "HOME": "/home/op",
+        "AWS_SHARED_CREDENTIALS_FILE": str(creds), "AWS_CONFIG_FILE": str(creds.with_name("config")),
+        "BOTO_CONFIG": str(tmp_path / "boto"), "AWS_EC2_METADATA_DISABLED": "true",
+        "FSSPEC_CONFIG_DIR": str(tmp_path / "fsspec"),
+        "DVC_GLOBAL_CONFIG_DIR": str(tmp_path / "dvc-global"), "DVC_SYSTEM_CONFIG_DIR": str(tmp_path / "dvc-system"),
+    }
+    assert (tmp_path / "boto").read_text(encoding="utf-8") == ""
+
+
+def test_a_bucket_run_needs_a_key_refused_version_listing(s3_server) -> None:
+    """mintd's push deletes the object it uploads again when its key may list versions. Mutations that turn
+    it red: the check dropped; any error (not AccessDenied) read as a refusal. The emulator refuses, as the
+    test key must."""
+    from botocore.exceptions import ClientError
+
+    from tests._harness.s3 import BUCKET
+
+    class Client:
+        def __init__(self, code: str | None) -> None:
+            self.code, self.asked = code, []
+
+        def list_object_versions(self, **kw: object) -> dict:
+            self.asked.append(kw)
+            if self.code:
+                raise ClientError({"Error": {"Code": self.code, "Message": "no"}}, "ListObjectVersions")
+            return {"Versions": []}
+
+    refused = Client("AccessDenied")
+    require_no_version_listing(refused, TEST_BUCKET, "runs/r/t")
+    assert refused.asked == [{"Bucket": TEST_BUCKET, "Prefix": "runs/r/t", "MaxKeys": 1}]
+    with pytest.raises(HarnessError, match="may list versions"):
+        require_no_version_listing(Client(None), TEST_BUCKET, "runs/r/t")
+    with pytest.raises(HarnessError, match="NoSuchBucket"):
+        require_no_version_listing(Client("NoSuchBucket"), TEST_BUCKET, "runs/r/t")
+    require_no_version_listing(s3_server.client, BUCKET, "runs/r/t")
+
+
+def test_a_bucket_run_stops_before_writing_when_its_key_may_list_versions(tmp_path: Path) -> None:
+    """Story 11 pointed at the test bucket, here a local S3 that lets the key list versions, run with
+    `--log-level=DEBUG`. Mutations that turn it red: the version-listing check dropped from the story's
+    bucket branch (the run goes on and writes); `quiet_tracebacks` leaving botocore's request log on (the
+    key id prints in each request's Authorization header)."""
+    import boto3
+    from moto.moto_server.werkzeug_app import DomainDispatcherApplication, create_backend_app
+    from werkzeug.serving import make_server
+
+    server = make_server("127.0.0.1", 0, DomainDispatcherApplication(create_backend_app))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        s3 = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1", aws_access_key_id="admin",
+                          aws_secret_access_key="admin")
+        s3.create_bucket(Bucket=TEST_BUCKET)
+        (tmp_path / "key").write_text("[mintd-test]\naws_access_key_id = AKIASTORYTEST\n"
+                                      "aws_secret_access_key = story-test-secret\n", encoding="utf-8")
+        (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {endpoint}\n",
+                                       encoding="utf-8")
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+               BUCKET_VAR: TEST_BUCKET, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"),
+               "AWS_CONFIG_FILE": str(tmp_path / "conf"), "MINTD_BIN": str(tmp_path / "no-mintd")}
+        got = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "--log-level=DEBUG",
+             "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
+            cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
+        )
+        written = s3.list_objects_v2(Bucket=TEST_BUCKET)["KeyCount"]
+    finally:
+        server.shutdown()
+    out = got.stdout + got.stderr
+    assert got.returncode == 1 and out.count("may list versions") >= 3 and "3 errors" in out, out[-4000:]
+    assert written == 0
+    assert "ListObjectVersions" in out and not any(v in out for v in ("AKIASTORYTEST", "story-test-secret")), out
 
 
 #: A fake mintd for the live tier's own tests. It records each call's argv,
