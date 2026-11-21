@@ -1,0 +1,18 @@
+recall: undoes push prints a check mark before storage holds every version the pointers pin (this also turns off #93's put-back of the pointers after a failed push, which is built on the same prepare step).
+fix: 91e55c5 (#70); before the fix: 9e50769.
+validated: with this patch on HEAD, tests/test_push_journey.py::test_a_moved_remote_is_reuploaded_despite_a_stale_dvc_site_cache goes red.
+
+diff --git a/src/mintd/data_ops.py b/src/mintd/data_ops.py
+index 376851f..e739652 100644
+--- a/src/mintd/data_ops.py
++++ b/src/mintd/data_ops.py
+@@ -1155,8 +1155,7 @@ def data_push(
+                   "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
+             + "; then push",
+         )
+-    prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
+-                       aws_profile=aws_profile, memo_path=memo_path)
++    prepared = None  # recall: undoes #70
+     # No per-group failure isolation, unlike ``_pull_isolating_failures``: a
+     # raising group aborts the rest and surfaces as a non-zero exit. Deliberate
+     # — push is idempotent (the re-run skips what already landed) and its

@@ -1,0 +1,16 @@
+recall: undoes an import that lands nothing prints a check mark.
+fix: ca2b326 (#60); before the fix: d03ff43.
+validated: with this patch on HEAD, tests/test_pre_units_journey.py::test_import_of_an_unpinned_directory_out_exits_nonzero_and_leaves_nothing goes red.
+
+diff --git a/src/mintd/data.py b/src/mintd/data.py
+index 5f0c91a..b29565e 100644
+--- a/src/mintd/data.py
++++ b/src/mintd/data.py
+@@ -434,6 +434,7 @@ def _require_deliverable(
+     directory out, say), judged by `_dvc_state.delivery` with the inputs
+     `mintd check` uses, so the two cannot disagree. Offline: reads the
+     producer's git, never its bucket."""
++    return  # recall: undoes #60
+     pin = DataDependency.from_dvc_file(pointer).contract_pin
+     if not pin:
+         # `--dvc-arg=--no-exec` records no `rev_lock`: nothing was meant to
