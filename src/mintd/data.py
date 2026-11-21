@@ -28,13 +28,13 @@ from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcOps
 from ._dvc_state import delivery, outs_matching, path_covers
 from ._fast_sync_ops import FastSyncOps, normalize_target
-from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
-from .errors import MintdError
+from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
 from .producer import (
@@ -446,10 +446,14 @@ def _require_deliverable(
         try:
             GitArchiveFetcher().checkout_at(repo_url, pin, tree)
         except FetchError as exc:
+            access = (
+                unreachable_repo_hint(repo_url) if exc.reason is FetchError.Reason.UNREACHABLE
+                else f"check git access to {repo_url}"
+            )
             raise UndeliverableImport(
                 f"nothing was imported for {path!r} of {name!r} @ {pin[:7]}, and the "
                 f"producer's DVC state there could not be read to say why: {exc.detail or exc.reason}",
-                f"check git access to {repo_url}, then {retry}",
+                f"{access}, then {retry}",
             ) from exc
         storage = inspect_storage(tree)
         verdict = delivery(
@@ -783,6 +787,8 @@ def _clone_failure(exc: GitOpError, *, repo_url: str, rev: str | None, dest: Pat
     """A failed `git clone`, sorted the way every other producer read is: a
     branch, tag or SHA the reachable repo lacks is a missing pin; anything
     else is an unreachable producer."""
+    if isinstance(exc, GitHubAccessMissing):  # refused before git ran: nothing was cloned
+        return ProducerError.unreachable(repo_url, rev or "HEAD", str(exc))
     detail = f"clone to {dest} failed; partial clone left in place: {exc}"
     if _classify_stderr(exc.stderr) is FetchError.Reason.PIN_MISSING:
         return ProducerError.pin_missing(repo_url, rev or "HEAD", detail)
@@ -1362,14 +1368,18 @@ def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
     another product's `.dvc`, whose payload the force path `shutil.rmtree`s
     and whose pointer the import rewrites — exit 0, "✓ imported".
 
-    Compares recorded URL strings, so no case or unicode normalization is
-    needed. `repo_url is None` skips the check: the bump reader has no
-    catalog entry to compare against for a de-listed product.
+    Compares the URLs' https forms (``https_remote``): an import through a
+    ``git@github.com:`` catalog entry records the https URL git used, and is
+    the same producer. No case or unicode normalization is needed.
+    `repo_url is None` skips the check: the bump reader has no catalog entry
+    to compare against for a de-listed product.
     """
+    from ._registry_git_ops import https_remote
+
     if repo_url is None:
         return
     owner = DataDependency.from_dvc_file(dvc_path).producer_repo
-    if owner != repo_url:
+    if https_remote(owner) != https_remote(repo_url):
         raise UnknownProductPath(
             f"{dvc_path} imports {owner}, not {repo_url}; refusing to "
             f"overwrite another product's import as {name!r} — if that "

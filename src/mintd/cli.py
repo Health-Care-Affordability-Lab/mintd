@@ -45,7 +45,9 @@ from ._registry_git_ops import (
     GitOpError,
     PRConflictError,
     RegistryBranchExists,
+    specific_hint,
 )
+from ._dvc_invoke import dvc_root
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
@@ -126,6 +128,26 @@ from .publish import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RELEASES = "https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download"
+
+
+def _install_line(*, with_schema: bool = False, windows: bool = os.name == "nt") -> str:
+    """The one line that installs, or updates to, the newest promoted release.
+
+    README.md shows exactly these lines (tests/test_docs.py checks it).
+    """
+    if windows:
+        if with_schema:
+            return f"& ([scriptblock]::Create((irm {_RELEASES}/install.ps1))) -WithSchema"
+        return f"irm {_RELEASES}/install.ps1 | iex"
+    return f"curl -fsSL {_RELEASES}/install.sh | bash" + (" -s -- --with-schema" if with_schema else "")
+
+
+def _reinstall_hint(*, windows: bool = os.name == "nt") -> str:
+    """The [schema] hint. On Windows it says the line is for PowerShell, not cmd."""
+    where = ", in PowerShell" if windows else ""
+    return f"reinstall mintd with the [schema] extra{where}: {_install_line(with_schema=True, windows=windows)}"
 
 
 class MetadataSchemaTooOld(MintdError):
@@ -1025,7 +1047,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             reporter.error(
                 f"pull incomplete: {summary.error_count} target(s) failed, "
                 f"{summary.targets_pulled} file(s) pulled",
-                hint="each failed target has a retry command in the errors above",
+                hint="each failed target's error above says what to do next",
             )
         return 1
     if summary.total_bytes:
@@ -1046,14 +1068,6 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     return 0
 
 
-def _dvc_root(start: Path) -> Path:
-    """The nearest directory at or above ``start`` holding ``.dvc/``: the
-    project `dvc push` pushes from anywhere beneath it. Git's own walk stops at
-    the nearest ``.git`` instead, which inside a submodule or nested clone is
-    a different repository. ``start`` when there is none."""
-    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
-
-
 def _skipped_line(skipped: list[str]) -> str:
     """The warning naming every pointer DVC skips because of .gitignore."""
     it = "it" if len(skipped) == 1 else "them"
@@ -1066,7 +1080,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     dvc_ops = _resolve_dvc_ops(config, reporter)
     # dvc runs from the project it finds by walking up to `.dvc/`; targets are
     # read relative to where the user typed them.
-    root = _dvc_root(Path.cwd())
+    root = dvc_root(Path.cwd())
     try:
         with reporter.status("Pushing data to DVC..."):
             summary = data_push(
@@ -1540,6 +1554,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
         ColumnNamesLookLikeData,
+        SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
     )
@@ -1555,6 +1570,7 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
         _hint((ValueError, RuntimeError), "check file format support (.dta, .csv, .json, .parquet) and integrity"),
         _hint(ColumnNamesLookLikeData),  # a ValueError, but it names its own fix
         _hint(FileNotFoundError, f"add supported data files under {data_dir} or pass --data-dir"),
+        _hint(SchemaExtraNotInstalled, _reinstall_hint()),
         reporter.status("Generating schema..."),
     ):
         generate_schema_file(
@@ -1855,8 +1871,8 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             reporter.error(
                 f"cloned {args.name} → {dest.name}/ but pull incomplete: "
                 f"{clone_result.pull_error_count} target(s) failed",
-                hint="each failed target has a retry command in the errors "
-                     f"above; run them inside {dest.name}/",
+                hint="each failed target's error above says what to do next; "
+                     f"run any retry command it gives inside {dest.name}/",
             )
         return 1
     if reporter.json_mode:
@@ -2202,7 +2218,8 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
             # than as a BumpBlocked finding.
             _hint(
                 (ProducerError, ValueError),
-                "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
+                lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+                or "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
             ),
             # A pydantic ValidationError is a ValueError: inside the clause
             # above, so it keeps this hint. The manifest is human-editable.
@@ -2231,7 +2248,11 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     with (
-        _hint((ProducerError, ValueError), "check the repo/pin arguments"),
+        _hint(
+            (ProducerError, ValueError),
+            lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+            or "check the repo/pin arguments",
+        ),
         # `--path` is not a flag on this parser; following the old hint exited
         # 64 with `unrecognized arguments`.
         _hint(MissingPrimaryDataProduct, "pass --source-path <output> or --all"),
@@ -2572,7 +2593,7 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
         except (GitOpError, GhAuthError, GhNotInstalled) as exc:
             raise MintdError(
                 f"could not update the registry entry for {metadata.project.name!r}: {exc}",
-                hint=(
+                hint=specific_hint(exc) or (
                     "check `gh auth status` and network access to the registry, then rerun "
                     "`mintd registry update` — nothing in this project changed"
                 ),

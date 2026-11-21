@@ -30,6 +30,7 @@ from ._dvc_ops import (
     DvcOpError,
     DvcOps,
     DvcPullError,
+    DvcPullRefused,
     DvcPushResult,
     DvcStorageKeyError,
     pull_retry_hint,
@@ -57,7 +58,7 @@ from ._dvc_state import (
     unlisted_on_disk,
 )
 from ._import_rescue_ops import RescueResult, rescue_import_pull
-from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
+from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path, specific_hint
 from ._storage_state import inspect_storage
 from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
@@ -351,12 +352,19 @@ def _pull_isolating_failures(
         )
 
     failed: dict[str, str] = {}
+    hints: dict[str, str] = {}  # a failure's own hint (a refused GitHub import's): retrying won't help
+
+    def _fail(target: str, exc: DvcPullError) -> None:
+        failed[target] = _dvc_failure_why(exc)
+        if (hint := specific_hint(exc)) is not None:
+            hints[target] = hint
+
     for group in _shape_groups(targets):
         try:
             _pull(group)
         except DvcPullError as exc:
             if len(group) == 1:
-                failed[group[0]] = _dvc_failure_why(exc)
+                _fail(group[0], exc)
             else:
                 # The exception text is dvc's raw stderr; each per-target retry
                 # reports its own trimmed reason, so it is not repeated here.
@@ -368,7 +376,7 @@ def _pull_isolating_failures(
                     try:
                         _pull([t])
                     except DvcPullError as exc_t:
-                        failed[t] = _dvc_failure_why(exc_t)
+                        _fail(t, exc_t)
     for t in targets:
         if t in failed:
             continue
@@ -380,7 +388,7 @@ def _pull_isolating_failures(
             )
     if reporter is not None:
         for t, why in failed.items():
-            _report_pull_failure(reporter, t, why)
+            _report_pull_failure(reporter, t, why, hint=hints.get(t))
     return list(failed)
 
 
@@ -514,6 +522,7 @@ def _pull_targets_with_import_rescue(
     rescue_failed: list[str] = []
     for t in import_targets:
         pull_raised = False
+        refused: DvcPullRefused | None = None
         try:
             dvc_ops.pull(
                 targets=[t], cwd=project_path, remote=remote, jobs=jobs,
@@ -524,6 +533,8 @@ def _pull_targets_with_import_rescue(
             # a version-aware import whose producer lock recorded no
             # version_id. Absorb it; the rescue lane below completes the pull.
             pull_raised = True
+            if isinstance(exc, DvcPullRefused):  # dvc never ran: GitHub access, maybe for another import
+                refused = exc
             logger.info(
                 "import %r: dvc pull did not materialize it (%s); "
                 "trying the import-rescue lane", t, exc,
@@ -551,7 +562,9 @@ def _pull_targets_with_import_rescue(
         )
         if not result.ok:
             rescue_failed.append(t)
-            if reporter is not None:
+            if reporter is not None and refused is not None:  # the gh fix first, not the rescue's advice
+                _report_pull_failure(reporter, t, _dvc_failure_why(refused), hint=specific_hint(refused))
+            elif reporter is not None:
                 _report_pull_failure(reporter, t, result.reason, hint=result.hint)
     return pull_failed + rescue_failed
 
@@ -1392,7 +1405,7 @@ def commit_pushed_pointers(
             commit=sha, hint="git pull --rebase, then git push (mintd never pulls, rebases or forces)",
         )
     except GitOpError as exc:
-        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint="git push")
+        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint=specific_hint(exc) or "git push")
     upstream = info.merge_ref.removeprefix("refs/heads/")
     note = None
     reads = git_ops.remote_default_branch(root, info.remote)
