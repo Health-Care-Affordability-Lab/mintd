@@ -1,6 +1,6 @@
 recall: undoes a pin is accepted on its size alone (found by review inside #70).
 fix: 9632271 (inside #70); before the fix: 082eead (#70's pre-review commit).
-validated: with this patch on HEAD, tests/test_data_push.py::test_check_a_pin_the_push_set_cant_pass_on_size_alone and tests/test_data_push.py::test_check_a_size_only_pin_passes_only_where_the_commit_leaves_it_unchanged goes red.
+validated: with this patch on HEAD, tests/test_data_push.py::test_check_a_size_only_pin_passes_only_where_the_commit_leaves_it_unchanged goes red.
 
 diff --git a/src/mintd/_push_verify.py b/src/mintd/_push_verify.py
 index 6fac971..7ef6bcf 100644

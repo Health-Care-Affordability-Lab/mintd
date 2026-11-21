@@ -1,6 +1,6 @@
 recall: undoes a failed pointer write is rolled back with its line endings changed (found by review inside #70; shows only on Windows).
 fix: 9f80d90 (inside #70); before the fix: 2246710 (#70's pre-review commit).
-validated: with this patch on HEAD, tests/test_pin_repair.py::test_a_write_that_changes_anything_else_restores_every_pointer goes red.
+validated (Windows only): with this patch on HEAD, tests/test_pin_repair.py::test_a_write_that_changes_anything_else_restores_every_pointer goes red.
 
 diff --git a/src/mintd/_pin_proof.py b/src/mintd/_pin_proof.py
 index cf1b235..d02cd60 100644
