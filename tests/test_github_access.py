@@ -1191,6 +1191,8 @@ _NESTED = "git@github.com:example-lab/nested.git"
         ("proj", ".", None, [_DEMO]),
         ("proj/analysis", ".", None, [_DEMO]),
         ("proj/inner", ".", None, [_NESTED]),  # inside the nested project, its own import
+        ("proj", ".", ["data\\demo.dvc"], [_DEMO]),  # a backslash, a separator to dvc
+        ("proj", ".", ["data\\demo"], [_DEMO]),
         # Symlinked paths passed as the working folder itself, as an absolute
         # `--path` through a symlink would be, not through a chdir (which
         # resolves the link before mintd sees it).
@@ -1240,3 +1242,18 @@ def test_dvc_imports_missing_path_error_names_the_url_dvc_was_given(
         )
     assert "https://gitlab.example/example-lab/demo.git" in str(raised.value)
     assert "SECRET" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "catalog_url",
+    ["https://u:TOK#E?N@X@gitlab.example/example-lab/demo.git", "https://u:TOK#E?N@X@github.com/example-lab/demo"],
+)
+def test_the_unreachable_hint_never_prints_a_password(github: GitHub, catalog_url: str) -> None:
+    """The hint names the URL as a value, so its credentials come out of its
+    structure: a "#", "?" or "@" in the password doesn't let it through."""
+    from mintd.errors import unreachable_repo_hint
+
+    github.ready()
+    hint = unreachable_repo_hint(catalog_url)
+    assert "could not reach" in hint
+    assert "TOK" not in hint and "N@X" not in hint
