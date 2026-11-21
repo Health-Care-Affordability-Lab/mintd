@@ -307,6 +307,8 @@ class CacheHashes:
         self._seen = {}
 
     def get(self, md5: str) -> tuple[str, str | None, int] | None:
+        if not md5:  # an out dvc records with no hash (`dvc import-url --no-download`): no cache file
+            return None
         if md5 not in self._seen:
             path = cache_path_for(self.cache_dir, md5)
             self._seen[md5] = hash_cache_object(path) if path.is_file() else None
