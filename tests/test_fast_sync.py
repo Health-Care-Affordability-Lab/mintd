@@ -11,6 +11,7 @@ mock_aws` (legacy `mock_s3` is removed).
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -37,6 +38,7 @@ from mintd._fast_sync_ops import (
     parse_dvc_lock_outs,
     PointerCutShort,
     parse_dvc_outs,
+    read_cached_dir_manifest,
     partition_pipeline_outs,
     parse_s3_url,
     s3_key_for,
@@ -158,17 +160,17 @@ def _write_dvc_config(tmp_path: Path, bucket: str, prefix: str = "") -> None:
 
 def test_parse_dvc_outs_standard_md5(tmp_path: Path) -> None:
     f = tmp_path / "a.dvc"
-    f.write_text("outs:\n  - path: a\n    md5: cafe\n")
+    f.write_text("outs:\n  - path: a\n    md5: cafecafecafecafecafecafecafecafe\n")
     outs = parse_dvc_outs(f, "origin")
     assert len(outs) == 1
-    assert outs[0].md5 == "cafe"
+    assert outs[0].md5 == "cafecafecafecafecafecafecafecafe"
     assert outs[0].is_dir is False
     assert outs[0].is_files_format is False
 
 
 def test_parse_dvc_outs_dir_detected_from_dir_suffix(tmp_path: Path) -> None:
     f = tmp_path / "d.dvc"
-    f.write_text("outs:\n  - path: d\n    md5: deadbeef.dir\n")
+    f.write_text("outs:\n  - path: d\n    md5: deadbeefdeadbeefdeadbeefdeadbeef.dir\n")
     outs = parse_dvc_outs(f, "origin")
     assert outs[0].is_dir is True
 
@@ -176,7 +178,7 @@ def test_parse_dvc_outs_dir_detected_from_dir_suffix(tmp_path: Path) -> None:
 def test_parse_dvc_outs_files_format(tmp_path: Path) -> None:
     f = tmp_path / "ff.dvc"
     f.write_text(
-        "outs:\n  - path: ff\n    files:\n      - relpath: x\n        md5: 1111\n"
+        "outs:\n  - path: ff\n    files:\n      - relpath: x\n        md5: 1111111111111111111111111111111a\n"
     )
     outs = parse_dvc_outs(f, "origin")
     assert outs[0].is_files_format is True
@@ -201,14 +203,14 @@ def test_parse_dvc_outs_hash_missing_outside_an_import_is_cut_short(tmp_path: Pa
 
 def test_parse_dvc_outs_extracts_version_id_top_level(tmp_path: Path) -> None:
     f = tmp_path / "v.dvc"
-    f.write_text("outs:\n  - path: v\n    md5: ace\n    version_id: vid-1\n")
+    f.write_text("outs:\n  - path: v\n    md5: aceaceaceaceaceaceaceaceaceaceac\n    version_id: vid-1\n")
     assert parse_dvc_outs(f, "origin")[0].version_id == "vid-1"
 
 
 def test_parse_dvc_outs_extracts_version_id_from_cloud(tmp_path: Path) -> None:
     f = tmp_path / "c.dvc"
     f.write_text(
-        "outs:\n  - path: c\n    md5: bed\n"
+        "outs:\n  - path: c\n    md5: bedbedbedbedbedbedbedbedbedbedbe\n"
         "    cloud:\n      origin:\n        version_id: vid-2\n"
     )
     assert parse_dvc_outs(f, "origin")[0].version_id == "vid-2"
@@ -224,9 +226,9 @@ def test_parse_dvc_outs_reads_a_cloud_key_cut_short_as_no_version_id(tmp_path: P
     Mutation: iterate `cloud` without the mapping checks -> raises, red.
     """
     f = tmp_path / "a.csv.dvc"
-    f.write_text("outs:\n- md5: abc123\n  size: 1\n  path: a.csv\n" + cloud)
+    f.write_text("outs:\n- md5: abc123abc123abc123abc123abc123ab\n  size: 1\n  path: a.csv\n" + cloud)
     (out,) = parse_dvc_outs(f, "origin")
-    assert (out.path, out.md5, out.version_id) == ("a.csv", "abc123", None)
+    assert (out.path, out.md5, out.version_id) == ("a.csv", "abc123abc123abc123abc123abc123ab", None)
 
 
 @pytest.mark.parametrize("files", ["  files:\n", "  files:\n  -\n"], ids=["files", "entry"])
@@ -255,7 +257,7 @@ def test_parse_dvc_outs_detects_dvc_import_via_deps_repo(tmp_path: Path) -> None
     """Real lab shape (a project's `data/imports/<product>/final.dvc`):
     frozen + deps[].repo + dir-suffixed md5. Detection is at the file
     level — every out parsed from the file inherits is_import=True."""
-    p = _write_dvc_file_import(tmp_path, "imported", "deadbeef.dir")
+    p = _write_dvc_file_import(tmp_path, "imported", "deadbeefdeadbeefdeadbeefdeadbeef.dir")
     outs = parse_dvc_outs(p, "origin")
     assert len(outs) == 1
     assert outs[0].is_import is True
@@ -275,7 +277,7 @@ def test_parse_dvc_outs_frozen_without_repo_is_not_import(tmp_path: Path) -> Non
         "  - path: input.csv\n"
         "outs:\n"
         "  - path: output.csv\n"
-        "    md5: cafe\n"
+        "    md5: cafecafecafecafecafecafecafecafe\n"
     )
     outs = parse_dvc_outs(f, "origin")
     assert outs[0].is_import is False
@@ -290,7 +292,7 @@ def test_parse_dvc_outs_deps_without_repo_is_not_import(tmp_path: Path) -> None:
         "  - path: script.py\n"
         "outs:\n"
         "  - path: out.csv\n"
-        "    md5: face\n"
+        "    md5: facefacefacefacefacefacefaceface\n"
     )
     outs = parse_dvc_outs(f, "origin")
     assert outs[0].is_import is False
@@ -743,7 +745,7 @@ def test_normalize_target(raw: str, expected: str) -> None:
 def test_classify_targets_normalizes_backslash_target(tmp_path: Path) -> None:
     """A backslash/'./'-prefixed target still finds the on-disk .dvc file,
     while out.target preserves the caller's original string."""
-    _write_dvc_file_md5(tmp_path, "data/foo.csv", "cafe")
+    _write_dvc_file_md5(tmp_path, "data/foo.csv", "cafecafecafecafecafecafecafecafe")
     all_outs, fallback, missing = classify_targets(
         tmp_path, ["./data\\foo.csv"], "origin"
     )
@@ -758,7 +760,7 @@ def test_classify_targets_normalizes_backslash_target(tmp_path: Path) -> None:
 def test_classify_targets_stamps_original_target_string(tmp_path: Path) -> None:
     """Reviewer-P0 regression: out.target carries the user's exact string,
     even when they passed `data/foo.csv.dvc` (with .dvc suffix)."""
-    _write_dvc_file_md5(tmp_path, "data/foo.csv", "cafe")
+    _write_dvc_file_md5(tmp_path, "data/foo.csv", "cafecafecafecafecafecafecafecafe")
     all_outs, fallback, missing = classify_targets(
         tmp_path, ["data/foo.csv.dvc"], "origin"
     )
@@ -770,10 +772,10 @@ def test_classify_targets_stamps_original_target_string(tmp_path: Path) -> None:
 def test_classify_targets_no_longer_routes_dirs_to_fallback(tmp_path: Path) -> None:
     """Slice 20: dir-shaped outs land in all_outs, not fallback. The
     orchestrator's per-out loop dispatches on is_dir / is_files_format."""
-    _write_dvc_file_md5(tmp_path, "data/md5dir", "deadbeef.dir")
+    _write_dvc_file_md5(tmp_path, "data/md5dir", "deadbeefdeadbeefdeadbeefdeadbeef.dir")
     (tmp_path / "data" / "ffdir.dvc").write_text(
         "outs:\n  - path: data/ffdir\n    files:\n"
-        "      - relpath: a.csv\n        md5: aaaa\n        size: 1\n"
+        "      - relpath: a.csv\n        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n        size: 1\n"
     )
     all_outs, fallback, _ = classify_targets(
         tmp_path, ["data/md5dir", "data/ffdir"], "origin"
@@ -825,8 +827,8 @@ def test_classify_targets_routes_imports_to_fallback(
     log per import. The user-supplied target string is preserved
     verbatim (slice-18 P0 invariant)."""
     import logging
-    _write_dvc_file_md5(tmp_path, "data/regular", "cafe")
-    _write_dvc_file_import(tmp_path, "data/imported", "deadbeef.dir")
+    _write_dvc_file_md5(tmp_path, "data/regular", "cafecafecafecafecafecafecafecafe")
+    _write_dvc_file_import(tmp_path, "data/imported", "deadbeefdeadbeefdeadbeefdeadbeef.dir")
     with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
         all_outs, fallback, missing = classify_targets(
             tmp_path, ["data/regular", "data/imported"], "origin",
@@ -998,7 +1000,7 @@ def test_try_fast_pull_with_missing_boto3_falls_back(tmp_path: Path) -> None:
     """Step-6 reviewer-P1 regression: when boto3 is None at module scope,
     the orchestrator routes everything to fallback rather than crashing."""
     _write_dvc_config(tmp_path, "irrelevant")
-    _write_dvc_file_md5(tmp_path, "a", "deadbeef")
+    _write_dvc_file_md5(tmp_path, "a", "deadbeefdeadbeefdeadbeefdeadbeef")
     with patch("mintd._s3.boto3", None), \
          patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)):
         result = SubprocessFastSyncOps().try_fast_pull(
@@ -1013,7 +1015,7 @@ def test_try_fast_pull_with_missing_boto3_falls_back(tmp_path: Path) -> None:
 
 def test_parse_dvc_outs_md5_dir_detected(tmp_path: Path) -> None:
     f = tmp_path / "d.dvc"
-    f.write_text("outs:\n  - path: d\n    md5: abc.dir\n")
+    f.write_text("outs:\n  - path: d\n    md5: abcabcabcabcabcabcabcabcabcabcab.dir\n")
     outs = parse_dvc_outs(f, "origin")
     assert outs[0].is_dir is True
     assert outs[0].files is None
@@ -1069,7 +1071,7 @@ def test_try_fast_pull_md5_dir_happy(s3_versioned, tmp_path: Path) -> None:
 def test_parse_dvc_outs_files_format_populates_files(tmp_path: Path) -> None:
     f = tmp_path / "f.dvc"
     f.write_text(
-        "outs:\n  - path: f\n    files:\n      - relpath: a.csv\n        md5: aaaa\n"
+        "outs:\n  - path: f\n    files:\n      - relpath: a.csv\n        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "        size: 1\n        cloud:\n          origin:\n            version_id: v1\n"
     )
     outs = parse_dvc_outs(f, "origin")
@@ -1313,16 +1315,29 @@ def test_try_fast_pull_md5_dir_local_manifest_no_refetch(s3_versioned, tmp_path:
     assert mock.call_count == 0
 
 
-def test_a_pointer_hash_that_names_a_file_outside_the_cache_is_refused(s3_versioned, tmp_path: Path) -> None:
-    """A hash dvc never writes, ``ab/home/u/notes.dir``, joined onto the
-    cache names ``/home/u/notes.dir``. The pull read it as a broken
-    manifest, failed to fetch one, and its cleanup deleted that file and
-    its ``.tmp``. Now the pull refuses the pointer and both files stay."""
-    s3, bucket = s3_versioned
+def _fast_pull(s3, project: Path, targets: list[str]):
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3):
+        return SubprocessFastSyncOps().try_fast_pull(project_path=project, targets=targets, remote_name="origin")
+
+
+def _project_on(bucket: str, tmp_path: Path) -> Path:
     project = tmp_path / "project"
     (project / "data").mkdir(parents=True)
     (project / ".dvc").mkdir()
     (project / ".dvc" / "config").write_text(f'[remote "origin"]\nurl = s3://{bucket}\n')
+    return project
+
+
+def test_a_pointer_hash_that_names_a_file_outside_the_cache_is_refused(s3_versioned, tmp_path: Path) -> None:
+    """A hash dvc never writes, ``ab/home/u/notes.dir``, joined onto the
+    cache names ``/home/u/notes.dir``. The pull read it as a broken
+    manifest, failed to fetch one, and its cleanup deleted that file and
+    its ``.tmp``. Now reading the pointer refuses it, naming the file, and
+    both files stay.
+    Mutation: drop the hash rule in ``_check_out`` and in ``cache_path_for``
+    -> both files deleted, red."""
+    s3, bucket = s3_versioned
+    project = _project_on(bucket, tmp_path)
     planted = {tmp_path / "notes.dir": "my notes\n", tmp_path / "notes.tmp": "my draft\n"}
     for path, text in planted.items():
         path.write_text(text)
@@ -1330,14 +1345,71 @@ def test_a_pointer_hash_that_names_a_file_outside_the_cache_is_refused(s3_versio
     md5 = "ab/" + (tmp_path / "notes.dir").relative_to(tmp_path.anchor).as_posix()
     (project / "data" / "dir.dvc").write_text(f"outs:\n  - path: data/dir\n    md5: {md5}\n")
 
-    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3), \
-         pytest.raises(PointerCutShort, match="not in the shape dvc writes"):
+    with pytest.raises(PointerCutShort, match=r"dir\.dvc is cut short or damaged: the hash of data/dir is not in"):
         try:
-            SubprocessFastSyncOps().try_fast_pull(
-                project_path=project, targets=["data/dir"], remote_name="origin"
-            )
+            _fast_pull(s3, project, ["data/dir"])
         finally:  # refused or not, the files outside the cache are untouched
             assert {p: p.read_text() for p in planted if p.is_file()} == planted
+
+
+def test_a_folder_list_entry_with_a_hash_dvc_never_writes_stops_the_pull_naming_the_list(
+    s3_versioned, tmp_path: Path,
+) -> None:
+    """A folder list in storage whose entry records no hash fell to one
+    failed file and a quiet ``dvc pull``. Now the pull stops, naming the
+    list; the copy the fetch left in the cache is named as that.
+    Mutations: drop the check where the list is fetched, or the re-raise in
+    ``try_fast_pull`` -> the first red; where the cached list is read -> the
+    second red."""
+    s3, bucket = s3_versioned
+    project = _project_on(bucket, tmp_path)
+    body = json.dumps([{"relpath": "a.csv"}]).encode()
+    tree = hashlib.md5(body, usedforsecurity=False).hexdigest()
+    s3.put_object(Bucket=bucket, Key=s3_key_for("", f"{tree}.dir"), Body=body)
+    (project / "data" / "dir.dvc").write_text(f"outs:\n  - path: data/dir\n    md5: {tree}.dir\n")
+
+    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir from storage is cut short or damaged: "
+                                              r"the hash of 'a\.csv' is not in the shape dvc writes: ''"):
+        _fast_pull(s3, project, ["data/dir"])
+    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir in the cache is cut short or damaged"):
+        read_cached_dir_manifest(project / ".dvc" / "cache", tree)
+
+
+def test_the_per_file_workers_let_a_refused_hash_through(tmp_path: Path) -> None:
+    """A hash refused for its shape reaches the user from the per-file
+    download workers, not as one failed file that routes to ``dvc pull``.
+    Mutation: drop either worker's ``except PointerCutShort: raise`` -> red."""
+    entry = DvcFileEntry("", "a.csv", 1, "v1")
+    with pytest.raises(PointerCutShort):
+        fetch_dir_contents(None, "bucket", "", [entry], tmp_path, 1)
+    out = DvcOut(target="data/f", path="data/f", md5="", is_dir=False, is_files_format=True, files=[entry])
+    with pytest.raises(PointerCutShort):
+        fetch_files_dir_contents(None, "bucket", "", out, tmp_path, 1, "origin", project_path=tmp_path)
+
+
+@pytest.mark.parametrize("md5", [
+    "ab/home/u/notes.dir", "ab/../../notes", "", ".dir", "9A0364B9E99BB480DD25E1F0284C8555",
+    "9a0364b9e99bb480dd25e1f0284c8555\n", "9a0364b9e99bb480dd25e1f0284c8555.dir.dir",
+])
+def test_cache_path_for_refuses_a_hash_dvc_never_writes(tmp_path: Path, md5: str) -> None:
+    """The floor under the pointer and folder-list readers: no caller gets
+    a path outside the cache. Mutation: drop its check -> red."""
+    with pytest.raises(PointerCutShort, match="not in the shape dvc writes"):
+        cache_path_for(tmp_path, md5)
+
+
+def test_the_pointer_readers_take_every_hash_shape_dvc_writes(tmp_path: Path) -> None:
+    """No hash at all (``dvc import-url --no-download``), a hash dvc quotes
+    because it reads as a number, and a folder hash all still read."""
+    pointer = tmp_path / "x.dvc"
+    for body in (
+        "md5: fd529d244111d84dcb4e57378b5e21f3\nfrozen: true\n"
+        "deps:\n- path: s3://bucket/x\n  etag: abc\nouts:\n- hash: md5\n  path: x\n",
+        "outs:\n- md5: '12345678901234567890123456789012'\n  path: x\n",
+        "outs:\n- md5: d751713988987e9331980363e24189ce.dir\n  hash: md5\n  path: x\n",
+    ):
+        pointer.write_text(body)
+        parse_dvc_outs(pointer, "origin")
 
 
 def test_fetch_dir_contents_dedups_by_md5(s3_versioned, tmp_path: Path) -> None:
@@ -1468,7 +1540,7 @@ def test_a_project_inside_a_larger_git_repo_skips_what_its_gitignore_excludes(tm
 
 def test_parse_dvc_outs_detects_path_based_from_cloud_nested_version_id(tmp_path: Path) -> None:
     """Lab's actual .dvc shape: version_id ONLY under cloud[remote]; no top-level."""
-    dvc_path = _write_dvc_file_path_based(tmp_path, "data/raw/foo", "abc", "vid-1")
+    dvc_path = _write_dvc_file_path_based(tmp_path, "data/raw/foo", "abcabcabcabcabcabcabcabcabcabcab", "vid-1")
     outs = parse_dvc_outs(dvc_path, "origin")
     assert len(outs) == 1
     assert outs[0].is_path_based is True
@@ -1478,7 +1550,7 @@ def test_parse_dvc_outs_detects_path_based_from_cloud_nested_version_id(tmp_path
 
 def test_parse_dvc_outs_md5_keyed_when_top_level_version_id(tmp_path: Path) -> None:
     """Top-level version_id → content-addressable (md5-keyed) mode."""
-    _write_dvc_file_md5(tmp_path, "a", "abc", version_id="vid-top")
+    _write_dvc_file_md5(tmp_path, "a", "abcabcabcabcabcabcabcabcabcabcab", version_id="vid-top")
     outs = parse_dvc_outs(tmp_path / "a.dvc", "origin")
     assert outs[0].is_path_based is False
 
@@ -1488,7 +1560,7 @@ def test_parse_dvc_outs_mixed_top_and_cloud_prefers_top(tmp_path: Path) -> None:
     body = (
         "outs:\n"
         "  - path: x\n"
-        "    md5: abc\n"
+        "    md5: abcabcabcabcabcabcabcabcabcabcab\n"
         "    size: 0\n"
         "    version_id: vid-top\n"
         "    cloud:\n"
@@ -1507,12 +1579,12 @@ def test_parse_dvc_outs_files_format_per_entry_path_based_flag(tmp_path: Path) -
         "outs:\n"
         "  - path: dir\n"
         "    files:\n"
-        "      - md5: aa\n"
+        "      - md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
         "        relpath: a\n"
         "        cloud:\n"
         "          origin:\n"
         "            version_id: vid-a\n"
-        "      - md5: bb\n"
+        "      - md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
         "        relpath: b\n"
         "        version_id: vid-b-top\n"  # top-level → md5-keyed at entry level
     )
@@ -1763,12 +1835,12 @@ def test_parse_dvc_lock_outs_skips_outs_without_cloud_section(tmp_path: Path) ->
             "  build:\n"
             "    outs:\n"
             "      - path: with_cloud.parquet\n"
-            "        md5: 11111111111111111111111111111111\n"
+            "        md5: '11111111111111111111111111111111'\n"
             "        cloud:\n"
             "          x:\n"
             "            version_id: v1\n"
             "      - path: no_cloud.parquet\n"
-            "        md5: 22222222222222222222222222222222\n"
+            "        md5: '22222222222222222222222222222222'\n"
         ),
     )
     parsed = parse_dvc_lock_outs(tmp_path, "x")
@@ -1796,7 +1868,7 @@ def test_parse_dvc_lock_outs_missing_dvc_yaml_degrades_to_default_wdir(
             "  build:\n"
             "    outs:\n"
             "      - path: data/final/foo.parquet\n"
-            "        md5: 33333333333333333333333333333333\n"
+            "        md5: '33333333333333333333333333333333'\n"
             "        cloud:\n"
             "          x:\n"
             "            version_id: v1\n"
@@ -1943,11 +2015,11 @@ def test_parse_dvc_lock_outs_stages_only_dvc_yaml_is_not_a_declaration(
             "  clean:\n"
             "    outs:\n"
             "      - path: data/clean.csv\n"
-            "        md5: 11111111111111111111111111111111\n"
+            "        md5: '11111111111111111111111111111111'\n"
             "  ingest:\n"
             "    outs:\n"
             "      - path: data/raw.csv\n"
-            "        md5: 22222222222222222222222222222222\n"
+            "        md5: '22222222222222222222222222222222'\n"
         ),
     )
     outs = parse_dvc_lock_outs(tmp_path, "x")
@@ -1985,11 +2057,11 @@ def test_parse_dvc_lock_outs_drops_a_true_orphan_stage(
             "  clean:\n"
             "    outs:\n"
             "      - path: data/clean.csv\n"
-            "        md5: 11111111111111111111111111111111\n"
+            "        md5: '11111111111111111111111111111111'\n"
             "  ingest:\n"
             "    outs:\n"
             "      - path: data/raw.csv\n"
-            "        md5: 22222222222222222222222222222222\n"
+            "        md5: '22222222222222222222222222222222'\n"
         ),
     )
     with caplog.at_level(logging.INFO, logger="mintd._fast_sync_ops"):
@@ -2045,11 +2117,11 @@ def test_parse_dvc_lock_outs_keeps_foreach_instances_under_the_orphan_guard(
             "  clean:\n"
             "    outs:\n"
             "      - path: data/clean.csv\n"
-            "        md5: 11111111111111111111111111111111\n"
+            "        md5: '11111111111111111111111111111111'\n"
             "  ingest:\n"
             "    outs:\n"
             "      - path: data/raw.csv\n"
-            "        md5: 22222222222222222222222222222222\n"
+            "        md5: '22222222222222222222222222222222'\n"
         ),
     )
     outs = parse_dvc_lock_outs(tmp_path, "x")
@@ -2113,17 +2185,17 @@ def test_parse_dvc_lock_outs_marks_cache_false_outs(tmp_path: Path) -> None:
             "  validate:\n"
             "    outs:\n"
             "      - path: ../schemas/v1/schema.json\n"
-            "        md5: 11111111111111111111111111111111\n"
+            "        md5: '11111111111111111111111111111111'\n"
             "      - path: ../data/reports/\n"
             "        md5: 44444444444444444444444444444444.dir\n"
             "      - path: ../data/final/validation_report.txt\n"
-            "        md5: 22222222222222222222222222222222\n"
+            "        md5: '22222222222222222222222222222222'\n"
             "      - path: ../data/m1.json\n"
-            "        md5: 55555555555555555555555555555555\n"
+            "        md5: '55555555555555555555555555555555'\n"
             "      - path: ../data/m2.json\n"
-            "        md5: 66666666666666666666666666666666\n"
+            "        md5: '66666666666666666666666666666666'\n"
             "      - path: ../data/plots/p.csv\n"
-            "        md5: 33333333333333333333333333333333\n"
+            "        md5: '33333333333333333333333333333333'\n"
             "  fan@a:\n"
             "    outs:\n"
             "      - path: data/a.csv\n"
@@ -2313,12 +2385,12 @@ def test_fast_syncable_pipeline_outs_include_files_format_dir_with_only_per_file
             "        size: 500\n"
             "        files:\n"
             "          - relpath: a.parquet\n"
-            "            md5: 11111111111111111111111111111111\n"
+            "            md5: '11111111111111111111111111111111'\n"
             "            cloud:\n"
             "              x:\n"
             "                version_id: v-a\n"
             "          - relpath: b.parquet\n"
-            "            md5: 22222222222222222222222222222222\n"
+            "            md5: '22222222222222222222222222222222'\n"
             "            cloud:\n"
             "              x:\n"
             "                version_id: v-b\n"
@@ -2509,7 +2581,7 @@ def test_try_fast_pull_no_credentials_named_reason_not_retried(tmp_path: Path) -
             raise NoCredentialsError()
 
     _write_dvc_config(tmp_path, "some-bucket")
-    _write_dvc_file_md5(tmp_path, "a", "deadbeef")
+    _write_dvc_file_md5(tmp_path, "a", "deadbeefdeadbeefdeadbeefdeadbeef")
     with patch("mintd._fast_sync_ops._check_dvc", return_value=(True, None)), \
          patch("mintd._fast_sync_ops._create_s3_client", return_value=_NoCredsS3()), \
          patch("mintd._s3.time.sleep") as mock_sleep:
@@ -2640,7 +2712,7 @@ def test_guard_mixed_targets_imports_md5_fall_back_version_aware_error(
     the fallback route; version-aware outs (top-level version_id AND
     cloud-nested/path-based) land in blocked_targets with the guard's reason."""
     _write_dvc_file_md5(tmp_path, "data/md5only", "ca" * 16)
-    _write_dvc_file_import(tmp_path, "data/imported", "deadbeef.dir")
+    _write_dvc_file_import(tmp_path, "data/imported", "deadbeefdeadbeefdeadbeefdeadbeef.dir")
     _write_dvc_file_md5(tmp_path, "data/versioned", "be" * 16, version_id="v1")
     (tmp_path / "data" / "pathbased.dvc").write_text(
         "outs:\n"
@@ -2672,8 +2744,8 @@ def test_guard_imports_only_repo_full_fallback_no_errors(tmp_path: Path) -> None
     """Slice C: an imports-only repo under a guard behaves exactly as before
     the fix — every target routes to plain `dvc pull` (the slice 29 contract)
     and nothing errors, so the CLI still exits 0."""
-    _write_dvc_file_import(tmp_path, "data/imports/a", "aa.dir")
-    _write_dvc_file_import(tmp_path, "data/imports/b", "bb.dir")
+    _write_dvc_file_import(tmp_path, "data/imports/a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.dir")
+    _write_dvc_file_import(tmp_path, "data/imports/b", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.dir")
     with patch(
         "mintd._fast_sync_ops._check_dvc",
         return_value=(False, "dvc version mismatch"),

@@ -43,6 +43,7 @@ from ._fast_sync_ops import (
     _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
     DvcFileEntry,
+    PointerCutShort,
     cache_path_for,
     ensure_dir_manifest,
     is_cached,
@@ -470,6 +471,8 @@ def rescue_import_pull(
                 ),
                 hint=f"check access to the producer's bucket for {dep.producer_repo}",
             )
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return RescueResult(
                 ok=False,

@@ -328,6 +328,16 @@ class PointerCutShort(MintdError):
         self.detail = detail
 
 
+_DVC_HASH = re.compile(r"[0-9a-f]{32}(\.dir)?")
+
+
+def hash_in_dvc_shape(md5: object) -> bool:
+    """Whether ``md5`` is a hash as dvc writes one: 32 lowercase hex, with or
+    without ``.dir``. Joined onto the cache unchecked, ``ab/home/u/notes.dir``
+    names ``/home/u/notes.dir`` and ``ab/../../x`` climbs out of it."""
+    return isinstance(md5, str) and _DVC_HASH.fullmatch(md5) is not None
+
+
 def load12(text: str) -> Any:
     """``text`` read as DVC reads ``.dvc``, ``dvc.lock`` and ``dvc.yaml``:
     YAML 1.2, with ruamel (DVC's own library), so an unquoted ``on``,
@@ -378,6 +388,8 @@ def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = 
         raise PointerCutShort(pointer, "an output has no path")
     if hashed and not out.get("md5") and "files" not in out and not (unrun_ok and out.get("hash")):
         raise PointerCutShort(pointer, f"{name} records no hash")
+    if out.get("md5") is not None and not hash_in_dvc_shape(out["md5"]):
+        raise PointerCutShort(pointer, f"the hash of {name} is not in the shape dvc writes: {out['md5']!r}")
     if not _scalars_ok(out):
         raise PointerCutShort(pointer, f"a value of {name} is not in the shape dvc writes")
     if not _cloud_ok(out):
@@ -392,6 +404,9 @@ def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = 
             if (not isinstance(fe, dict) or fe.get("md5") is None or fe.get("relpath") is None
                     or not _scalars_ok(fe) or not _cloud_ok(fe)):
                 raise PointerCutShort(pointer, f"a file entry of {name} is incomplete")
+            if not hash_in_dvc_shape(fe["md5"]):
+                raise PointerCutShort(
+                    pointer, f"a file entry of {name} records a hash not in the shape dvc writes: {fe['md5']!r}")
 
 
 def check_dvc_file(pointer: Path | str, doc: Any) -> None:
@@ -904,12 +919,12 @@ def _walk_pointers(
 def cache_path_for(cache_dir: Path, md5: str) -> Path:
     """Where DVC keeps the object ``md5`` under ``cache_dir``.
 
-    ``PointerCutShort`` unless ``md5`` is 32 lowercase hex, with or without
-    ``.dir``, the shape dvc writes: joined unchecked, ``ab/home/u/notes.dir``
-    names ``/home/u/notes.dir`` and ``ab/../../x`` climbs out, and the
-    callers' cleanup would delete that file outside the cache."""
-    if not re.fullmatch(r"[0-9a-f]{32}(\.dir)?", md5):
-        raise PointerCutShort("a pointer", f"the hash {md5!r} is not in the shape dvc writes")
+    ``PointerCutShort`` unless ``hash_in_dvc_shape(md5)``, so no caller gets
+    a path outside the cache, whose cleanup would delete what's there. The
+    floor: the pointer readers (``_check_out``) and the folder-list readers
+    refuse such a hash first, naming where it came from."""
+    if not hash_in_dvc_shape(md5):
+        raise PointerCutShort("a pointer or folder list", f"the hash {md5!r} is not in the shape dvc writes")
     return cache_dir / "files" / "md5" / md5[:2] / md5[2:]
 
 
@@ -919,6 +934,15 @@ def is_cached(cache_dir: Path, md5: str) -> bool:
     return cache_path_for(cache_dir, md5).exists()
 
 
+def _listed(entries: "list[DvcFileEntry]", source: str) -> "list[DvcFileEntry]":
+    """``entries``, read from the folder list ``source``, unless one records
+    a hash dvc never writes: then ``PointerCutShort`` naming ``source``."""
+    for e in entries:
+        if not hash_in_dvc_shape(e.md5):
+            raise PointerCutShort(source, f"the hash of {e.relpath!r} is not in the shape dvc writes: {e.md5!r}")
+    return entries
+
+
 def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntry] | None":
     """Parse a locally-cached ``.dir`` manifest into file entries.
 
@@ -926,7 +950,8 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
     filename always carries it (DVC's own layout — see ensure_dir_manifest).
     Returns ``None`` when the manifest is absent or malformed in any way
     (bad JSON, non-list payload, non-dict entries): callers treat that as
-    "manifest not usable from cache" and fetch or route accordingly.
+    "manifest not usable from cache" and fetch or route accordingly. An
+    entry whose hash dvc never writes is ``PointerCutShort`` (``_listed``).
     """
     full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
     manifest_path = cache_path_for(cache_dir, full_md5)
@@ -936,7 +961,7 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
         payload = json.loads(manifest_path.read_bytes())
         if not isinstance(payload, list):
             return None
-        return [
+        entries = [
             DvcFileEntry(
                 md5=str(e.get("md5", "")),
                 relpath=str(e.get("relpath", "")),
@@ -946,6 +971,7 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
         ]
     except Exception:
         return None
+    return _listed(entries, f"the folder list {full_md5} in the cache")
 
 
 def ensure_out_cached(cache_dir: Path, out: "DvcOut") -> bool:
@@ -1550,7 +1576,7 @@ def fetch_dir_manifest(
     if not isinstance(payload, list):
         cache_path.unlink(missing_ok=True)
         return None
-    return [
+    return _listed([
         DvcFileEntry(
             md5=str(e.get("md5", "")),
             relpath=str(e.get("relpath", "")),
@@ -1558,7 +1584,7 @@ def fetch_dir_manifest(
             version_id=None,
         )
         for e in payload
-    ]
+    ], f"the folder list {full_md5} from storage")
 
 
 
@@ -1619,6 +1645,8 @@ def fetch_dir_contents(
                 progress=progress,
             )
             return (entry.relpath, None)
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return (entry.relpath, f"{entry.relpath}: {exc}")
 
@@ -1710,6 +1738,8 @@ def fetch_files_dir_contents(
                 progress=progress,
             )
             return (entry.relpath, None)
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return (entry.relpath, f"{entry.relpath}: {exc}")
 
