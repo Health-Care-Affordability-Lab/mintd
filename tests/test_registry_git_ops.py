@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from mintd._registry_git_ops import (
+    GitHubAccessMissing,
     BranchInfo,
     GitOpError,
     GitPushRejected,
@@ -165,13 +166,18 @@ def test_timeouts_surface_as_git_op_error(
     neither FileNotFoundError nor CalledProcessError, so without an explicit
     arm it escapes untyped — a raw traceback out of publish step 5, after the
     DVC push, the version commit, and the tag have all landed."""
-    def _timeout(*a: object, **kw: object) -> None:
-        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30.0)
+    from tests._harness.access import REAL_RUN, is_access_check
+
+    def _timeout(argv: list[str], **kw: object) -> object:
+        if is_access_check(argv):  # the check runs for real, so `_git`'s own handler is the one reached
+            return REAL_RUN(argv, **kw)  # type: ignore[call-overload]
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=30.0)
 
     monkeypatch.setattr(subprocess, "run", _timeout)
 
     with pytest.raises(GitOpError) as exc:
         call(SubprocessRegistryGitOps(), tmp_path)
+    assert not isinstance(exc.value, GitHubAccessMissing)
     assert "timed out" in exc.value.stderr
 
 
@@ -397,10 +403,14 @@ def test_every_parsed_git_spawn_actually_passes_git_env(
     """
     from mintd import _subprocess
     from mintd._producer_git_ops import GitArchiveFetcher
+    from tests._harness.access import REAL_RUN, is_access_check
 
     seen: list[dict[str, str]] = []
 
-    def record(*args: object, **kwargs: object) -> None:
+    def record(*args: object, **kwargs: object) -> object:
+        argv = args[0] if args else kwargs.get("argv") or kwargs.get("args")
+        if isinstance(argv, list) and is_access_check(argv):  # the access check first: real, not recorded
+            return REAL_RUN(argv, **kwargs)  # type: ignore[call-overload]
         env = kwargs.get("env")
         seen.append(dict(env) if isinstance(env, dict) else {})
         raise FileNotFoundError("recorded the env; no process needed")

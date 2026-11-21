@@ -32,8 +32,11 @@ def unreachable_repo_hint(repo_url: str) -> str:
     """What to do when a producer's repository can't be reached. One wording
     for every verb that meets it; the URL is quoted where it sits in a command,
     since the producer controls it."""
-    from ._registry_git_ops import NETWORK_TOO, github_access_hint, github_owner, url_git_uses
+    from ._registry_git_ops import NETWORK_TOO, github_access_hint, github_owner, github_refusal, url_git_uses
 
+    refused = github_refusal(repo_url)
+    if refused is not None:  # refused before git ran: what to fix, not a network failure
+        return refused.hint or ""
     url = strip_userinfo(repo_url)
     moved = "if it moved, the catalog entry is out of date, so tell the producer"
     used = url_git_uses(repo_url)

@@ -192,6 +192,10 @@ class CatalogClient(Protocol):
         hard reset to `origin/main`) before reporting.
         """
         ...
+    def require_push_access(self) -> None:
+        """Before publish writes anything: GitHub access for every URL
+        ``update`` will push the registry to. A no-op without a git remote."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +243,9 @@ class InMemoryCatalogClient:
         if name in self._entries:
             return RegistrationStatus(state="registered")
         return RegistrationStatus(state="not_found")
+
+    def require_push_access(self) -> None:
+        return None
 
     def sync(self) -> int:
         """No-op for in-memory; returns the current entry count."""
@@ -437,6 +444,9 @@ class GitCatalogClient:
         if pending is not None:
             return RegistrationStatus(state="pending", pr_number=pending.pr_number)
         return RegistrationStatus(state="not_found")
+
+    def require_push_access(self) -> None:
+        self._git_ops.require_github_access(self._work_dir, push=True)
 
     def sync(self) -> int:
         """Force-refresh the registry cache; returns the entry count."""

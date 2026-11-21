@@ -3521,8 +3521,9 @@ def test_cli_data_pull_error_count_exits_nonzero_with_summary_error(
 ) -> None:
     """Slice C (pull-all audit, fix 4): version-aware targets fast-sync could
     not serve make `mintd data pull` exit non-zero, with a summary error line
-    pointing at the per-target errors (each already carries its own
-    targeted-retry hint). No ✓ success line."""
+    pointing at the per-target errors (each already carries its own hint: a
+    targeted retry, or, for a target refused for GitHub access, the fix to
+    make first). No ✓ success line."""
     from mintd.data_ops import PullSummary
 
     (tmp_path / ".dvc").mkdir()
@@ -3539,7 +3540,7 @@ def test_cli_data_pull_error_count_exits_nonzero_with_summary_error(
     _, msg, hint = errs[0]
     assert "2 target(s) failed" in msg
     assert "3 file(s) pulled" in msg
-    assert "retry command" in hint
+    assert "says what to do next" in hint
     assert recording_reporter.events_of("success") == []
 
 
@@ -3614,6 +3615,8 @@ def test_cli_data_pull_incomplete_targets_exit_nonzero_no_success_line(
         for _, msg, hint in errors
     )
     assert any("pull incomplete" in msg for _, msg, _h in errors)
+    # Not "a retry command": a target refused for GitHub access has none.
+    assert any("says what to do next" in (h or "") for _, msg, h in errors if "pull incomplete" in msg)
     # Never handed to the plain dvc pull fallback.
     assert dvc_ops.pull_calls == []
 
@@ -3642,7 +3645,7 @@ def test_cli_data_clone_pull_errors_exit_nonzero_no_success_line(
     _, msg, hint = errors[0]
     assert "pull incomplete" in msg
     assert "2 target(s) failed" in msg
-    assert "retry command" in hint
+    assert "says what to do next" in hint and "retry command" in hint
 
 
 def test_cli_data_clone_pull_errors_json_mode_includes_errors(

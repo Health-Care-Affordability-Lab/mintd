@@ -2,6 +2,7 @@
 
 import os
 import sys
+from pathlib import Path
 
 
 def dvc_cmd() -> list[str]:
@@ -45,3 +46,12 @@ def dvc_env() -> dict[str, str]:
     env = dict(os.environ)
     env["DVC_NO_ANALYTICS"] = "1"
     return env
+
+
+def dvc_root(start: Path) -> Path:
+    """The nearest directory at or above ``start`` holding ``.dvc/``: the
+    project dvc acts on from anywhere beneath it, found as dvc's own
+    ``Repo.find_root`` finds it. Git's own walk stops at the nearest ``.git``
+    instead, which inside a submodule or nested clone is a different
+    repository; dvc's doesn't. ``start`` when there is none."""
+    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)

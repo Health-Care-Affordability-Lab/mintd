@@ -47,6 +47,7 @@ from ._registry_git_ops import (
     RegistryBranchExists,
     specific_hint,
 )
+from ._dvc_invoke import dvc_root
 from ._fast_sync_ops import FastSyncOps, gitignored_pointers
 from . import _s3
 from ._s3 import S3AccessDenied
@@ -1046,7 +1047,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             reporter.error(
                 f"pull incomplete: {summary.error_count} target(s) failed, "
                 f"{summary.targets_pulled} file(s) pulled",
-                hint="each failed target has a retry command in the errors above",
+                hint="each failed target's error above says what to do next",
             )
         return 1
     if summary.total_bytes:
@@ -1067,14 +1068,6 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     return 0
 
 
-def _dvc_root(start: Path) -> Path:
-    """The nearest directory at or above ``start`` holding ``.dvc/``: the
-    project `dvc push` pushes from anywhere beneath it. Git's own walk stops at
-    the nearest ``.git`` instead, which inside a submodule or nested clone is
-    a different repository. ``start`` when there is none."""
-    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
-
-
 def _skipped_line(skipped: list[str]) -> str:
     """The warning naming every pointer DVC skips because of .gitignore."""
     it = "it" if len(skipped) == 1 else "them"
@@ -1087,7 +1080,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     dvc_ops = _resolve_dvc_ops(config, reporter)
     # dvc runs from the project it finds by walking up to `.dvc/`; targets are
     # read relative to where the user typed them.
-    root = _dvc_root(Path.cwd())
+    root = dvc_root(Path.cwd())
     try:
         with reporter.status("Pushing data to DVC..."):
             summary = data_push(
@@ -1878,8 +1871,8 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             reporter.error(
                 f"cloned {args.name} → {dest.name}/ but pull incomplete: "
                 f"{clone_result.pull_error_count} target(s) failed",
-                hint="each failed target has a retry command in the errors "
-                     f"above; run them inside {dest.name}/",
+                hint="each failed target's error above says what to do next; "
+                     f"run any retry command it gives inside {dest.name}/",
             )
         return 1
     if reporter.json_mode:

@@ -132,29 +132,41 @@ def _real_aws_credentials_are_unreachable(monkeypatch):
     )
 
 
+@pytest.fixture(scope="session")
+def _hermetic_gitconfig(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The global git config every test sees: gh's helper for github.com and
+    nothing else. Outside each test's tmp_path, which some tests list."""
+    path = tmp_path_factory.mktemp("gh-hermetic") / "gitconfig"
+    path.write_text('[credential "https://github.com"]\n\thelper = !gh auth git-credential\n')
+    return path
+
+
 @pytest.fixture(autouse=True)
-def _github_access_is_hermetic():
-    """Every test sees gh logged in as a made-up account, with git using it,
-    and every URL as git would use it unchanged.
+def _github_access_is_hermetic(_hermetic_gitconfig: Path):
+    """Every test runs mintd's real GitHub-access check against a gh that is
+    logged in and a git that uses it, whoever's machine it runs on.
 
     mintd checks GitHub access through gh before git reaches github.com
-    (``_registry_git_ops.require_github_access``). Left real, that check reads
+    (``_registry_git_ops.require_github_access``). Left alone, that check reads
     the developer's own gh login and git config: green on a laptop that is
-    logged in, red on a CI runner that isn't. The two functions replaced here
-    are that check's whole boundary with gh and git. ``tests/test_github_access.py``
-    puts the real ones back to test the check itself.
+    logged in, red on a CI runner that isn't. Nothing in mintd is replaced:
+    ``GH_TOKEN`` makes ``gh auth token`` answer offline (every gh since 2.17;
+    CI runners and lab machines have gh), and git's global config is a file
+    of the test's own that names gh's helper and holds no insteadOf rule.
+    ``tests/test_github_access.py`` sets up each state it tests itself.
     """
-    from mintd import _registry_git_ops as git_ops
-
-    # Swapped by hand, not with `monkeypatch`: an autouse fixture that requests
-    # it inverts teardown order (see `_in_process_dvc_is_hermetic`).
-    saved = git_ops._gh_state, git_ops.url_git_uses
-    git_ops._gh_state = lambda: ("ready", "test-account", (), True)  # type: ignore[assignment]
-    git_ops.url_git_uses = lambda url, *, cwd=None, push=False: url
+    redirect = {"GH_TOKEN": "test-token", "GIT_CONFIG_GLOBAL": str(_hermetic_gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
+    # Set by hand, not with `monkeypatch`, for the reason given in `_in_process_dvc_is_hermetic`.
+    previous = {key: os.environ.get(key) for key in redirect}
+    os.environ.update(redirect)
     try:
         yield
     finally:
-        git_ops._gh_state, git_ops.url_git_uses = saved
+        for key, old_value in previous.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
 
 
 @pytest.fixture(autouse=True)

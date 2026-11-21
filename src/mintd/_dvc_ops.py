@@ -80,6 +80,12 @@ class DvcPullError(DvcOpError):
     """`dvc pull` exited non-zero."""
 
 
+class DvcPullRefused(DvcPullError):
+    """`dvc pull` wasn't run: an import it would clone is on GitHub, and gh
+    isn't ready for it. A ``DvcPullError``, so a pull that isolates failures by
+    target names this one and carries on with the rest."""
+
+
 class DvcAddError(DvcOpError):
     """`dvc add` exited non-zero."""
 
@@ -377,6 +383,60 @@ class DvcOps(Protocol):
         ...
 
 
+def _require_github_access(repo_urls: list[str], what: str, *, pull: bool = False) -> None:
+    """dvc clones an import's producer itself, so GitHub access is checked
+    here, for exactly the URL dvc will use, before dvc runs. Refused as this
+    seam's own error, so its callers handle it: for a pull, a failed target."""
+    from ._registry_git_ops import github_refusal
+
+    for url in dict.fromkeys(repo_urls):
+        refused = github_refusal(url)
+        if refused is None:
+            continue
+        if pull:
+            raise DvcPullRefused(f"{what} not run: {refused}", hint=refused.hint) from refused
+        raise DvcImportRepoUnreachable(f"{what} not run: {refused}", url) from refused
+
+
+def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
+    """The producer URLs dvc may clone for ``targets``, as their .dvc files
+    record them: each target's own pointer (the target itself, or beside it
+    or beside a folder it sits in, as dvc resolves a path inside an output),
+    every import under a folder target, and every import in the project when
+    there are no targets. A target no pointer covers, such as a pipeline's
+    output, adds none: `dvc status` of one clones no producer. (`dvc pull`
+    clones every import's producer whatever its targets, so it asks for all.)"""
+    import yaml
+
+    from ._dvc_invoke import dvc_root
+    from ._fast_sync_ops import discover_all_outs
+    from .imports import DataDependency, NotAnImportError
+
+    cwd = cwd.absolute()  # `data verify` passes "." as given; a relative path has no parents to walk
+    root = dvc_root(cwd)
+    if not targets:
+        pointers = [root / rel for rel in discover_all_outs(root)]
+    else:
+        pointers = []
+        for target in targets:
+            path = cwd / target
+            if target.endswith(".dvc"):
+                pointers.append(path)
+            if path.is_dir():
+                pointers += [path / rel for rel in discover_all_outs(path)]
+            pointers += [
+                beside for p in (path, *path.parents)
+                if p.is_relative_to(root) and p != root and (beside := p.with_name(p.name + ".dvc")).is_file()
+            ]
+    urls = []
+    for pointer in dict.fromkeys(pointers):
+        try:
+            urls.append(DataDependency.from_dvc_file(pointer).producer_repo)
+        except (NotAnImportError, OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
+            continue  # not an import, or unreadable: dvc says so itself
+    return urls
+
+
 class SubprocessDvcOps:
     """Production: shells out to `dvc` commands."""
 
@@ -476,17 +536,15 @@ class SubprocessDvcOps:
         force: bool = False,
         extra_args: list[str] | None = None,
     ) -> Path:
-        from ._registry_git_ops import GitHubAccessMissing, github_owner, https_remote, require_github_access
+        from ._registry_git_ops import without_credentials
 
-        # dvc clones the producer itself, so GitHub access is checked here.
-        try:
-            require_github_access(repo_url)
-        except GitHubAccessMissing as e:  # this seam's own error, so its callers handle it
-            raise DvcImportRepoUnreachable(f"dvc import not run: {e}", repo_url) from e
-        # dvc gets the catalog's URL, an SSH one as https: dvc's own clone may
-        # not apply insteadOf, and the user's own rewrite (a mirror, a token)
-        # must not land in the pointer, which gets committed.
-        source = https_remote(repo_url) if github_owner(repo_url) else repo_url
+        # dvc gets the catalog's URL rebuilt from its parts: GitHub's as https,
+        # none with credentials. dvc writes it into the pointer, which gets
+        # committed, and dvc's own clone reads a different git config than git
+        # does, so it gets a URL that needs no rewriting. gh's helper supplies
+        # the credentials. The check is on exactly this URL.
+        source = without_credentials(repo_url)
+        _require_github_access([source], "dvc import")
         # `-o` is absolutized against the PROCESS cwd, not `cwd` -- see the
         # argument rule on `DvcOps`. The return value below stays computed from
         # the original `dest`, so this is invisible to callers.
@@ -593,6 +651,9 @@ class SubprocessDvcOps:
         jobs: int | None = None,
         extra_args: list[str] | None = None,
     ) -> None:
+        # Every import in the project, whatever the targets: dvc pull clones
+        # every import's producer for any target (measured, dvc 3.67.1).
+        _require_github_access(_import_urls(cwd, None), "dvc pull", pull=True)
         cmd = [*dvc_cmd(), "pull"]
         if remote:
             cmd.extend(["--remote", remote])
@@ -631,6 +692,7 @@ class SubprocessDvcOps:
     def status(self, targets: list[str] | None = None, *, cwd: Path) -> dict[str, str]:
         import json
 
+        _require_github_access(_import_urls(cwd, targets), "dvc status")
         cmd = [*dvc_cmd(), "status", "--json"]
         if targets:
             cmd.extend(targets)

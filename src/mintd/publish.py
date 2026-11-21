@@ -28,7 +28,6 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
     RegistryGitOps,
-    require_github_access,
     specific_hint,
 )
 from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
@@ -161,7 +160,7 @@ def prepare_publish(
     commit = git_ops.current_commit(project_path)
     # Step 5 pushes to origin: check GitHub access to it now, not after
     # `dvc push`, the bump commit and the tag.
-    require_github_access("origin", cwd=project_path, push=True)
+    git_ops.require_github_access(project_path, "origin", push=True)
 
     new_metadata = current.model_copy(deep=True)
     new_metadata.mint.version = new_version
@@ -210,6 +209,8 @@ def prepare_publish(
             project_path, git_ops, current.project.name, current.mint.version, new_version,
             existing._nested("status", "last_published_version"), local_diff,
         )
+    # Step 6 pushes the registry: check that too before anything is written.
+    client.require_push_access()
 
     return PublishPreview(
         project_name=current.project.name,
