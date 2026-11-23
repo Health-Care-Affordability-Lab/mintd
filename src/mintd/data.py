@@ -385,28 +385,30 @@ def import_product(
         if new_dest is not None:
             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
         _remove_empty_dirs(created_dirs)
-        # dvc never got its lock (another dvc held it): it wrote nothing here.
-        # A pointer at the destination by now is another run's finished import.
-        lock = isinstance(exc, DvcOpError) and "Unable to acquire lock" in str(exc)
-        if new_dest is not None and not lock and not target_dvc.exists() and (new_dest.is_file() or new_dest.is_dir()):
+        # What is at the destination is not this import's when dvc stopped
+        # before writing anything (another dvc held its lock, no repo, no such
+        # path), or when a pointer is there by now (another run's finished import).
+        wrote_nothing = isinstance(exc, DvcOpError) and exc.wrote_nothing
+        if new_dest is not None and not wrote_nothing and not _pointer_at(target_dvc) and (new_dest.is_file() or new_dest.is_dir()):
             # Not there before this import, and a re-run refuses it: say what is
-            # there and how to clear it. "Now holds", not "left": a file another
-            # run put there with no pointer can't be told apart. In the
-            # message, so the error's own hint (or the CLI's) stays.
+            # there and how to clear it, as an "if": a file another run put
+            # there with no pointer can't be told apart. In the message, so the
+            # error's own hint (or the CLI's) stays.
             where = _shown(dest, cwd)
-            if new_dest.is_dir():
+            kind = "link" if new_dest.is_symlink() else "folder" if new_dest.is_dir() else "file"
+            if kind == "folder":
                 left = _first_files(Path(os.path.abspath(dest)))
                 there = f"the folder {where} now holds {_named(left, cwd) if left else 'only empty folders'}"
-                clear = shlex.join(["rm", "-r", where])
-            else:
-                there, clear = f"the file {where} is now there", shlex.join(["rm", where])
+            else:  # a link's folder is not listed: `rm` removes the link, not what it holds
+                there = f"the {kind} {where} is now there"
+            step = _if_left("this import", where, kind)
             if isinstance(exc, DvcImportStorageMissing):
                 exc.args = (f"{exc}; {there}", *exc.args[1:])
-                exc.clear_first(f"remove it ({clear})")  # in order: tell the producer, clear, re-run
+                exc.clear_first(f"clear the {kind} ({step})")  # in order: tell the producer, clear, re-run
             elif isinstance(exc, MintdError):
-                exc.args = (f"{exc}; {there}; remove it before re-running: {clear}", *exc.args[1:])
+                exc.args = (f"{exc}; {there}; before re-running, {step}", *exc.args[1:])
             elif reporter is not None:
-                reporter.warn(f"{there}; remove it before re-running: {clear}")
+                reporter.warn(f"{there}; before re-running, {step}")
         if produced and reporter is not None:
             # EARLIER outputs are not rolled back — the failing one is, by
             # `_payload_backup`. Say what landed, so the user is not left
@@ -1064,11 +1066,11 @@ def _import_destination(
         # re-import of a legacy import stays where it is.
         target_dvc = existing
         dest = existing.with_suffix("")
-    elif target_dvc.exists() and not force:
+    elif _pointer_at(target_dvc) and not force:
         raise ImportDestinationExists(
             f"{target_dvc} already exists; pass --force or remove it"
         )
-    elif (dest.is_symlink() or dest.resolve().exists()) and not target_dvc.resolve().exists():
+    elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
         # Something no pointer records is in the way: dvc imports INTO a
         # folder, a level down, and the landed check counts what it held
         # (exit 0, data nested); `--force` replaces a file. With or without
@@ -1080,6 +1082,15 @@ def _import_destination(
         why, hint = _occupied(dest, cwd, holds=holds, within=within)
         raise ImportDestinationExists(why, hint=hint)
     return dest, target_dvc
+
+
+def _pointer_at(target_dvc: Path) -> bool:
+    """Whether a pointer is at ``target_dvc``, for the refusals and for the
+    failed import's note alike. Resolved: ``foo/../x.dvc`` does not exist while
+    ``foo`` is missing (before an import makes it, and after a failed one
+    removes it again), even when ``x.dvc`` does. ``realpath``, which unlike
+    ``Path.resolve`` never raises on a link loop (Python 3.11 and 3.12)."""
+    return os.path.exists(os.path.realpath(target_dvc))
 
 
 def _shown(p: Path, cwd: Path) -> str:
@@ -1113,6 +1124,17 @@ def _named(paths: list[Path], cwd: Path) -> str:
     return ", ".join(_shown(p, cwd) for p in paths[:_NAMED]) + (" and more" if len(paths) > _NAMED else "")
 
 
+def _if_left(who: str, where: str, kind: str) -> str:
+    """How to clear the folder, file or link (``kind``) at ``where`` if ``who``
+    left it, and otherwise: what another run put there can't be told apart.
+    One wording for a failed import's note and the refusal of its re-run."""
+    if kind == "folder":
+        left, rm = "these are the files it left and are", ["rm", "-r", "--", where]
+    else:
+        left, rm = f"this is the {kind} it left and is", ["rm", "--", where]
+    return f"if {who} failed partway, {left} safe to remove: {shlex.join(rm)}; otherwise move that {kind}"
+
+
 def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -> tuple[str, str]:
     """The refusal, message and hint, for something at ``dest`` that no pointer
     at its own place records: what is there and what to do about it. ``holds``
@@ -1137,13 +1159,12 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
     if not files:
         if next(folder.iterdir(), None) is None:
             return (f"{where} is already a folder, an empty one, {down}",
-                    f"it is empty and safe to remove: {shlex.join(['rmdir', where])}")
+                    f"it is empty and safe to remove: {shlex.join(['rmdir', '--', where])}")
         return (f"{where} is already a folder holding only empty folders, {down}",
-                f"it holds no files and is safe to remove: {shlex.join(['rm', '-r', where])}")
+                f"it holds no files and is safe to remove: {shlex.join(['rm', '-r', '--', where])}")
     return (
         f"{where} is already a folder and no pointer records it (it holds {_named(files, cwd)}), {down}",
-        "if an earlier mintd data import failed partway, these are the files it left and are safe to remove: "
-        f"{shlex.join(['rm', '-r', where])}; otherwise move that folder, or import somewhere else with --dest-root",
+        f"{_if_left('an earlier mintd data import', where, 'folder')}, or import somewhere else with --dest-root",
     )
 
 
