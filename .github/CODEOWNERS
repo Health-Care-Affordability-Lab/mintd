@@ -4,5 +4,6 @@
 /install.ps1 @daltonmaurice
 /tests/_harness/ @daltonmaurice
 /tests/stories/ @daltonmaurice
+/tests/conftest.py @daltonmaurice
 /pyproject.toml @daltonmaurice
 /uv.lock @daltonmaurice
