@@ -681,7 +681,8 @@ def test_another_runs_finished_import_through_a_dotdot_dest_root_is_not_named_as
         dest.mkdir()
         (dest / "a.csv").write_text("the other run's\n")
         (dest.parent / "cms_based.dvc").write_text("the other run's pointer\n")
-        (tmp_path / "foo").rmdir()
+        if (tmp_path / "foo").is_dir():  # Windows folds `foo/..` without making `foo`
+            (tmp_path / "foo").rmdir()
 
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
@@ -719,7 +720,8 @@ def test_a_link_at_the_destination_is_named_as_a_link_not_listed(tmp_path: Path)
 
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
-    fails = _failing_after(lambda dest: dest.symlink_to(elsewhere), DvcOpError("dvc import failed (exit 1): reset"))
+    fails = _failing_after(lambda dest: dest.symlink_to(elsewhere, target_is_directory=True),
+                           DvcOpError("dvc import failed (exit 1): reset"))
     with pytest.raises(DvcOpError) as failed:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert "keep.csv" not in str(failed.value)
