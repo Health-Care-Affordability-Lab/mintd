@@ -145,6 +145,10 @@ class DvcRepoLocked(DvcOpError):
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
 
+    # The stderr match below is loose ("Unable to find", "Does not exist"), so
+    # a failure after dvc wrote could be taken for this one. That fails safe:
+    # the failed import says nothing about removing what it finds, and the
+    # re-run's refusal still names it.
     wrote_nothing = True
 
     hint: str | None = (

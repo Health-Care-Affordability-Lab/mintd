@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import shlex
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
@@ -559,16 +562,15 @@ def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_p
         "; the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv"
     )
     assert failed.value.hint.endswith(  # in order: tell the producer, clear the folder, re-run
-        "that is the producer's to fix: send them this error, then clear the folder (if this import failed partway, "
-        "these are the files it left and are safe to remove: rm -r -- data_demo_xw/outputs/cms_based; otherwise "
-        "move that folder), then re-run the import"
+        "that is the producer's to fix: send them this error, then clear the folder (if these are files this import "
+        "left, not yours: rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder), then re-run the import"
     )
     assert DvcImportStorageMissing.hint.endswith("send them this error, then re-run the import")  # per instance
 
     with pytest.raises(ImportDestinationExists) as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert refused.value.hint.startswith(
-        "if an earlier mintd data import failed partway, these are the files it left and are safe to remove: "
+        "if these are files an earlier mintd data import left, not yours: "
         "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"
     )
 
@@ -651,7 +653,7 @@ def test_an_import_dvc_stopped_before_writing_names_nothing_to_remove(tmp_path: 
 def test_a_partial_failure_words_the_rm_as_an_if(tmp_path: Path) -> None:
     """dvc may have written before a failure like this, and another run may
     have: the files can't be told apart, so the rm is conditional, with the
-    other way out. Mutation: drop the "if" from `_if_left` -> red."""
+    other way out. Mutation: drop the "if ..., not yours" from `_if_left` -> red."""
     from mintd._dvc_ops import DvcOpError
 
     def landed(dest: Path) -> None:
@@ -665,7 +667,7 @@ def test_a_partial_failure_words_the_rm_as_an_if(tmp_path: Path) -> None:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert str(failed.value).endswith(
         "; the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv; before "
-        "re-running, if this import failed partway, these are the files it left and are safe to remove: "
+        "re-running, if these are files this import left, not yours: "
         "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"
     )
 
@@ -726,9 +728,70 @@ def test_a_link_at_the_destination_is_named_as_a_link_not_listed(tmp_path: Path)
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert "keep.csv" not in str(failed.value)
     assert str(failed.value).endswith(
-        "; the link data_demo_xw/outputs/cms_based is now there; before re-running, if this import failed partway, "
-        "this is the link it left and is safe to remove: rm -- data_demo_xw/outputs/cms_based; otherwise move that link"
+        "; the link data_demo_xw/outputs/cms_based is now there; before re-running, if this is a link this import "
+        "left, not yours: rm -- data_demo_xw/outputs/cms_based; otherwise move that link"
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows folds `..` before following a link, as Python does")
+def test_a_dest_root_through_a_links_dotdot_names_the_folder_dvc_wrote_to(tmp_path: Path) -> None:
+    """`link/..` is the folder above where `link` points, which is where dvc
+    writes. Folded as text it is the project, where the user's own folder of
+    the same name is. The failed import and its re-run used to list
+    my_thesis.csv and give `rm -r` for the user's folder.
+    Mutations: name or list the folder folded as text (`abspath`), in the note
+    or in the refusal -> red."""
+    from mintd._dvc_ops import DvcOpError
+
+    project, far = tmp_path / "project", tmp_path / "far"
+    (far / "sub").mkdir(parents=True)
+    (project / "link").parent.mkdir()
+    (project / "link").symlink_to(far / "sub", target_is_directory=True)
+    mine = project / "data_demo_xw" / "outputs" / "cms_based"
+    mine.mkdir(parents=True)
+    (mine / "my_thesis.csv").write_text("the user's\n")
+    wrote = Path(os.path.realpath(far)) / "data_demo_xw" / "outputs" / "cms_based"
+    there = wrote.as_posix()
+
+    def landed(dest: Path) -> None:
+        dest.mkdir()
+        (dest / "a.csv").write_text("landed\n")
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fails = _failing_after(landed, DvcOpError("dvc import failed (exit 1): connection reset"))
+    with pytest.raises(DvcOpError) as failed:
+        import_product(client, fails(), "demo_xw", cwd=project, dest_root=project / "link" / "..")
+    assert (wrote / "a.csv").is_file()
+    assert "my_thesis" not in str(failed.value)
+    assert str(failed.value).endswith(
+        f"; the folder {there} now holds {there}/a.csv; before re-running, if these are files this import left, "
+        f"not yours: {shlex.join(['rm', '-r', '--', there])}; otherwise move that folder"
+    )
+
+    with pytest.raises(ImportDestinationExists) as refused:
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=project, dest_root=project / "link" / "..")
+    said = f"{refused.value} {refused.value.hint}"
+    assert "my_thesis" not in said and f"(it holds {there}/a.csv)" in said
+    assert shlex.join(["rm", "-r", "--", there]) in said
+    assert (mine / "my_thesis.csv").is_file()
+
+
+def test_a_link_to_a_folder_at_the_destination_is_refused_as_a_link(tmp_path: Path) -> None:
+    """`rm -r <link>` removes the link only, so the refusal names a link as a
+    link and lists nothing behind it. Mutation: check only `is_dir()` -> the
+    folder's files are listed under "rm -r", red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    elsewhere = dest.parent / "elsewhere"  # inside the namespace: outside, the containment check refuses it first
+    elsewhere.mkdir(parents=True)
+    (elsewhere / "keep.csv").write_text("not an import's\n")
+    dest.symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a link and no pointer records it, "
+                                                      r"so the import would write where it points") as refused:
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert "keep.csv" not in f"{refused.value} {refused.value.hint}"
 
 
 def test_a_dest_root_that_reads_as_an_option_is_not_one_to_rm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -742,7 +805,7 @@ def test_a_dest_root_that_reads_as_an_option_is_not_one_to_rm(tmp_path: Path, mo
     (stray / "a.csv").write_text("x\n")
     with pytest.raises(ImportDestinationExists) as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=Path("-rf"))
-    assert "safe to remove: rm -r -- -rf/data_demo_xw/outputs/cms_based;" in refused.value.hint
+    assert "not yours: rm -r -- -rf/data_demo_xw/outputs/cms_based;" in refused.value.hint
 
 
 def test_another_runs_finished_import_is_not_named_as_left(tmp_path: Path) -> None:
@@ -778,8 +841,8 @@ def test_an_interrupted_import_names_what_it_left_as_a_warning(tmp_path: Path) -
         import_product(client, _failing_after(landed, KeyboardInterrupt())(), "demo_xw", cwd=tmp_path,
                        dest_root=tmp_path, reporter=reporter)
     assert reporter.warns == ["the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv; "
-                              "before re-running, if this import failed partway, these are the files it left and are "
-                              "safe to remove: rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"]
+                              "before re-running, if these are files this import left, not yours: "
+                              "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"]
 
 
 def test_a_failed_single_file_import_names_the_file_it_left(tmp_path: Path) -> None:
@@ -792,7 +855,7 @@ def test_a_failed_single_file_import_names_the_file_it_left(tmp_path: Path) -> N
     with pytest.raises(DvcOpError) as failed:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert str(failed.value).endswith("; the file data_demo_xw/outputs/main.parquet is now there; before re-running, "
-                                      "if this import failed partway, this is the file it left and is safe to remove: "
+                                      "if this is a file this import left, not yours: "
                                       "rm -- data_demo_xw/outputs/main.parquet; otherwise move that file")
 
 

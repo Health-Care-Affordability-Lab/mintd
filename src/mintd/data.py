@@ -394,10 +394,10 @@ def import_product(
             # there and how to clear it, as an "if": a file another run put
             # there with no pointer can't be told apart. In the message, so the
             # error's own hint (or the CLI's) stays.
-            where = _shown(dest, cwd)
+            where = _shown(new_dest, cwd)  # where dvc wrote, which `foo/..` names only resolved
             kind = "link" if new_dest.is_symlink() else "folder" if new_dest.is_dir() else "file"
             if kind == "folder":
-                left = _first_files(Path(os.path.abspath(dest)))
+                left = _first_files(new_dest)
                 there = f"the folder {where} now holds {_named(left, cwd) if left else 'only empty folders'}"
             else:  # a link's folder is not listed: `rm` removes the link, not what it holds
                 there = f"the {kind} {where} is now there"
@@ -1093,14 +1093,23 @@ def _pointer_at(target_dvc: Path) -> bool:
     return os.path.exists(os.path.realpath(target_dvc))
 
 
+def _physical(p: Path) -> Path:
+    """``p`` where the OS reaches it, as the checks resolve it: its folder with
+    links and ``..`` resolved, since ``link/..`` is the folder above where
+    ``link`` points, not the folder ``link`` is in, and its own name kept, so a
+    link there is named as the link."""
+    p = Path.cwd() / p  # absolute, its `..` kept
+    if p.name in ("", ".."):
+        return Path(os.path.realpath(p))
+    return Path(os.path.realpath(p.parent)) / p.name
+
+
 def _shown(p: Path, cwd: Path) -> str:
-    """``p`` relative to the project, a ``..`` folded without following links
-    (``abspath``), so a linked folder is named as given; as given on another
-    drive than the project (Windows)."""
-    try:
-        return Path(os.path.relpath(os.path.abspath(p), os.path.abspath(cwd))).as_posix()
-    except ValueError:
-        return Path(os.path.abspath(p)).as_posix()
+    """``p`` as a message names it, where the OS reaches it (``_physical``):
+    relative to the project inside it, and absolute outside it, where a
+    ``..`` would climb out from where the project really is."""
+    q, top = _physical(p), Path(os.path.realpath(cwd))
+    return (q.relative_to(top) if q.is_relative_to(top) else q).as_posix()
 
 
 _NAMED = 8  # files a message names; walking stops once there is one more
@@ -1125,14 +1134,15 @@ def _named(paths: list[Path], cwd: Path) -> str:
 
 
 def _if_left(who: str, where: str, kind: str) -> str:
-    """How to clear the folder, file or link (``kind``) at ``where`` if ``who``
-    left it, and otherwise: what another run put there can't be told apart.
-    One wording for a failed import's note and the refusal of its re-run."""
+    """How to clear the folder, file or link (``kind``) at ``where``, if what
+    it holds is what ``who`` left, and otherwise: a file another run or the
+    user put there can't be told apart. One wording for a failed import's
+    note and the refusal of its re-run."""
     if kind == "folder":
-        left, rm = "these are the files it left and are", ["rm", "-r", "--", where]
+        whose, rm = f"these are files {who} left", ["rm", "-r", "--", where]
     else:
-        left, rm = f"this is the {kind} it left and is", ["rm", "--", where]
-    return f"if {who} failed partway, {left} safe to remove: {shlex.join(rm)}; otherwise move that {kind}"
+        whose, rm = f"this is a {kind} {who} left", ["rm", "--", where]
+    return f"if {whose}, not yours: {shlex.join(rm)}; otherwise move that {kind}"
 
 
 def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -> tuple[str, str]:
@@ -1147,11 +1157,13 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
         return f"{where} already holds imports ({_named(sorted(holds), cwd)}); {nothing}", pointers
     if within:
         return f"{where} is inside an earlier import ({_named(sorted(within), cwd)}); {nothing}", pointers
-    folder = Path(os.path.abspath(dest))
-    if not folder.is_dir():
-        kind = "link" if dest.is_symlink() else "file"
+    folder = _physical(dest)
+    if folder.is_symlink() or not folder.is_dir():
+        # A link is not listed, even to a folder: `rm` removes the link only.
+        effect = "write where it points" if folder.is_symlink() else "replace it"
         return (
-            f"{where} is already a {kind} and no pointer records it, so the import would replace it; {nothing}",
+            f"{where} is already a {'link' if folder.is_symlink() else 'file'} and no pointer records it, "
+            f"so the import would {effect}; {nothing}",
             "move or remove it, or import somewhere else with --dest-root",
         )
     down = f"so dvc would import into it, a level down; {nothing}"
