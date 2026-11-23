@@ -7,11 +7,14 @@
   attribute 'strip'` instead of the 5xx, as Wasabi did on a real clone.
   - Then: the file is fetched again and lands; exit 0.
   - Pass: every file lands and matches its pointer, and each downloads once.
-- Stale lock entry case: the producer's foreach stage shrank from `[p, q]` to
-  `[p]`, and `dvc.lock` still holds `fan@q`, which dvc.yaml no longer
-  declares. Plain `dvc pull` skips it; `dvc checkout` refuses any argv naming
-  its output.
-  - Then: everything else lands, `fan@q` is named in one warning; exit 0.
+- Stale lock entry case: `dvc.lock` still holds a step dvc.yaml no longer
+  declares. Either the producer's foreach stage shrank from `[p, q]` to `[p]`
+  and the lock keeps `fan@q`, or a stage with `wdir: code` and the out
+  `../data/gone.csv` was deleted, and the lock keeps `gone`. Plain `dvc pull`
+  skips it; `dvc checkout` refuses any argv naming its output.
+  - Then: everything else lands, the stale step is named in one warning; exit 0.
+  - Pass: the shared landed-files check passes, so it too expects only the
+    steps dvc.yaml still declares.
 - Failed checkout case: the product also imports a folder from another
   producer, and one stage's output was renamed in dvc.yaml without a rerun,
   so `dvc checkout` refuses the lock's old name.
@@ -31,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from tests._harness.expect import md5, s3_state
+from tests._harness.expect import assert_landed_match_pointers, md5, s3_state
 from tests._harness.git import _git
 from tests._harness.producer import build_local_producer
 from tests._harness.s3 import BUCKET
@@ -90,17 +93,54 @@ def _shrink_fan(product) -> None:
     _git(["push", "-q"], cwd=producer.work)
 
 
+KEEP = """stages:
+  keep:
+    cmd: echo keep > data/keep.csv
+    outs:
+      - data/keep.csv
+"""
+
+GONE = """  gone:
+    wdir: code
+    cmd: echo gone > ../data/gone.csv
+    outs:
+      - ../data/gone.csv
+"""
+
+
+def _remove_a_step(product) -> None:
+    """Publish `keep` and `gone`, whose out `../data/gone.csv` is relative to
+    its wdir `code`, then delete `gone` from dvc.yaml without running again,
+    so `dvc.lock` keeps a step whose out is right only against that wdir."""
+    producer = product.producer
+    producer.publish_pipeline(KEEP + GONE, seed={"code/README.md": b"gone's working folder\n"})
+    (producer.work / "dvc.yaml").write_text(KEEP)
+    assert "gone:" in (producer.work / "dvc.lock").read_text()
+    _git(["commit", "-q", "-am", "gone is deleted"], cwd=producer.work)
+    _git(["push", "-q"], cwd=producer.work)
+
+
+#: How the lock goes stale, the step it keeps, and the output that still lands.
+STALE = {
+    "shrunk-foreach": (_shrink_fan, "fan@q", "data/fan_p.csv"),
+    "removed-step": (_remove_a_step, "gone", "data/keep.csv"),
+}
+
+
+@pytest.mark.parametrize("stale", list(STALE))
 @pytest.mark.parametrize("fetch", [_clone, _git_clone_then_pull], ids=["clone", "pull"])
-def test_a_stale_lock_entry_is_skipped_and_named(product, mintd, s3_server, tmp_path, fetch) -> None:
-    _shrink_fan(product)
+def test_a_stale_lock_entry_is_skipped_and_named(product, mintd, s3_server, tmp_path, fetch, stale) -> None:
+    make_stale, step, still_lands = STALE[stale]
+    make_stale(product)
 
     dest, run = fetch(mintd, product, tmp_path, json=False)
 
     assert run.returncode == 0, run.stderr
-    warning = "skipped dvc.lock entries for 1 stage(s) dvc.yaml no longer declares, as dvc pull does: fan@q"
+    warning = f"skipped dvc.lock entries for 1 stage(s) dvc.yaml no longer declares, as dvc pull does: {step}"
     assert " ".join(run.stderr.split()).count(warning) == 1, run.stderr
-    fan_p = (product.producer.work / "data" / "fan_p.csv").read_bytes()
-    assert _landed(dest) == {**{k: md5(b) for k, b in product.published().items()}, "data/fan_p.csv": md5(fan_p)}
+    built = (product.producer.work / still_lands).read_bytes()
+    assert assert_landed_match_pointers(dest) == {
+        **{k: md5(b) for k, b in product.published().items()}, still_lands: md5(built)}
 
 
 RENAMED = """stages:

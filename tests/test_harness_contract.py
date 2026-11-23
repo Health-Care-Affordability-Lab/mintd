@@ -45,7 +45,7 @@ from mintd.producer import ProducerError, ProducerView
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness import HarnessError
 from tests._harness.consumer import Import
-from tests._harness.expect import Mismatch, assert_landed_match_pointers, md5
+from tests._harness.expect import CannotCheck, Mismatch, _outs, assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
 from tests._harness.live import (
@@ -1747,13 +1747,16 @@ def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_pa
     pin storage holds counts; other bytes, a version storage lacks, or no
     version id fails. Mutations that turn it red: the md5 compare dropped (the
     other-bytes case passes); the dvc.lock branch never taken (2 pins read as 1);
-    dvc.yaml not read from git (the wdir lost, the `cache: false` out pinned)."""
+    dvc.yaml not read from git (the wdir lost, the `cache: false` out pinned);
+    the checkout ignoring `rev` (the first commit read as main, 3 pins)."""
     from tests._harness.expect import assert_storage_holds_pins
     from tests._harness.s3 import BUCKET
 
     put = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/a.csv", Body=b"alpha\n")
     repo = tmp_path / "repo"
     _git(["init", "-q", "-b", "main", str(repo)])
+    (repo / ".dvc").mkdir()  # a dvc project, so dvc can list its steps
+    (repo / ".dvc" / "config").write_text("", encoding="utf-8")
 
     def pin(digest: str, cloud: dict | None) -> None:
         out = {"md5": digest, "size": 6, "path": "a.csv", **({"cloud": {"storage": cloud}} if cloud else {})}
@@ -1764,7 +1767,10 @@ def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_pa
 
     pin(md5(b"alpha\n"), {"version_id": put["VersionId"]})
     assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 1
+    first = _git(["rev-parse", "HEAD"], cwd=repo).strip()
     built = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/built/out.csv", Body=b"built")
+    (repo / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"cmd": "true", "outs": ["data/built"]}}}),
+                                   encoding="utf-8")
     (repo / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build": {"cmd": "true", "outs": [
         {"path": "data/built", "files": [{"relpath": "out.csv", "md5": md5(b"built"),
                                          "cloud": {"storage": {"version_id": built["VersionId"]}}}]},
@@ -1785,6 +1791,7 @@ def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_pa
     _git(["add", "-A"], cwd=repo)
     _git(["commit", "-q", "-m", "a stage with a wdir"], cwd=repo)
     assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 3
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p", rev=first) == 1  # a commit, read as it was
     for digest, cloud, said in (
         (md5(b"other\n"), {"version_id": put["VersionId"]}, "holds other bytes"),
         (md5(b"alpha\n"), {"version_id": "nonexistent-version"}, "data/a.csv"),
@@ -1851,7 +1858,10 @@ def test_story_2_deletes_only_on_the_emulator() -> None:
 def _tracked_project(root: Path) -> None:
     """A project shaped like the lab's real products: a foreach stage with a
     wdir, one cached out and one `cache: false` out in `dvc.lock`, and a
-    folder pointer written with its `files:` list and no top-level md5."""
+    folder pointer written with its `files:` list and no top-level md5. A git
+    work tree with a `.dvc` folder, as dvc needs to list the steps."""
+    _git(["init", "-q"], cwd=root)
+    (root / ".dvc").mkdir()
     (root / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"foreach": ["x"], "do": {
         "wdir": "code", "cmd": "true",
         "outs": ["../data/final/a.csv", {"../data/final/report.json": {"cache": False}}],
@@ -1875,6 +1885,121 @@ def test_landed_files_include_dvc_lock_outs_and_files_list_folders(tmp_path: Pat
     `cache: false` skip, the `do` lookup, or `_files_of` reading `files:` first."""
     _tracked_project(tmp_path)
     assert assert_landed_match_pointers(tmp_path) == {"data/final/a.csv": md5(b"a"), "data/raw/r.csv": md5(b"r")}
+
+
+
+def _lock_project(root: Path, dvc_yaml: str | None, lock: dict, files: dict[str, bytes],
+                  extra: dict[str, str] | None = None) -> None:
+    """A git work tree with a `.dvc` folder, `dvc_yaml` (none when None), a
+    hand-written `dvc.lock` whose outs record `files`' md5s, the files on disk,
+    and `extra` text files such as `params.yaml`."""
+    _git(["init", "-q"], cwd=root)
+    (root / ".dvc").mkdir()
+    if dvc_yaml is not None:
+        (root / "dvc.yaml").write_text(dvc_yaml, encoding="utf-8")
+    stages = {name: {"cmd": "true", "outs": [{"path": out, "hash": "md5", "md5": md5(files.get(out, b"")), "size": 1}
+                                              for out in outs]} for name, outs in lock.items()}
+    (root / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": stages}), encoding="utf-8")
+    for rel, body in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(body)
+    for rel, text in (extra or {}).items():
+        (root / rel).write_text(text, encoding="utf-8")
+
+
+MATRIX_AND_ROWS = """stages:
+  mat:
+    matrix:
+      m: [x, y]
+    cmd: "true"
+    outs:
+      - data/m_${item.m}.csv
+  rows:
+    foreach:
+      - {n: one}
+    do:
+      cmd: "true"
+      outs:
+        - data/r_${item.n}.csv
+"""
+
+
+def test_landed_files_expect_the_steps_dvc_lists_and_skip_the_rest(tmp_path: Path) -> None:
+    """dvc names a matrix `mat@x` and a list-of-dicts foreach `rows@0`; the
+    lock still holds `rows@1`, an item since dropped, whose file never landed.
+    Mutation that turns it red: `_outs` trusting every lock step."""
+    files = {"data/m_x.csv": b"x", "data/m_y.csv": b"y", "data/r_one.csv": b"1"}
+    _lock_project(tmp_path, MATRIX_AND_ROWS, {"mat@x": ["data/m_x.csv"], "mat@y": ["data/m_y.csv"],
+                                              "rows@0": ["data/r_one.csv"], "rows@1": ["data/r_two.csv"]}, files)
+    assert assert_landed_match_pointers(tmp_path) == {k: md5(v) for k, v in files.items()}
+    (tmp_path / "data" / "m_y.csv").unlink()
+    with pytest.raises(Mismatch, match=r"not expected: \['dvc.lock:rows@1'\]"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_lock_with_no_dvc_yaml_expects_nothing(tmp_path: Path) -> None:
+    """dvc reads steps only from a `dvc.yaml`, so a lock left without one
+    adds nothing, and dvc isn't asked. Mutation that turns it red: listing
+    the steps of a folder with no `dvc.yaml` (dvc exits 255 there)."""
+    pointer = yaml.safe_dump({"outs": [{"path": "a.csv", "hash": "md5", "md5": md5(b"a")}]})
+    _lock_project(tmp_path, None, {"gone": ["data/gone.csv"]}, {"data/a.csv": b"a"})
+    (tmp_path / "data" / "a.csv.dvc").write_text(pointer, encoding="utf-8")
+    assert assert_landed_match_pointers(tmp_path) == {"data/a.csv": md5(b"a")}
+
+
+@pytest.mark.parametrize("dvc_yaml, extra, named", [
+    ("stages:\n  build:\n    wdir: ${dir}\n    cmd: \"true\"\n    outs:\n      - x.csv\n",
+     {"params.yaml": "dir: code\n"}, "${dir}"),
+    ("stages:\n  build:\n    foreach: [x]\n    do:\n      cmd: \"true\"\n      outs:\n"
+     "        - data/${item}.json:\n            cache: false\n", {}, "data/${item}.json"),
+], ids=["wdir", "cache-false-path"])
+def test_a_path_the_check_would_have_to_expand_is_refused_by_name(tmp_path, dvc_yaml, extra, named) -> None:
+    """dvc's CLI gives no resolved wdir, and expanding `${...}` here would
+    re-derive dvc's rules, so the check names what it can't resolve rather
+    than check a path it guessed. Mutation that turns it red: dropping the
+    `templated` refusal in `_outs`."""
+    step = "build" if "wdir" in dvc_yaml else "build@x"
+    _lock_project(tmp_path, dvc_yaml, {step: ["x.csv" if step == "build" else "data/x.json"]}, {}, extra)
+    with pytest.raises(CannotCheck, match=re.escape(named)) as caught:
+        assert_landed_match_pointers(tmp_path)
+    assert step in str(caught.value)
+
+
+@pytest.mark.parametrize("recorded", ["../escape.csv", "/etc/escape.csv"], ids=["dotdot", "absolute"])
+def test_a_lock_out_outside_the_project_is_a_mismatch(tmp_path: Path, recorded: str) -> None:
+    """The lock disagrees with `dvc.yaml` and names an out dvc would never
+    write. Mutation that turns it red: `_inside` returning the path as it is
+    (the absolute one then reaches `relative_to`, the `..` one counts as missing)."""
+    _lock_project(tmp_path, "stages:\n  build:\n    cmd: \"true\"\n    outs:\n      - data/x.csv\n",
+                  {"build": [recorded]}, {"data/x.csv": b"x"})
+    with pytest.raises(Mismatch, match="an out resolves outside the project") as caught:
+        assert_landed_match_pointers(tmp_path)
+    assert caught.value.counts == "1 out outside the project"
+
+
+def test_a_pointer_out_outside_the_project_is_a_mismatch(tmp_path: Path) -> None:
+    """Mutation that turns it red: the pointer loop yielding without `_inside`."""
+    (tmp_path / "x.dvc").write_text(yaml.safe_dump({"outs": [{"path": "../x", "md5": "0" * 32}]}), encoding="utf-8")
+    with pytest.raises(Mismatch, match="an out resolves outside the project"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_dvc_yaml_dvc_cant_read_stops_the_check(tmp_path: Path) -> None:
+    """`stage list --all` would skip this file and exit 0; plain `stage list`
+    exits 255. Mutation that turns it red: ignoring its exit code."""
+    _lock_project(tmp_path, "stages:\n  build: [\n", {"build": ["data/x.csv"]}, {"data/x.csv": b"x"})
+    with pytest.raises(CannotCheck, match="dvc stage list exited"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_step_name_dvc_yaml_doesnt_define_stops_the_check() -> None:
+    """If dvc ever printed names in another form (`dvc.yaml:build`), no lock
+    step would match and every one would be skipped. The check stops instead.
+    Mutation that turns it red: dropping the `unknown` check in `_outs`."""
+    texts = {"dvc.lock": yaml.safe_dump({"stages": {"build": {"outs": [{"path": "x.csv", "md5": "0" * 32}]}}}),
+             "dvc.yaml": "stages:\n  build:\n    cmd: \"true\"\n"}
+    with pytest.raises(CannotCheck, match="doesn't define"):
+        list(_outs(["dvc.lock"], texts.get, lambda base: {"dvc.yaml:build"}))
 
 
 def test_the_live_tier_runs_only_read_only_commands(tmp_path: Path) -> None:

@@ -10,7 +10,11 @@ import collections
 import dataclasses
 import hashlib
 import json
+import os
 import posixpath
+import subprocess
+import sys
+import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -41,6 +45,12 @@ class Mismatch(AssertionError):
     def __init__(self, detail: str, counts: str) -> None:
         super().__init__(detail)
         self.counts = counts
+
+
+class CannotCheck(Exception):
+    """The check can't tell what a project should hold, so it stops rather
+    than guess: a `dvc.yaml` dvc can't read, a step dvc lists that `dvc.yaml`
+    doesn't define, or a `${...}` path it would have to expand itself."""
 
 
 def _files_of(project: Path, root: Path, out: dict) -> dict[str, str]:
@@ -80,40 +90,80 @@ def _load(text: str | None) -> Any:
 
 
 Reader = Callable[[str], "str | None"]
+Live = Callable[[str], "set[str]"]
 
 
-def _outs(rels: Iterable[str], read: Reader) -> Iterator[tuple[str, dict]]:
+def _inside(rel: str, path: str) -> str:
+    """`path`, unless it leaves the project: dvc never writes an out there, so
+    a pointer or lock naming one is wrong, and says so plainly."""
+    if posixpath.isabs(path) or path == ".." or path.startswith("../"):
+        raise Mismatch(f"{rel}: an out resolves outside the project: {path}", "1 out outside the project")
+    return path
+
+
+def _outs(rels: Iterable[str], read: Reader, live: Live,
+          skipped: list[str] | None = None) -> Iterator[tuple[str, dict]]:
     """`(path under the project, out)` for each out dvc pulls: every `.dvc`
     pointer's, then every cached out a `dvc.lock` records, against its stage's
     wdir. An out its `dvc.yaml` marks `cache: false` is committed to git,
     never pulled. `rels` are the project's pointers and locks; `read` gives a
-    file's text, or None when there is none."""
+    file's text, or None when there is none; `live` gives the steps dvc lists
+    for a lock's folder.
+
+    A lock step dvc doesn't list (a stage deleted from `dvc.yaml`, a foreach
+    item dropped from its list) is one `dvc pull` skips, so it is skipped and
+    added to `skipped`. With no `dvc.yaml` beside a lock, dvc reads no step
+    from it. Raises `CannotCheck` rather than guess a step or a path."""
     rels = sorted(rels)
     for rel in rels:
         if rel.endswith(".dvc"):
             for out in _load(read(rel))["outs"]:
-                yield posixpath.normpath(posixpath.join(posixpath.dirname(rel), out["path"])), out
+                yield _inside(rel, posixpath.normpath(posixpath.join(posixpath.dirname(rel), out["path"]))), out
     for rel in rels:
         if posixpath.basename(rel) != "dvc.lock":
             continue
         base = posixpath.dirname(rel)
-        stages = (_load(read(posixpath.join(base, "dvc.yaml"))) or {}).get("stages", {})
+        text = read(posixpath.join(base, "dvc.yaml"))
+        listed = live(base) if text is not None else set()  # first: dvc names a dvc.yaml it can't read
+        stages = (_load(text) or {}).get("stages", {}) if text is not None else {}
+        if unknown := sorted(n for n in listed if n.split("@")[0] not in stages):
+            raise CannotCheck(f"{rel}: dvc lists steps its dvc.yaml doesn't define: {unknown}")
         for name, stage in (_load(read(rel)) or {}).get("stages", {}).items():
-            body = stages.get(name.split("@")[0], {})
+            if name not in listed:
+                if skipped is not None:
+                    skipped.append(f"{rel}:{name}")
+                continue
+            body = stages[name.split("@")[0]]
             body = body.get("do", body)  # a foreach or matrix stage
-            # ponytail: a ${...} wdir or cache:false path is not expanded; expand it if a product needs it
-            wdir = posixpath.join(base, body.get("wdir", "."))
-            uncached = {
-                posixpath.normpath(posixpath.join(wdir, _path_of(e)))
-                for kind in ("outs", "metrics", "plots") for e in body.get(kind, []) if not _cached(e)
-            }
+            wdir = body.get("wdir", ".")
+            uncached = [_path_of(e) for kind in ("outs", "metrics", "plots") for e in body.get(kind, []) if not _cached(e)]
+            if templated := [p for p in (wdir, *uncached) if "${" in p]:
+                raise CannotCheck(f"{rel}: step {name} needs {templated} expanded; the check doesn't expand ${{...}}")
+            wdir = posixpath.join(base, wdir)
+            uncached_paths = {posixpath.normpath(posixpath.join(wdir, p)) for p in uncached}
             for out in stage.get("outs", []):
-                path = posixpath.normpath(posixpath.join(wdir, out["path"]))
-                if path not in uncached:
+                path = _inside(rel, posixpath.normpath(posixpath.join(wdir, out["path"])))
+                if path not in uncached_paths:
                     yield path, out
 
 
-def _on_disk(project: Path) -> tuple[list[str], Reader]:
+def _stage_list(folder: Path) -> set[str]:
+    """The steps dvc lists for `folder`'s `dvc.yaml`, foreach and matrix
+    instances named by dvc itself, so the check never re-derives dvc's naming.
+    Never `--all`: it skips a `dvc.yaml` it can't read and exits 0. dvc's
+    global and system config and its site cache point at an empty folder, and
+    analytics are off, so the host's dvc settings never reach the answer."""
+    with tempfile.TemporaryDirectory() as empty:
+        env = {**os.environ, "DVC_NO_ANALYTICS": "1", "DVC_GLOBAL_CONFIG_DIR": f"{empty}/global",
+               "DVC_SYSTEM_CONFIG_DIR": f"{empty}/system", "DVC_SITE_CACHE_DIR": f"{empty}/site"}
+        r = subprocess.run([sys.executable, "-m", "dvc", "stage", "list", "--name-only"],
+                           cwd=folder, env=env, capture_output=True, text=True)
+    if r.returncode:
+        raise CannotCheck(f"dvc stage list exited {r.returncode} in {folder}: {(r.stderr or r.stdout).strip()}")
+    return {line.strip() for line in r.stdout.splitlines() if line.strip()}
+
+
+def _on_disk(project: Path) -> tuple[list[str], Reader, Live]:
     """`project`'s pointers and locks as they are on disk, for `_outs`."""
     rels = [p.relative_to(project).as_posix() for pattern in ("*.dvc", "dvc.lock")
             for p in project.rglob(pattern) if p.is_file()]  # not the `.dvc` folder itself
@@ -122,30 +172,20 @@ def _on_disk(project: Path) -> tuple[list[str], Reader]:
         path = project / rel
         return path.read_text(encoding="utf-8") if path.is_file() else None
 
-    return rels, read
-
-
-def _at_rev(repo: Path, rev: str) -> tuple[list[str], Reader]:
-    """`repo`'s pointers and locks as git holds them at `rev`, for `_outs`."""
-    # -z: a path with non-ASCII or special characters comes back as it is, not quoted
-    tracked = set(filter(None, _git(["ls-tree", "-r", "-z", "--name-only", rev], cwd=repo).split("\0")))
-    rels = [r for r in tracked if r.endswith(".dvc") or posixpath.basename(r) == "dvc.lock"]
-
-    def read(rel: str) -> str | None:
-        return _git(["show", f"{rev}:{rel}"], cwd=repo) if rel in tracked else None
-
-    return rels, read
+    return rels, read, lambda base: _stage_list(project / base)
 
 
 def assert_landed_match_pointers(project: Path) -> dict[str, str]:
     """Every file each out in `project` names (`.dvc` pointers and cached
-    `dvc.lock` outs) is on disk and hashes to its recorded md5, no other file
-    sits in an out's folder, and at least one file landed. Returns
-    `{path under project: md5}`. On a difference it raises `Mismatch`, whose
-    `counts` names no file."""
+    `dvc.lock` outs of the steps dvc still lists) is on disk and hashes to its
+    recorded md5, no other file sits in an out's folder, and at least one file
+    landed. Returns `{path under project: md5}`. On a difference it raises
+    `Mismatch`, whose `counts` names no file; when it can't tell what should
+    land, `CannotCheck`."""
     expected: dict[str, str] = {}
     landed: dict[str, str] = {}
-    for rel, out in _outs(*_on_disk(project)):
+    skipped: list[str] = []
+    for rel, out in _outs(*_on_disk(project), skipped):
         root = project / rel
         expected.update(_files_of(project, root, out))
         for f in [root] if root.is_file() else root.rglob("*"):
@@ -161,6 +201,8 @@ def assert_landed_match_pointers(project: Path) -> dict[str, str]:
             f"landed files differ from their pointers: {landed} != {expected}" if landed != expected
             else f"no file landed in {project}"
         )
+        if skipped:
+            detail += f"; lock steps dvc no longer lists, not expected: {skipped}"
         raise Mismatch(detail, counts)
     return landed
 
@@ -219,7 +261,9 @@ def assert_storage_holds_pins(s3: S3Server, repo: Path, prefix: str, *, rev: str
     """Story 3's Pass line: storage holds every version the pointers at `rev`
     pin, read from git (the producer's bare repo, which importers read), never
     from mintd. Outs are read as `assert_landed_match_pointers` reads them
-    (`_outs`: a stage's wdir applied, `cache: false` left out), at `rev`. A pin
+    (`_outs`: a stage's wdir applied, `cache: false` and steps dvc no longer
+    lists left out), from a checkout of `rev`, since dvc lists steps only in a
+    git work tree. `rev` may be a branch or a commit. A pin
     is an out's md5 and its `cloud[remote]` version id; a folder out with a
     `files:` list is one pin per file. Each pinned version is fetched and its bytes hashed. Fails
     when no pin exists (never vacuous), or a pin has no version id, a version
@@ -227,11 +271,15 @@ def assert_storage_holds_pins(s3: S3Server, repo: Path, prefix: str, *, rev: str
     land in the server's records, so read `s3_state` first."""
     from botocore.exceptions import ClientError
 
-    pins = [
-        (root if entry is out else f"{root}/{entry['relpath']}", entry.get("md5", ""),
-         (entry.get("cloud") or {}).get(remote) or {})
-        for root, out in _outs(*_at_rev(repo, rev)) for entry in out.get("files") or [out]
-    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        checkout = Path(tmp) / "checkout"
+        _git(["clone", "-q", "--no-checkout", str(repo), str(checkout)])
+        _git(["checkout", "-q", rev], cwd=checkout)  # a commit as well as a branch, so not `clone --branch`
+        pins = [
+            (root if entry is out else f"{root}/{entry['relpath']}", entry.get("md5", ""),
+             (entry.get("cloud") or {}).get(remote) or {})
+            for root, out in _outs(*_on_disk(checkout)) for entry in out.get("files") or [out]
+        ]
     wrong: dict[str, str] = {}
     for path, digest, cloud in pins:
         if not cloud.get("version_id"):  # a .dir record with no file list has none either
