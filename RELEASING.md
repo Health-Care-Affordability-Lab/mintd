@@ -19,12 +19,13 @@ practice, until a nightly clone of every product runs.
 ## Roll back
 
 ```bash
-gh release edit vPREV --latest      # first: the last good release (it must have install.sh and install.ps1)
+gh release view vPREV --json assets --jq '[.assets[].name] | (index("install.sh") != null) and (index("install.ps1") != null)'   # must print true
+gh release edit vPREV --latest      # first: the last good release is latest again
 gh release edit vBAD --prerelease   # then: the withdrawn one
 ```
 
-If vBAD wrote catalog entries or metadata vPREV can't read, repair them with PRs. Never delete
-anything on S3.
+Users on vBAD are told within a day, the next time they run `mintd --version` or bare `mintd`. If vBAD wrote
+catalog entries or metadata vPREV can't read, repair them with PRs. Never delete anything on S3.
 
 ## Hotfix
 

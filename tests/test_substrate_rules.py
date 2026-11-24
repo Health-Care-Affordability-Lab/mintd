@@ -446,6 +446,7 @@ PER_FILE_IGNORES = {
     "src/mintd/_registry_git_ops.py": ["TID251"],
     "src/mintd/_atomic.py": ["TID251"],
     "src/mintd/_s3.py": ["TID251", "BLE001"],
+    "src/mintd/_release_check.py": ["TID251", "BLE001"],
     "src/mintd/_init_ops.py": ["TID251"],
     "src/mintd/_fast_sync_ops.py": ["TID251", "BLE001", "S110"],
     "src/mintd/_producer_git_ops.py": ["TID251"],
@@ -575,6 +576,7 @@ TID251_NAMES_USED: dict[str, dict[str, int]] = {
     "src/mintd/_fast_sync_ops.py": {"subprocess": 1},
     "src/mintd/_init_ops.py": {"subprocess": 1},
     "src/mintd/_producer_git_ops.py": {"subprocess": 1},
+    "src/mintd/_release_check.py": {"urllib.request": 1},
     "src/mintd/_registry_git_ops.py": {"subprocess": 1},
     "src/mintd/_s3.py": {"boto3": 3, "botocore": 4},
     "src/mintd/_subprocess.py": {"subprocess": 1},
@@ -654,6 +656,8 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
     # 6 -> 4: a fetched folder list is read before it lands in the cache, so
     # the two unlinks that dropped a bad one after it landed are gone.
     "src/mintd/_fast_sync_ops.py": {"unlink": 4, "write_bytes": 1},
+    # The URL opener's .open(Request(...)): a fetch, which the scan can't tell from a write.
+    "src/mintd/_release_check.py": {"open-for-write": 1},
     "src/mintd/_share_ops.py": {"unlink": 3},
     "src/mintd/_templates/_render.py": {"unlink": 1, "write_text": 3},
     "src/mintd/data.py": {"rename": 2, "rmdir": 1, "unlink": 3, "write_bytes": 2},

@@ -77,10 +77,10 @@ MIN_FREE = 4 * 2**30
 
 def child_env(**extra: str) -> dict[str, str]:
     """This process's environment for a child pytest, without what reaches real storage: the test bucket's name,
-    and every AWS, boto and fsspec setting (keys, key files, profiles). No bytecode, plus ``extra``."""
+    and every AWS, boto and fsspec setting (keys, key files, profiles). No bytecode, no release lookup, plus ``extra``."""
     env = {k: v for k, v in os.environ.items()
            if k != "MINTD_STORY_BUCKET" and not k.startswith(("AWS_", "BOTO_", "FSSPEC_"))}
-    return {**env, "PYTHONDONTWRITEBYTECODE": "1", **extra}
+    return {**env, "PYTHONDONTWRITEBYTECODE": "1", "MINTD_NO_UPDATE_CHECK": "1", **extra}
 
 
 class Row(NamedTuple):
