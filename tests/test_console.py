@@ -301,3 +301,25 @@ def test_under_a_spinner_child_output_is_stripped_and_flushed_on_exit(capsys, mo
     out, err = capsys.readouterr()
     assert "s3cr3tTOKEN" not in out + err
     assert "Importing 'data/final (http://host/priv.git)'" in err
+
+
+def test_every_message_line_prints_whole(capsys, monkeypatch):
+    """rich wrapped them at the width: `rm -r` on one line and `--` on the
+    next, a long path broken after a `/`, so a line-by-line copy named an
+    ancestor folder. Every message line goes through one print. Mutation:
+    drop its soft_wrap -> red."""
+    monkeypatch.setenv("COLUMNS", "80")
+    path = "data/imports/" + "/".join(["a_folder_with_a_long_name"] * 5)
+    reporter = Reporter(no_color=True)
+    reporter.error(f"the folder {path} now holds files", hint=f"if this is a folder it left, not yours: rm -r -- {path}")
+    reporter.warn(f"before re-running: rm -r -- {path}")
+    reporter.info(f"  fetch it with: mintd share get {path}")
+    reporter.success(f"imported into {path}")
+    lines = capsys.readouterr().err.splitlines()
+    assert lines == [
+        f"error: the folder {path} now holds files",
+        f"  hint: if this is a folder it left, not yours: rm -r -- {path}",
+        f"warning: before re-running: rm -r -- {path}",
+        f"  fetch it with: mintd share get {path}",
+        f"imported into {path}",
+    ]

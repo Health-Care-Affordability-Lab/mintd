@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import builtins
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -4756,16 +4757,18 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
     assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
 
 
-def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+def test_data_import_all_refuses_before_any_output_lands_when_a_later_one_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--all`: the first output lands, then the second is refused before
-    anything is made for it (a file already sits at its pointer's path). The
-    failure rollback never touches the payload of the output that landed.
+    """`--all`: a file already sits at the second output's pointer path. Every
+    destination is checked before the first dvc call, so the import is refused
+    before the first output lands, rather than half done. (An output that
+    fails in dvc after an earlier one landed keeps that one:
+    `test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver`.)
 
-    Mutation: remove the destination whole on failure and keep the previous
-    output's rollback state -> `good/` is deleted.
+    Mutation: check each destination as its output is imported -> `good/` lands, red.
     """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
     client, _dvc_ops = patched_clients
     sha = _undeliverable_producer(tmp_path, client)
     root = tmp_path / "imports"
@@ -4779,7 +4782,9 @@ def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
     err = " ".join(capsys.readouterr().err.split())
 
     assert rc != 0, err
-    assert (ns / "good" / "payload").is_file(), err
+    assert "final.dvc already exists" in err
+    assert not (ns / "good").exists() and not (ns / "good.dvc").exists(), err
+    assert (ns / "final.dvc").read_text() == "not a pointer\n"
 
 
 def _reachable_raises(root: str) -> set[str]:
@@ -5354,3 +5359,87 @@ def test_cli_error_arms_only_render_in_main() -> None:
         ("_handle_enclave_package", "NothingNewToPackage"),
         ("_handle_update_metadata", "metadata_migrate.MetadataAlreadyV2"),
     }
+
+
+def test_cli_data_import_json_paths_stay_relative_for_a_default_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The import root is resolved for the checks and for dvc, but what
+    `--json` prints keeps the default `--dest-root`'s spelling: relative to
+    the project, as before. Mutation: return the resolved paths -> absolute, red."""
+    client, _ = patched_clients
+    _register_demo_xw(client)
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["--json", "data", "import", "demo-xw"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["produced"] and all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
+
+
+def _import_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake, *argv: str) -> dict:
+    """`mintd --json data import demo-xw <argv>`, its pointers recording 4096
+    bytes in 2 files, so the summary has something to report."""
+    real = fake.import_
+
+    def import_(**kw):
+        written = real(**kw)
+        for p in kw["dest"].parent.glob("*.dvc"):
+            p.write_text(p.read_text().replace("    size: 0\n", "    size: 4096\n    nfiles: 2\n"))
+        return written
+
+    monkeypatch.setattr(fake, "import_", import_)
+    rc = cli.main(["--json", "data", "import", "demo-xw", *argv])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    return payload
+
+
+def test_cli_data_import_through_a_missing_folders_dotdot_reports_where_it_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--dest-root foo/..` with `foo` missing: the import lands, and every path
+    it reports is where it landed, so the summary reads the pointer back (a
+    path through `foo/..` isn't there, and the summary reported no pin and
+    0 bytes). Mutation: report the path as the caller spelled it -> red."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    monkeypatch.chdir(tmp_path)
+    payload = _import_json(monkeypatch, capsys, fake, "--dest-root", "foo/..")
+    assert all(Path(p).is_file() and ".." not in Path(p).parts for p in payload["produced"]), payload
+    assert payload["pin"] and payload["producer_repo"] == "https://github.com/example-org/demo-xw", payload
+    assert payload["file_count"] == 2 and payload["total_bytes"] == 4096, payload
+
+
+def test_cli_data_import_under_a_symlinked_home_stays_short_and_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A project reached through a link (a home folder on another disk): paths
+    are named from where the project really is, so they stay relative. Through
+    the CLI the working folder (`os.getcwd()`) is already resolved; the case a
+    caller names through the link is
+    `test_paths_under_a_symlinked_home_are_named_relative_to_where_the_project_is`."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    (tmp_path / "real" / "proj").mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path / "home" / "proj")
+    payload = _import_json(monkeypatch, capsys, fake)
+    assert all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
+
+
+def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Outside the working folder a relative name would climb out through `..`;
+    the path is given in full. Mutation: always relative -> red."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    (tmp_path / "proj").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.chdir(tmp_path / "proj")
+    payload = _import_json(monkeypatch, capsys, fake, "--dest-root", str(elsewhere))
+    real = os.path.realpath(elsewhere)
+    assert all(Path(p).is_absolute() and Path(p).is_relative_to(real) for p in payload["produced"]), payload
+    assert payload["total_bytes"] == 4096, payload

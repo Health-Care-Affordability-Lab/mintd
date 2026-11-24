@@ -597,7 +597,7 @@ def _files_on_disk(root: Path, folder: str) -> list[str]:
         dirnames[:] = sorted(d for d in dirnames if d not in (".git", ".hg", ".dvc") and not (here / d / ".dvc").is_dir())
         found += [(here / f).relative_to(root).as_posix() for f in filenames if f != ".git"]
     ignored = _dvcignore(root, [root, *(root.joinpath(*parts[:k]) for k in range(1, len(parts)))])
-    prefix = f"{Path(folder).as_posix()}/"
+    prefix = "" if Path(folder) == Path(".") else f"{Path(folder).as_posix()}/"  # the project itself
     return sorted(p[len(prefix):] for p in found
                   if not ignored.match_file(p) and not (Path(p).name in _OS_JUNK or Path(p).name.startswith("._")))
 

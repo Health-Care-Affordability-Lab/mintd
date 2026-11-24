@@ -1089,6 +1089,25 @@ def test_import_with_files_missing_from_storage_says_the_producer_must_fix_it(tm
     assert "data/final/a.csv" in str(ei.value)
 
 
+def test_an_import_that_finds_dvcs_lock_held_says_it_wrote_nothing(tmp_path: Path) -> None:
+    """dvc stops before writing anything (checked with dvc 3.67.1), as it does
+    for no repo, no path and an unreachable producer, so a failed import names
+    nothing it finds at the destination as its own. Mutation: drop the lock
+    match -> a plain DvcOpError, which may have written, red."""
+    from mintd._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcRepoLocked
+
+    locked = (
+        "ERROR: Unable to acquire lock. Most likely another DVC process is running or was terminated abruptly.\n"
+    )
+    with pytest.raises(DvcRepoLocked) as ei:
+        _CannedStderrDvcOps(locked).import_(
+            repo_url="https://example.org/repo", path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert ei.value.wrote_nothing and "Unable to acquire lock" in str(ei.value)
+    assert all(e.wrote_nothing for e in (DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError))
+    assert not DvcOpError.wrote_nothing
+
+
 def test_any_other_import_failure_keeps_no_hint_of_its_own(tmp_path: Path) -> None:
     """The verb's `_hint(DvcOpError, ...)` then supplies "retry with --dvc-arg=-v"."""
     with pytest.raises(DvcOpError) as ei:

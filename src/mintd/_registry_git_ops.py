@@ -145,6 +145,8 @@ class RegistryGitOps(Protocol):
     def remote_branch_exists(self, repo_dir: Path, branch: str) -> bool: ...
     def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
     def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]: ...
+    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]: ...
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]: ...
     def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
@@ -327,6 +329,33 @@ class SubprocessRegistryGitOps:
                 mode, obj, _stage = meta.split()
                 entries[name] = f"{mode},{obj}"
         return entries
+
+    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        """The files at or under ``paths`` that git ignores and doesn't track:
+        what `git status` never lists and `git add -A` never picks up. Paths
+        are relative to ``work_dir``, as given. Empty for no ``paths``: with no
+        pathspec git would list every ignored file in the repository."""
+        if not paths:
+            return []
+        out = self._git(
+            ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
+             *(f":(literal){p}" for p in paths)],
+            cwd=work_dir,
+        )
+        return [name for name in out.split("\0") if name]
+
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        """Every entry git lists at or under ``paths``: tracked files and
+        untracked ones, ignored included. A symlink is one entry, and a
+        nested repository one ``dir/`` entry, since git doesn't look inside
+        either. Empty for no ``paths``, as `ignored_files`."""
+        if not paths:
+            return []
+        out = self._git(
+            ["ls-files", "-z", "--cached", "--others", "--", *(f":(literal){p}" for p in paths)],
+            cwd=work_dir,
+        )
+        return [name for name in out.split("\0") if name]
 
     def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
         """Put git's index for ``names`` back to ``entries`` (from
