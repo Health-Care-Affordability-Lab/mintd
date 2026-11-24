@@ -432,6 +432,43 @@ def test_a_folder_pointer_shorter_than_its_folder_stops_the_push_before_upload(
     assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
 
 
+def test_check_remote_finds_what_push_wrote_and_staged_refuses_dvc_commit_f(producer, s3_server, real_dvc, capsys):  # noqa: F811
+    """After a real push, `mintd check --remote` finds every pinned version,
+    for `.dvc` and dvc.lock outs, and uploads nothing. Then `dvc commit -f`
+    writes a stage's folder out back as a bare tree hash with no IDs:
+    `check --staged` refuses that commit, with the tree in the local cache
+    and without it."""
+    from mintd._dvc_state import dvc_cache_dir
+    from mintd.check import check_project, check_staged
+
+    write = ("import pathlib; p=pathlib.Path('../data/out'); p.mkdir(parents=True, exist_ok=True); "
+             "[(p/n).write_text(n) for n in ('a.csv', 'b.csv')]")
+    doc = yaml.safe_load((producer / "dvc.yaml").read_text())
+    doc["stages"]["many"] = {"wdir": "code", "cmd": f'"{sys.executable}" -c "{write}"', "outs": ["../data/out"]}
+    (producer / "dvc.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    real_dvc(["repro", "-q"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "folder stage"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)  # commits the pinned pointers
+    puts = list(s3_server.puts)
+    remote = [f for f in check_project(producer, remote=True, all_outs=True) if (f.kind or "").startswith("remote_")]
+    assert remote == [] and s3_server.puts == puts
+
+    real_dvc(["commit", "-f", "-q", "dvc.yaml:many"], cwd=producer, check=True)
+    rec = yaml.safe_load((producer / "dvc.lock").read_text())["stages"]["many"]["outs"][0]
+    assert "files" not in rec and rec["md5"].endswith(".dir")  # what DVC does to a folder out
+    _git(["add", "dvc.lock"], cwd=producer)
+    want = ["dvc.lock drops S3 version IDs from 2 unchanged file(s) (data/out/a.csv, data/out/b.csv)"]
+    assert [f.message for f in check_staged(producer)] == want
+    cache = dvc_cache_dir(producer)
+    assert cache.is_relative_to(producer)
+    # the test's own local cache, gone as from a CI checkout: moved, not
+    # deleted, since DVC makes cache files read-only and Windows won't delete those
+    cache.rename(cache.with_name("cache-gone"))
+    assert [f.message for f in check_staged(producer)] == want
+
+
 def test_a_nested_pipeline_folder_shorter_than_its_folder_stops_the_push(
     producer, s3_server, real_dvc, capsys,  # noqa: F811
 ) -> None:
