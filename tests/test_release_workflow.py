@@ -83,6 +83,7 @@ def test_each_job_gets_only_the_permissions_it_needs() -> None:
         "prerelease": {"contents": "write"},
         "install": {"contents": "read"},
         "evidence": {"contents": "write"},
+        "supersede": {"actions": "write"},
         "promote": {"contents": "write", "actions": "read"},
     }
     assert _WF["tag.yml"]["permissions"] == {"contents": "write", "actions": "write"}
@@ -386,8 +387,7 @@ gate run: https://example/run
 
 - CI (test.yml) on this tag: passed
 - clean install with this release's install.sh and install.ps1 on Linux (--with-schema), macOS and Windows PowerShell 5.1 (plain, then -WithSchema), and the story tests against the Linux install: failure
-- live tier: run by hand on the lab Linux box when the change touches download or push paths; result: passed 12 of 12 checks on 3 products
-- canary: run by hand (RELEASING.md); result: passed
+- a line someone added by hand
 
 A prerelease."""
 
@@ -410,12 +410,13 @@ def test_evidence_fills_the_notes_while_the_gate_placeholder_is_there(tmp_path: 
     assert rc == 0, out
     assert notes is not None and notes.startswith("commit: abc\n")
     assert "and the story tests against the Linux install: success\n" in notes
-    assert "- live tier: run by hand on the lab Linux box when the change touches download or push paths; result: not recorded yet" in notes
+    assert "gate run: https://github.com/o/r/actions/runs/1\n" in notes  # the one link to the run
+    assert "live tier" not in notes and "canary" not in notes  # nothing left for people to fill in
 
 
 @_BASH
 def test_evidence_on_a_rerun_replaces_only_the_install_line(tmp_path: Path) -> None:
-    """A rerun keeps the live-tier and canary results people wrote."""
+    """A rerun keeps anything people wrote."""
     rc, notes, out = _evidence(tmp_path, _FILLED)
     assert rc == 0, out
     assert notes == _FILLED.replace("against the Linux install: failure", "against the Linux install: success")
@@ -426,6 +427,62 @@ def test_evidence_never_changes_a_release_that_is_not_a_prerelease(tmp_path: Pat
     rc, notes, out = _evidence(tmp_path, _FILLED, prerelease="false")
     assert rc != 0 and "is not a prerelease" in out
     assert notes is None
+
+
+# --- only the newest release waits, run with a stub gh -------------------
+
+_STUB_GH_SUPERSEDE = """#!/bin/bash
+echo "gh $*" >> "$LOG"
+case "$*" in
+  # The listing as `gh api --paginate --jq` prints it: one line per run, page
+  # after page. Without --paginate only the first page comes back.
+  "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
+  "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
+esac
+exit 0
+"""
+
+
+@_BASH
+@pytest.mark.parametrize(
+    ("case", "tag", "pages", "cancelled", "ok"),
+    [
+        ("a newer release cancels the older ones, on every page", "v1.3.0", (["11 v1.2.0"], ["12 v1.1.0"]), ["11", "12"], True),
+        ("versions, not text", "v1.10.0", (["11 v1.9.0"], []), ["11"], True),
+        ("an older run stands down for a newer one waiting", "v1.2.0", (["60 v1.3.0"], []), ["50"], True),
+        ("the same tag twice keeps the later run", "v1.3.0", (["40 v1.3.0"], []), ["40"], True),
+        ("the same tag, started later, stands this one down", "v1.3.0", (["60 v1.3.0"], []), ["50"], True),
+        ("a waiting hotfix is left alone", "v1.3.0", (["13 v1.2.0.post1"], []), [], True),
+        ("a hotfix run cancels nothing", "v1.2.0.post1", (["11 v1.1.0"], []), [], True),
+        ("itself, and anything that isn't a release, is skipped", "v1.3.0", (["50 v1.3.0", "14 main", "abc v1.2.0", "15 v1.2.0;x"], []), [], True),
+        ("nothing waiting", "v1.3.0", ([], []), [], True),
+        ("the listing fails", "v1.3.0", (["11 v1.2.0"], []), [], False),
+    ],
+)
+def test_only_the_newest_release_waits_for_approval(
+    tmp_path: Path, case: str, tag: str, pages: tuple[list[str], list[str]], cancelled: list[str], ok: bool
+) -> None:
+    for i, page in enumerate(pages, 1):
+        (tmp_path / f"page{i}").write_text("".join(f"{line}\n" for line in page))
+    env = {
+        **_stubs(tmp_path, gh=_STUB_GH_SUPERSEDE), "TAG": tag, "GH_REPO": "o/r", "GITHUB_RUN_ID": "50",
+        "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
+        "LIST_FAIL": "1" if case == "the listing fails" else "0",
+    }
+    result = subprocess.run(["bash", "-c", _runs("supersede")], cwd=tmp_path, env=env, capture_output=True, text=True)
+    log = (tmp_path / "log").read_text().splitlines()
+    assert (result.returncode == 0) is ok, result.stdout + result.stderr
+    assert [line.split()[-1] for line in log if line.startswith("gh run cancel")] == cancelled
+
+
+def test_supersede_touches_only_runs_waiting_for_approval_once_the_gate_has_passed() -> None:
+    """Only `waiting` runs are listed, so an approved promote that is running is
+    never cancelled; and supersede runs only after the gate passed (no `if:`), before
+    promote. Mutations: list every run; promote without supersede -> red."""
+    run = re.sub(r"\s*\\\n\s*", " ", _runs("supersede"))
+    assert 'out=$(gh api --paginate "repos/$GH_REPO/actions/workflows/release.yml/runs?status=waiting&per_page=100"' in run
+    assert set(_JOBS["supersede"]["needs"]) == {"install", "evidence"} and "if" not in _JOBS["supersede"]
+    assert "supersede" in _JOBS["promote"]["needs"]
 
 
 # --- promoting, run with a stub gh ---------------------------------------

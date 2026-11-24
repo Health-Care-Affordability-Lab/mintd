@@ -8,13 +8,13 @@ nothing enforces (anyone with write access can edit a release):
 
 ## Promote
 
-1. Edit the release's notes. Fill in the live-tier line (run by hand, read-only, on the lab Linux box
-   when download or push paths changed) and the canary line (the lab workflows the maintainer names,
-   run by hand): `passed N of N checks on N products` or `not run: <reason>`. For the first two
-   releases, add `pre-release sweep on the lab box: N of N data products cloned and imported`. The
-   notes are public: counts only, no non-public product's name.
-2. Actions → the `release` run for `vX.Y.Z` → Review deployments → tick `release` → Approve and deploy.
-3. Reject the runs you won't promote (Review deployments → Reject); otherwise each waits 30 days.
+Only the newest release run waits for approval: each newer one cancels the older ones still waiting.
+
+1. Actions → `release` → the run waiting for approval. Every job before `promote` is green.
+2. Review deployments → tick `release` → Approve and deploy.
+
+A read-only run of the live tier on the lab Linux box before promoting is still worth doing, as
+practice, until a nightly clone of every product runs.
 
 ## Roll back
 
@@ -34,8 +34,9 @@ git tag -a vX.Y.Z.post1 -m vX.Y.Z.post1 && git push origin hotfix/vX.Y.Z vX.Y.Z.
 gh workflow run release.yml --ref vX.Y.Z.post1
 ```
 
-Promote it as above, and land the fix on `main` in a normal PR. A branch cut before releases were
-made as drafts must cherry-pick that change first.
+Promote it as above (a hotfix run is never cancelled by newer ones: approve or Reject it), and land
+the fix on `main` in a normal PR. A branch cut before releases were made as drafts must cherry-pick
+that change first.
 
 ## A failed run
 
@@ -52,7 +53,9 @@ Re-run failed jobs in the same run. A release stays a draft, seen by no one else
 
 `release.yml` reruns CI on the tag, builds the wheel once, and publishes a draft with the wheel, its
 SHA-256, `constraints.txt` and both install scripts once every file is up. It installs that release
-on Linux, macOS and Windows and runs the stories, writing the results into the notes. `promote`
+on Linux, macOS and Windows and runs the stories, writing the results and a link to the run into the
+notes. Then `supersede` cancels the older runs waiting for approval, or this one if a newer run is
+waiting; a run already promoting is never touched, and hotfix runs are left alone. `promote`
 refuses unless the environment has a required reviewer, the tag is still the built commit, both
 install scripts are there, and no newer release is latest. The install line checks the wheel's
 SHA-256 and pins dependencies by version (uv doesn't check a constraints file's hashes); reflink's
