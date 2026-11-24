@@ -713,11 +713,14 @@ def test_a_pointer_through_a_dotdot_dest_root_is_refused_without_force(tmp_path:
 
 def test_a_link_at_the_destination_is_named_as_a_link_not_listed(tmp_path: Path) -> None:
     """`rm -r <link>` removes the link only, so listing the folder it points to
-    under it reads as "delete these". Mutation: list it as a folder -> red."""
+    under it reads as "delete these". The cleanup leaves the link and what is
+    behind it alone, empty folders too.
+    Mutations: list it as a folder -> red; walk the link's folder in the
+    cleanup -> its empty folder is removed (on Windows, the link), red."""
     from mintd._dvc_ops import DvcOpError
 
     elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
+    (elsewhere / "empty").mkdir(parents=True)
     (elsewhere / "keep.csv").write_text("not this import's\n")
 
     client = InMemoryCatalogClient()
@@ -726,6 +729,7 @@ def test_a_link_at_the_destination_is_named_as_a_link_not_listed(tmp_path: Path)
                            DvcOpError("dvc import failed (exit 1): reset"))
     with pytest.raises(DvcOpError) as failed:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert (tmp_path / "data_demo_xw" / "outputs" / "cms_based").is_symlink() and (elsewhere / "empty").is_dir()
     assert "keep.csv" not in str(failed.value)
     assert str(failed.value).endswith(
         "; the link data_demo_xw/outputs/cms_based is now there; before re-running, if this is a link this import "
