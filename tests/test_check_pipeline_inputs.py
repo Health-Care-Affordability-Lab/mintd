@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import unicodedata
 from pathlib import Path
 
@@ -224,6 +225,7 @@ def test_a_project_below_its_repo_root_gets_project_relative_paths(tmp_path: Pat
     assert [m.split(": ")[1] for _, _, m in _found(proj)] == ["data/raw/county.csv; a fresh clone can't rerun the stage"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows can't hold a newline in a file name")
 def test_a_file_name_holding_a_newline_survives(tmp_path: Path) -> None:
     proj = _project(tmp_path)
     _put(proj, "data/raw/a\nb.csv")
@@ -434,6 +436,10 @@ def test_a_dep_spelled_in_another_case_is_named_unchecked(tmp_path: Path) -> Non
     proj = _project(tmp_path, SCAFFOLD.replace("../data/raw/", "../data/RAW/"))
     _put(proj, "data/raw/county.csv")
     found = _found(proj)
+    if sys.platform == "win32":
+        # realpath gives the folder's own spelling there, so git's list matches
+        assert [m.split(": ")[1] for _, _, m in found] == ["data/raw/county.csv; a fresh clone can't rerun the stage"]
+        return
     assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
     assert "git spells the folder or these names differently, e.g. in letter case" in found[0][2]
 
