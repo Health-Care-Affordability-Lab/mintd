@@ -3018,6 +3018,7 @@ def test_check_does_not_swallow_a_consumer_walk_failure_it_cannot_attribute(tmp_
     [
         (Path("data/final.dvc"), "data_products.outputs.0.path", str(Path("data/final.dvc"))),
         (None, "data_products.outputs.0.description", "data_products.outputs[0].description"),
+        (None, "data_products.outputs.12.path", "data_products.outputs[12].path"),
         (None, None, "<project>"),
     ],
 )
