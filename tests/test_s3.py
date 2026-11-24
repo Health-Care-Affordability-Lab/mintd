@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import shutil
 from pathlib import Path
 
 import pytest
@@ -234,17 +235,18 @@ def test_data_pull_stops_on_a_missing_named_profile_and_never_falls_back_to_dvc(
 
 
 @pytest.mark.parametrize(("keys", "message"), [
-    pytest.param("", "error: no AWS credentials were found", id="none"),
+    pytest.param("", "no AWS credentials were found", id="none"),
     pytest.param("[default]\naws_access_key_id = AKIABLANK\naws_secret_access_key =\n",
-                 "error: the AWS credentials from shared-credentials-file have an empty access key or secret", id="a-blank-secret"),
+                 "the AWS credentials from shared-credentials-file have an empty access key or secret", id="a-blank-secret"),
 ])
-def test_every_s3_command_stops_before_any_work_without_usable_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], keys: str, message: str,
+def test_every_s3_client_is_refused_without_usable_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keys: str, message: str,
 ) -> None:
-    """Every S3 client comes from create_client, which loads the credentials first: a pull
-    stops there, with config validate's message and hint, and never falls back to dvc.
-    Mutation: create_client back to profile_session alone -> red."""
-    from mintd import cli
+    """create_client is the one place every S3 command connects through: it loads the
+    credentials first, so push, clone, import, cache, share and check --remote stop there,
+    with config validate's message and hint (a pull then falls back to dvc: below).
+    Mutation: create_client back to profile_session alone -> no refusal, red."""
+    from mintd import _s3
 
     for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
                 "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
@@ -254,16 +256,47 @@ def test_every_s3_command_stops_before_any_work_without_usable_credentials(
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
     monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")  # off EC2 the chain would wait 2 s there
-    project = tmp_path / "project"
-    (project / ".dvc").mkdir(parents=True)
-    (project / ".dvc" / "config").write_text("[core]\n    remote = origin\n['remote \"origin\"']\n    url = s3://bucket/p\n")
-    (project / "data.csv.dvc").write_text("outs:\n- md5: " + "a" * 32 + "\n  size: 1\n  path: data.csv\n")
+    with pytest.raises(_s3.CredentialsUnavailable) as raised:
+        _s3.create_client({"endpointurl": "http://127.0.0.1:9"}, None)
+    assert str(raised.value) == message and "AKIABLANK" not in str(raised.value)
+    assert "add a [mintd] section" in (raised.value.hint or "")
+
+
+def test_a_pull_falls_back_to_dvc_when_only_dvc_has_the_keys(
+    s3_server, real_dvc, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keys only in .dvc/config.local: mintd finds none, dvc does. A pull falls back to dvc
+    and gets the file, as on main; other commands stop early. Mutation: let pull stop on
+    CredentialsUnavailable like any other MintdError -> red."""
+    from mintd import cli
+    from tests._harness.git import _git
+
+    project = tmp_path / "dvcproj"
+    project.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=project)
+    real_dvc(["init", "-q"], cwd=project, check=True)
+    real_dvc(["remote", "add", "-d", "storage", "s3://journey-bucket/p"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "storage", "endpointurl", s3_server.endpoint], cwd=project, check=True)
+    real_dvc(["remote", "modify", "storage", "version_aware", "true"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "--local", "storage", "access_key_id", "test"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "--local", "storage", "secret_access_key", "test"], cwd=project, check=True)
+    (project / "x.csv").write_text("x\n")
+    real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
+    real_dvc(["push", "-q"], cwd=project, check=True)
+    (project / "x.csv").unlink()
+    shutil.rmtree(project / ".dvc" / "cache")
+
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "credentials").write_text("")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
     rc = cli.main(["data", "pull", "--path", str(project)])
     err = " ".join(capsys.readouterr().err.split())
-    assert rc == 1, err
-    assert message in err and "hint: add a [mintd] section" in err and "AKIABLANK" not in err
-    assert "dvc pull" not in err
+    assert rc == 0, err
+    assert (project / "x.csv").read_text() == "x\n"
 
 
 def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

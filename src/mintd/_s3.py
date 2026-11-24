@@ -319,13 +319,20 @@ def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) ->
         ) from exc
 
 
+class CredentialsUnavailable(MintdError):
+    """No usable AWS credentials where mintd looks: none, a blank key or secret, or a load
+    that failed. dvc reads keys mintd doesn't (a remote's own in `.dvc/config` or
+    `config.local`, an anonymous remote), so a pull falls back to dvc on this one."""
+
+
 def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -> tuple[Any, str]:
     """Load the credentials of :func:`profile_session`'s session, as boto3 would on its first S3 call,
     and say where they came from (botocore's name: ``env``, ``shared-credentials-file``, ``sso``, ...).
     :func:`create_client` calls this for every S3 command, and ``mintd config validate`` directly.
-    A ``MintdError`` when there are no credentials, when the access key or secret is blank, or when
-    loading fails; that message names only the exception's type, so nothing from the failure (a key,
-    a token, a credential_process's output) is ever printed. Loading runs the whole chain, including
+    A ``CredentialsUnavailable`` when there are no credentials, when the access key or secret is blank,
+    or when loading fails; that message names only the exception's type, so nothing from the failure
+    (a key, a token, a credential_process's output) is ever printed. A named profile that doesn't exist,
+    and an AWS config file that doesn't parse, stop earlier, in :func:`profile_session`, as on main. Loading runs the whole chain, including
     any SSO, assume-role or credential_process fetch. With no credentials anywhere it ends at the
     instance metadata service: two requests, one try each, a one-second timeout each (botocore's
     defaults), so about two seconds off EC2, paid only on the way to "no AWS credentials"."""
@@ -335,16 +342,16 @@ def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -
     try:  # all of the load, field access included, so no error escapes this one message
         creds = session.get_credentials()
         if creds is None:
-            raise MintdError("no AWS credentials were found", hint=hint)
+            raise CredentialsUnavailable("no AWS credentials were found", hint=hint)
         method = creds.method
         frozen = creds.get_frozen_credentials()  # SSO, assume-role, credential_process: reading them proves them
         blank = not (frozen.access_key or "").strip() or not (frozen.secret_key or "").strip()
     except MintdError:
         raise
     except Exception as exc:  # by type only: the text can carry a key, a token or a process's output
-        raise MintdError(f"AWS credentials could not be loaded ({type(exc).__name__})", hint=hint) from None
+        raise CredentialsUnavailable(f"AWS credentials could not be loaded ({type(exc).__name__})", hint=hint) from None
     if blank:
-        raise MintdError(f"the AWS credentials from {method} have an empty access key or secret", hint=hint)
+        raise CredentialsUnavailable(f"the AWS credentials from {method} have an empty access key or secret", hint=hint)
     return session, method
 
 
