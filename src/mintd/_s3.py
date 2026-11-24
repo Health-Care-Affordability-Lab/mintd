@@ -319,12 +319,50 @@ def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) ->
         ) from exc
 
 
+def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -> tuple[Any, str]:
+    """:func:`profile_session`'s session with its credentials loaded, and where they
+    came from as botocore names it (``env``, ``shared-credentials-file``, ``sso``,
+    ``custom-process``, ...). A ``MintdError`` when the named profile is missing, when
+    there are no credentials, when loading them fails, or when the access key or
+    secret is blank. Loading runs the whole chain: the instance metadata service
+    (one try, a one-second timeout off EC2), and any SSO, assume-role or
+    credential_process fetch. No message carries a key, secret or token."""
+    from botocore.exceptions import CredentialRetrievalError  # only reached with boto3 installed
+
+    session = profile_session(remote_cfg, aws_profile_name)
+    hint = (f"add a [mintd] section to {shared_credentials_path()} (mintd config setup offers to), "
+            "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+    try:
+        creds = session.get_credentials()
+        if creds is None:
+            raise MintdError("no AWS credentials were found", hint=hint)
+        method = creds.method
+        # SSO, assume-role and credential_process credentials are deferred: reading them is what proves them.
+        frozen = creds.get_frozen_credentials()
+    except MintdError:
+        raise
+    except CredentialRetrievalError as exc:
+        # Never str(exc): for a credential_process it carries the process's stderr, which may hold anything.
+        provider = exc.kwargs.get("provider", "credential")
+        raise MintdError(
+            f"AWS credentials could not be loaded: the {provider} provider failed",
+            hint="run the profile's credential_process yourself to see its output" if provider == "custom-process" else hint,
+        ) from None
+    except Exception as exc:  # partial keys, an expired SSO token, a malformed file: their messages name no secret
+        raise MintdError(f"AWS credentials could not be loaded ({type(exc).__name__}): {exc}", hint=hint) from exc
+    if not (frozen.access_key or "").strip() or not (frozen.secret_key or "").strip():
+        raise MintdError(f"the AWS credentials from {method} have an empty access key or secret", hint=hint)
+    return session, method
+
+
 def create_client(
-    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None,
+    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None, session: Any = None,
 ) -> Any:
     """An S3 client for a DVC remote section (``endpointurl``/``endpoint``, ``region``,
-    ``profile``), on :func:`profile_session`'s session."""
-    session = profile_session(remote_cfg, aws_profile_name)
+    ``profile``), on ``session`` when given (one :func:`load_credentials` returned),
+    else on :func:`profile_session`'s."""
+    if session is None:
+        session = profile_session(remote_cfg, aws_profile_name)
 
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:

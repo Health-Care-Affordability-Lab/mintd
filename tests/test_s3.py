@@ -242,27 +242,28 @@ def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path
     cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "other")
     step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
-    assert (step.status, step.message) == ("ok", "'other' profile, named by AWS_PROFILE")
+    assert (step.status, step.message) == ("ok", "'other' profile, named by AWS_PROFILE; credentials from shared-credentials-file")
 
 
-@pytest.mark.parametrize(("bucket", "step_name"), [
-    pytest.param(None, "aws_profile", id="the-profile-step"),
-    pytest.param("b", "s3", id="the-s3-step-with-a-bucket"),
-])
+@pytest.mark.parametrize("bucket", [pytest.param(None, id="no-bucket"), pytest.param("b", id="with-a-bucket")])
 def test_config_validate_fails_a_missing_named_profile_with_its_hint(
-    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str | None, step_name: str,
+    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str | None,
 ) -> None:
-    """Every S3 command fails on it, so validate can't call it ok, and the hint says how to fix it.
-    Mutations that must redden this: drop the existence check in the profile step; drop the hint."""
+    """Every S3 command fails on it, so validate can't call it ok, and the hint says how to fix it;
+    the s3 step, which would fail the same way, is skipped rather than said twice.
+    Mutations that must redden this: drop the existence check in the profile step; drop the hint;
+    run the s3 step after the profile step failed."""
     from mintd.config_ops import validate_config
 
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "nope")
-    step = next(s for s in validate_config(cfg, bucket=bucket) if s.name == step_name)
+    steps = {s.name: s for s in validate_config(cfg, bucket=bucket)}
+    step = steps["aws_profile"]
     assert step.status == "fail"
     assert "AWS profile 'nope' (named by AWS_PROFILE)" in step.message
     assert "add a [nope] section there, or unset AWS_PROFILE" in step.message
+    assert (steps["s3"].status, steps["s3"].message) == ("skipped", "aws_profile failed")
 
 
 @pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE", "empty-in-config.local"])

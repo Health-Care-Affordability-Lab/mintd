@@ -208,9 +208,10 @@ class ValidationStep(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     name: Literal["schema", "aws_profile", "s3"]
-    status: Literal["ok", "fail", "skipped"]
+    status: Literal["ok", "warning", "fail", "skipped"]
     message: str
     latency_ms: int | None = None
+    bucket: str | None = None  # the bucket the s3 step checked; not in the JSON
 
 
 def validate_config(
@@ -222,12 +223,16 @@ def validate_config(
 
     The schema step is load-bearing: if the config doesn't parse, the
     later steps are marked ``skipped`` (we have no values to test
-    against). The AWS profile step reports the profile every S3 command
-    will use and where its name came from (``_s3.resolve_profile``); it fails
-    when that profile is named but doesn't exist, or the AWS configuration
-    can't be read, because every S3 command then fails too. The S3 step
-    is only meaningful when a ``bucket`` is supplied; otherwise it's
-    ``skipped``.
+    against). It warns, without failing, when ``registry_url`` is unset,
+    since only the commands that use the catalog need it. The AWS profile
+    step loads the credentials every S3 command will use
+    (``_s3.load_credentials``) and says which profile and where the
+    credentials came from; it fails when there are none, when the named
+    profile doesn't exist, or when loading them fails, because every S3
+    command then fails too. The S3 step asks for ``bucket``, else the
+    config's ``storage_bucket_prefix``, with that same session; with
+    neither, or when the profile step failed, it is ``skipped``.
+    ``head_bucket`` proves the bucket can be listed, not written.
     """
     path = _resolve_path(config_path)
     try:
@@ -240,82 +245,80 @@ def validate_config(
         ]
 
     populated = config.model_dump(exclude_none=True)
-    schema_step = ValidationStep(
-        name="schema",
-        status="ok",
-        message=f"config parses cleanly ({len(populated)} fields)",
-    )
+    parses = f"config parses cleanly ({len(populated)} fields)"
+    if (config.registry_url or "").strip():
+        schema_step = ValidationStep(name="schema", status="ok", message=parses)
+    else:
+        schema_step = ValidationStep(
+            name="schema",
+            status="warning",
+            message=f"{parses}, but registry_url isn't set: commands that use the lab's catalog stop until it is",
+        )
 
-    from ._s3 import available, profile_session, resolve_profile
+    from ._s3 import available, load_credentials, resolve_profile
     from .errors import MintdError
+
+    if not available():
+        return [
+            schema_step,
+            ValidationStep(name="aws_profile", status="skipped", message="boto3 not installed"),
+            ValidationStep(name="s3", status="skipped", message="boto3 not installed"),
+        ]
 
     profile = config.aws_profile_name
     named, source = resolve_profile({}, profile)
     problem: str | None = None
-    if available():
-        try:
-            # The same check every S3 command makes first: a named profile must exist, and the
-            # AWS files must parse (boto3 reads them even when nothing is named). No network.
-            profile_session({}, profile)
-        except MintdError as e:
-            problem = f"{e}; {e.hint}"
-        except Exception as e:  # a malformed AWS config file, say: this command diagnoses it, so report it
-            problem = f"could not read the AWS configuration: {type(e).__name__}: {e}"
+    try:
+        session, method = load_credentials({}, profile)
+    except MintdError as e:
+        problem = f"{e}; {e.hint}" if e.hint else str(e)
+    except Exception as e:  # a malformed AWS config file, say: this command diagnoses it, so report it
+        problem = f"could not read the AWS configuration: {type(e).__name__}: {e}"
     if problem is not None:
-        profile_step = ValidationStep(name="aws_profile", status="fail", message=problem)
-    elif source.startswith("named by AWS_"):
-        profile_step = ValidationStep(
-            name="aws_profile",
-            status="ok",
-            message=f"'{named}' profile, {source}",
-        )
+        return [
+            schema_step,
+            ValidationStep(name="aws_profile", status="fail", message=problem),
+            ValidationStep(name="s3", status="skipped", message="aws_profile failed"),
+        ]
+    if source.startswith("named by AWS_"):
+        which = f"'{named}' profile, {source}"
     elif named == "mintd":
-        profile_step = ValidationStep(
-            name="aws_profile",
-            status="ok",
-            message="'mintd' profile found in the AWS shared credentials file",
-        )
+        which = "'mintd' profile found in the AWS shared credentials file"
     else:
-        profile_step = ValidationStep(
-            name="aws_profile",
-            status="ok",
-            message="using default boto3 credential chain (no [mintd] section)",
-        )
+        which = "using default boto3 credential chain (no [mintd] section)"
+    profile_step = ValidationStep(name="aws_profile", status="ok", message=f"{which}; credentials from {method}")
 
+    if bucket is None:
+        bucket = (config.storage_bucket_prefix or "").strip() or None
     if bucket is None:
         s3_step = ValidationStep(
             name="s3",
             status="skipped",
-            message="no --bucket provided (auto-discovery is slice-22+)",
+            message="no bucket to check: storage_bucket_prefix isn't set and no --bucket was given",
         )
     else:
-        s3_step = _check_bucket(bucket, profile, config.storage_endpoint)
+        s3_step = _check_bucket(bucket, session, profile, config.storage_endpoint)
 
     return [schema_step, profile_step, s3_step]
 
 
 def _check_bucket(
-    bucket: str, profile: str | None, endpoint_url: str | None = None
+    bucket: str, session: object, profile: str | None, endpoint_url: str | None = None
 ) -> ValidationStep:
-    from ._s3 import ClientError, EndpointConnectionError, NoCredentialsError, available, create_client
+    from ._s3 import ClientError, EndpointConnectionError, NoCredentialsError, create_client
     from .errors import MintdError
 
-    if not available():
-        return ValidationStep(
-            name="s3",
-            status="skipped",
-            message="boto3 not installed",
-        )
     try:
-        client = create_client({"endpointurl": endpoint_url} if endpoint_url else {}, profile)
+        client = create_client({"endpointurl": endpoint_url} if endpoint_url else {}, profile, session=session)
     except MintdError as e:
         # ValidationStep has no hint field, and render_validation prints the message only.
-        return ValidationStep(name="s3", status="fail", message=f"{e}; {e.hint}")
+        return ValidationStep(name="s3", status="fail", message=f"{e}; {e.hint}", bucket=bucket)
     except Exception as e:
         return ValidationStep(
             name="s3",
             status="fail",
             message=f"failed to create S3 client: {type(e).__name__}: {e}",
+            bucket=bucket,
         )
     via = f" via {endpoint_url}" if endpoint_url else ""
     start = time.monotonic()
@@ -327,18 +330,21 @@ def _check_bucket(
             name="s3",
             status="fail",
             message=f"head_bucket on s3://{bucket}{via} — failed: {code}",
+            bucket=bucket,
         )
     except (NoCredentialsError, EndpointConnectionError) as e:
         return ValidationStep(
             name="s3",
             status="fail",
             message=f"head_bucket: {type(e).__name__}: {e}",
+            bucket=bucket,
         )
     except Exception as e:
         return ValidationStep(
             name="s3",
             status="fail",
             message=f"head_bucket: {type(e).__name__}: {e}",
+            bucket=bucket,
         )
     ms = int((time.monotonic() - start) * 1000)
     return ValidationStep(
@@ -346,6 +352,7 @@ def _check_bucket(
         status="ok",
         message=f"head_bucket on s3://{bucket}{via} — 200 OK (latency {ms}ms)",
         latency_ms=ms,
+        bucket=bucket,
     )
 
 
@@ -578,7 +585,7 @@ def interactive_setup(
 # ---------------------------------------------------------------------------
 
 
-_STATUS_GLYPH = {"ok": "✓", "fail": "✗", "skipped": "~"}
+_STATUS_GLYPH = {"ok": "✓", "warning": "⚠", "fail": "✗", "skipped": "~"}
 
 
 def render_validation(

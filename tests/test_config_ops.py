@@ -159,7 +159,7 @@ def test_validate_reports_aws_profile_when_present(
     # one shared_credentials_path chokepoint, whose home fallback is the
     # conftest ratchet's boom -- the env var is the injection point.
     creds = tmp_path / "credentials"
-    creds.write_text("[mintd]\naws_access_key_id = 123\n")
+    creds.write_text("[mintd]\naws_access_key_id = AKIAEXAMPLEKEY\naws_secret_access_key = example-secret\n")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(creds))
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
@@ -225,6 +225,14 @@ def test_validate_s3_client_uses_config_storage_endpoint(
         def head_bucket(self, Bucket: str) -> dict:
             return {}
 
+    class _Credentials:  # what boto3's Session.get_credentials gives: a source, and keys to read
+        method = "env"
+
+        def get_frozen_credentials(self) -> object:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(access_key="AKIAEXAMPLEKEY", secret_key="example-secret", token=None)
+
     class _Session:  # one constructor: no named profile still builds a Session (the default chain)
         def __init__(self, profile_name: str | None = None) -> None:
             captured["profile_name"] = profile_name
@@ -232,6 +240,9 @@ def test_validate_s3_client_uses_config_storage_endpoint(
         def client(self, service: str, **kwargs: object) -> _Client:
             captured.update(kwargs)
             return _Client()
+
+        def get_credentials(self) -> _Credentials:
+            return _Credentials()
 
     monkeypatch.setattr("boto3.Session", _Session)
     steps = validate_config(cfg, bucket="b")
@@ -260,6 +271,14 @@ def test_validate_s3_profile_branch_uses_config_storage_endpoint(
         def head_bucket(self, Bucket: str) -> dict:
             return {}
 
+    class _Credentials:  # what boto3's Session.get_credentials gives: a source, and keys to read
+        method = "env"
+
+        def get_frozen_credentials(self) -> object:
+            from types import SimpleNamespace
+
+            return SimpleNamespace(access_key="AKIAEXAMPLEKEY", secret_key="example-secret", token=None)
+
     class _Session:
         def __init__(self, profile_name: str | None = None) -> None:
             captured["profile_name"] = profile_name
@@ -267,6 +286,9 @@ def test_validate_s3_profile_branch_uses_config_storage_endpoint(
         def client(self, service: str, **kwargs: object) -> _Client:
             captured.update(kwargs)
             return _Client()
+
+        def get_credentials(self) -> _Credentials:
+            return _Credentials()
 
     monkeypatch.setattr("boto3.Session", _Session)
     steps = validate_config(cfg, bucket="b")
@@ -362,6 +384,8 @@ def test_validate_happy_path_no_bucket_skips_s3(
 ) -> None:
     """The common case: schema ok + aws_profile ok + s3 skipped (no bucket)."""
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "no-credentials"))
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLEKEY")  # credentials to find: without them the profile step fails
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret")
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     steps = validate_config(cfg)
