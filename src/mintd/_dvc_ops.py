@@ -32,7 +32,13 @@ class DvcOpError(MintdError):
     ``DvcImportRepoUnreachable``, ``DvcImportStorageMissing`` and enclave's
     ``EnclavePullError``). Where it is ``None``, a verb's ``_hint(...)``
     supplies one.
+
+    ``wrote_nothing`` is True on the errors dvc raises before it writes
+    anything at the destination, so a failed import knows that what it finds
+    there is not its own.
     """
+
+    wrote_nothing = False
 
 
 def pull_retry_hint(target: str | None) -> str:
@@ -133,9 +139,24 @@ class DvcNotInRepoError(DvcOpError):
     (which `enclave_pull` now does lazily), not checking the producer's pin.
     """
 
+    wrote_nothing = True
+
+
+class DvcRepoLocked(DvcOpError):
+    """Another dvc process holds the project's lock, so this one stopped
+    before doing anything."""
+
+    wrote_nothing = True
+
 
 class DvcImportPathNotFound(DvcOpError):
     """`dvc import` reports the requested path doesn't exist at the given rev."""
+
+    # The stderr match below is loose ("Unable to find", "Does not exist"), so
+    # a failure after dvc wrote could be taken for this one. That fails safe:
+    # the failed import says nothing about removing what it finds, and the
+    # re-run's refusal still names it.
+    wrote_nothing = True
 
     hint: str | None = (
         "if that path exists only on a branch or tag, name it: "
@@ -148,6 +169,8 @@ class DvcImportRepoUnreachable(DvcOpError):
     URL mintd passed: the catalog entry's, or for `--bump` the import's own
     pointer."""
 
+    wrote_nothing = True
+
     def __init__(self, message: str, repo_url: str) -> None:
         super().__init__(message, hint=unreachable_repo_hint(repo_url))
 
@@ -158,10 +181,16 @@ class DvcImportStorageMissing(DvcOpError):
     upstream product's (dvc's stderr is the same). No repair command: nothing
     has shown the producer's `check` or `push` would restore a deleted version."""
 
-    hint = (
+    _WHOSE = (
         "the producer's data, or data it imports from another product, is missing from storage; "
-        "that is the producer's to fix: send them this error, then re-run the import"
+        "that is the producer's to fix: send them this error"
     )
+    hint = f"{_WHOSE}, then re-run the import"
+
+    def clear_first(self, step: str) -> None:
+        """The hint with ``step`` (clearing what the failed import left) in
+        its place: after telling the producer, before re-running."""
+        self.hint = f"{self._WHOSE}, then {step}, then re-run the import"
 
 
 class DvcDestinationGitIgnored(DvcOpError):
@@ -583,6 +612,8 @@ class SubprocessDvcOps:
                     f"not inside a DVC repository while importing into '{dest}'"
                 )
             failed = f"dvc import failed (exit {r.returncode}): {stderr.strip()}"
+            if "Unable to acquire lock" in stderr:
+                raise DvcRepoLocked(failed)
             # Before the path checks: a git error such as "Unable to find
             # remote helper" would otherwise read as a missing path.
             if "Failed to clone repo" in stderr:
