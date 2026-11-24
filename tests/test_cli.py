@@ -602,6 +602,58 @@ def test_data_import_and_clone_share_the_selector_flags() -> None:
     assert imp.timeout == clone.timeout == 7.0
 
 
+# ---------------------------------------------------------------------------
+# the front door: `mintd import` / `mintd clone` are `data import` / `data clone`
+# ---------------------------------------------------------------------------
+
+_SAME_UNDER_BOTH_SPELLINGS = [
+    ("import", ["x"]),
+    ("import", ["x", "--path", "a", "--path", "b", "--rev", "v1", "--force", "--dest-root", "d",
+                "--jobs", "3", "--timeout", "7", "--dvc-arg=--verbose"]),
+    ("import", ["x", "--all"]),
+    ("import", ["x", "--bump", "--path", "a"]),
+    ("clone", ["x"]),
+    ("clone", ["x", "--dest", "d", "--rev", "v1", "--primary", "--jobs", "3", "--timeout", "7"]),
+    ("clone", ["x", "--path", "a", "--path", "b", "--dvc-arg=--verbose"]),
+]
+
+
+@pytest.mark.parametrize("verb, tail", _SAME_UNDER_BOTH_SPELLINGS)
+def test_top_level_import_and_clone_parse_as_their_data_twins(verb: str, tail: list[str]) -> None:
+    """Every flag, default and the handler are the same under both spellings,
+    so the top-level verbs can't drift from `data import` / `data clone`."""
+    parser = cli._build_parser()
+    top = vars(parser.parse_args([verb, *tail]))
+    data = vars(parser.parse_args(["data", verb, *tail]))
+    for spelling_only in ("command", "data_command", "_parser"):
+        top.pop(spelling_only, None)
+        data.pop(spelling_only, None)
+    assert top == data
+
+
+def test_mintd_import_writes_the_same_files_as_mintd_data_import(
+    tmp_path: Path, patched_clients,
+) -> None:
+    client, dvc_ops = patched_clients
+    _register_demo_map(client)
+    for spelling, root in ((["import"], tmp_path / "top"), (["data", "import"], tmp_path / "data")):
+        root.mkdir()
+        assert cli.main([*spelling, "demo-map", "--dest-root", str(root), "--path", "outputs/main.parquet"]) == 0
+    top, data = dvc_ops.calls
+    assert (top.path, top.rev, top.force, top.extra_args) == (data.path, data.rev, data.force, data.extra_args)
+    files = {
+        root: {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        for root in (tmp_path / "top", tmp_path / "data")
+    }
+    assert files[tmp_path / "top"] and files[tmp_path / "top"] == files[tmp_path / "data"]
+
+
+def test_mintd_help_lists_import_and_clone_with_what_each_brings() -> None:
+    text = " ".join(cli._build_parser().format_help().split())
+    assert "import Bring a product's primary output into this project, pinned (--path, --all for more)" in text
+    assert "clone Get a product's whole project in its own folder, with every tracked output pulled" in text
+
+
 def test_data_import_bump_rejects_more_than_one_path(
     tmp_path: Path,
     patched_clients,
@@ -1516,12 +1568,15 @@ def test_data_pull_reports_what_landed_not_what_was_requested(
 # Slice 24: mintd data clone -----------------------------------------------
 
 
+@pytest.mark.parametrize("spelling", [["data", "clone"], ["clone"]], ids=["data-clone", "clone"])
 def test_cli_data_clone_invokes_clone_and_pull_product(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     patched_clients,
+    spelling: list[str],
 ) -> None:
+    """`mintd clone` and `mintd data clone` hand the clone the same arguments."""
     from mintd.data import CloneResult
 
     received: dict[str, object] = {}
@@ -1536,7 +1591,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     )
 
     rc = cli.main([
-        "data", "clone", "demo-map",
+        *spelling, "demo-map",
         "--dest", "/tmp/x",
         "--rev", "v1.2",
         "--primary",

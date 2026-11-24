@@ -251,25 +251,26 @@ derives it from DVC. A data product needs at least one output and a primary:
 
 ## Example: consume someone else's dataset
 
-Two commands, for two jobs.
+Two commands, for two jobs. (`mintd data import` and `mintd data clone` are the
+same commands, with the same flags, and keep working.)
 
-**Bring a product's data into your project** with `mintd data import`. The data
+**Bring a product's data into your project** with `mintd import`. The data
 lands under `data/imports/<full_name>/`, beside a `.dvc` file that pins the
 producer commit it came from (`--rev`; default: the producer's HEAD).
 
 | Command | Brings |
 |---|---|
-| `mintd data import <name>` | the primary output |
-| `mintd data import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
-| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
+| `mintd import <name>` | the primary output |
+| `mintd import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
+| `mintd import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
 
 **Get a product's whole project, code and data, to read or work on** with
-`mintd data clone`. A data product's clone lands in `./data_<name>/`.
+`mintd clone`. A data product's clone lands in `./data_<name>/`.
 
 | Command | Brings |
 |---|---|
-| `mintd data clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
-| `mintd data clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
+| `mintd clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
+| `mintd clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
 
 ```bash
 # See what's published in the lab catalog:
@@ -280,22 +281,22 @@ mintd data list
 mintd data ls my-cleaned-survey
 
 # Clone the whole producer repo + pull every tracked output:
-mintd data clone my-cleaned-survey
+mintd clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
-mintd data clone my-cleaned-survey --rev v0.1.0 --primary
+mintd clone my-cleaned-survey --rev v0.1.0 --primary
 # or: only specific declared outputs (repeatable; an unknown path lists the
 # valid outputs):
-mintd data clone my-cleaned-survey --path data/final/survey.parquet
+mintd clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import one or more outputs
 # (--path is repeatable) and record the pin in this repo's .dvc files:
-mintd data import my-cleaned-survey --path data/final/survey.parquet
+mintd import my-cleaned-survey --path data/final/survey.parquet
 
 # Later, check whether anything you depend on has moved:
 mintd check --upgrades
 # And bump a pin when you're ready — same name, same --path selector
 # (--path picks the row once you have imported more than one output):
-mintd data import my-cleaned-survey --bump --path data/final/survey.parquet
+mintd import my-cleaned-survey --bump --path data/final/survey.parquet
 ```
 
 ## Example: enclave workflow
@@ -416,6 +417,8 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
+mintd import   NAME [--path P…] [--all] [--rev R] Bring a product's primary output into this project, pinned
+mintd clone    NAME [--primary | --path P…]       Get a product's whole project in its own folder
 mintd check    [path] [--upgrades] [--remote [--all] | --staged]
                                                   Validate metadata, output delivery + (optionally) pins;
                                                   --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
@@ -449,7 +452,7 @@ key, and arrays are always present, possibly empty, never null.
   each has `name`, `project_type`, `description` (str or null).
 - `data list --imported` — array of entries; each has `local_path`,
   `producer_repo`, `contract_pin`, `output_path`.
-- `data clone` — object: `dest` (absolute), `primary` (str or null),
+- `clone` / `data clone` — object: `dest` (absolute), `primary` (str or null),
   `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
   `remote_bucket` (str or null).
 

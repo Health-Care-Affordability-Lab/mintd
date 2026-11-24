@@ -428,6 +428,131 @@ def _add_cache_parser(subs: Any) -> None:
     p_cache_ls.set_defaults(_handler=_handle_cache_ls)
 
 
+#: What each form of `import` and `clone` brings, shown in their --help and
+#: checked word for word against README's "Command | Brings" tables.
+_IMPORT_BRINGS = [
+    ("<name>", ["the primary output"]),
+    ("<name> --path <path>", ["only that dataset or folder, declared", "as an output or not (repeatable)"]),
+    ("<name> --all", ["every output in the product's", "data_products.outputs; a tracked",
+                      "folder no output declares is left out"]),
+]
+_CLONE_BRINGS = [
+    ("<name>", ["a full git clone of the producer's repo,", "with every DVC-tracked output pulled"]),
+    ("<name> --primary", ["the same clone, with only the primary", "output pulled; --path pulls only declared",
+                          "outputs"]),
+]
+
+
+def _brings_epilog(prefix: str, verb: str, rows: list[tuple[str, list[str]]], width: int, other: str) -> str:
+    """The "what each form brings" table for `<prefix><verb> --help`, aligned at
+    ``width`` whichever spelling it is shown under."""
+    lines = ["what each form brings:"]
+    for form, brings in rows:
+        lines.append(f"  {prefix}{verb} {form}".ljust(width) + brings[0])
+        lines.extend(" " * width + more for more in brings[1:])
+    return "\n".join(lines) + "\n\n" + other.format(prefix=prefix)
+
+
+def _add_import_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`import` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_import = subs.add_parser(
+        "import",
+        help="Bring a product's primary output into this project, pinned (--path, --all for more)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_brings_epilog(
+            prefix, "import", _IMPORT_BRINGS, 42,
+            "To get the producer's whole project, code and data, use `{prefix}clone`.",
+        ),
+    )
+    p_import.add_argument(
+        "name",
+        help="Registered data product name (the catalog key) — the same "
+             "identifier for import and for --bump",
+    )
+    p_import.add_argument(
+        "--bump", action="store_true",
+        help="Re-pin an existing import to the producer's HEAD; selects the "
+             "import with the same name/--path pair a plain import uses",
+    )
+    p_import.add_argument(
+        "--path", dest="import_path", action="append", default=[], metavar="PATH",
+        help="Import only this path — any file or directory the producer tracks, "
+             "declared in data_products.outputs or not (repeatable). Default: the "
+             "primary output.",
+    )
+    p_import.add_argument(
+        "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
+    )
+    p_import.add_argument(
+        "--all", dest="all_outputs", action="store_true",
+        help="Import every tracked output of the product",
+    )
+    p_import.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing import of the same output",
+    )
+    p_import.add_argument(
+        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root",
+        help="Directory imports land under (default: data/imports)",
+    )
+    p_import.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_import.add_argument(
+        "--timeout", type=float, default=None,
+        help="Wall-clock cap in seconds for the import (default: unbounded)",
+    )
+    p_import.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
+    p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+    return p_import
+
+
+def _add_clone_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`clone` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_clone = subs.add_parser(
+        "clone",
+        help="Get a product's whole project in its own folder, with every tracked output pulled",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_brings_epilog(
+            prefix, "clone", _CLONE_BRINGS, 37,
+            "To bring only a product's data into your project, use `{prefix}import`.",
+        ),
+    )
+    p_clone.add_argument("name", help="Registered data product name")
+    p_clone.add_argument(
+        "--dest", type=Path,
+        help="Destination path (default: ./<type>_<name>)",
+    )
+    p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
+    clone_scope = p_clone.add_mutually_exclusive_group()
+    clone_scope.add_argument(
+        "--primary", dest="primary_only", action="store_true",
+        help="Pull only the primary data product (default: pull every tracked output)",
+    )
+    clone_scope.add_argument(
+        "--path", dest="paths", action="append", metavar="PATH",
+        help="Pull only this tracked output — a file or directory from the "
+             "product's data_products.outputs (repeatable). Default: pull every "
+             "tracked output.",
+    )
+    p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_clone.add_argument("--timeout", type=float, default=None,
+                         help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
+    p_clone.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
+    p_clone.set_defaults(_handler=_handle_data_clone)
+    return p_clone
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _MintdArgumentParser(
         prog="mintd",
@@ -477,6 +602,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(_handler=_handle_init)
 
+    # The front door: the same entries as `data import` and `data clone`.
+    _add_import_parser(subs, "mintd ")
+    _add_clone_parser(subs, "mintd ")
+
     p_check = subs.add_parser("check", help="Validate a mintd project")
     p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
     p_check.add_argument("--upgrades", action="store_true")
@@ -497,62 +626,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data = subs.add_parser("data", help="Data commands")
     p_data_sub = p_data.add_subparsers(dest="data_command")
-    p_import = p_data_sub.add_parser(
-        "import", help="Import a producer's data product",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data import <name>                the primary output
-  mintd data import <name> --path <path>  only that dataset or folder, declared
-                                          as an output or not (repeatable)
-  mintd data import <name> --all          every output in the product's
-                                          data_products.outputs; a tracked
-                                          folder no output declares is left out
-
-To get the producer's whole project, code and data, use `mintd data clone`.""",
-    )
-    p_import.add_argument(
-        "name",
-        help="Registered data product name (the catalog key) — the same "
-             "identifier for import and for --bump",
-    )
-    p_import.add_argument(
-        "--bump", action="store_true",
-        help="Re-pin an existing import to the producer's HEAD; selects the "
-             "import with the same name/--path pair a plain import uses",
-    )
-    p_import.add_argument(
-        "--path", dest="import_path", action="append", default=[], metavar="PATH",
-        help="Import only this path — any file or directory the producer tracks, "
-             "declared in data_products.outputs or not (repeatable). Default: the "
-             "primary output.",
-    )
-    p_import.add_argument(
-        "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
-    )
-    p_import.add_argument(
-        "--all", dest="all_outputs", action="store_true",
-        help="Import every tracked output of the product",
-    )
-    p_import.add_argument(
-        "--force", action="store_true",
-        help="Overwrite an existing import of the same output",
-    )
-    p_import.add_argument(
-        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root",
-        help="Directory imports land under (default: data/imports)",
-    )
-    p_import.add_argument("--jobs", type=int, help="DVC parallelism")
-    p_import.add_argument(
-        "--timeout", type=float, default=None,
-        help="Wall-clock cap in seconds for the import (default: unbounded)",
-    )
-    p_import.add_argument(
-        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
-        help="Append an arg to the underlying `dvc` invocation. "
-             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
-             "(repeatable; ignored on fast-sync code paths).",
-    )
-    p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+    _add_import_parser(p_data_sub, "mintd data ")
 
     p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
     p_pull.add_argument(
@@ -571,46 +645,7 @@ To get the producer's whole project, code and data, use `mintd data clone`.""",
     )
     p_pull.set_defaults(_handler=_handle_data_pull)
 
-    p_clone = p_data_sub.add_parser(
-        "clone",
-        help="Clone a published data product (registry lookup + git clone + dvc pull)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data clone <name>            a full git clone of the producer's repo,
-                                     with every DVC-tracked output pulled
-  mintd data clone <name> --primary  the same clone, with only the primary
-                                     output pulled; --path pulls only declared
-                                     outputs
-
-To bring only a product's data into your project, use `mintd data import`.""",
-    )
-    p_clone.add_argument("name", help="Registered data product name")
-    p_clone.add_argument(
-        "--dest", type=Path,
-        help="Destination path (default: ./<type>_<name>)",
-    )
-    p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
-    clone_scope = p_clone.add_mutually_exclusive_group()
-    clone_scope.add_argument(
-        "--primary", dest="primary_only", action="store_true",
-        help="Pull only the primary data product (default: pull every tracked output)",
-    )
-    clone_scope.add_argument(
-        "--path", dest="paths", action="append", metavar="PATH",
-        help="Pull only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable). Default: pull every "
-             "tracked output.",
-    )
-    p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
-    p_clone.add_argument("--timeout", type=float, default=None,
-                         help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
-    p_clone.add_argument(
-        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
-        help="Append an arg to the underlying `dvc` invocation. "
-             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
-             "(repeatable; ignored on fast-sync code paths).",
-    )
-    p_clone.set_defaults(_handler=_handle_data_clone)
+    _add_clone_parser(p_data_sub, "mintd data ")
 
     p_push = p_data_sub.add_parser(
         "push", help="Upload DVC data, check every pinned S3 version, then commit and push the .dvc / dvc.lock files it rewrote",
