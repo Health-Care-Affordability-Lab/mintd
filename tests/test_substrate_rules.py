@@ -578,7 +578,7 @@ TID251_NAMES_USED: dict[str, dict[str, int]] = {
     "src/mintd/_producer_git_ops.py": {"subprocess": 1},
     "src/mintd/_release_check.py": {"urllib.request": 1},
     "src/mintd/_registry_git_ops.py": {"subprocess": 1},
-    "src/mintd/_s3.py": {"boto3": 3, "botocore": 6},
+    "src/mintd/_s3.py": {"boto3": 3, "botocore": 4},
     "src/mintd/_subprocess.py": {"subprocess": 1},
     "src/mintd/data.py": {"shutil.rmtree": 2},
     "src/mintd/enclave.py": {"shutil.copytree": 1, "shutil.move": 2, "shutil.rmtree": 5},

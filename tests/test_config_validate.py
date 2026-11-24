@@ -94,85 +94,20 @@ def test_an_sso_profile_with_no_token_fails_when_its_credentials_are_read(aws: P
         _s3.load_credentials({"profile": "lab"}, None)
 
 
-def test_a_failing_credential_process_is_named_without_its_output(aws: Path, tmp_path: Path) -> None:
-    """A credential_process's stderr may hold anything; botocore puts it in its error.
-    Mutation: put str(exc) back into the message -> STDERR-SECRET shows, red."""
-    code = "import sys; sys.stderr.write('STDERR-SECRET'); sys.exit(1)"  # Python, so it runs on Windows too
-    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{sys.executable}" -c "{code}"\n')
-    with pytest.raises(MintdError) as raised:
-        _s3.load_credentials({"profile": "lab"}, None)
-    text = f"{raised.value} {raised.value.hint}"
-    assert "custom-process provider failed" in text and "credential_process yourself" in text
-    assert "STDERR-SECRET" not in text
-
-
-def test_a_credential_process_that_cannot_start_is_named_and_points_at_the_process(aws: Path, tmp_path: Path) -> None:
-    """botocore lets the OSError through; on Windows a script with a shebang raises one too.
-    Mutation: drop the OSError branch -> the hint about a [mintd] section, red."""
-    missing = tmp_path / "no-such-program"
-    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{missing}" --token ARG-SECRET\n')
-    with pytest.raises(MintdError) as raised:
-        _s3.load_credentials({"profile": "lab"}, None)
-    assert "the profile's credential_process couldn't start" in str(raised.value)
-    assert raised.value.hint == _PROCESS_HINT
-    assert "ARG-SECRET" not in f"{raised.value} {raised.value.hint}"
-
-
-_PROCESS_HINT = "run the profile's credential_process yourself to see what it says"
-
-
-def _process_prints(aws: Path, code: str) -> None:
-    """A credential_process that runs ``code`` in Python, so it runs on Windows too."""
-    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{sys.executable}" -c "{code}"\n')
-
-
-def _load_failure(remote: dict[str, str] | None = None) -> MintdError:
-    with pytest.raises(MintdError) as raised:
-        _s3.load_credentials({"profile": "lab"} if remote is None else remote, None)
-    return raised.value
-
-
-def test_a_credential_process_whose_expiration_does_not_parse_never_prints_its_output(aws: Path) -> None:
-    """dateutil's error quotes the value, which came from the process's stdout.
-    Mutation: print every load error's text again -> SEKRET_STDOUT shows, red."""
-    _process_prints(aws, "import json; print(json.dumps(dict(Version=1, AccessKeyId='AKIAEXAMPLE', "
-                         "SecretAccessKey='x', Expiration='SEKRET_STDOUT')))")
-    error = _load_failure()
-    assert "SEKRET_STDOUT" not in f"{error} {error.hint}"
-    assert error.hint == _PROCESS_HINT
-
-
-@pytest.mark.parametrize("code", [
-    pytest.param("print('not json SEKRET_STDOUT')", id="bad-json"),
-    pytest.param("import json; print(json.dumps(dict(Version=1, AccessKeyId='AKIAEXAMPLE', SecretAccessKey='x', "
-                 "Expiration='2000-01-01T00:00:00Z')))", id="expired"),
+@pytest.mark.parametrize(("code", "kind"), [
+    pytest.param("import sys; sys.stderr.write('SEKRET_STDERR'); sys.exit(1)", "CredentialRetrievalError", id="fails"),
+    # A number where the key should be: the blank check's field access fails, inside the one except.
+    pytest.param("import json; print(json.dumps(dict(Version=1, AccessKeyId=12345, SecretAccessKey='SEKRET_STDOUT')))",
+                 "AttributeError", id="a-number-for-the-key"),
 ])
-def test_a_credential_process_that_gives_unusable_keys_points_at_the_process(aws: Path, code: str) -> None:
-    """Mutation: the [mintd]-section hint for a profile with a credential_process -> red."""
-    _process_prints(aws, code)
-    error = _load_failure()
-    assert error.hint == _PROCESS_HINT
-    assert "SEKRET_STDOUT" not in f"{error} {error.hint}"
-
-
-def test_a_missing_token_file_is_named_without_blaming_a_credential_process(
-    aws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No profile runs a program here. Mutation: say "credential_process" for any OSError -> red."""
-    missing = tmp_path / "no-token"
-    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", str(missing))
-    monkeypatch.setenv("AWS_ROLE_ARN", "arn:aws:iam::123456789012:role/example")
-    error = _load_failure({})
-    text = f"{error} {error.hint}"
-    assert str(missing) in str(error) and "credential_process" not in text
-    assert "AWS_*_FILE" in error.hint
-
-
-def test_an_aws_config_that_does_not_parse_is_a_mintd_error(aws: Path) -> None:
-    """Mutation: no ConfigParseError mapping in profile_session -> botocore's own error, red."""
-    (aws / "config").write_text("[profile lab\nregion = us-east-1\n")
-    error = _load_failure()
-    assert "could not read the AWS configuration" in str(error) and str(aws / "config") in str(error)
+def test_a_failed_load_names_only_the_error_type(aws: Path, code: str, kind: str) -> None:
+    """Nothing from the failure is printed: a credential_process's output can hold anything.
+    Mutations: print the error's text; let the field access escape the except -> red."""
+    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{sys.executable}" -c "{code}"\n')
+    with pytest.raises(MintdError) as raised:
+        _s3.load_credentials({"profile": "lab"}, None)
+    assert str(raised.value) == f"AWS credentials could not be loaded ({kind})"
+    assert "AWS_ACCESS_KEY_ID" in (raised.value.hint or "")
 
 
 # --- validate ----------------------------------------------------------------------
