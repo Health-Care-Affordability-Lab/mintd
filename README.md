@@ -157,6 +157,10 @@ cd data_my-cleaned-survey
 # rebuilds it from data/raw/ and deletes anything placed there by hand, so
 # keep source files in data/raw/:
 dvc repro
+# Nothing uploads data/raw/ on its own: git ignores it, and `dvc repro`
+# records it as an input without caching it, so a teammate's clone can't
+# rerun the pipeline. `mintd data add data/raw` tracks it if it should be
+# shared; `mintd check` warns while a pipeline input is tracked by neither.
 
 # Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status

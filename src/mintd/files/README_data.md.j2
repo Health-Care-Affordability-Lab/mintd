@@ -102,7 +102,10 @@ and skips any that are already up to date:
 
 ```bash
 # Place raw source data under data/raw/ (or enable the optional fetch stage in
-# dvc.yaml), then reproduce:
+# dvc.yaml), then reproduce. Nothing uploads data/raw/ on its own: git ignores
+# it, and dvc repro records it as an input without caching it, so a teammate's
+# clone can't rerun the pipeline. `mintd data add data/raw` tracks it if it
+# should be shared.
 dvc repro
 ```
 
