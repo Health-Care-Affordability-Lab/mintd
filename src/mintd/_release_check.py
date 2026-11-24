@@ -15,8 +15,9 @@ this install is behind it, or newer than it.
   as GitHub Actions and most CI services set it): no request, no notice.
 - At most one lookup a day per install: the answer, or the failure, is kept
   in a file in the cache folder with the version it was looked up for, so an
-  upgrade asks again at once. A cache folder that can't be written means no
-  lookup at all, since it would otherwise happen on every run.
+  upgrade asks again at once. A cache folder that can't be written or
+  reached means no lookup at all, since it would otherwise happen on every
+  run. Any filesystem error means "unknown", never a crash of --version.
 
 This is mintd's only HTTP client of its own; ruff's banned-api rule lets this
 module, and no other, import urllib.request.
@@ -78,6 +79,13 @@ def newest_release(cache_dir: Path, installed: str, url: str = LATEST_URL, timeo
     """The newest promoted release, e.g. "0.12.0", or None when unknown or turned off."""
     if os.environ.get("MINTD_NO_UPDATE_CHECK") == "1" or os.environ.get("CI"):
         return None
+    try:
+        return _lookup(cache_dir, installed, url, timeout)
+    except OSError:  # e.g. a parent of the cache folder that can't be entered: unknown, never a crash
+        return None
+
+
+def _lookup(cache_dir: Path, installed: str, url: str, timeout: float) -> str | None:
     cache = cache_dir / "newest-release"  # "<newest>\n<the install it was looked up for>\n"
     with contextlib.suppress(OSError, ValueError):  # ValueError: bytes that aren't UTF-8
         if 0 <= time.time() - cache.stat().st_mtime < _DAY:  # a future date is stale too

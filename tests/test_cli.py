@@ -1161,6 +1161,31 @@ def test_version_and_bare_mintd_leave_no_log_handler(release_cache, argv: list[s
     assert logging.getLogger("mintd").handlers == before
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod can't stop Windows entering a folder")
+def test_version_still_exits_0_when_the_cache_folder_cannot_be_reached(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent of the cache folder that can't be entered (a share the user
+    can't open): no notice, and never a crash, since install.sh runs --version
+    to check the install. Mutation: drop newest_release's OSError guard -> red."""
+    if os.geteuid() == 0:
+        pytest.skip("root enters a chmod 000 folder")
+    locked, cfg = tmp_path / "locked", tmp_path / "cfg"
+    locked.mkdir()
+    cfg.mkdir()
+    (cfg / "config.yaml").write_text(f"cache_dir: {locked / 'cache'}\n")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)  # the lookup on, as for a user
+    monkeypatch.delenv("CI", raising=False)
+    locked.chmod(0)
+    try:
+        assert cli.main(["--version"]) == 0
+    finally:
+        locked.chmod(0o700)
+    out = capsys.readouterr()
+    assert out.out == f"mintd {cli.__version__}\n" and "newest release" not in out.err
+
+
 def test_no_notice_on_the_newest_release(release_cache, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
     # A checkout's own version is a dev build, never a release: pretend to be one.
     monkeypatch.setattr(cli, "__version__", "1.2.3")
