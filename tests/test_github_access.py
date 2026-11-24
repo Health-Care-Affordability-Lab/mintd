@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from mintd import _producer_git_ops, _registry_git_ops, cli
+from mintd import _producer_git_ops, cli
+from tests._harness.access import clear_access_caches
 from mintd._config import Timeouts
 from mintd._dvc_ops import DvcImportRepoUnreachable, DvcPullRefused, SubprocessDvcOps
 from mintd._registry_git_ops import (
@@ -34,13 +35,8 @@ from mintd.producer import FetchError
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the stub gh is a POSIX script")
 
-_GH_STATE = _registry_git_ops._gh_state
-
-
-def _clear_caches() -> None:
-    """What mintd reads once per process: gh's login, and each producer's check."""
-    _GH_STATE.cache_clear()
-    _registry_git_ops.producer_refusal.cache_clear()
+# Tests here change gh's state partway through, so they read it afresh after each change.
+_clear_caches = clear_access_caches
 _REPO = "https://github.com/example-lab/demo"
 _HELPER = "!gh auth git-credential"
 
@@ -107,9 +103,7 @@ def github(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[GitHub]:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
         monkeypatch.setenv(var, f"http://127.0.0.1:{closed}")
-    _clear_caches()
-    yield gh
-    _clear_caches()
+    yield gh  # conftest cleared what mintd caches before this test began
 
 
 def _refused(url: str) -> str:

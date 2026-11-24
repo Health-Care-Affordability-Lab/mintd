@@ -853,22 +853,28 @@ def test_push_with_tags_sends_the_commit_and_its_tag_or_neither(
     ).strip()
 
 
-def test_gh_state_read_in_a_test_stays_cached_for_the_process() -> None:
-    """The first of a pair: mintd reads gh's login and a producer's check once per process."""
+@pytest.fixture(scope="module")
+def _gh_state_cached_before_the_test() -> None:
+    """What an earlier test on this worker could leave: gh read as missing, and a
+    producer's refusal. Module-scoped, so pytest sets it up before conftest's
+    per-test fixtures, whatever ran before."""
     from mintd import _registry_git_ops
 
-    _registry_git_ops._gh_state()
+    path = os.environ.get("PATH", "")
+    os.environ["PATH"] = ""  # no gh
+    try:
+        assert _registry_git_ops._gh_state()[0] == "missing"
+    finally:
+        os.environ["PATH"] = path
     _registry_git_ops.producer_refusal("https://github.com/example-org/demo")
-    assert _registry_git_ops._gh_state.cache_info().currsize == 1
-    assert _registry_git_ops.producer_refusal.cache_info().currsize == 1
 
 
-def test_each_test_starts_with_no_gh_state_cached() -> None:
-    """The second of the pair: conftest clears both before each test, so a test
-    that leaves gh unready can't fail every later test on its worker.
-    Mutation: drop either cache_clear in conftest -> red after the test above."""
+def test_each_test_reads_gh_afresh(_gh_state_cached_before_the_test: None) -> None:
+    """conftest clears what mintd caches once per process before every test, so one
+    bad gh read fails that test only, not every later test on its worker.
+    Mutation: drop either cache_clear from clear_access_caches -> red."""
     from mintd import _registry_git_ops
 
     assert _registry_git_ops._gh_state.cache_info().currsize == 0
     assert _registry_git_ops.producer_refusal.cache_info().currsize == 0
-
+    assert _registry_git_ops._gh_state()[0] == "ready"

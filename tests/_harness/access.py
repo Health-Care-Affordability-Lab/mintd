@@ -22,3 +22,14 @@ def is_access_check(argv: list[str]) -> bool:
         rest = rest[2:]
     return (rest[:2] == ["ls-remote", "--get-url"] or rest[:1] == ["config"]
             or rest[:2] == ["remote", "get-url"] or rest == ["remote"])
+
+
+def clear_access_caches() -> None:
+    """What mintd reads once per process: gh's login, and each producer's check.
+    conftest clears both before every test; a test that changes gh's state
+    partway through clears them again."""
+    from mintd import _registry_git_ops
+
+    _registry_git_ops._gh_state.cache_clear()
+    _registry_git_ops.producer_refusal.cache_clear()
+
