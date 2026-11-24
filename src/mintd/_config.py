@@ -74,7 +74,9 @@ class Config(BaseModel):
             return cls.model_validate(data)
         except ValidationError as e:
             raise ConfigError(
-                f"invalid config in {path} (note the timeouts: block added in v2): {_plain_errors(e)}"
+                f"invalid config in {path} (note the timeouts: block added in v2): {_plain_errors(e)}",
+                hint="fix it with `mintd config setup` (return clears a value that isn't valid), "
+                     "or clear one field with `mintd config setup --set <field>=`",
             ) from e
 
     def resolved_cache_dir(self) -> Path:

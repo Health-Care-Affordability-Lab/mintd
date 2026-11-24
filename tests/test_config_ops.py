@@ -915,3 +915,4 @@ def test_a_bad_file_reads_the_same_for_every_command(tmp_path: Path) -> None:
         Config.load(p)
     assert "timeouts.fast: Input should be a valid number" in str(ei.value)
     assert "errors.pydantic.dev" not in str(ei.value)
+    assert "mintd config setup" in ei.value.hint and "--set <field>=" in ei.value.hint  # what fixes it
