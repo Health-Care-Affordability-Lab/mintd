@@ -632,27 +632,6 @@ def test_mintd_import_writes_the_same_files_as_mintd_data_import(
     assert files[tmp_path / "top"] and files[tmp_path / "top"] == files[tmp_path / "data"]
 
 
-def test_mintd_clone_clones_as_mintd_data_clone_does(
-    monkeypatch: pytest.MonkeyPatch, patched_clients,
-) -> None:
-    from mintd.data import CloneResult
-
-    received: list[dict[str, object]] = []
-
-    def _stub(client, dvc_ops, registry_git_ops, fast_sync_ops, **kwargs):
-        received.append(kwargs)
-        return CloneResult(dest=Path("/tmp/sentinel"), rev="abc1234def", remote_bucket="my-bucket")
-
-    monkeypatch.setattr("mintd.cli.clone_and_pull_product", _stub)
-    monkeypatch.setattr("mintd.cli._resolve_git_ops", lambda cfg, **_: object())
-    tail = ["demo-map", "--dest", "/tmp/x", "--rev", "v1.2", "--primary", "--jobs", "4"]
-    assert cli.main(["clone", *tail]) == 0
-    assert cli.main(["data", "clone", *tail]) == 0
-    for kwargs in received:
-        kwargs.pop("reporter")  # a new one each run
-    assert received[0] == received[1] and received[0]["name"] == "demo-map"
-
-
 def test_mintd_help_lists_import_and_clone_with_what_each_brings() -> None:
     text = " ".join(cli._build_parser().format_help().split())
     assert "import Bring a product's primary output into this project, pinned (--path, --all for more)" in text
@@ -1572,12 +1551,15 @@ def test_data_pull_reports_what_landed_not_what_was_requested(
 # Slice 24: mintd data clone -----------------------------------------------
 
 
+@pytest.mark.parametrize("spelling", [["data", "clone"], ["clone"]], ids=["data-clone", "clone"])
 def test_cli_data_clone_invokes_clone_and_pull_product(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     patched_clients,
+    spelling: list[str],
 ) -> None:
+    """`mintd clone` and `mintd data clone` hand the clone the same arguments."""
     from mintd.data import CloneResult
 
     received: dict[str, object] = {}
@@ -1592,7 +1574,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     )
 
     rc = cli.main([
-        "data", "clone", "demo-map",
+        *spelling, "demo-map",
         "--dest", "/tmp/x",
         "--rev", "v1.2",
         "--primary",

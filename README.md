@@ -417,7 +417,7 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
-mintd import   NAME [--path P… | --all] [--rev R] Bring a product's primary output into this project, pinned
+mintd import   NAME [--path P…] [--all] [--rev R] Bring a product's primary output into this project, pinned
 mintd clone    NAME [--primary | --path P…]       Get a product's whole project in its own folder
 mintd check    [path] [--upgrades] [--remote [--all] | --staged]
                                                   Validate metadata, output delivery + (optionally) pins;
@@ -452,7 +452,7 @@ key, and arrays are always present, possibly empty, never null.
   each has `name`, `project_type`, `description` (str or null).
 - `data list --imported` — array of entries; each has `local_path`,
   `producer_repo`, `contract_pin`, `output_path`.
-- `data clone` — object: `dest` (absolute), `primary` (str or null),
+- `clone` / `data clone` — object: `dest` (absolute), `primary` (str or null),
   `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
   `remote_bucket` (str or null).
 
