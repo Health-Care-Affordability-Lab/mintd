@@ -306,13 +306,13 @@ def test_clone_and_pull_product_strips_legacy_prefix_in_dest(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
-    _register(client, name="data_aha")
+    _register(client, name="data_demo-survey")
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    dest = clone_and_pull_product(client, dvc, git, _fast(), name="data_aha")
+    dest = clone_and_pull_product(client, dvc, git, _fast(), name="data_demo-survey")
 
-    assert dest.dest == (tmp_path / "data_aha").resolve()
+    assert dest.dest == (tmp_path / "data_demo-survey").resolve()
 
 
 def test_clone_and_pull_product_code_type_uses_bare_name(
