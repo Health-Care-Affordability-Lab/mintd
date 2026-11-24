@@ -68,12 +68,12 @@ def _git_clone_then_pull(mintd, product, tmp_path: Path, *, json: bool = True):
 @pytest.mark.parametrize("fetch", [_clone, _git_clone_then_pull], ids=["clone", "pull"])
 def test_a_storage_hiccup_on_one_file_is_fetched_again(product, mintd, s3_server, tmp_path, fetch) -> None:
     hiccup = f"/{BUCKET}/{product.prefix}/data/final/a.csv"
-    s3_server.hiccup_gets[hiccup] = 1
+    s3_server.fail_gets[hiccup] = (503, 1)
 
     dest, run = fetch(mintd, product, tmp_path)
 
     assert run.returncode == 0, run.stderr
-    assert s3_server.hiccups == [hiccup], "the hiccup was served"
+    assert s3_server.failed_gets == [hiccup], "the hiccup was served"
     assert _landed(dest) == {k: md5(b) for k, b in product.published().items()}
     assert s3_state(s3_server, product.prefix).gets == collections.Counter(list(product.published())), "each file once"
 
