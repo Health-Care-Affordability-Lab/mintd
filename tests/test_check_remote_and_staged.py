@@ -81,6 +81,26 @@ def _lock(stage: str, md5: str, vid: str | None, *, path: str = "data/x.csv") ->
             f"      md5: {md5}\n      size: 2\n{cloud}")
 
 
+#: `.dvc/config` shapes dvc refuses to push with: one remote and no default
+#: (`data push --remote` can still have pinned files there), or a `version_aware`
+#: that dvc reads as neither true nor false.
+CONFIGS_DVC_REFUSES = ["no-default-remote", "a-note-after-true", "yes"]
+
+
+def _config_dvc_refuses(proj: Path, how: str) -> tuple[str, str]:
+    """Rewrite `proj`'s `.dvc/config` as `how` says; the (message, hint) that names it."""
+    cfg = proj / ".dvc" / "config"
+    text = cfg.read_text(encoding="utf-8")
+    if how == "no-default-remote":
+        cfg.write_text(text.replace(f"[core]\n    remote = {REMOTE}\n", ""), encoding="utf-8")
+        return ("no default DVC remote in .dvc/config",
+                f"set a default: dvc remote default {REMOTE}, and commit .dvc/config")
+    value = {"a-note-after-true": "true ; note", "yes": "yes"}[how]
+    cfg.write_text(text.replace("version_aware = true", f"version_aware = {value}"), encoding="utf-8")
+    return (f"the DVC remote {REMOTE} sets version_aware to {value!r}, which dvc reads as neither true nor false, "
+            "so dvc refuses the config", "set version_aware to true or false in .dvc/config or .dvc/config.local")
+
+
 def _remote(findings) -> list[tuple[str, str, str]]:
     return [(f.severity, f.kind, f.message) for f in findings if (f.kind or "").startswith("remote_")]
 
@@ -287,7 +307,7 @@ def test_remote_names_an_undeclared_out_with_no_ids_only_with_all(pushed, shape:
     tree has it -> files-without-ids passes, red; the same for a bare tree
     -> bare-tree red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     proj, _, _, files = pushed
     if shape == "files-without-ids":
@@ -411,6 +431,62 @@ def test_remote_on_an_md5_layout_remote_checks_nothing(tmp_path: Path) -> None:
     assert _remote(check_project(proj, remote=True)) == [
         ("info", "remote_not_checked",
          "the default remote isn't a version-aware S3 remote, so nothing is pinned by version to check")]
+
+
+@pytest.mark.parametrize("how", CONFIGS_DVC_REFUSES)
+def test_remote_refuses_a_remote_it_cant_read_as_dvc_does(pushed, how: str) -> None:
+    """A pin that isn't at its key, behind a config dvc refuses: an error that
+    names the config, not "nothing is pinned by version".
+
+    Mutations: read a missing default as "no remote" -> the info, red; read
+    `true ; note` or `yes` as not version-aware -> the info, red.
+    """
+    proj, _, _, files = pushed
+    _folder_pointer(proj, "final", _broken(files))
+    _commit(proj)
+    message, hint = _config_dvc_refuses(proj, how)
+    (finding,) = [f for f in check_project(proj, remote=True) if (f.kind or "").startswith("remote_")]
+    assert (finding.severity, finding.kind, finding.message, finding.hint) == ("error", "remote_unreadable",
+                                                                               message, hint)
+
+
+def test_remote_with_no_remote_at_all_says_so(tmp_path: Path) -> None:
+    proj = _repo(tmp_path)
+    (proj / ".dvc" / "config").write_text("")
+    assert _remote(check_project(proj, remote=True)) == [
+        ("info", "remote_not_checked", "the project has no DVC remote, so nothing is pinned by version to check")]
+
+
+@pytest.mark.parametrize("how", ["a-note-after-true", "yes"])
+def test_push_refuses_a_version_aware_dvc_reads_as_neither_true_nor_false(tmp_path: Path, how: str) -> None:
+    """The same reading as check's: push stops before any S3 call, where
+    reading it as not version-aware would skip verifying the pins.
+
+    Mutation: drop the check from `_version_aware` -> prepare returns None, red.
+    """
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    message, hint = _config_dvc_refuses(proj, how)
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (message, hint)
+
+
+def test_push_to_a_named_remote_with_no_default_names_the_missing_default(tmp_path: Path) -> None:
+    """`--remote storage` on a version-aware remote with no `core.remote`: pins are read back
+    through the default, so push stops with dvc's missing-default message and hint, not
+    "isn't the default remote None" with a hint that fails next.
+
+    Mutation: drop prepare's no-default branch -> the None message, red.
+    """
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    message, hint = _config_dvc_refuses(proj, "no-default-remote")
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg="storage", selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (message, hint)
 
 
 def test_remote_refuses_a_remote_with_its_own_keys(pushed) -> None:
@@ -573,7 +649,7 @@ def test_remote_names_a_head_that_lost_its_ids_while_the_working_tree_has_them(p
     Mutations: skip entries with no ID at HEAD -> files-without-ids red;
     skip HEAD's unexpandable folder outs -> bare-tree red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     proj, _, _, files = pushed
     if head_shape == "files-without-ids":
@@ -601,7 +677,7 @@ def test_remote_reports_head_s_missing_ids_only_where_the_working_tree_has_them(
     unpinned too -> gone-from-the-working-tree red; report every bare tree
     at HEAD -> bare-tree red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     proj, _, _, files = pushed
     if shape == "bare-tree":
@@ -726,6 +802,23 @@ def test_staged_refuses_a_commit_that_drops_ids_from_unchanged_files(tmp_path: P
     assert finding.hint == "run mintd data push, which puts them back, then commit"
 
 
+@pytest.mark.parametrize("how", CONFIGS_DVC_REFUSES)
+def test_staged_refuses_a_commit_it_cant_check_against_its_remote(tmp_path: Path, how: str) -> None:
+    """A commit that drops IDs, behind a config dvc refuses to push with: the
+    pins may be real, so the commit isn't passed unchecked.
+
+    Mutations: return no finding when there's a remote but no default -> [],
+    red; read `true ; note` or `yes` as not version-aware -> [], red.
+    """
+    proj, files = _pinned_repo(tmp_path)
+    message, hint = _config_dvc_refuses(proj, how)
+    _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+    _git(proj, "add", "data/final.dvc")
+    (finding,) = check_staged(proj)
+    assert (finding.severity, finding.kind, finding.message, finding.hint) == (
+        "error", "staged_unchecked", f"can't check the staged commit: {message}", hint)
+
+
 @pytest.mark.parametrize("change", ["new-data", "ids-added", "file-removed", "new-pointer", "pointer-deleted",
                                     "readme", "another-project", "a-dvc-yaml-never-added"])
 def test_staged_lets_through_a_commit_that_drops_no_id(tmp_path: Path, change: str) -> None:
@@ -806,7 +899,7 @@ def test_staged_reads_dvc_commit_f_s_bare_tree_when_the_tree_isnt_cached(tmp_pat
 
     Mutation: skip the bare-tree comparison -> same-files passes, red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     proj, files = _pinned_repo(tmp_path)
     now = files if same_tree else {**files, "a.csv": (_md5(b"A\n"), None)}
@@ -986,7 +1079,7 @@ def test_staged_lets_through_a_key_another_staged_pointer_still_pins(tmp_path: P
     HEAD's files once per pointer -> the tree doesn't match and the last
     case passes, red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     proj = _repo(tmp_path)
     md5 = _md5(b"x\n")
@@ -1095,7 +1188,7 @@ def test_staged_screens_the_head_copies_its_comparison_reads(tmp_path: Path, hea
     tree -> both dvc.yaml cases refused, red; write it whenever the commit
     changes dvc.lock -> the first-lock case refused, red.
     """
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     def conflicted(text: str) -> str:
         return f"<<<<<<< ours\n{text}=======\n{text}>>>>>>> theirs\n"
@@ -1225,7 +1318,7 @@ def _stage_a_dvc_commit_f_on_a_wdir_stage(proj: Path) -> None:
     """What `dvc commit -f <stage>` stages for a `wdir: code` stage's folder
     out: dvc.lock's out written back as a bare tree hash, with no file list
     and no IDs, over a commit that recorded each file's ID."""
-    from mintd._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from mintd._dvc_state import DvcFileEntry, dir_manifest_md5
 
     (proj / "code").mkdir()
     (proj / "code" / "run.py").write_text("print('run')\n")
