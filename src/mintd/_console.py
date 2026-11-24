@@ -147,26 +147,33 @@ class Reporter:
             return
         self._active_progress.update(self._progress_task_id, description=msg)
 
+    def _line(self, text: str) -> None:
+        """A message line to stderr, printed whole however long (soft_wrap):
+        messages carry the paths and commands mintd offers, and rich wrapped
+        them at the width, after a `/` or between `rm -r` and `--`, so a
+        line-by-line copy named another folder."""
+        self._stderr.print(strip_userinfo(text), soft_wrap=True)
+
     def info(self, msg: str) -> None:
         if self.level >= 1 and not self.json_mode:
-            self._stderr.print(strip_userinfo(msg))
+            self._line(msg)
 
     def success(self, msg: str, *, elapsed_s: Optional[float] = None) -> None:
         if self.json_mode:
             return
         if elapsed_s is not None:
             msg += f" (elapsed: {elapsed_s:.2f}s)"
-        self._stderr.print(strip_userinfo(msg))
+        self._line(msg)
 
     def warn(self, msg: str) -> None:
         if not self.json_mode:
-            self._stderr.print(strip_userinfo(f"warning: {msg}"))
+            self._line(f"warning: {msg}")
 
     def error(self, msg: str, *, hint: Optional[str] = None) -> None:
-        self._stderr.print(strip_userinfo(f"error: {msg}"))
+        self._line(f"error: {msg}")
         if hint:
             for line in hint.splitlines():
-                self._stderr.print(strip_userinfo(f"  hint: {line}"))
+                self._line(f"  hint: {line}")
 
     def result(self, payload: Any, *, pretty: Optional[Callable[[Any], str]] = None) -> None:
         if self.json_mode:
@@ -185,11 +192,11 @@ class Reporter:
 
     def debug(self, msg: str) -> None:
         if self.level >= 2 and not self.json_mode:
-            self._stderr.print(strip_userinfo(f"debug: {msg}"))
+            self._line(f"debug: {msg}")
 
     def trace(self, msg: str) -> None:
         if self.level >= 3 and not self.json_mode:
-            self._stderr.print(strip_userinfo(f"trace: {msg}"))
+            self._line(f"trace: {msg}")
 
     def passthrough_stdout(self, chunk: str) -> None:
         """Route a raw stdout chunk from a child subprocess.
