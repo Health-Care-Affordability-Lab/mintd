@@ -89,6 +89,7 @@ class _FakeRegistryGitOps:
         *,
         shallow: bool = True,
         branch: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         self.clone_calls.append(CloneCall(url, Path(dest), shallow, branch))
         argv: list[str] = ["clone"]

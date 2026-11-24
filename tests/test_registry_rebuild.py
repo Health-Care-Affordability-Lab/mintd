@@ -42,16 +42,19 @@ def _meta(name: str, mutate: Callable[[dict[str, Any]], None] | None = None) -> 
 
 
 def _commit(repo: Path, meta: dict[str, Any] | None, *, date: str = "2026-11-20T10:00:00+00:00",
-            files: dict[str, str] | None = None) -> str:
+            files: dict[str, str | bytes] | None = None) -> str:
     """Write the product's `metadata.json` (or remove it, for None) and any
     other files, commit, and return the full sha."""
     if meta is None:
         (repo / "metadata.json").unlink(missing_ok=True)
     else:
         (repo / "metadata.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    for rel, text in (files or {}).items():
+    for rel, body in (files or {}).items():
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
-        (repo / rel).write_text(text, encoding="utf-8")
+        if isinstance(body, bytes):
+            (repo / rel).write_bytes(body)
+        else:
+            (repo / rel).write_text(body, encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "--allow-empty", "-m", "change", date=date)
     return _git(repo, "rev-parse", "HEAD").strip()
@@ -201,13 +204,12 @@ def _owned_leaves(model: type[BaseModel], prefix: str = "") -> set[str]:
     leaves: set[str] = set()
     for name, info in model.model_fields.items():
         key = info.alias or name
-        listed = "list" in str(info.annotation)
-        path = f"{prefix}{key}{'[]' if listed else ''}"
         inner = _unwrap_container(info.annotation)
         if isinstance(inner, type) and issubclass(inner, BaseModel):
-            leaves |= _owned_leaves(inner, f"{path}.")
+            listed = "list" in str(info.annotation)  # "[]" marks each item of a list of models, as COPIED_LEAVES does
+            leaves |= _owned_leaves(inner, f"{prefix}{key}{'[]' if listed else ''}.")
         elif any(m in (Owner.USER, Owner.PIPELINE) for m in info.metadata):
-            leaves.add(path)
+            leaves.add(f"{prefix}{key}")
     return leaves
 
 
@@ -218,9 +220,15 @@ def test_the_copied_leaves_agree_with_the_models_owner_tags() -> None:
     assert _owned_leaves(Metadata) == set(COPIED_LEAVES)
 
 
-@pytest.mark.parametrize("bad", ["../x", "/abs/x", "data\\final", ""], ids=["dotdot", "absolute", "backslash", "empty"])
+@pytest.mark.parametrize(
+    "bad", ["../x", "/abs/x", "data\\final", "", "-x", "data/fi\x00nal", "C:/x"],
+    ids=["dotdot", "absolute", "backslash", "empty", "leading-dash", "nul", "drive"],
+)
 def test_an_output_path_a_consumer_cant_import_holds_the_entry(tmp_path: Path, bad: str) -> None:
-    """Mutation: drop the output-path rule -> the entry takes the path."""
+    """Held however the refusal is phrased: by the pinned rule today, or by the
+    model's own validator once it refuses the path first.
+
+    Mutation: drop the output-path rule -> the entry takes the path."""
     repo, sha = _product(tmp_path, "demo", _meta("demo", lambda m: m["data_products"]["outputs"].append(
         {"path": bad, "description": "x", "primary": False, "last_published": ""})))
     path = _entry(tmp_path / "registry", "demo", repo)
@@ -229,10 +237,10 @@ def test_an_output_path_a_consumer_cant_import_holds_the_entry(tmp_path: Path, b
     [result] = _rebuild(tmp_path / "registry")
 
     entry = _read(path)
-    assert result.verdict == "held"
+    assert result.verdict == "held", result.why
     assert entry["data_products"] == before["data_products"]
     assert entry["source"]["held"]["commit"] == sha
-    assert f"the output path {bad!r}" in entry["source"]["held"]["why"]
+    assert "\n" not in result.why and (not bad or bad not in result.why.replace("'/' or '-'", ""))  # names no value
 
 
 def test_a_product_mintd_check_refuses_holds_the_entry(tmp_path: Path) -> None:
@@ -247,7 +255,8 @@ def test_a_product_mintd_check_refuses_holds_the_entry(tmp_path: Path) -> None:
 
     assert result.verdict == "held"
     assert _read(path)["metadata"]["description"] != "new"
-    assert "mintd check reports 1 error(s), first: 'data/final/' is not a DVC-tracked output" in result.why
+    assert result.why == ("mintd check reports 1 error(s) (data_products_output_untracked); "
+                          "run mintd check in its repository")
 
 
 @pytest.mark.parametrize("body", [None, "{not json"], ids=["missing", "invalid"])
@@ -378,3 +387,141 @@ def test_a_product_subscribing_to_a_catalogued_product_is_checked_against_the_re
     results = {r.name: r for r in _rebuild(tmp_path / "registry")}
 
     assert results["vault"].verdict == "updated", results["vault"].why
+
+
+class _Recording(SubprocessRegistryGitOps):
+    """Real git, recording each clone's keywords, and timing out on one URL."""
+
+    def __init__(self, *, times_out: str | None = None) -> None:
+        super().__init__()
+        self.clones: list[dict[str, Any]] = []
+        self.times_out = times_out
+
+    def clone(self, url: str, dest: Path, **kw: Any) -> None:  # type: ignore[override]
+        from mintd._subprocess import WallTimeoutExceeded
+
+        self.clones.append(kw)
+        if url == self.times_out:
+            raise WallTimeoutExceeded(5)
+        super().clone(url, dest, **kw)
+
+
+def _good_and(tmp_path: Path, files: dict[str, str | bytes]) -> tuple[Path, Path]:
+    """A registry with `demo`, its product carrying ``files``, beside a good `other`."""
+    demo, _ = _product(tmp_path, "demo", _meta("demo", lambda m: m["metadata"].update(description="new")), files=files)
+    other, _ = _product(tmp_path, "other", _meta("other", lambda m: m["metadata"].update(description="new")))
+    _entry(tmp_path / "registry", "demo", demo)
+    _entry(tmp_path / "registry", "other", other)
+    return demo, other
+
+
+@pytest.mark.parametrize("files", [
+    {".dvc/config": b"\xff\xfe[core]\n"},
+    {"enclave_manifest.yaml": b"\xff\xfe approved_products: []\n"},
+    {"data/imports/x.dvc": b"\xff\xfe outs: []\n"},
+    {"data/imports/x.dvc": "deps: 3\n"},
+    {"enclave_manifest.yaml": "schema_version: '2.0'\nenclave_name: e\napproved_products: 3\n"},
+], ids=["dvc-config-not-utf8", "manifest-not-utf8", "pointer-not-utf8", "pointer-deps-a-number", "manifest-invalid"])
+def test_one_products_unreadable_file_holds_only_that_product(tmp_path: Path, files: dict[str, str | bytes]) -> None:
+    """A file check can't read holds its own product, in one line naming no
+    value from it; every other entry is still rebuilt.
+
+    Mutation: drop the guard around check -> a traceback and no result."""
+    _good_and(tmp_path, files)
+
+    results = {r.name: r for r in _rebuild(tmp_path / "registry")}
+
+    assert results["demo"].verdict == "held" and "\n" not in results["demo"].why, results["demo"].why
+    assert results["other"].verdict == "updated"
+
+
+def test_a_clone_that_times_out_is_unreachable_and_the_rest_go_on(tmp_path: Path) -> None:
+    """Mutation: catch only GitOpError around the clone -> the timeout escapes."""
+    demo, _ = _good_and(tmp_path, {})
+    git = _Recording(times_out=str(demo))
+
+    results = {r.name: r for r in rebuild_catalog(tmp_path / "registry", git_ops=git, write=True)}
+
+    assert results["demo"].verdict == "unreachable" and results["demo"].why == (
+        "can't read the repository (WallTimeoutExceeded)")
+    assert results["other"].verdict == "updated"
+
+
+def test_every_clone_skips_lfs_objects(tmp_path: Path) -> None:
+    """Mutation: drop the env -> the clone smudges LFS pointers into downloads."""
+    _good_and(tmp_path, {})
+    git = _Recording()
+
+    rebuild_catalog(tmp_path / "registry", git_ops=git, write=False)
+
+    assert [c.get("env") for c in git.clones] == [{"GIT_LFS_SKIP_SMUDGE": "1"}] * 2
+
+
+def test_clone_passes_its_env_to_git(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Mutation: run git with `git_env()` alone -> the variable is missing."""
+    import mintd._subprocess as sub
+
+    seen: dict[str, str] = {}
+
+    def fake(argv: list[str], **kw: Any) -> Any:
+        seen.update(kw["env"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(sub, "run_streaming", fake)
+    SubprocessRegistryGitOps().clone(str(tmp_path / "src"), tmp_path / "dest", env={"GIT_LFS_SKIP_SMUDGE": "1"})
+
+    assert seen.get("GIT_LFS_SKIP_SMUDGE") == "1"
+
+
+def test_rebuild_exits_1_when_no_entry_could_be_read(tmp_path: Path) -> None:
+    """Every repository unreachable (no access, say) is a failure, not a clean run.
+
+    Mutation: count only updated and held -> exit 0."""
+    _entry(tmp_path / "registry", "demo", tmp_path / "remotes" / "gone")
+    registry = str(tmp_path / "registry")
+
+    assert cli.main(["registry", "rebuild", "--registry", registry]) == 1
+    assert cli.main(["registry", "rebuild", "--check", "--registry", registry]) == 1
+
+
+def test_a_linked_metadata_json_holds_the_entry(tmp_path: Path) -> None:
+    """A link could point out of the checkout: it isn't followed.
+
+    Mutation: drop the link refusal -> the linked file's fields arrive."""
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps(_meta("demo", lambda m: m["metadata"].update(description="from outside"))))
+    repo, _ = _product(tmp_path, "demo", _meta("demo"))
+    (repo / "metadata.json").unlink()
+    try:
+        (repo / "metadata.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("no symlinks here")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "link")
+    path = _entry(tmp_path / "registry", "demo", repo)
+
+    [result] = _rebuild(tmp_path / "registry")
+
+    assert result.verdict == "held" and result.why == "metadata.json is a link, which a rebuild doesn't follow"
+    assert _read(path)["metadata"]["description"] != "from outside"
+
+
+def test_an_unreadable_registry_entry_is_named_to_its_subscribers(tmp_path: Path) -> None:
+    """Mutation: drop the note -> the subscriber's reason doesn't say why its product is unknown."""
+    from mintd.enclave import ApprovedProduct, EnclaveManifest
+
+    vault_repo = tmp_path / "remotes" / "data_vault"
+    vault_repo.mkdir(parents=True)
+    _git(vault_repo, "init", "-q", "-b", "main")
+    EnclaveManifest(enclave_name="e", approved_products=[
+        ApprovedProduct(repo="demo", registry_entry="catalog/data/demo.yaml", pin="a" * 40),
+    ]).save(vault_repo / "enclave_manifest.yaml")
+    _commit(vault_repo, _meta("vault"))
+    _entry(tmp_path / "registry", "vault", vault_repo)
+    (tmp_path / "registry" / "catalog" / "data" / "demo.yaml").write_text("{ not: [yaml\n")
+
+    results = {r.name: r for r in _rebuild(tmp_path / "registry", write=False)}
+
+    assert results["demo"].verdict == "skipped"
+    assert results["vault"].verdict == "held"
+    assert results["vault"].why.endswith("registry entries that can't be read: demo.yaml"), results["vault"].why

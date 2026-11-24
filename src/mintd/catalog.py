@@ -616,34 +616,36 @@ def rebuild_catalog(registry: Path, *, git_ops: "RegistryGitOps", write: bool) -
     paths = [path for type_dir in _TYPE_DIRS for path in sorted((registry / "catalog" / type_dir).glob("*.yaml"))]
     # The catalog as it stands, for check's enclave lookups: an enclave product
     # resolves the products it subscribes to through the catalog.
-    readable = []
+    readable, unreadable = [], []
     for path in paths:
         try:
             readable.append(deserialize(path.read_text(encoding="utf-8"), source=path))
-        except CatalogEntryInvalid:
-            continue  # reported by its own rebuild below
+        except (CatalogEntryInvalid, OSError, ValueError):
+            unreadable.append(path.name)  # skipped by its own rebuild below, and named to its subscribers
     catalog = InMemoryCatalogClient.of(readable)
-    return [_rebuild_entry(registry, path, git_ops=git_ops, write=write, catalog=catalog) for path in paths]
+    return [
+        _rebuild_entry(registry, path, git_ops=git_ops, write=write, catalog=catalog, unreadable=tuple(unreadable))
+        for path in paths
+    ]
 
 
 def _rebuild_entry(
     registry: Path, path: Path, *, git_ops: "RegistryGitOps", write: bool, catalog: "CatalogClient",
+    unreadable: tuple[str, ...] = (),
 ) -> Rebuilt:
     import copy
     import tempfile
 
-    import yaml
-
-    from ._catalog_serializer import deserialize
+    from ._catalog_serializer import deserialize, dump
     from ._registry_git_ops import GitOpError
+    from ._subprocess import WallTimeoutExceeded
     from .errors import strip_userinfo
 
     rel = path.relative_to(registry).as_posix()
-    text = path.read_text(encoding="utf-8")
     try:
-        old = deserialize(text, source=rel)
-    except CatalogEntryInvalid as exc:
-        return Rebuilt(path.stem, rel, "skipped", why=str(exc))
+        old = deserialize(path.read_text(encoding="utf-8"), source=rel)
+    except (CatalogEntryInvalid, OSError, ValueError):
+        return Rebuilt(path.stem, rel, "skipped", why="the registry entry can't be read")
     entry = old.model_dump()
     name = old.name or path.stem
     url = old.repo_url
@@ -652,12 +654,16 @@ def _rebuild_entry(
     with tempfile.TemporaryDirectory(prefix="mintd-rebuild-") as tmp:
         product = Path(tmp) / "product"
         try:
-            git_ops.clone(url, product, shallow=True, branch=old._nested("repository", "default_branch") or None)
+            # One commit deep, no DVC data and no LFS objects: only what git tracks at HEAD.
+            git_ops.clone(url, product, shallow=True, branch=old._nested("repository", "default_branch") or None,
+                          env={"GIT_LFS_SKIP_SMUDGE": "1"})
             sha, date = git_ops.head_commit(product)
         except GitOpError as exc:
             last = (exc.stderr or str(exc)).strip().splitlines()[-1:] or [""]
             return Rebuilt(name, rel, "unreachable", why=f"can't read the repository: {strip_userinfo(last[0])}")
-        why, meta = _refusal(product, catalog)
+        except (WallTimeoutExceeded, OSError) as exc:
+            return Rebuilt(name, rel, "unreachable", why=f"can't read the repository ({type(exc).__name__})")
+        why, meta = _refusal(product, catalog, unreadable)
     reports = _reports(entry, meta) if meta is not None else ()
     new = copy.deepcopy(entry)
     source = dict(new.get("source") or {})
@@ -677,43 +683,61 @@ def _rebuild_entry(
     if write:
         from ._atomic import _atomic_write_text
 
-        _atomic_write_text(path, yaml.safe_dump(new, sort_keys=False, default_flow_style=False))
+        _atomic_write_text(path, dump(new))
     changes = tuple(_dict_diff(entry, new))
     return Rebuilt(name, rel, "held" if why else "updated", commit=sha, why=why, changes=changes, reports=reports)
 
 
-def _refusal(product: Path, catalog: "CatalogClient") -> tuple[str | None, "Metadata | None"]:
+def _refusal(
+    product: Path, catalog: "CatalogClient", unreadable: tuple[str, ...] = (),
+) -> tuple[str | None, "Metadata | None"]:
     """Why a product can't update its entry, or None, and its metadata when it
-    could be read."""
+    could be read. Each reason is one line and quotes none of the product's
+    values: it goes into a commit status and the registry's issue."""
+    import yaml
+    from pydantic import ValidationError
+
     from .check import check_project
     from .model import Metadata
 
-    if not (product / "metadata.json").is_file():
+    file = product / "metadata.json"
+    if file.is_symlink():
+        return "metadata.json is a link, which a rebuild doesn't follow", None
+    if not file.is_file():
         return "the repository has no metadata.json", None
     try:
-        meta = Metadata.from_json_file(product / "metadata.json")
-    except (OSError, ValueError) as exc:
-        return f"metadata.json doesn't validate: {str(exc).splitlines()[0]}", None
+        meta = Metadata.from_json_file(file)
+    except ValidationError as exc:
+        return f"metadata.json doesn't validate ({exc.error_count()} error(s)); run mintd check in its repository", None
+    except (OSError, ValueError):
+        return "metadata.json can't be read", None
     paths = [o.path for o in meta.data_products.outputs]
     if meta.data_products.primary is not None:
         paths.append(meta.data_products.primary)
-    bad = [p for p in paths if not _output_path_ok(p)]
-    if bad:
-        return f"the output path {bad[0]!r} is empty, absolute, holds '..' or a backslash", meta
-    errors = [f for f in check_project(product, upgrades=False, client=catalog) if f.severity == "error"]
-    if errors:
-        return f"mintd check reports {len(errors)} error(s), first: {errors[0].message}", meta
-    return None, meta
+    if not all(_output_path_ok(p) for p in paths):
+        return "an output path is empty, starts with '/' or '-', or holds a drive, '..', a backslash or a NUL", meta
+    try:
+        findings = check_project(product, upgrades=False, client=catalog)
+    except (OSError, ValueError, TypeError, LookupError, AttributeError, yaml.YAMLError, MintdError) as exc:
+        return f"mintd check can't read the product ({type(exc).__name__}); run mintd check in its repository", meta
+    errors = [f for f in findings if f.severity == "error"]
+    if not errors:
+        return None, meta
+    kinds = sorted({str(f.kind) for f in errors})
+    why = f"mintd check reports {len(errors)} error(s) ({', '.join(kinds)}); run mintd check in its repository"
+    if "catalog_unresolved" in kinds and unreadable:
+        why += f"; registry entries that can't be read: {', '.join(unreadable)}"
+    return why, meta
 
 
 def _output_path_ok(path: str) -> bool:
-    """A declared output path a consumer can import: relative, inside the
-    product, written with forward slashes. Pinned here until the model
-    validates `DataProductOutput.path` itself."""
-    from pathlib import PurePosixPath
+    """A declared output path a consumer can import: a relative posix path
+    inside the product that git and dvc never read as an option. The rule the
+    model is to apply to `DataProductOutput.path`, pinned here until it does."""
+    from pathlib import PureWindowsPath
 
-    return bool(path) and "\\" not in path and not path.startswith("/") and ":" not in path[:2] \
-        and ".." not in PurePosixPath(path).parts
+    return bool(path) and not path.startswith(("-", "/")) and "\\" not in path and "\x00" not in path \
+        and ".." not in path.split("/") and not PureWindowsPath(path).drive
 
 
 def _copy_leaves(entry: dict[str, Any], product: dict[str, Any]) -> None:

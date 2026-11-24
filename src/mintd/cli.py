@@ -2721,8 +2721,10 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
 
 
 def _handle_registry_rebuild(args: argparse.Namespace) -> int:
-    """Rebuild the catalog in a registry checkout. Exits 1 under --check when
-    any entry would change or is held, so a dry run can gate."""
+    """Rebuild the catalog in a registry checkout. Exits 1 when an entry
+    couldn't be read (its repository unreachable, or the entry itself), the
+    other entries written; under --check, also when any entry would change
+    or is held, so a dry run can gate."""
     from .catalog import rebuild_catalog
 
     reporter = getattr(args, "_reporter", None) or Reporter()
@@ -2743,7 +2745,8 @@ def _handle_registry_rebuild(args: argparse.Namespace) -> int:
             (reporter.warn if r.verdict in ("held", "unreachable", "skipped") else reporter.info)(line)
             for report in r.reports:
                 reporter.warn(f"{r.entry}: {report}")
-    return 1 if args.check and any(r.verdict in ("updated", "held") for r in results) else 0
+    unread = any(r.verdict in ("unreachable", "skipped") for r in results)
+    return 1 if unread or (args.check and any(r.verdict in ("updated", "held") for r in results)) else 0
 
 
 def _handle_publish(args: argparse.Namespace) -> int:

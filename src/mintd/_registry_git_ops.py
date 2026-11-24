@@ -594,6 +594,7 @@ class RegistryGitOps(Protocol):
         *,
         shallow: bool = True,
         branch: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None: ...
     def fetch(self, repo_dir: Path) -> None: ...
     def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
@@ -682,7 +683,9 @@ class SubprocessRegistryGitOps:
         *,
         shallow: bool = True,
         branch: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
+        # ``env`` is merged over ``git_env()`` (GIT_LFS_SKIP_SMUDGE, say).
         # Slice 25: clone uses run_streaming so git's --progress output
         # reaches the terminal live. run_streaming reads chunks (not lines)
         # so \r-based progress overwrites correctly in place — single
@@ -711,7 +714,7 @@ class SubprocessRegistryGitOps:
         try:
             r = run_streaming(
                 argv,
-                env=git_env(),
+                env={**git_env(), **(env or {})},
                 wall_timeout=wall_timeout,
                 reporter=self._reporter,
             )
