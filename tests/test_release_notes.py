@@ -87,6 +87,7 @@ def test_the_merges_since_the_last_promoted_release_grouped_by_area(tmp_path: Pa
         "## What changed since v1.0.0\n\n"
         "### data import\n\n- a refused folder is named (#5)\n- --dest-root resolved once (#8)\n\n"
         "### check\n\n- warns on untracked inputs (#7)\n\n"
+        "### other\n\n- a merge that isn't a squash\n\n"
         "Internal: 2 changes to tests, stories, CI and lint (#6, #9).\n"
     )
 
@@ -106,6 +107,7 @@ def test_a_prs_release_notes_replace_its_line_and_lift_do_this_once_and_known_li
         "### Do this once\n\n```bash\ngh auth setup-git\n```\n(#5)\n\n"
         "### data import\n\n- An import into an occupied folder is refused. (#5)\n- --dest-root resolved once (#8)\n\n"
         "### check\n\n- warns on untracked inputs (#7)\n\n"
+        "### other\n\n- a merge that isn't a squash\n\n"
         "### Known limits\n\n- a nested lock is only warned about (#5)\n\n- a story can't run on Windows (#6)\n\n"
         "Internal: 2 changes to tests, stories, CI and lint (#6, #9).\n"
     )
@@ -126,3 +128,76 @@ def test_a_failed_lookup_fails_rather_than_leaving_entries_out(tmp_path: Path, l
     result = _notes(tmp_path, latest=latest, pr_fail=pr_fail)
     assert result.returncode != 0 and result.stdout == ""
     assert "release_notes: could not read" in result.stderr
+
+
+def _git_in(repo: Path):
+    def git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return git
+
+
+def _run(tmp_path: Path, repo: Path, tag: str, latest: str) -> subprocess.CompletedProcess[str]:
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(exist_ok=True)
+    (stubs / "gh").write_text(_STUB_GH)
+    (stubs / "gh").chmod(0o755)
+    (tmp_path / "bodies").mkdir(exist_ok=True)
+    env = {**os.environ, "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}", "GH_REPO": "o/r",
+           "LATEST": latest, "BODIES": str(tmp_path / "bodies"), "PR_FAIL": ""}
+    return subprocess.run([sys.executable, str(SCRIPT), tag], cwd=repo, env=env, capture_output=True, text=True)
+
+
+@_BASH
+def test_a_hotfix_lists_its_own_commits_since_the_release_it_was_cut_from(tmp_path: Path) -> None:
+    """vX.Y.Z.postN cut from an older release isn't ahead of the latest one, so the range from
+    the latest release is empty. Mutation: always start at the latest release -> red."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = _git_in(repo)
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "data: the release (#1)")
+    git("tag", "v1.0.0")
+    git("commit", "-q", "--allow-empty", "-m", "check: a newer release (#2)")
+    git("tag", "v1.1.0")
+    git("switch", "-q", "-c", "hotfix/v1.0.0", "v1.0.0")
+    git("commit", "-q", "--allow-empty", "-m", "data: the fix (#12)")
+    git("commit", "-q", "--allow-empty", "-m", "fix the y")
+    git("tag", "v1.0.0.post1")
+    result = _run(tmp_path, repo, "v1.0.0.post1", latest="v1.1.0")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "## Hotfix for v1.0.0\n\n### data\n\n- the fix (#12)\n\n### other\n\n- fix the y\n"
+
+
+@_BASH
+def test_commits_without_a_pr_number_are_listed_never_nothing_merged(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = _git_in(repo)
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "data: the release (#1)")
+    git("tag", "v1.0.0")
+    git("commit", "-q", "--allow-empty", "-m", "a direct commit")
+    git("tag", "v1.1.0")
+    result = _run(tmp_path, repo, "v1.1.0", latest="v1.0.0")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "## What changed since v1.0.0\n\n### other\n\n- a direct commit\n"
+
+
+@_BASH
+def test_only_the_first_parent_line_counts(tmp_path: Path) -> None:
+    """A merge commit's second parent brings its branch's own commits, which aren't merges into
+    main. Mutation: drop --first-parent -> #99 shows, red."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = _git_in(repo)
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "data: the release (#1)")
+    git("tag", "v1.0.0")
+    git("switch", "-q", "-c", "feature")
+    git("commit", "-q", "--allow-empty", "-m", "wip: a step on the branch (#99)")
+    git("switch", "-q", "main")
+    git("merge", "-q", "--no-ff", "-m", "data: the merged PR (#20)", "feature")
+    git("tag", "v1.1.0")
+    result = _run(tmp_path, repo, "v1.1.0", latest="v1.0.0")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "## What changed since v1.0.0\n\n### data\n\n- the merged PR (#20)\n"

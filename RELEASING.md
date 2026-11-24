@@ -18,7 +18,8 @@ practice, until a nightly clone of every product runs.
 
 The notes' "What changed" lists the PRs merged since the last promoted release, by title, and a PR's own
 "## Release notes" section when it has one (its "### Do this once" and "### Known limits" go to the top and
-bottom).
+bottom). A hotfix lists its own commits since the release it was cut from. `promote` drops the notes' "A
+prerelease" line as it makes the release latest.
 
 ## Roll back
 
@@ -52,6 +53,8 @@ Re-run failed jobs in the same run. A release stays a draft, seen by no one else
   ever a draft: never `gh release delete vX.Y.Z`, which picks the published release when there is one.
 - **Stopped on "published release"**: it is never changed. If it is missing a file, roll it back and ship the
   next version.
+- **The notes say the changelog couldn't be written:** in that run, `evidence` → Re-run this job. It writes the
+  changelog again and leaves the rest of the notes as they are.
 - **A run `supersede` cancelled**, re-run, waits beside the newer one. Approve the newer; `promote` refuses
   an older release once a newer one is latest.
 - **The release never started** (say, a branch has the tag's name): `gh workflow run release.yml --ref vX.Y.Z`.

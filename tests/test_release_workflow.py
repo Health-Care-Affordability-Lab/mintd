@@ -435,6 +435,23 @@ def test_a_changelog_that_cannot_be_written_says_so_in_the_notes(tmp_path: Path)
     assert "::warning::the changelog could not be written" in out and "could not read PR #7" in out
 
 
+@_BASH
+def test_a_rerun_writes_a_changelog_that_failed_last_time(tmp_path: Path) -> None:
+    """Mutation: a rerun keeps the failure line -> red."""
+    failed = "(The changelog could not be written: see this run's evidence job.)"
+    rc, notes, out = _evidence(tmp_path, failed + "\n\n---\n\n" + _FILLED)
+    assert rc == 0, out
+    assert notes is not None and notes.startswith("## What changed since v1.2.2\n\n### data\n\n- something (#7)\n\n---\n\ncommit: abc\n")
+    assert "- a line someone added by hand" in notes and "against the Linux install: success" in notes
+
+
+def test_ci_lints_the_release_scripts_too() -> None:
+    """scripts/release_notes.py runs in the release; CI's lint covers it."""
+    steps = [step for job in _WF["test.yml"]["jobs"].values() for step in job.get("steps", [])]
+    lint = next(step["run"] for step in steps if step.get("run", "").startswith("ruff check src tests"))
+    assert lint.split()[2:] == ["src", "tests", "scripts"]
+
+
 def test_evidence_reads_the_history_back_to_the_last_promoted_release() -> None:
     checkout = next(s for s in _JOBS["evidence"]["steps"] if s.get("uses", "").startswith("actions/checkout@"))
     assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
@@ -456,6 +473,43 @@ def test_evidence_never_changes_a_release_that_is_not_a_prerelease(tmp_path: Pat
     assert notes is None
 
 
+_PROMOTED_BODY = """## What changed since v0.1.0
+
+### data
+
+- something (#7)
+
+---
+
+commit: abc
+gate run: https://example/run
+
+- CI (test.yml) on this tag: passed
+
+A prerelease: `releases/latest` skips it. It becomes the latest release only when the maintainer approves this run's `release` environment (RELEASING.md)."""
+
+
+@_BASH
+@pytest.mark.parametrize("body_fail", [False, True], ids=["notes-read", "notes-unreadable"])
+def test_promote_takes_the_prerelease_line_out_of_the_notes_in_its_one_edit(tmp_path: Path, body_fail: bool) -> None:
+    """The line is true only until promote. Mutations: keep it; edit the notes in a second call;
+    blank the notes when they can't be read -> red."""
+    (tmp_path / "body").write_text(_PROMOTED_BODY + "\n")
+    env = {
+        **_stubs(tmp_path, gh=_STUB_GH_PROMOTE), "TAG": "v0.2.0", "GITHUB_SHA": "abc", "GH_REPO": "o/r",
+        "REVIEWERS": "1", "TAG_SHA": "abc", "ASSETS": "install.sh install.ps1", "LATEST": "v0.1.0",
+        "BODY": str(tmp_path / "body"), "NOTES_OUT": str(tmp_path / "notes"), "BODY_FAIL": "1" if body_fail else "0",
+    }
+    result = subprocess.run(["bash", "-c", _runs("promote")], env=env, capture_output=True, text=True)
+    edits = [line for line in (tmp_path / "log").read_text().splitlines() if line.startswith("release edit")]
+    if body_fail:
+        assert result.returncode != 0 and edits == []
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(edits) == 1 and edits[0].startswith("release edit v0.2.0 --prerelease=false --latest --notes ")
+    assert (tmp_path / "notes").read_text() == _PROMOTED_BODY.split("\n\nA prerelease: ")[0]
+
+
 # --- only the newest release waits, run with a stub gh -------------------
 
 _STUB_GH_SUPERSEDE = """#!/bin/bash
@@ -466,7 +520,7 @@ case "$*" in
   "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
   # A run's status now: the last line for it in $STATUS, else still waiting.
   "api repos/"*"/actions/runs/"*)
-    id=${2##*/}; awk -v id="$id" '$1 == id {s = $2} END {print (s ? s : "waiting")}' "$STATUS" ;;
+    id=${2##*/}; [ "$id" = "$STATUS_FAIL" ] && { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }; awk -v id="$id" '$1 == id {s = $2} END {print (s ? s : "waiting")}' "$STATUS" ;;
   "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
   "run cancel"*)
     case " $CANCEL_FAIL " in *" $3 "*) exit 1 ;; esac
@@ -494,6 +548,7 @@ exit 0
         ("a newer run no longer waiting doesn't stand this one down", "v1.2.0", (["16 v1.3.0", "11 v1.1.0"], []), ["11"], True),
         ("a cancel that fails is a warning, and the rest go on", "v1.3.0", (["17 v1.2.0", "11 v1.1.0"], []), ["17", "11"], True),
         ("a run listed twice is cancelled once", "v1.3.0", (["11 v1.2.0"], ["11 v1.2.0"]), ["11"], True),
+        ("a run whose status can't be read is left alone", "v1.3.0", (["18 v1.2.0", "11 v1.1.0"], []), ["11"], True),
     ],
 )
 def test_only_the_newest_release_waits_for_approval(
@@ -505,7 +560,7 @@ def test_only_the_newest_release_waits_for_approval(
         **_stubs(tmp_path, gh=_STUB_GH_SUPERSEDE), "TAG": tag, "GH_REPO": "o/r", "GITHUB_RUN_ID": "50",
         "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
         "LIST_FAIL": "1" if case == "the listing fails" else "0",
-        "STATUS": str(tmp_path / "status"), "CANCEL_FAIL": "17",
+        "STATUS": str(tmp_path / "status"), "CANCEL_FAIL": "17", "STATUS_FAIL": "18",
     }
     (tmp_path / "status").write_text("16 completed\n")  # approved, rejected or finished since the listing
     result = subprocess.run(["bash", "-c", _runs("supersede")], cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -535,7 +590,11 @@ echo "$*" >> "$LOG"
 case "$*" in
   *environments/release*) echo "$REVIEWERS" ;;
   *commits/refs/tags/*) echo "$TAG_SHA" ;;
+  "release view"*"--json body"*) [ "$BODY_FAIL" = 1 ] && exit 1; cat "$BODY" ;;
   "release view"*) printf '%s\n' $ASSETS ;;
+  "release edit"*)
+    prev=""
+    for a in "$@"; do [ "$prev" = --notes ] && printf '%s' "$a" > "$NOTES_OUT"; prev="$a"; done ;;
   *releases/latest*)
     # As real gh does on an HTTP error: the body on stdout, the status on stderr.
     if grep -q '^release edit' "$LOG"; then echo "$TAG"
@@ -564,10 +623,13 @@ esac
 def test_promote_refuses_unless_every_check_passes(
     tmp_path: Path, tag: str, reviewers: str, tag_sha: str, assets: str, latest: str, promoted: bool
 ) -> None:
+    (tmp_path / "body").write_text("notes\n")
     env = {
         **_stubs(tmp_path, gh=_STUB_GH_PROMOTE), "TAG": tag, "GITHUB_SHA": "abc", "GH_REPO": "o/r",
         "REVIEWERS": reviewers, "TAG_SHA": tag_sha, "ASSETS": assets, "LATEST": latest,
+        "BODY": str(tmp_path / "body"), "NOTES_OUT": str(tmp_path / "notes"), "BODY_FAIL": "0",
     }
     result = subprocess.run(["bash", "-c", _runs("promote")], env=env, capture_output=True, text=True)
-    edited = f"release edit {tag} --prerelease=false --latest" in (tmp_path / "log").read_text().splitlines()
+    edited = any(line.startswith(f"release edit {tag} --prerelease=false --latest")
+                 for line in (tmp_path / "log").read_text().splitlines())
     assert (result.returncode == 0, edited) == (promoted, promoted), result.stdout + result.stderr

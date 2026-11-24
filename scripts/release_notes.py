@@ -7,7 +7,9 @@ is a prerelease, and only a promoted release is ever latest. Each first-parent c
 a squash merge whose subject ends "(#N)", and a PR's title reads "<area>: <what>".
 
 - Entries are grouped by area, in merge order. PRs whose area is tests, stories, ci or lint are counted on one
-  "Internal" line.
+  "Internal" line. A commit with no "(#N)" is listed by its subject.
+- A tag that isn't ahead of the latest release (a hotfix, vX.Y.Z.postN, cut from an older one) lists its own
+  commits since the release it was cut from, under "Hotfix for vX.Y.Z".
 - A PR body may hold a "## Release notes" section, written by a person. Its text replaces the PR's line, and what
   it puts under "### Do this once" or "### Known limits" goes to those sections, at the top and the bottom.
 
@@ -40,13 +42,29 @@ def last_promoted(repo: str) -> str | None:
     raise SystemExit(f"release_notes: could not read the latest release: {result.stderr.strip()}")
 
 
-def merges(previous: str, tag: str) -> list[tuple[int, str]]:
-    """(PR number, title) of each squash merge after `previous` up to `tag`, oldest first."""
-    result = _run("git", "log", "--first-parent", "--reverse", "--format=%s", f"{previous}..{tag}")
+def _git(*args: str) -> str:
+    result = _run("git", *args)
     if result.returncode != 0:
-        raise SystemExit(f"release_notes: git log {previous}..{tag} failed: {result.stderr.strip()}")
-    found = (_SUBJECT.match(subject) for subject in result.stdout.splitlines())
-    return [(int(m["number"]), m["title"]) for m in found if m]
+        raise SystemExit(f"release_notes: git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def base(previous: str, tag: str) -> tuple[str, bool]:
+    """Where the list starts, and whether `tag` is a hotfix: the last promoted release when `tag` is
+    ahead of it, else the release `tag` was cut from (its nearest earlier tag)."""
+    if _run("git", "merge-base", "--is-ancestor", previous, tag).returncode == 0:
+        return previous, False
+    return _git("describe", "--tags", "--abbrev=0", f"{tag}^").strip(), True
+
+
+def merges(start: str, tag: str) -> list[tuple[int | None, str]]:
+    """(PR number, or None for a commit with none; title) of each first-parent commit after `start`
+    up to `tag`, oldest first."""
+    found: list[tuple[int | None, str]] = []
+    for subject in _git("log", "--first-parent", "--reverse", "--format=%s", f"{start}..{tag}").splitlines():
+        m = _SUBJECT.match(subject)
+        found.append((int(m["number"]), m["title"]) if m else (None, subject))
+    return found
 
 
 def pr_body(repo: str, number: int) -> str:
@@ -71,12 +89,14 @@ def release_notes(body: str) -> dict[str, str]:
     return {name: text for name, text in texts.items() if text}
 
 
-def _cite(text: str, number: int) -> str:
+def _cite(text: str, number: int | None) -> str:
     """`text` with its PR number at the end, on a line of its own after a code block."""
+    if number is None:
+        return text
     return f"{text}\n(#{number})" if text.endswith("```") else f"{text} (#{number})"
 
 
-def render(previous: str, entries: list[tuple[int, str, dict[str, str]]]) -> str:
+def render(heading: str, entries: list[tuple[int | None, str, dict[str, str]]]) -> str:
     """The section's markdown, from (number, title, release notes) in merge order."""
     hoisted: dict[str, list[str]] = {name: [] for name in HOISTED}
     groups: dict[str, list[str]] = {}
@@ -91,13 +111,13 @@ def render(previous: str, entries: list[tuple[int, str, dict[str, str]]]) -> str
         if "" in notes:
             text = notes[""]
             groups.setdefault(area, []).append(_cite(text if text.startswith("- ") else f"- {text}", number))
-        elif area in INTERNAL:
+        elif area in INTERNAL and number is not None:
             internal.append(number)
         else:
-            groups.setdefault(area, []).append(f"- {what} (#{number})")
-    out = [f"## What changed since {previous}"]
+            groups.setdefault(area, []).append(_cite(f"- {what}", number))
+    out = [heading]
     if not entries:
-        out.append(f"Nothing was merged since {previous}.")
+        out.append("No commits.")
     if hoisted["Do this once"]:
         out += ["### Do this once", *hoisted["Do this once"]]
     for area, lines in groups.items():
@@ -112,15 +132,18 @@ def render(previous: str, entries: list[tuple[int, str, dict[str, str]]]) -> str
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print("usage: release_notes.py vX.Y.Z  (GH_REPO set)", file=sys.stderr)
+        sys.stderr.write("usage: release_notes.py vX.Y.Z  (GH_REPO set)\n")
         return 2
     tag, repo = argv[1], os.environ["GH_REPO"]
     previous = last_promoted(repo)
     if previous is None:
-        print("No release has been promoted yet, so there is nothing to compare this one with.")
+        sys.stdout.write("No release has been promoted yet, so there is nothing to compare this one with.\n")
         return 0
-    entries = [(number, title, release_notes(pr_body(repo, number))) for number, title in merges(previous, tag)]
-    print(render(previous, entries))
+    start, hotfix = base(previous, tag)
+    heading = f"## Hotfix for {re.sub(r'[.]post[0-9]+$', '', start)}" if hotfix else f"## What changed since {start}"
+    entries = [(number, title, release_notes(pr_body(repo, number)) if number is not None else {})
+               for number, title in merges(start, tag)]
+    sys.stdout.write(render(heading, entries) + "\n")
     return 0
 
 
