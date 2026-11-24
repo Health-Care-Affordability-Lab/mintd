@@ -626,8 +626,10 @@ def test_an_import_dvc_stopped_before_writing_names_nothing_to_remove(tmp_path: 
     """Someone else's file lands at the destination while dvc fails before
     writing anything (another import holds its lock, the producer is
     unreachable, the path or the repo is missing): the file is not this
-    import's, so its error says nothing about removing it.
-    Mutation: drop `wrote_nothing` from the check -> "rm -r" on my_thesis.csv, red."""
+    import's, so its error says nothing about removing it, and the cleanup
+    leaves the folder alone, empty folders in it too.
+    Mutations: drop `wrote_nothing` from the note's check -> "rm -r" on
+    my_thesis.csv, red; from the cleanup's -> users_empty/ is removed, red."""
     from mintd._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcOpError, DvcRepoLocked
 
     exc = {
@@ -638,7 +640,7 @@ def test_an_import_dvc_stopped_before_writing_names_nothing_to_remove(tmp_path: 
     }[error]
 
     def theirs(dest: Path) -> None:
-        dest.mkdir()
+        (dest / "users_empty").mkdir(parents=True)
         (dest / "my_thesis.csv").write_text("someone else's\n")
 
     client = InMemoryCatalogClient()
@@ -647,7 +649,8 @@ def test_an_import_dvc_stopped_before_writing_names_nothing_to_remove(tmp_path: 
         import_product(client, _failing_after(theirs, exc)(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     said = f"{failed.value} {failed.value.hint}"
     assert "now holds" not in said and "rm " not in said and "my_thesis" not in said
-    assert (tmp_path / "data_demo_xw" / "outputs" / "cms_based" / "my_thesis.csv").is_file()
+    theirs_at = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    assert (theirs_at / "my_thesis.csv").is_file() and (theirs_at / "users_empty").is_dir()
 
 
 def test_a_partial_failure_words_the_rm_as_an_if(tmp_path: Path) -> None:

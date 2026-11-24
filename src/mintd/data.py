@@ -382,15 +382,16 @@ def import_product(
         # anywhere after the mkdir (Ctrl-C during the index snapshot included)
         # is covered. dvc builds a new destination's folder tree before it
         # fetches, so that tree is walked first, deepest folders first.
-        # Not through a link at the destination: the folder it points to is not
-        # this import's, and on Windows `rmdir` removes the link itself.
-        if new_dest is not None and not new_dest.is_symlink():
-            created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
-        _remove_empty_dirs(created_dirs)
         # What is at the destination is not this import's when dvc stopped
         # before writing anything (another dvc held its lock, no repo, no such
         # path), or when a pointer is there by now (another run's finished import).
         wrote_nothing = isinstance(exc, DvcOpError) and exc.wrote_nothing
+        # Not when dvc wrote nothing, for that reason, and not through a link at
+        # the destination: the folder it points to is not this import's, and on
+        # Windows `rmdir` removes the link itself.
+        if new_dest is not None and not wrote_nothing and not new_dest.is_symlink():
+            created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
+        _remove_empty_dirs(created_dirs)
         if new_dest is not None and not wrote_nothing and not _pointer_at(target_dvc) and (new_dest.is_file() or new_dest.is_dir()):
             # Not there before this import, and a re-run refuses it: say what is
             # there and how to clear it, as an "if": a file another run put
