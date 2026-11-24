@@ -130,8 +130,8 @@ REGISTRY = {
 
 def test_each_field_owner_is_pinned():
     """A catalog rebuild copies only the product's own leaves and keeps the
-    registry's, so every field's owner is a reviewed choice: a new field, or a
-    changed tag, fails here until this table says so.
+    registry's. Re-tagging a field in either set, or adding a USER or PIPELINE
+    field, fails here; a new MINTD field passes, since a rebuild never copies it.
 
     Mutations: tag a registry field (leaf or parent) USER, MINTD or PIPELINE,
     or tag a copied leaf REGISTRY -> red.
