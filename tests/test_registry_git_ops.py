@@ -851,3 +851,24 @@ def test_push_with_tags_sends_the_commit_and_its_tag_or_neither(
     assert local_producer.resolve_remote_tag("v0.1.1") == _git(
         ["rev-parse", "main"], cwd=local_producer.bare
     ).strip()
+
+
+def test_gh_state_read_in_a_test_stays_cached_for_the_process() -> None:
+    """The first of a pair: mintd reads gh's login and a producer's check once per process."""
+    from mintd import _registry_git_ops
+
+    _registry_git_ops._gh_state()
+    _registry_git_ops.producer_refusal("https://github.com/example-org/demo")
+    assert _registry_git_ops._gh_state.cache_info().currsize == 1
+    assert _registry_git_ops.producer_refusal.cache_info().currsize == 1
+
+
+def test_each_test_starts_with_no_gh_state_cached() -> None:
+    """The second of the pair: conftest clears both before each test, so a test
+    that leaves gh unready can't fail every later test on its worker.
+    Mutation: drop either cache_clear in conftest -> red after the test above."""
+    from mintd import _registry_git_ops
+
+    assert _registry_git_ops._gh_state.cache_info().currsize == 0
+    assert _registry_git_ops.producer_refusal.cache_info().currsize == 0
+

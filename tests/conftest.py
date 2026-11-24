@@ -162,10 +162,17 @@ def _github_access_is_hermetic(_hermetic_gitconfig: Path):
     of the test's own that names gh's helper and holds no insteadOf rule.
     ``tests/test_github_access.py`` sets up each state it tests itself.
     """
+    from mintd import _registry_git_ops
+
     redirect = {"GH_TOKEN": "test-token", "GIT_CONFIG_GLOBAL": str(_hermetic_gitconfig), "GIT_CONFIG_NOSYSTEM": "1"}
     # Set by hand, not with `monkeypatch`, for the reason given in `_in_process_dvc_is_hermetic`.
     previous = {key: os.environ.get(key) for key in redirect}
     os.environ.update(redirect)
+    # mintd reads gh's login, and each producer's check, once per process. Read
+    # afresh for each test, so one bad read (gh slower than its timeout, say)
+    # fails that test only, not every later test on its xdist worker.
+    _registry_git_ops._gh_state.cache_clear()
+    _registry_git_ops.producer_refusal.cache_clear()
     try:
         yield
     finally:
