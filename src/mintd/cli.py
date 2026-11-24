@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 import os
-import posixpath
 import shlex
 import sys
 import time
@@ -100,8 +99,8 @@ from ._cache_ops import (
     CachePushSummary,
     cache_pull,
     cache_push,
-    list_cache_objects,
     resolve_repo_remote,
+    select_cache_objects,
 )
 from .enclave import (
     EnclaveManifest,
@@ -236,6 +235,21 @@ class _MintdArgumentParser(argparse.ArgumentParser):
         sys.exit(64)
 
 
+class _Removed(argparse.Action):
+    """A flag a release removed. Typing it says where its job went, with the
+    value given, and exits 64 while parsing, before any handler, so no code can
+    read the value. The next removal is one ``add_argument(..., action=_Removed)``."""
+
+    def __init__(self, option_strings: list[str], dest: str, *, instead: str, **_kw: Any) -> None:
+        super().__init__(option_strings, dest, nargs="?", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        self.instead = instead
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace,
+                 values: Any, option_string: str | None = None) -> NoReturn:
+        shown = shlex.quote(neutralize_control_chars(values)) if values else "<path>"
+        parser.exit(64, f"{option_string} was removed; {self.instead.format(value=shown)}\n")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -352,9 +366,10 @@ def _add_cache_parser(subs: Any) -> None:
         "pull", help="Download objects from the repo file cache (S3) to their repo paths"
     )
     p_cache_pull.add_argument(
-        "--prefix", default=None,
-        help="Limit to objects under cache/<prefix> (e.g. data/scratch/)",
+        "paths", nargs="*",
+        help="Files or folders to pull, by their path in the project (default: all of the repo file cache (S3))",
     )
+    p_cache_pull.add_argument("--prefix", action=_Removed, instead="pass the path: mintd cache pull {value}")
     p_cache_pull.add_argument("--remote", help="DVC remote name (default: the project's)")
     p_cache_pull.add_argument("--jobs", type=int, default=8, help="Download parallelism (default: 8)")
     p_cache_pull.add_argument(
@@ -370,9 +385,10 @@ def _add_cache_parser(subs: Any) -> None:
         "ls", help="List objects in the repo file cache (S3)"
     )
     p_cache_ls.add_argument(
-        "--prefix", default=None,
-        help="Limit to objects under cache/<prefix> (e.g. isochrones/ct/)",
+        "paths", nargs="*",
+        help="Files or folders to list, by their path in the project (default: all of the repo file cache (S3))",
     )
+    p_cache_ls.add_argument("--prefix", action=_Removed, instead="pass the path: mintd cache ls {value}")
     p_cache_ls.add_argument("--remote", help="DVC remote name (default: the project's)")
     p_cache_ls.add_argument("--no-truncate", dest="no_truncate", action="store_true",
                             help="Render every row (default: truncate past 50 files)")
@@ -1465,18 +1481,16 @@ def _render_cache_push(summary: CachePushSummary, reporter: Reporter) -> int:
 
 def _handle_cache_pull(args: argparse.Namespace) -> int:
     reporter, project_path, config, factory = _cache_project_preflight(args)
-    # bad --prefix via _normalise_sub_path
-    with _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2):
-        summary = cache_pull(
-            project_path=project_path,
-            config=config,
-            reporter=reporter,
-            prefix=args.prefix,
-            remote=args.remote,
-            jobs=args.jobs,
-            force=args.force,
-            s3_client_factory=factory,
-        )
+    summary = cache_pull(
+        project_path=project_path,
+        config=config,
+        reporter=reporter,
+        paths=args.paths,
+        remote=args.remote,
+        jobs=args.jobs,
+        force=args.force,
+        s3_client_factory=factory,
+    )
     return _render_cache_pull(summary, reporter)
 
 
@@ -1495,7 +1509,7 @@ def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
                 "skipped_existing": len(skipped),
                 "failed": len(failed),
                 "bytes": summary.pulled_bytes,
-                "prefix": summary.sub,
+                "paths": summary.paths,
                 "elapsed_s": round(summary.elapsed_s, 2),
             }
         )
@@ -1527,32 +1541,19 @@ def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
 def _handle_cache_ls(args: argparse.Namespace) -> int:
     reporter, project_path, config, factory = _cache_project_preflight(args)
     repo = resolve_repo_remote(project_path, args.remote)
-    with (
-        _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2),
-        _hint(BucketNotFound, "check the project's remote url in .dvc/config"),
-        reporter.status("Listing the repo file cache (S3)..."),
-    ):
-        result = list_cache_objects(
-            repo,
-            sub_path=args.prefix,
-            aws_profile_name=config.aws_profile_name,
-            factory=factory,
+    with reporter.status("Listing the repo file cache (S3)..."):
+        _keys, result = select_cache_objects(
+            project_path, repo, args.paths, verb="ls",
+            aws_profile_name=config.aws_profile_name, factory=factory,
         )
 
     payload = _data_ls_payload("cache", result, include_versions=False)
-    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. The
-    # hint must name a PREFIX that cache_pull can actually list under: --prefix
-    # is normalised with a trailing '/', so a full file key (`iso/a.bin`) becomes
-    # `iso/a.bin/` and matches nothing. Point at the file's containing directory
-    # instead (keys are relative to sub_path, so prepend it).
+    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. Keys
+    # are full repo paths and cache pull takes a file's path, so name the file,
+    # quoted so a path with a space pastes as one.
     first_file = next((o for o in result.objects if not o.is_dir), None)
     if first_file is not None:
-        sub = result.truncated_to_prefix or ""
-        sub = sub.strip("/") + "/" if sub.strip("/") else ""
-        target = (sub + posixpath.dirname(first_file.key)).strip("/")
-        payload["hint"] = (
-            f"mintd cache pull --prefix {target}/" if target else "mintd cache pull"
-        )
+        payload["hint"] = f"mintd cache pull {shlex.quote(first_file.key)}"
     no_truncate = getattr(args, "no_truncate", False)
     reporter.result(
         payload,
