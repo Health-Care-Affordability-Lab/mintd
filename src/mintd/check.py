@@ -162,6 +162,18 @@ class CheckFinding:
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
 
+    @property
+    def location(self) -> str:
+        """What a printed finding names: its file, else its field with list
+        indexes as ``[n]`` (``data_products.outputs[0].description``), else
+        the project."""
+        if self.source:
+            return str(self.source)
+        if self.field_path:
+            parts = self.field_path.split(".")
+            return "".join(f"[{p}]" if p.isdigit() else f".{p}" for p in parts).removeprefix(".")
+        return "<project>"
+
 
 # ---------------------------------------------------------------------------
 # Public API
