@@ -1398,8 +1398,8 @@ def test_import_never_clobbers_another_products_import(tmp_path: Path) -> None:
     wrong class still passes here, a rule that lets the delete through does
     not.
 
-    Mutation: drop the `_require_owner` call from `import_product` -> this
-    reddens.
+    Mutation: drop the `_require_owner` call for a pointer already at the
+    destination (`_import_destination`) -> this reddens.
     """
     client = InMemoryCatalogClient()
     _register(client, "provider_a", mutate=_with_primary("data/final/"))

@@ -1497,16 +1497,18 @@ def bump_import(
 
 
 def _import_namespace(entry: dict[str, Any], name: str) -> str:
-    """The `data/imports/` folder one product's imports live under:
+    """The `data/imports/` folder one product's new imports land in:
     `project.full_name`, falling back to the catalog name. One definition
-    for the import writer and the bump reader so the two cannot drift.
+    for the import writer and for the bump reader of a product the catalog
+    no longer lists (which has no URL to find its imports by), so the two
+    cannot drift.
 
     The namespace must be ONE plain path component (`_validate_clone_name`'s
     rule, reused). It is producer-controlled and `import_product`'s
     containment check cannot cover it: `full_name = "."` makes
-    `nested_root == dest_root`, which IS inside the import root, and
-    `_imports_index` then rglobs the whole tree and hands back ANOTHER
-    product's `.dvc`.
+    `nested_root == dest_root`, which IS inside the import root, and that
+    bump reader then indexes the whole tree and hands back ANOTHER product's
+    `.dvc`.
 
     SHAPE ONLY — two legal namespaces can still name one directory.
     `_require_owner` is what refuses those.

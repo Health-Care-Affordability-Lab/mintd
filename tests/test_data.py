@@ -1377,9 +1377,12 @@ def test_bump_never_touches_another_products_import(tmp_path: Path) -> None:
 
     Asserts on the victim, not on an exception type.
 
-    Mutation: drop the `_require_owner` call from `_resolve_import_source`
-    -> this reddens (and the whole existing suite stays green, which is why
-    it is here).
+    Two guards keep the victim safe: the index keeps only pointers naming the
+    requested product's repository, and `_require_owner` refuses another
+    repository's. Each alone keeps this green.
+
+    Mutation: drop both (the index's repository filter and the
+    `_require_owner` call in `_resolve_import_source`) -> this reddens.
     """
     client = InMemoryCatalogClient()
     _register_fixture_product(client)
