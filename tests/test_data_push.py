@@ -1022,7 +1022,7 @@ def test_push_to_a_non_default_remote_commits_nothing(
     "shape",
     [
         "detached", "no-commit-yet", "deleted-pointer", "nested-project", "nested-clone",
-        "branch-tracks-another-name", "config-local-default", "config-local-url",
+        "branch-tracks-another-name", "config-local-default", "config-local-url", "config-local-worktree",
         "config-not-committed", "dvc-yaml-not-committed", "staged-deletion", "no-default-remote",
     ],
 )
@@ -1046,6 +1046,8 @@ def test_push_leaves_the_commit_when_git_state_is_unusual(
         "branch-tracks-another-name": "wip tracks origin/main, a branch of another name",
         "config-local-default": ".dvc/config.local sends pushes to scratch",
         "config-local-url": ".dvc/config.local overrides storage's url",
+        # dvc reads a worktree remote as version-aware: importers would read the committed md5 layout
+        "config-local-worktree": ".dvc/config.local overrides storage's worktree",
         "config-not-committed": ".dvc/config is not committed",
         "dvc-yaml-not-committed": "dvc.yaml is not committed",
         "staged-deletion": "data/final.dvc is staged for deletion",
@@ -1076,6 +1078,8 @@ def test_push_leaves_the_commit_when_git_state_is_unusual(
         (proj / ".dvc" / "config.local").write_text("[core]\n    remote = scratch\n")
     if shape == "config-local-url":
         (proj / ".dvc" / "config.local").write_text("['remote \"storage\"']\n    url = s3://scratch/x\n")
+    if shape == "config-local-worktree":
+        (proj / ".dvc" / "config.local").write_text("['remote \"storage\"']\n    worktree = true\n")
     if shape == "config-not-committed":
         _git(["rm", "-q", "--cached", ".dvc/config"], cwd=proj)
         _git(["commit", "-q", "-m", "untrack the config"], cwd=proj)
@@ -1382,6 +1386,26 @@ def test_check_a_push_that_uploads_is_verified_committed_and_pushed(moto_push, t
     # Every dvc push of the command ran with one throwaway site cache, gone after.
     site = {c.env["DVC_SITE_CACHE_DIR"] for c in dvc.push_calls}
     assert len(site) == 1 and not Path(site.pop()).exists()
+
+
+@pytest.mark.parametrize("setting", ['version_aware = "true"', "worktree = true"])
+def test_check_verifies_a_remote_dvc_reads_as_version_aware(moto_push, tmp_path, monkeypatch, capsys, setting) -> None:
+    """dvc strips the quotes from a quoted `version_aware`, and turns it on
+    for a `worktree` remote that doesn't set it, so DVC records version IDs
+    there: push verifies them as on any version-aware remote.
+
+    Mutation: read only an unquoted `version_aware` key -> push skips the
+    check, no verified line, red.
+    """
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    cfg = proj / ".dvc" / "config"
+    cfg.write_text(cfg.read_text().replace("version_aware = true", setting))
+    _git(["commit", "-q", "-am", "remote setting"], cwd=proj)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push"]) == 0, _err(capsys)
+    assert "✓ 1 file(s) verified on s3://test-bucket/lab/p (1 uploaded and verified)" in _err(capsys)
 
 
 def test_check_dvc_pinning_other_bytes_fails_and_commits_nothing(moto_push, tmp_path, monkeypatch, capsys) -> None:

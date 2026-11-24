@@ -344,7 +344,9 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
-mintd check    [path] [--upgrades]                Validate metadata, output delivery + (optionally) pins
+mintd check    [path] [--upgrades] [--remote [--all] | --staged]
+                                                  Validate metadata, output delivery + (optionally) pins;
+                                                  --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
 mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
