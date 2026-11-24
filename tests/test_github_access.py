@@ -498,10 +498,10 @@ def test_data_clone_stops_before_git_and_says_nothing_was_cloned(
     client = InMemoryCatalogClient()
     _register(client)
     with pytest.raises(ProducerError) as raised:
-        clone_and_pull_product(client, _FakeDvcOps(), SubprocessRegistryGitOps(), _fast(), name="demo-xw")
+        clone_and_pull_product(client, _FakeDvcOps(), SubprocessRegistryGitOps(), _fast(), name="demo-map")
     assert "isn't ready" in str(raised.value)
     assert "partial clone" not in str(raised.value)
-    assert not (tmp_path / "data_demo-xw").exists()
+    assert not (tmp_path / "data_demo-map").exists()
 
 
 def test_data_import_stops_before_dvc_with_the_hint(github: GitHub, tmp_path: Path) -> None:
@@ -513,10 +513,10 @@ def test_data_import_stops_before_dvc_with_the_hint(github: GitHub, tmp_path: Pa
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/main.parquet"))
     with pytest.raises(MintdError) as raised:
-        import_product(client, SubprocessDvcOps(timeouts=Timeouts()), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+        import_product(client, SubprocessDvcOps(timeouts=Timeouts()), "demo_map", cwd=tmp_path, dest_root=tmp_path)
     assert "isn't ready" in str(raised.value)
     assert "gh auth login" in (raised.value.hint or "")
-    assert not (tmp_path / "data_demo_xw").exists()
+    assert not (tmp_path / "data_demo_map").exists()
 
 
 def test_a_token_in_the_catalog_url_never_reaches_the_written_pointer(

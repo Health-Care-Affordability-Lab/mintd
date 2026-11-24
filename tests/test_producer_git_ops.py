@@ -14,7 +14,7 @@ from tests._harness.access import REAL_RUN, is_access_check
 
 from mintd._producer_git_ops import FetchError, GitArchiveFetcher
 
-REPO = "https://github.com/example-org/demo_xw"
+REPO = "https://github.com/example-org/demo_map"
 PIN = "a" * 40
 
 
