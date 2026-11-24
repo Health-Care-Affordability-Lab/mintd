@@ -400,12 +400,11 @@ def _require_github_access(repo_urls: list[str], what: str, *, pull: bool = Fals
 
 
 def _canonical(path: Path) -> Path:
-    """``path`` absolute and physical: "." and ".." resolved, symlinks too,
-    and a backslash read as a separator, as dvc reads a target. dvc runs in a
-    subprocess started in the working folder, which resolves its symlinks, so
-    its ``find_root`` walks up from the physical folder; a symlink into a
-    project's subfolder finds that project only this way."""
-    return Path(os.path.realpath(str(path).replace("\\", "/")))
+    """``path`` absolute and physical: "." and ".." resolved, symlinks too.
+    dvc runs in a subprocess started in the working folder, which resolves its
+    symlinks, so its ``find_root`` walks up from the physical folder; a symlink
+    into a project's subfolder finds that project only this way."""
+    return Path(os.path.realpath(path))
 
 
 def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
@@ -434,7 +433,9 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
     else:
         pointers = []
         for target in targets:
-            path = _canonical(cwd / target)
+            # dvc reads a backslash as a separator in a target, and only there: the
+            # working folder, the project and each pointer keep theirs in their names.
+            path = _canonical(cwd / target.replace("\\", "/"))
             if target.endswith(".dvc"):
                 pointers.append(path)
             if path.is_dir():

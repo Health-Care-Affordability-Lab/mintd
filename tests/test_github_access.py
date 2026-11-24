@@ -1217,6 +1217,30 @@ def test_every_path_is_compared_in_one_form(
     assert _import_urls(Path(cwd.format(tmp=tmp_path)), targets) == found
 
 
+_WEIRD = "git@github.com:example-lab/weird.git"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="on Windows a backslash can't be part of a folder name")
+@pytest.mark.parametrize("folder", ["proj", "pro\\j"])
+@pytest.mark.parametrize(
+    ("targets", "found"), [(None, [_DEMO, _WEIRD]), (["data/demo"], [_DEMO]), (["."], [_DEMO, _WEIRD])]
+)
+def test_a_backslash_in_a_folder_or_pointer_name_stays_part_of_the_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str, targets: list[str] | None, found: list[str]
+) -> None:
+    """dvc reads a backslash as a separator in a target only: a project in a
+    folder named pro\\j, and a pointer named we\\ird.dvc, are still found."""
+    from mintd._dvc_ops import _import_urls
+
+    project = tmp_path / folder
+    for sub in (project / ".dvc", project / "data" / "demo"):
+        sub.mkdir(parents=True)
+    _import_pointer(project / "data" / "demo.dvc", _DEMO)
+    _import_pointer(project / "we\\ird.dvc", _WEIRD)
+    monkeypatch.chdir(project)
+    assert sorted(_import_urls(Path("."), targets)) == found
+
+
 def test_www_github_passes_on_github_coms_helper(github: GitHub) -> None:
     """GitHub answers www.github.com with a redirect to github.com, and git
     then asks github.com's credential helper, as `gh auth setup-git` writes it."""
