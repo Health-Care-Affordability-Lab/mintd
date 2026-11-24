@@ -159,7 +159,7 @@ def target(request, tmp_path, monkeypatch, mintd):
     mintd.timeout = None  # a real upload takes as long as the link does; Ctrl-C still stops it
     client = boto3.Session(profile_name="mintd").client("s3", endpoint_url=endpoint)
     require_no_version_listing(client, bucket, prefix)  # before anything is written
-    print(f"story 11 writes under s3://{bucket}/{prefix}/")  # shown by -rA, for the PR's record
+    print(f"story 11 writes under {prefix}/ in the test bucket")  # -rA shows it; never the bucket's name
     yield Target(bucket, f"{prefix}/{BIG}", client,
                  {"url": f"s3://{bucket}/{prefix}", "endpointurl": endpoint, "version_aware": "true",
                   "profile": "mintd"})

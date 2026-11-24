@@ -43,6 +43,7 @@ TEST_BUCKET_SHA256 = "328fdfb5a7427fc030248d85272bfd45528013dc716282d7bb53a273b3
 #: endpoint path-style, so a host with a bucket label in front (`other.s3.wasabisys.com`) would send every request,
 #: writes included, to that other bucket. Only the bare service host is accepted.
 TEST_ENDPOINT_SCHEME = "https"
+TEST_ENDPOINT_PORT: int | None = None   # the scheme's own port: none written
 TEST_ENDPOINT_HOST = re.compile(r"s3(\.[a-z]{2}-[a-z]+-[0-9]+)?\.wasabisys\.com")
 #: Classifications whose paths, md5s, bytes and times a report may show.
 DETAILED = frozenset({"public", "labonly"})
@@ -195,7 +196,7 @@ def profile_endpoint(credentials: Path) -> str:
     """The `endpoint_url` of the `[profile mintd]` copy beside `credentials`, a
     file the harness wrote. Refused when missing, so no request can fall back to
     AWS's own endpoint; and unless it is the test bucket's endpoint host alone
-    (`TEST_ENDPOINT_SCHEME`, `TEST_ENDPOINT_HOST`), so no request can land in
+    (`TEST_ENDPOINT_SCHEME`, `TEST_ENDPOINT_HOST`, no port), so no request can land in
     another bucket, whether named by a path or by a label in front of the host."""
     config = configparser.ConfigParser(interpolation=None)
     config.read(credentials.with_name("config"), encoding="utf-8")
@@ -203,11 +204,17 @@ def profile_endpoint(credentials: Path) -> str:
     if not endpoint:
         raise HarnessError(f"[profile {TEST_PROFILE}] in AWS_CONFIG_FILE has no endpoint_url: name the endpoint, or "
                            "every request would go to AWS's own")
-    parts = urlsplit(endpoint)
+    try:
+        parts = urlsplit(endpoint)
+        port = parts.port
+    except ValueError:  # `[host]`, or a port that isn't a number
+        raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE isn't a URL the harness can "
+                           "read; name the endpoint's host alone") from None
     if parts.path.strip("/") or parts.query or parts.fragment:  # path-style requests would go to the bucket it names
         raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE has a path: requests would land "
                            "in the bucket it names, not the test bucket; name the endpoint's host alone")
     if (parts.scheme != TEST_ENDPOINT_SCHEME or parts.username is not None or parts.password is not None
+            or port != TEST_ENDPOINT_PORT or parts.netloc.endswith(":")
             or TEST_ENDPOINT_HOST.fullmatch(parts.hostname or "") is None):
         raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE isn't the test bucket's "
                            f"endpoint ({TEST_ENDPOINT_SCHEME}://{TEST_ENDPOINT_HOST.pattern}): a bucket label in front "

@@ -1990,15 +1990,19 @@ def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
 DEMO_BUCKET = "demo-story-bucket"
 
 
-def _story_pin(tmp_path: Path, bucket: str, *, scheme: str | None = None, host: str | None = None) -> list[str]:
+def _story_pin(tmp_path: Path, bucket: str, *, scheme: str | None = None, host: str | None = None,
+               port: int | None = None) -> list[str]:
     """A plugin for a child pytest that points story 11's allow-list at `bucket` (and the endpoint pin at
-    `scheme`://`host`), as the operator's own bucket and endpoint would pass. Production code keeps no override."""
+    `scheme`://`host`:`port`), as the operator's own bucket and endpoint would pass. Production code keeps no
+    override."""
     lines = ["import hashlib, re", "def pytest_configure(config):", "    import tests._harness.live as live",
              f"    live.TEST_BUCKET_SHA256 = hashlib.sha256({bucket!r}.encode()).hexdigest()"]
     if scheme is not None:
         lines.append(f"    live.TEST_ENDPOINT_SCHEME = {scheme!r}")
     if host is not None:
         lines.append(f"    live.TEST_ENDPOINT_HOST = re.compile(re.escape({host!r}))")
+    if port is not None:
+        lines.append(f"    live.TEST_ENDPOINT_PORT = {port!r}")
     (tmp_path / "story_pin.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return ["-p", "story_pin"]
 
@@ -2036,7 +2040,8 @@ def test_a_tier_failure_on_real_storage_prints_no_frame_arguments(tmp_path: Path
 def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the name whose SHA-256 is the harness's constant passes. Mutations that turn it red: `story_bucket`
     returning the value unchecked, or comparing anything but the hash of the whole name (a prefix, `in`,
-    `lower()`, the bare hex); a delete, an abort or a transfer-manager upload added to story 11."""
+    `lower()`, the bare hex); a delete, an abort or a transfer-manager upload added to story 11; story 11 printing
+    the bucket's name."""
     assert re.fullmatch(r"[0-9a-f]{64}", TEST_BUCKET_SHA256)
     monkeypatch.setattr(live_harness, "TEST_BUCKET_SHA256", hashlib.sha256(DEMO_BUCKET.encode()).hexdigest())
     assert story_bucket(None) is None and story_bucket("") is None
@@ -2047,15 +2052,29 @@ def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch)
             story_bucket(named)
     story = (Path(__file__).parent / "stories" / "test_story_11_multipart.py").read_text(encoding="utf-8")
     assert re.search(r"\.(delete_\w+|abort_multipart_upload|upload_file\w*)\(", story) is None
+    assert re.search(r"print\(f?[\"'][^\n]*\{bucket\}", story) is None  # -rA's record is pasted into the PR
 
 
-def test_the_test_bucket_s_name_is_only_a_hash_in_the_harness_and_the_stories() -> None:
-    """No word in the harness, the stories or their tests hashes to `TEST_BUCKET_SHA256`, so the plain name
-    can't creep back into this public repo. Mutation that turns it red: the name written into any of them."""
-    root = Path(__file__).parent
-    files = [*(root / "_harness").glob("*.py"), *(root / "stories").glob("*.py"), Path(__file__)]
-    words = {w for f in files for w in re.findall(r"[a-z0-9][a-z0-9.-]{1,62}", f.read_text(encoding="utf-8"))}
-    assert not [w for w in words if hashlib.sha256(w.encode()).hexdigest() == TEST_BUCKET_SHA256]
+def test_the_test_bucket_s_name_is_only_a_hash_in_tests_and_docs() -> None:
+    """No word in `tests/`, `docs/` or the README hashes to `TEST_BUCKET_SHA256`, so the plain name can't creep back
+    into this public repo. Every run of dot-separated labels is tried, so the name beside punctuation or in front of
+    a host is found too. Mutations that turn it red: the name written into any of those files, alone, as `<name>.` or
+    as `<name>.s3.wasabisys.com`."""
+    root = Path(__file__).parents[1]
+    text = {".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".json", ".cfg", ".ini", ".patch", ".j2", ".sh", ".ps1"}
+    files = [f for d in ("tests", "docs") if (root / d).is_dir() for f in (root / d).rglob("*")
+             if f.is_file() and f.suffix in text and "__pycache__" not in f.parts]
+    files.append(root / "README.md")
+    found = set()
+    for f in files:
+        for token in re.findall(r"[a-z0-9][a-z0-9.-]*", f.read_text(encoding="utf-8", errors="ignore").lower()):
+            labels = token.strip(".-").split(".")
+            for i in range(len(labels)):
+                for j in range(i + 1, len(labels) + 1):
+                    word = ".".join(labels[i:j]).strip("-")
+                    if hashlib.sha256(word.encode()).hexdigest() == TEST_BUCKET_SHA256:
+                        found.add(f.relative_to(root).as_posix())
+    assert not found, sorted(found)
 
 
 def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2063,7 +2082,8 @@ def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypat
     dropped, or comparing paths rather than files (a hard link to the default file gets through);
     `profile_endpoint` accepting a missing endpoint, one with a path (requests would land in the bucket
     the path names), or any host but the bucket's service host: one with a bucket label in front, another
-    host, plain http, or credentials in the URL."""
+    host, plain http, a port, or credentials in the URL; the host pattern's dots unescaped; a URL it can't
+    parse raising anything but HarnessError."""
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))  # never the real ~/.aws
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -2104,7 +2124,14 @@ def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypat
                               ("https://s3.example.test", "isn't the test bucket's endpoint"),
                               ("http://s3.wasabisys.com", "isn't the test bucket's endpoint"),
                               ("https://u:p@s3.wasabisys.com", "isn't the test bucket's endpoint"),
-                              ("https://other-bucket@s3.wasabisys.com", "isn't the test bucket's endpoint")):
+                              ("https://other-bucket@s3.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://s3xwasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisysxcom", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:8443", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:443", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:x", "isn't a URL"),
+                              ("https://[s3.wasabisys.com]", "isn't a URL")):
         (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {endpoint}\n",
                                        encoding="utf-8")
         copy = readonly_credentials(good, tmp_path / "out5", profile=TEST_PROFILE)
@@ -2183,7 +2210,7 @@ def test_a_bucket_run_stops_before_writing_when_its_key_may_list_versions(tmp_pa
                "AWS_CONFIG_FILE": str(tmp_path / "conf"), "MINTD_BIN": str(tmp_path / "no-mintd")}
         got = subprocess.run(
             [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "--log-level=DEBUG",
-             *_story_pin(tmp_path, DEMO_BUCKET, scheme="http", host="127.0.0.1"),
+             *_story_pin(tmp_path, DEMO_BUCKET, scheme="http", host="127.0.0.1", port=server.server_port),
              "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
             cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
         )
