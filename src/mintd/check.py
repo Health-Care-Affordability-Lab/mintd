@@ -749,10 +749,11 @@ def _check_remote(
     import tempfile
 
     from ._atomic import write_tree
-    from ._dvc_state import default_remote_name, dvc_cache_dir
+    from ._dvc_state import dvc_cache_dir
     from ._pin_proof import CacheHashes, prove_pins, publishable_scope
     from ._push_verify import (
         PushRefused,
+        default_for_pins,
         in_subrepo,
         pinned_remote,
         pushed_dvc_files,
@@ -762,17 +763,18 @@ def _check_remote(
     from ._s3 import S3AccessDenied, resolve_profile
     from .errors import MintdError
 
-    name = default_remote_name(project_path)
     pointers = pushed_dvc_files(project_path)
     try:
+        name = default_for_pins(project_path)
         remote = pinned_remote(project_path, name, project_path, pointers) if name else None
     except PushRefused as exc:  # push refuses it too
         return [CheckFinding(severity="error", section="producer", kind="remote_unreadable",
                              message=str(exc), hint=exc.hint)]
     if remote is None:
+        why = "the default remote isn't a version-aware S3 remote" if name else "the project has no DVC remote"
         return [CheckFinding(
             severity="info", section="producer", kind="remote_not_checked",
-            message="the default remote isn't a version-aware S3 remote, so nothing is pinned by version to check",
+            message=f"{why}, so nothing is pinned by version to check",
         )]
     git = git_ops or SubprocessRegistryGitOps()
     declared_outs = _declared_outputs(project_path)
@@ -928,9 +930,9 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
 
     from ._atomic import write_tree
     from ._dvc_invoke import dvc_root
-    from ._dvc_state import DvcFileEntry, default_remote_name, dir_manifest_md5, dvc_cache_dir
+    from ._dvc_state import DvcFileEntry, dir_manifest_md5, dvc_cache_dir
     from ._pin_proof import publishable_scope
-    from ._push_verify import PushRefused, in_subrepo, pinned_remote
+    from ._push_verify import PushRefused, default_for_pins, in_subrepo, pinned_remote
     from ._registry_git_ops import SubprocessRegistryGitOps
 
     hint = "run mintd check --staged in the DVC project's folder, or pass it as the path"
@@ -969,7 +971,10 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     # is: they are pinned on that project's own.
     other = sorted(rel for status, rel in changes if status != "D" and in_subrepo(project_path, rel))
     findings = unchecked(f"the commit stages pointers in another DVC project ({abbreviate(other)})") if other else []
-    name = default_remote_name(project_path)
+    try:
+        name = default_for_pins(project_path)
+    except PushRefused as exc:  # push refuses it too
+        return [*findings, *unchecked(str(exc), hint=exc.hint)]
     if name is None:
         return findings  # no remote to pin to
     ours = [(status, rel) for status, rel in changes if not in_subrepo(project_path, rel)]

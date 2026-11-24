@@ -26,7 +26,10 @@ from typing import Any
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
-from ._dvc_state import default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files
+from ._dvc_state import (
+    default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files, read_dvc_config,
+    require_default_remote,
+)
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
@@ -57,10 +60,37 @@ class PushRefused(MintdError):
         self.hint = hint
 
 
-def _version_aware(cfg: dict[str, str]) -> bool:
+def _version_aware(cfg: dict[str, str], name: str) -> bool:
+    """dvc's version-aware rule for the remote ``name``. A ``version_aware`` or
+    ``worktree`` that dvc reads as neither true nor false raises ``PushRefused``:
+    dvc refuses the whole config then, and reading it as "not version-aware"
+    would skip every check on the remote's pins."""
     from ._storage_state import remote_is_version_aware
 
+    for key in ("version_aware", "worktree"):
+        value = cfg.get(key)
+        if value is not None and str(value).lower() not in ("true", "false"):  # dvc's Bool: lowercased, one of two
+            raise PushRefused(
+                f"the DVC remote {name} sets {key} to {value!r}, which dvc reads as neither true nor false, "
+                "so dvc refuses the config",
+                hint=f"set {key} to true or false in .dvc/config or .dvc/config.local",
+            )
     return remote_is_version_aware(cfg.get)
+
+
+def default_for_pins(root: Path) -> str | None:
+    """The remote ``check`` reads pins on: ``root``'s default remote, as dvc
+    reads it. None when there is no remote at all, so nothing is pinned by
+    version. Raises ``PushRefused`` when there is a remote but no default:
+    ``data push --remote`` can still have pinned files there, so passing would
+    skip a check that has something to check."""
+    name = default_remote_name(root)
+    if name is not None or not (read_dvc_config(root, "repo")["remote"] or read_dvc_config(root, "local")["remote"]):
+        return name
+    try:
+        return require_default_remote(root)
+    except MintdError as exc:
+        raise PushRefused(str(exc), hint=exc.hint) from exc
 
 
 def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
@@ -108,7 +138,7 @@ def pinned_remote(root: Path, name: str, tree: Path, dvc_files: list[str]) -> Pi
     carries its own access keys, or an out in ``dvc_files`` or the
     ``dvc.yaml`` (both read under ``tree``) names a remote of its own."""
     cfg = merged_remote(root, name)
-    if not _version_aware(cfg):
+    if not _version_aware(cfg, name):
         return None
     if any(cfg.get(k) for k in _CREDENTIAL_KEYS):
         raise PushRefused(
@@ -250,7 +280,7 @@ def prepare(
     name = remote_arg or default
     if name is None:
         return None
-    versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r))]
+    versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r), r)]
     if not versioned:
         return None
     if remote_arg is not None and remote_arg != default:
