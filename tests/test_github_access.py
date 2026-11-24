@@ -398,9 +398,9 @@ def test_an_import_made_through_an_ssh_form_catalog_url_is_the_same_producer(tmp
         under="data/imports/demo",
     )
     for catalog_url in ("git@github.com:example-lab/demo.git", "ssh://git@github.com/example-lab/demo", _REPO + ".git"):
-        _require_owner(dvc, catalog_url, name="demo")
+        _require_owner(dvc, catalog_url, name="demo", cwd=tmp_path)
     with pytest.raises(UnknownProductPath):
-        _require_owner(dvc, "git@github.com:other-lab/demo.git", name="demo")
+        _require_owner(dvc, "git@github.com:other-lab/demo.git", name="demo", cwd=tmp_path)
 
 
 def test_an_import_that_landed_nothing_from_an_unreachable_producer_gets_the_shared_hint(
@@ -987,9 +987,9 @@ def test_an_import_made_through_a_credentialed_url_is_still_its_own_producer(tmp
         under="data/imports/demo",
     )
     assert "SECRET" not in dvc.read_text(encoding="utf-8")
-    _require_owner(dvc, catalog_url, name="demo")
+    _require_owner(dvc, catalog_url, name="demo", cwd=tmp_path)
     with pytest.raises(UnknownProductPath):
-        _require_owner(dvc, "https://git.example/other.git", name="demo")
+        _require_owner(dvc, "https://git.example/other.git", name="demo", cwd=tmp_path)
 
 
 def test_a_refused_batch_names_each_target_with_the_gh_fix(github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
