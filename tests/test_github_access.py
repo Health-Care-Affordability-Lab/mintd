@@ -1275,3 +1275,148 @@ def test_the_unreachable_hint_never_prints_a_password(github: GitHub, catalog_ur
     hint = unreachable_repo_hint(catalog_url)
     assert "could not reach" in hint
     assert "TOK" not in hint and "N@X" not in hint
+
+
+# --- GitHub access together with a pointer hash dvc never writes ------------
+
+_BAD_PRODUCER_POINTER = (
+    "outs:\n- path: data\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: ab/../../a.csv\n    size: 1\n"
+)
+_PRODUCER_CONFIG = "[core]\n    remote = storage\n['remote \"storage\"']\n    url = s3://example-lab-bucket/demo\n"
+
+
+def _producer_over_git_archive(monkeypatch: pytest.MonkeyPatch, files: dict[str, str]) -> list[str]:
+    """The producer's files as `git archive --remote` would serve them, for the
+    real GitArchiveFetcher; the GitHub check's own gh and git calls run for real.
+    Returns the paths archived, in order."""
+    import io
+    import tarfile
+
+    from tests._harness.access import REAL_RUN, is_access_check
+
+    archived: list[str] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        if is_access_check(argv):
+            return REAL_RUN(argv, **kwargs)
+        assert "archive" in argv, argv
+        path = argv[-1]
+        archived.append(path)
+        if path not in files:
+            return subprocess.CompletedProcess(argv, 128, b"", f"fatal: pathspec '{path}' did not match any files\n".encode())
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(name=path)
+            info.size = len(files[path].encode())
+            tar.addfile(info, io.BytesIO(files[path].encode()))
+        return subprocess.CompletedProcess(argv, 0, buf.getvalue(), b"")
+
+    monkeypatch.setattr("mintd._producer_git_ops.subprocess.run", run)
+    return archived
+
+
+@pytest.mark.parametrize("gh_ready", [False, True])
+def test_a_github_import_whose_producer_pointer_has_a_bad_hash(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gh_ready: bool
+) -> None:
+    """dvc pull can't land the import, so the rescue reads the producer's pointer,
+    and that pointer records a hash dvc never writes.
+
+    gh not ready: dvc pull is refused before it runs, and so is the rescue's first
+    fetch from the producer; the pointer is never read, and the user gets the gh fix.
+    That is right: nothing of the producer can be read until gh is set up, so it's the
+    first thing to fix, and the hash refusal follows once it is.
+    gh ready: the rescue fetches the producer's config, then its pointer, and refuses
+    the hash, naming the producer's file, its repo and pin, as #117's rescue test pins
+    for a producer that never reached the check.
+
+    Mutations: drop the gh check in the fetcher's `_run` -> the not-ready case reads
+    the pointer and raises, red; drop the hash check in `_entries_from_producer_pointer`
+    -> the ready case reaches S3 and returns a rescue failure instead, red."""
+    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._import_rescue_ops import rescue_import_pull
+    from mintd.data_ops import _pull_targets_with_import_rescue
+    from types import SimpleNamespace
+
+    if gh_ready:
+        github.ready()
+    monkeypatch.setattr(  # dvc pull runs only when gh is ready, and can't land the import
+        SubprocessDvcOps, "_spawn",
+        lambda self, cmd, **kw: SimpleNamespace(returncode=1, stderr_lines=["ERROR: failed to pull data\n"], stdout_lines=[]),
+    )
+    (tmp_path / ".dvc").mkdir()
+    _import_pointer(tmp_path / "demo.dvc", _REPO, hashed=True)
+    archived = _producer_over_git_archive(monkeypatch, {".dvc/config": _PRODUCER_CONFIG, "data.dvc": _BAD_PRODUCER_POINTER})
+
+    class Reporter:
+        def __init__(self) -> None:
+            self.errors: list[tuple[str, str | None]] = []
+
+        def error(self, msg: str, hint: str | None = None) -> None:
+            self.errors.append((msg, hint))
+
+        def __getattr__(self, name: str) -> Callable[..., None]:
+            return lambda *a, **k: None
+
+    reporter = Reporter()
+
+    def pull() -> list[str]:
+        return _pull_targets_with_import_rescue(
+            tmp_path, ["demo.dvc"], "storage", [],
+            dvc_ops=SubprocessDvcOps(timeouts=Timeouts()), remote=None, jobs=None, extra_dvc_args=None,
+            reporter=reporter, aws_profile_name=None,  # type: ignore[arg-type]
+            import_rescue=rescue_import_pull,
+        )
+
+    if not gh_ready:
+        assert pull() == ["demo.dvc"]
+        assert archived == []  # nothing of the producer was read
+        ((msg, hint),) = reporter.errors
+        assert "gh auth login" in (hint or ""), (msg, hint)
+        assert "shape dvc writes" not in msg + (hint or "")
+    else:
+        with pytest.raises(PointerCutShort) as refused:
+            pull()
+        assert str(refused.value) == (
+            f"data.dvc in {_REPO} at aaaaaaa is cut short or damaged: "
+            "a hash in it is not in the shape dvc writes: 'ab/../../a.csv'"
+        )
+        assert archived == [".dvc/config", "data.dvc"]
+
+
+@pytest.mark.parametrize("gh_ready", [False, True])
+def test_a_pull_with_a_github_import_and_a_bad_hash_pointer_names_the_pointer(
+    github: GitHub, s3_versioned, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, gh_ready: bool
+) -> None:
+    """A project's own pointer records a hash dvc never writes, beside a GitHub
+    import. `mintd data pull` stops on the pointer, naming it, before any dvc pull,
+    so the GitHub check never runs, ready or not.
+
+    That is right: the pull changes nothing (a damaged pointer could name a path
+    outside the cache, which #117 stops), the message names the file to restore,
+    and with that fixed the next pull reaches the import and its GitHub check.
+    It is also why the gh fix isn't shown here: no clone was about to happen.
+
+    Mutation: drop the hash check in `_check_out` -> the pull goes on to dvc pull
+    (and, gh not ready, to the gh refusal), red."""
+    from unittest.mock import patch
+
+    s3, bucket = s3_versioned
+    if gh_ready:
+        github.ready()
+    spawned: list[list[str]] = []
+    monkeypatch.setattr(SubprocessDvcOps, "_spawn", lambda self, cmd, **kw: spawned.append(cmd))
+    project = tmp_path / "project"
+    (project / "data" / "imports").mkdir(parents=True)
+    (project / ".dvc").mkdir()
+    (project / ".dvc" / "config").write_text(f"[core]\n    remote = origin\n['remote \"origin\"']\n    url = s3://{bucket}\n")
+    (project / "data" / "dir.dvc").write_text("outs:\n  - path: dir\n    md5: ab/home/u/notes.dir\n")
+    _import_pointer(project / "data" / "imports" / "demo.dvc", _REPO, hashed=True)
+    with patch("mintd._fast_sync_ops._create_s3_client", return_value=s3):
+        rc = cli.main(["data", "pull", "--path", str(project)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert "dir.dvc is cut short or damaged: the hash of dir is not in the shape dvc writes" in err, err
+    assert "gh auth" not in err
+    assert spawned == []  # no dvc pull ran
+    assert github.calls() == []  # and no GitHub check
