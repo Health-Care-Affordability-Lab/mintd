@@ -2722,9 +2722,9 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
 
 def _handle_registry_rebuild(args: argparse.Namespace) -> int:
     """Rebuild the catalog in a registry checkout. Exits 1 when an entry
-    couldn't be read (its repository unreachable, or the entry itself), the
-    other entries written; under --check, also when any entry would change
-    or is held, so a dry run can gate."""
+    couldn't be read (its repository unreachable, or the entry itself) or is
+    held by mintd's own error, the other entries written; under --check, also
+    when any entry would change or is held, so a dry run can gate."""
     from .catalog import rebuild_catalog
 
     reporter = getattr(args, "_reporter", None) or Reporter()
@@ -2735,7 +2735,7 @@ def _handle_registry_rebuild(args: argparse.Namespace) -> int:
     if reporter.json_mode:
         reporter.result([
             {"name": r.name, "entry": r.entry, "verdict": r.verdict, "commit": r.commit, "why": r.why,
-             "changes": [c.field_path for c in r.changes], "reports": list(r.reports)}
+             "changes": [c.field_path for c in r.changes], "reports": list(r.reports), "mintd_error": r.mintd_error}
             for r in results
         ])
     else:
@@ -2745,7 +2745,7 @@ def _handle_registry_rebuild(args: argparse.Namespace) -> int:
             (reporter.warn if r.verdict in ("held", "unreachable", "skipped") else reporter.info)(line)
             for report in r.reports:
                 reporter.warn(f"{r.entry}: {report}")
-    unread = any(r.verdict in ("unreachable", "skipped") for r in results)
+    unread = any(r.verdict in ("unreachable", "skipped") or r.mintd_error for r in results)
     return 1 if unread or (args.check and any(r.verdict in ("updated", "held") for r in results)) else 0
 
 

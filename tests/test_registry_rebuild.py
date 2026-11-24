@@ -525,3 +525,28 @@ def test_an_unreadable_registry_entry_is_named_to_its_subscribers(tmp_path: Path
     assert results["demo"].verdict == "skipped"
     assert results["vault"].verdict == "held"
     assert results["vault"].why.endswith("registry entries that can't be read: demo.yaml"), results["vault"].why
+
+
+def test_mintds_own_failure_is_marked_and_fails_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A type, key or attribute error out of check is more likely mintd's bug
+    than the product's fault: one bad release would hold every product. The
+    hold says so, and the run exits 1.
+
+    Mutations: don't mark it -> `mintd_error` is false; leave it out of the
+    exit code -> exit 0."""
+    import mintd.check
+
+    def broken(*_: Any, **__: Any) -> Any:
+        raise TypeError("a bug")
+
+    monkeypatch.setattr(mintd.check, "check_project", broken)
+    _good_and(tmp_path, {})
+
+    rc = cli.main(["--json", "registry", "rebuild", "--registry", str(tmp_path / "registry")])
+
+    rows = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert [(r["verdict"], r["mintd_error"]) for r in rows] == [("held", True), ("held", True)]
+    assert rows[0]["why"] == "mintd's error: check failed on this product (TypeError); tell mintd's maintainers"

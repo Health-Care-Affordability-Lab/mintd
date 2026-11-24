@@ -587,7 +587,10 @@ class Rebuilt:
     records why in ``source.held``), "unreachable" (the repository couldn't be
     read, so the entry is untouched), or "skipped" (the entry itself can't be
     read or names no repository). ``reports`` are differences and leaks the
-    registry should know of; none changes the entry."""
+    registry should know of; none changes the entry. ``mintd_error``: the
+    entry is held because mintd itself failed on the product (a type, key or
+    attribute error out of `check_project`), which is more likely mintd's bug
+    than the product's fault."""
 
     name: str
     entry: str
@@ -596,6 +599,7 @@ class Rebuilt:
     why: str | None = None
     changes: tuple[FieldChange, ...] = ()
     reports: tuple[str, ...] = ()
+    mintd_error: bool = False
 
 
 def rebuild_catalog(registry: Path, *, git_ops: "RegistryGitOps", write: bool) -> list[Rebuilt]:
@@ -663,7 +667,7 @@ def _rebuild_entry(
             return Rebuilt(name, rel, "unreachable", why=f"can't read the repository: {strip_userinfo(last[0])}")
         except (WallTimeoutExceeded, OSError) as exc:
             return Rebuilt(name, rel, "unreachable", why=f"can't read the repository ({type(exc).__name__})")
-        why, meta = _refusal(product, catalog, unreadable)
+        why, meta, mintd_error = _refusal(product, catalog, unreadable)
     reports = _reports(entry, meta) if meta is not None else ()
     new = copy.deepcopy(entry)
     source = dict(new.get("source") or {})
@@ -679,21 +683,24 @@ def _rebuild_entry(
         source["commit"] = sha
     new["source"] = source
     if new == entry:
-        return Rebuilt(name, rel, "held" if why else "unchanged", commit=sha, why=why, reports=reports)
+        return Rebuilt(name, rel, "held" if why else "unchanged", commit=sha, why=why, reports=reports,
+                       mintd_error=mintd_error)
     if write:
         from ._atomic import _atomic_write_text
 
         _atomic_write_text(path, dump(new))
     changes = tuple(_dict_diff(entry, new))
-    return Rebuilt(name, rel, "held" if why else "updated", commit=sha, why=why, changes=changes, reports=reports)
+    return Rebuilt(name, rel, "held" if why else "updated", commit=sha, why=why, changes=changes, reports=reports,
+                   mintd_error=mintd_error)
 
 
 def _refusal(
     product: Path, catalog: "CatalogClient", unreadable: tuple[str, ...] = (),
-) -> tuple[str | None, "Metadata | None"]:
-    """Why a product can't update its entry, or None, and its metadata when it
-    could be read. Each reason is one line and quotes none of the product's
-    values: it goes into a commit status and the registry's issue."""
+) -> tuple[str | None, "Metadata | None", bool]:
+    """Why a product can't update its entry, or None; its metadata when it
+    could be read; and whether the reason is mintd's own failure. Each reason
+    is one line and quotes none of the product's values: it goes into a
+    commit status and the registry's issue."""
     import yaml
     from pydantic import ValidationError
 
@@ -702,32 +709,38 @@ def _refusal(
 
     file = product / "metadata.json"
     if file.is_symlink():
-        return "metadata.json is a link, which a rebuild doesn't follow", None
+        return "metadata.json is a link, which a rebuild doesn't follow", None, False
     if not file.is_file():
-        return "the repository has no metadata.json", None
+        return "the repository has no metadata.json", None, False
     try:
         meta = Metadata.from_json_file(file)
     except ValidationError as exc:
-        return f"metadata.json doesn't validate ({exc.error_count()} error(s)); run mintd check in its repository", None
+        why = f"metadata.json doesn't validate ({exc.error_count()} error(s)); run mintd check in its repository"
+        return why, None, False
     except (OSError, ValueError):
-        return "metadata.json can't be read", None
+        return "metadata.json can't be read", None, False
     paths = [o.path for o in meta.data_products.outputs]
     if meta.data_products.primary is not None:
         paths.append(meta.data_products.primary)
     if not all(_output_path_ok(p) for p in paths):
-        return "an output path is empty, starts with '/' or '-', or holds a drive, '..', a backslash or a NUL", meta
+        return "an output path is empty, starts with '/' or '-', or holds a drive, '..', a backslash or a NUL", meta, False
     try:
         findings = check_project(product, upgrades=False, client=catalog)
-    except (OSError, ValueError, TypeError, LookupError, AttributeError, yaml.YAMLError, MintdError) as exc:
-        return f"mintd check can't read the product ({type(exc).__name__}); run mintd check in its repository", meta
+    except (TypeError, AttributeError, LookupError) as exc:
+        # More likely mintd's bug than the product's fault: one bad release would
+        # hold every product, so the run says so and fails.
+        why = f"mintd's error: check failed on this product ({type(exc).__name__}); tell mintd's maintainers"
+        return why, meta, True
+    except (OSError, ValueError, yaml.YAMLError, MintdError) as exc:
+        return f"mintd check can't read the product ({type(exc).__name__}); run mintd check in its repository", meta, False
     errors = [f for f in findings if f.severity == "error"]
     if not errors:
-        return None, meta
+        return None, meta, False
     kinds = sorted({str(f.kind) for f in errors})
     why = f"mintd check reports {len(errors)} error(s) ({', '.join(kinds)}); run mintd check in its repository"
     if "catalog_unresolved" in kinds and unreadable:
         why += f"; registry entries that can't be read: {', '.join(unreadable)}"
-    return why, meta
+    return why, meta, False
 
 
 def _output_path_ok(path: str) -> bool:
