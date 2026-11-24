@@ -57,7 +57,8 @@ from ._fast_sync_ops import (
     stage_wdir,
     wdir_map,
 )
-from ._registry_git_ops import GitOpError
+from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._s3 import create_client as _create_s3_client  # the S3 boundary: tests stand a client in here
 from .errors import unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
@@ -137,6 +138,15 @@ class CheckFinding:
         "data_products_output_unpinned",
         "data_products_output_missing_from_manifest",
         "dvc_state_unreadable",
+        "dvc_lock_dep_unhashed",
+        "remote_pin_missing",
+        "remote_pin_wrong_bytes",
+        "remote_pin_unpinned",
+        "remote_unchecked",
+        "remote_unreadable",
+        "remote_not_checked",
+        "staged_drops_version_ids",
+        "staged_unchecked",
         "dvc_folder_unlisted",
         "repository_github_url_missing",
     ] | None = None
@@ -154,6 +164,10 @@ def check_project(
     upgrades: bool = False,
     producer_view_factory: ProducerViewFactory | None = None,
     fetcher: Fetcher | None = None,
+    remote: bool = False,
+    all_outs: bool = False,
+    git_ops: RegistryGitOps | None = None,
+    aws_profile: str | None = None,
 ) -> list[CheckFinding]:
     """Validate a mintd project at `path` (the project directory).
 
@@ -169,8 +183,14 @@ def check_project(
 
     Consumer section: the project's imports; `upgrades=True` also resolves each producer at its pin and at HEAD and
     reports drift. When enclave_manifest.yaml exists, a manifest `enclave package` cannot load is 1 error finding.
+
+    `remote=True` also asks S3 whether every pinned file version the
+    working tree and HEAD record is there (`_check_remote`): the declared
+    outputs' publishable outs, or all of them with `all_outs`.
     """
     findings = _producer_findings(path)
+    if remote:
+        findings.extend(_check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile))
     try:
         findings.extend(
             _consumer_findings(
@@ -349,6 +369,7 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                 for rel, why in unreadable
             )
             if not unreadable:
+                findings.extend(_unhashed_lock_deps(project_path))
                 # A folder pointer's list read against the folder on disk:
                 # the only reference that shows a list cut at an entry, or
                 # recorded before files were added. Publish refuses it too.
@@ -449,6 +470,386 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
             )
         )
     return findings
+
+
+def _unhashed_lock_deps(project_path: Path) -> list[CheckFinding]:
+    """A root ``dvc.lock`` stage dep recorded with ``hash`` but no
+    fingerprint at all (no md5, file list, etag, checksum or version ID): a
+    re-dump wrote it without the dep's tree (a directory dep whose tree
+    wasn't in the local cache). An out-of-repo dep records its remote's
+    checksum (``etag`` on S3) instead of an md5, which is fine. The outputs
+    still deliver; only the dep's fingerprint is lost, so DVC can't tell
+    when to rerun."""
+    from ruamel.yaml import YAMLError
+
+    lock = project_path / "dvc.lock"
+    if not lock.is_file() or not (project_path / "dvc.yaml").is_file():
+        return []
+    try:
+        doc = load12(lock.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, YAMLError):  # unreadable: the screen above names it
+        return []
+    stages = doc.get("stages") if isinstance(doc, dict) else None
+    findings = []
+    for stage, entry in (stages or {}).items():
+        for dep in (entry.get("deps") or []) if isinstance(entry, dict) else []:
+            if (isinstance(dep, dict) and dep.get("hash") and "files" not in dep
+                    and not any(dep.get(k) for k in ("md5", "etag", "checksum", "version_id"))):
+                findings.append(CheckFinding(
+                    severity="warning", section="producer", source=lock, kind="dvc_lock_dep_unhashed",
+                    message=f"dvc.lock stage {stage} records its dep {dep.get('path')} with no hash: the lock was "
+                            "re-dumped without the dep's tree",
+                    hint=f"run dvc commit {stage}, or dvc repro {stage}",
+                ))
+    return findings
+
+
+_RemoteKind = Literal["remote_pin_missing", "remote_pin_wrong_bytes", "remote_pin_unpinned", "remote_unchecked"]
+
+_REMOTE_VERDICTS: dict[str, tuple[Literal["error", "warning"], _RemoteKind, str]] = {
+    "missing": ("error", "remote_pin_missing", "its recorded S3 version isn't at its key"),
+    "wrong_bytes": ("error", "remote_pin_wrong_bytes", "its recorded S3 version holds other bytes"),
+    "unpinned": ("error", "remote_pin_unpinned", "versioning is suspended, so its recorded version is null"),
+    "inconclusive": ("error", "remote_unchecked", "S3 gave no clear answer for its recorded version"),
+    "unproven": ("warning", "remote_unchecked", "its multipart upload can't be proven without the file in the cache"),
+    "size_only": ("warning", "remote_unchecked", "its multipart upload matches by size only"),
+    # only where the offline unpinned finding doesn't report it (_check_remote), never twice
+    "no_id": ("error", "remote_pin_unpinned", "it records no S3 version ID, so importers can't fetch it"),
+}
+
+def _declared_outputs(project_path: Path) -> list[str]:
+    """The declared output paths, primary first, normalized; none when the
+    metadata can't be read (the producer findings say why)."""
+    try:
+        meta = Metadata.from_json_file(project_path / "metadata.json")
+    except Exception:
+        return []
+    paths = [meta.data_products.primary, *(o.path for o in meta.data_products.outputs)]
+    return [n for p in paths if p and (n := normalize_target(p))]
+
+
+def _check_remote(
+    project_path: Path, *, all_outs: bool, git_ops: RegistryGitOps | None, aws_profile: str | None = None,
+) -> list[CheckFinding]:
+    """``check --remote``: is every pinned file version the working tree and
+    HEAD record actually on S3? Read-only: one HEAD and a content proof per
+    distinct pin (``prove_pins``, with no memo, so nothing remembered can
+    hide a deletion), on the default remote, as the identity DVC pushes
+    with (``pinned_remote``, push's own test). A version S3 gives no clear
+    answer for is unproven, so an error. HEAD covers every ``.dvc`` file it
+    tracks, deleted from the working tree or not, and no ``.gitignore``
+    hides one: git never ignores a tracked file. An entry with no version ID
+    is left to the offline check's unpinned finding where that covers it, a
+    declared out in the working tree. At HEAD, which nothing offline reads,
+    it is an error where the working tree's copy of the file has its ID
+    (``dvc commit -f`` committed, the working tree since re-pinned), and so
+    is a HEAD pointer that can't be read; under ``--all``, so is an
+    undeclared out's. Only the root ``dvc.lock`` is read, as push
+    verification does: a nested one is named. Git is read relative to the
+    project, so a project below its repository's root reads the same; a git
+    failure raises rather than skip HEAD."""
+    import posixpath
+    import tempfile
+
+    from ._atomic import write_tree
+    from ._dvc_state import dvc_cache_dir
+    from ._pin_proof import CacheHashes, prove_pins, publishable_scope
+    from ._push_verify import (
+        PushRefused,
+        in_subrepo,
+        merged_default_remote,
+        pinned_remote,
+        pushed_dvc_files,
+        pushed_lockfiles,
+    )
+    from ._registry_git_ops import SubprocessRegistryGitOps
+    from ._s3 import S3AccessDenied, resolve_profile
+    from .errors import MintdError
+
+    name = merged_default_remote(project_path)
+    pointers = pushed_dvc_files(project_path)
+    try:
+        remote = pinned_remote(project_path, name, project_path, pointers) if name else None
+    except PushRefused as exc:  # push refuses it too
+        return [CheckFinding(severity="error", section="producer", kind="remote_unreadable",
+                             message=str(exc), hint=exc.hint)]
+    if remote is None:
+        return [CheckFinding(
+            severity="info", section="producer", kind="remote_not_checked",
+            message="the default remote isn't a version-aware S3 remote, so nothing is pinned by version to check",
+        )]
+    git = git_ops or SubprocessRegistryGitOps()
+    declared_outs = _declared_outputs(project_path)
+    cache = CacheHashes(dvc_cache_dir(project_path))
+    findings: list[CheckFinding] = []
+    trees: dict[str, list] = {}
+    bare: dict[str, list] = {}  # folder outs recorded as a bare tree hash, with no files and no IDs
+    nested = {lock for lock in pushed_lockfiles(project_path) if lock != "dvc.lock"}
+
+    def declared(out: str) -> bool:
+        return any(path_covers(d, out) or path_covers(out, d) for d in declared_outs)
+
+    def in_scope(out: str) -> bool:
+        return all_outs or declared(out)
+
+    with tempfile.TemporaryDirectory(prefix="mintd-check-head-") as tmp:
+        roots = [("in the working tree", project_path, pointers)]
+        if git.has_commit(project_path):  # none yet: only the working tree has pointers
+            tracked = set(git.head_files(project_path))
+            ours = sorted(f for f in tracked if not in_subrepo(project_path, f))
+            head_pointers = [f for f in ours if f.endswith(".dvc")]
+            nested |= {f for f in ours if f.endswith("/dvc.lock") and f"{posixpath.dirname(f)}/dvc.yaml" in tracked}
+            head = Path(tmp)
+            texts = {rel: git.head_text(project_path, f"./{rel}") for rel in [*head_pointers, "dvc.lock", "dvc.yaml"]}
+            write_tree(head, {rel: text for rel, text in texts.items() if text is not None})
+            roots.append(("at HEAD", head, head_pointers))
+        for where, root, listed in roots:
+            if where == "at HEAD":  # the working tree's are the offline screen's
+                findings.extend(_unreadable_at(root, listed, "at HEAD", project_path))
+            scope = publishable_scope(root, remote=remote.name, prefix=remote.prefix, cache_dir=cache.cache_dir,
+                                      dvc_files=listed)
+            trees[where] = [e for e in scope.entries if in_scope(e.out)]
+            bare[where] = [o for o in scope.unrecoverable if in_scope(o.path)]
+    if nested:
+        findings.append(CheckFinding(
+            severity="warning", section="producer", kind="remote_unchecked",
+            message=f"only the root dvc.lock is read, so the pins in {abbreviate(sorted(nested))} aren't checked",
+        ))
+    # One proof per distinct pin and recorded file: the trees can name the
+    # same version with different bytes, and each is judged by its own md5.
+    # A pin with no verdict is unproven, never "ok".
+    verdicts: dict[tuple[str, str | None, str], str] = {}
+    try:
+        s3 = None
+        for entries in trees.values():
+            todo = {(e.key, e.version_id, e.md5): e for e in entries
+                    if e.version_id and (e.key, e.version_id, e.md5) not in verdicts}
+            if todo:
+                s3 = s3 or _create_s3_client(remote.cfg, aws_profile, pool=16)
+                got = prove_pins(s3, remote.bucket, list(todo.values()), cache, None)
+                verdicts.update({pin: got.get((e.key, e.version_id), "inconclusive") for pin, e in todo.items()})
+    except (S3AccessDenied, MintdError) as exc:  # access denied, no credentials, a profile that isn't there
+        profile = resolve_profile(remote.cfg, aws_profile)[0]
+        return [*findings, CheckFinding(
+            severity="error", section="producer", kind="remote_unreadable",
+            message=f"can't check the remote {remote.name} as "
+                    f"{'the default AWS credentials' if profile is None else f'profile {profile!r}'}: {exc}",
+            hint=getattr(exc, "hint", None) or "check the AWS profile DVC uses for this remote",
+        )]
+    failing: dict[tuple[str, str, str], set[str]] = {}  # (verdict, pointer, path) -> trees
+    pinned_here = {e.path for e in trees["in the working tree"] if e.version_id}  # files, by S3 key
+    for where, entries in trees.items():
+        for e in entries:
+            if e.version_id:
+                verdict = verdicts.get((e.key, e.version_id, e.md5), "inconclusive")
+            else:  # see the docstring: where nothing offline reports it
+                lost = where == "at HEAD" and e.path in pinned_here
+                verdict = "no_id" if lost or not declared(e.out) else "ok"
+            if verdict in _REMOTE_VERDICTS:
+                failing.setdefault((verdict, e.pointer, e.path), set()).add(where)
+    for where, outs in bare.items():
+        for o in outs:
+            lost = where == "at HEAD" and any(path_covers(o.path, p) for p in pinned_here)
+            if lost or not declared(o.path):
+                failing.setdefault(("no_id", o.pointer, o.path), set()).add(where)
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    for (verdict, pointer, path), wheres in failing.items():
+        label = " and ".join(sorted(wheres, key=["in the working tree", "at HEAD"].index))
+        groups.setdefault((verdict, pointer, label), []).append(path)
+    for (verdict, pointer, label), paths in sorted(groups.items()):
+        severity, kind, why = _REMOTE_VERDICTS[verdict]
+        findings.append(CheckFinding(
+            severity=severity, section="producer", kind=kind,
+            source=project_path / pointer,
+            message=f"{pointer} {label}: {len(paths)} file(s) where {why}: {abbreviate(sorted(paths))}",
+            hint=("check the network and the AWS profile, then run it again" if verdict == "inconclusive"
+                  else _remote_hint(project_path, pointer, label, severity)),
+        ))
+    return findings
+
+
+def _unreadable_at(root: Path, pointers: list[str], where: str, project_path: Path) -> list[CheckFinding]:
+    """The offline screen (``_unreadable_dvc_files``) over a scratch copy of
+    HEAD's or the index's pointers: a file dvc would refuse there (conflict
+    markers, a pointer cut short) is an error, not "no outs"."""
+    return [CheckFinding(
+        severity="error", section="producer", kind="dvc_state_unreadable", source=project_path / rel,
+        message=f"could not read {rel} {where}: {why}",
+        hint="fix the file by hand (a merge may have left conflict markers), then commit it",
+    ) for rel, why in _unreadable_dvc_files(root, pointers)]
+
+
+def _remote_hint(project_path: Path, pointer: str, label: str, severity: str) -> str:
+    """At HEAD only, the working tree is right and importers read the pushed
+    commit; a pointer gone from the working tree, or one ``.gitignore``
+    excludes, is no longer push's."""
+    from ._fast_sync_ops import gitignored_pointers
+
+    if label != "at HEAD" or severity != "error":
+        return "mintd data push re-attaches or re-uploads them"
+    if not (project_path / pointer).is_file():
+        return f"{pointer} is gone from the working tree: commit its removal, or restore it and run mintd data push"
+    if pointer in gitignored_pointers(project_path):  # push skips it: DVC never collects an ignored .dvc file
+        return f"{pointer} is excluded by .gitignore, so push skips it: stop ignoring it and run mintd data push, or git rm it"
+    return "mintd data push re-attaches or re-uploads them; importers read your pushed commit, so push the pointers again"
+
+
+def _raw_out_md5(root: Path, pointer: str, stage: str | None, index: int) -> str:
+    """The ``md5`` a pointer under ``root`` records for one out."""
+    doc = load12((root / pointer).read_text(encoding="utf-8"))
+    outs = doc["stages"][stage]["outs"] if stage is not None else doc["outs"]
+    return str(outs[index].get("md5") or "")
+
+
+def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> list[CheckFinding]:
+    """``check --staged``: does the commit about to be made drop S3 version
+    IDs from files whose bytes it doesn't change (``dvc commit -f <stage>``
+    does)? Offline: the staged ``.dvc`` files and root ``dvc.lock`` against
+    HEAD's copies of every pointer the commit changes, deleted ones
+    included, and HEAD's root ``dvc.lock`` whenever a pointer changes, each
+    tree read with its own ``dvc.yaml`` through ``publishable_scope``, the
+    parsing push uses. A file is matched by its S3 identity, its path, so a
+    pointer or stage renamed, or an out moved between a ``.dvc`` file and a
+    stage, still compares; its ID is dropped only when no staged entry for
+    the same bytes at that key still records one. A folder out
+    ``dvc commit -f`` rewrote as a bare ``.dir`` md5 is compared by its tree
+    when that tree isn't in the local cache. A changed md5, added IDs, a
+    removed out or pointer, a new file and the repository's first commit
+    pass, and so do this project's readable pointers on a remote push pins
+    nothing on. HEAD's copies are screened too: one dvc couldn't read is
+    named when the commit records a file with no ID. Staged pointers it can't read here
+    are named: another DVC project's (whatever this project's remote), an
+    error, and a nested ``dvc.lock``, changed or deleted, a warning. Git is read
+    relative to the project, so a project below its repository's root reads
+    the same; a git failure raises rather than pass.
+
+    ``project_path`` need not be the project's root: the project is found as
+    dvc finds it, at the nearest folder up from the path that holds
+    ``.dvc/``, never past the repository's top level (found as git finds it,
+    by its ``.git``). With no DVC project there (an enclave repo), only a
+    commit that stages pointers needs one, and it is refused, naming them."""
+    import tempfile
+
+    from ._atomic import write_tree
+    from ._dvc_state import dvc_cache_dir
+    from ._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from ._pin_proof import publishable_scope
+    from ._push_verify import PushRefused, in_subrepo, merged_default_remote, pinned_remote
+    from ._registry_git_ops import SubprocessRegistryGitOps
+
+    hint = "run mintd check --staged in the DVC project's folder, or pass it as the path"
+
+    def unchecked(why: str, hint: str | None = hint) -> list[CheckFinding]:
+        return [CheckFinding(
+            severity="error", section="producer", kind="staged_unchecked",
+            message=f"can't check the staged commit: {why}", hint=hint,
+        )]
+
+    def is_pointer(rel: str) -> bool:
+        return rel.endswith(".dvc") or rel.rsplit("/", 1)[-1] == "dvc.lock"
+
+    git = git_ops or SubprocessRegistryGitOps()
+    path = Path(project_path).resolve()
+    if not path.is_dir():  # before any git call, which would blame git for the wrong folder
+        return unchecked(f"{project_path} isn't a folder")
+    # By hand, not `git rev-parse`: it runs before any git call, so a wrong folder is named, not blamed on git.
+    top = next((d for d in (path, *path.parents) if (d / ".git").exists()), None)  # a worktree's .git is a file
+    if top is None:
+        return unchecked(f"{project_path} isn't in a git repository")
+    project = next((d for d in (path, *path.parents) if d.is_relative_to(top) and (d / ".dvc").is_dir()), None)
+    if project is None:
+        pointers = sorted(p for status, p in git.staged_changes(top) if status != "D" and is_pointer(p))
+        if not pointers:
+            return []  # no DVC project and no pointer staged: nothing to check
+        return unchecked(f"{project_path} isn't in a DVC project, and the commit stages DVC pointers "
+                         f"({abbreviate(pointers)})")
+    project_path = project
+    # Raises when git can't read the repository. A deleted pointer drops no
+    # ID itself, but HEAD's copy is read: its IDs may have moved.
+    changes = [(status, rel) for status, rel in git.staged_changes(project_path) if is_pointer(rel)]
+    if not changes or not git.has_commit(project_path):
+        return []  # no pointer staged, or the first commit: nothing to drop
+    # Another DVC project's pointers are named whatever this project's remote
+    # is: they are pinned on that project's own.
+    other = sorted(rel for status, rel in changes if status != "D" and in_subrepo(project_path, rel))
+    findings = unchecked(f"the commit stages pointers in another DVC project ({abbreviate(other)})") if other else []
+    name = merged_default_remote(project_path)
+    if name is None:
+        return findings  # no remote to pin to
+    ours = [(status, rel) for status, rel in changes if not in_subrepo(project_path, rel)]
+    changed = [rel for status, rel in ours if rel.endswith(".dvc") or rel == "dvc.lock"]
+    staged = [rel for status, rel in ours if status != "D" and (rel.endswith(".dvc") or rel == "dvc.lock")]
+    dvc_files = [rel for rel in staged if rel.endswith(".dvc")]
+    with tempfile.TemporaryDirectory(prefix="mintd-check-staged-") as tmp:
+        roots = {"staged": Path(tmp) / "staged", "head": Path(tmp) / "head"}
+        read = {"staged": lambda rel: git.index_text(project_path, rel),
+                "head": lambda rel: git.head_text(project_path, f"./{rel}")}
+        # HEAD's root lock whenever a pointer changes: an out can move from an
+        # unchanged lock into a changed .dvc file.
+        head_rels = changed if "dvc.lock" in changed else [*changed, "dvc.lock"]
+        for which, rels in (("staged", staged), ("head", head_rels)):
+            texts = {rel: read[which](rel) for rel in rels}
+            # Each tree's own dvc.yaml, for its lock's wdirs and stages. HEAD's
+            # matters only beside a lock HEAD has: screened without one, a
+            # broken dvc.yaml the commit fixes would refuse it for nothing.
+            if which == "staged" or texts.get("dvc.lock") is not None:
+                texts["dvc.yaml"] = read[which]("dvc.yaml")
+            write_tree(roots[which], {rel: text for rel, text in texts.items() if text is not None})
+        unreadable = _unreadable_at(roots["staged"], dvc_files, "in the staged commit", project_path)
+        if unreadable:  # read as "no outs", a damaged pointer would look like one dropped on purpose
+            return [*findings, *unreadable]
+        try:
+            if pinned_remote(project_path, name, roots["staged"], dvc_files) is None:
+                return findings  # not version-aware: nothing is pinned by version, so nothing to drop
+        except PushRefused as exc:  # push refuses it too
+            return [*findings, *unchecked(str(exc), hint=exc.hint)]
+        # A nested lock's pins, kept, changed or moved out of it by a deletion,
+        # aren't compared. Re-running a nested pipeline is everyday work, so
+        # the lock is named, not refused.
+        nested = sorted(rel for status, rel in ours if rel.endswith("/dvc.lock"))
+        if nested:
+            findings.append(CheckFinding(
+                severity="warning", section="producer", kind="staged_unchecked",
+                message=f"only the root dvc.lock is read, so the pins in {abbreviate(nested)} aren't checked",
+            ))
+        scopes = {which: publishable_scope(root, remote=name, prefix="", cache_dir=dvc_cache_dir(project_path),
+                                           dvc_files=[p for p in (changed if which == "head" else dvc_files)
+                                                      if p.endswith(".dvc")])
+                  for which, root in roots.items()}
+        bare = {(o.pointer, o.path): _raw_out_md5(roots["staged"], o.pointer, o.stage, o.index)
+                for o in scopes["staged"].unrecoverable}
+        # HEAD's copy read as "no outs" would hide every ID it records. That
+        # matters only when the staged commit records a file with no ID.
+        could_drop = bool(bare) or any(not e.version_id for e in scopes["staged"].entries)
+        head_unreadable = _unreadable_dvc_files(  # a new pointer has no HEAD copy
+            roots["head"], [p for p in changed if p.endswith(".dvc") and (roots["head"] / p).is_file()])
+        if could_drop and head_unreadable:
+            return [*findings, *(f for rel, why in head_unreadable for f in unchecked(
+                f"HEAD's {rel} can't be read ({why}), so the IDs it records can't be compared",
+                hint="run mintd data push, which records the IDs, then commit"))]
+    # A file's ID is dropped when HEAD records one for its bytes and no staged
+    # entry for those bytes at that key still does (two pointers can record one key).
+    pinned = {(e.path, e.md5) for e in scopes["head"].entries if e.version_id}  # HEAD's, by S3 identity
+    kept = {(e.path, e.md5) for e in scopes["staged"].entries if e.version_id}
+    dropped: dict[str, list[str]] = {}
+    for e in scopes["staged"].entries:
+        if not e.version_id and (e.path, e.md5) in pinned - kept:
+            dropped.setdefault(e.pointer, []).append(e.path)
+    # A staged folder out recorded as a bare .dir md5 whose tree isn't cached
+    # (dvc commit -f's shape): the same tree as HEAD's file list means the
+    # same files, and every ID HEAD recorded for them is gone.
+    for (pointer, out), md5 in bare.items():
+        # once per file: two of HEAD's pointers can record the same folder
+        files = list({(e.relpath, e.md5): e for e in scopes["head"].entries if e.out == out}.values())
+        tree = dir_manifest_md5([DvcFileEntry(md5=e.md5, relpath=e.relpath or "", size=e.size or 0) for e in files])
+        lost = [e.path for e in files if e.version_id and (e.path, e.md5) not in kept]
+        if files and md5 == tree and lost:
+            dropped.setdefault(pointer, []).extend(lost)
+    return [*findings, *(CheckFinding(
+        severity="error", section="producer", kind="staged_drops_version_ids", source=project_path / pointer,
+        message=f"{pointer} drops S3 version IDs from {len(paths)} unchanged file(s) ({abbreviate(sorted(paths))})",
+        hint="run mintd data push, which puts them back, then commit",
+    ) for pointer, paths in sorted(dropped.items()))]
 
 
 def _check_data_products_delivery(
@@ -572,6 +973,8 @@ def _unreadable_dvc_files(project_path: Path, pointers: list[str]) -> list[tuple
     choosing a fallback route and wrong for a gate that would then call the
     file's out untracked -- or, for the consumer walk, traceback.
 
+    Each file is parsed as dvc parses it (``load12``: ruamel, YAML 1.2), so
+    a duplicated key, which PyYAML takes and dvc refuses, is named too.
     Shape is checked only as far as the parsers assume it: dvc.yaml lists
     outs as strings or ``{path: options}`` mappings (under ``do:`` for a
     foreach stage); dvc.lock and pointers list outs as mappings.
@@ -580,7 +983,7 @@ def _unreadable_dvc_files(project_path: Path, pointers: list[str]) -> list[tuple
 
     def load(rel: str) -> tuple[bool, object]:
         try:
-            return True, yaml.safe_load((project_path / rel).read_text(encoding="utf-8"))
+            return True, load12((project_path / rel).read_text(encoding="utf-8"))
         except UnicodeDecodeError:
             bad.append((rel, "not UTF-8 text (dvc writes UTF-8)"))
             return False, None
