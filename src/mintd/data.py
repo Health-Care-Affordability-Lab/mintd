@@ -244,16 +244,10 @@ def import_product(
     # Where the OS reaches it, once, here: a `..` after a folder that is
     # missing or a link (`--dest-root foo/..`) otherwise reaches the index,
     # the refusals and the note unresolved, where `foo/..` reads as nothing.
-    # The checks and dvc use this; what is returned keeps the caller's own
-    # spelling of `dest_root` (relative for the default), as `--json` prints it.
+    # Every path the import returns or prints is this one too, named by
+    # `_where`: relative to `cwd` inside it (`data/imports/...` for the
+    # default), absolute outside it.
     nested_root = _physical(dest_root) / namespace
-    given_root = dest_root / namespace
-
-    def as_given(q: Path) -> Path:
-        try:
-            return given_root / q.relative_to(nested_root)
-        except ValueError:  # not under the import root: nothing to respell
-            return q
 
     # Status feedback (slice 38a). Multi-output imports relabel the spinner
     # per output. We use the spinner (not the determinate progress bar)
@@ -385,7 +379,7 @@ def import_product(
                                             f".gitignore in {dest.parent}: {git_exc.stderr.strip()}"
                                         )
                             raise
-                    produced.append(as_given(written))
+                    produced.append(Path(_where(written, cwd)))
                     new_dest, created_dirs = None, []
     except BaseException as exc:
         # The failing output's empty folders, after its own rollback above.
@@ -1071,7 +1065,7 @@ def _import_destination(
     # died on `AmbiguousImport`. Same lookup `--bump` uses.
     existing = index.get(p.rstrip("/"))
     if existing is not None:
-        _require_owner(existing, repo_url, name=name)
+        _require_owner(existing, repo_url, name=name, cwd=cwd)
         if not force:
             raise ImportDestinationExists(
                 f"{_shown(existing, cwd)} already imports {p!r} of {name!r}; "
@@ -1550,7 +1544,7 @@ def _namespace_by_scan(imports_root: Path, name: str) -> str:
     return matches[0] if matches else name
 
 
-def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
+def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str, cwd: Path) -> None:
     """Refuse a pointer found under this product's namespace that records a
     DIFFERENT producer.
 
@@ -1570,7 +1564,7 @@ def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
     owner = DataDependency.from_dvc_file(dvc_path).producer_repo
     if owner != repo_url:
         raise UnknownProductPath(
-            f"{_shown(dvc_path, Path('.'))} imports {owner}, not {repo_url}; refusing to "
+            f"{_shown(dvc_path, cwd)} imports {owner}, not {repo_url}; refusing to "
             f"overwrite another product's import as {name!r} — if that "
             f"producer's repo moved, delete the file and re-import"
         )
@@ -1630,7 +1624,7 @@ def _resolve_import_source(
         )
     # The bump arm has no containment check, so this is its only guard
     # against acting on another product's pointer.
-    _require_owner(resolved, owner, name=name)
+    _require_owner(resolved, owner, name=name, cwd=project_path)
     return resolved
 
 
