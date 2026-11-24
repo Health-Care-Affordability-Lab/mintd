@@ -16,8 +16,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mintd._dvc_state import dvc_cache_dir, unlisted_on_disk
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import dvc_cache_dir, DvcFileEntry
+from mintd._pin_proof import unlisted_on_disk
+from mintd._fast_sync_ops import ensure_dir_manifest
 from mintd.check import check_project
 from tests._dvc_fixtures import REMOTE, stage_dvc_project
 from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)

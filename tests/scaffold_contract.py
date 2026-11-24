@@ -38,7 +38,7 @@ import posixpath
 # The production helper, not a copy: `check._pointer_md5` resolves the
 # same wdir-relative lock paths for a REMOTE rev, and the two must agree or a
 # scaffold this file blesses is one the drift comparator cannot read.
-from mintd._fast_sync_ops import resolve_out as _resolve_out
+from mintd._dvc_state import resolve_out as _resolve_out
 import re
 import subprocess
 from pathlib import Path

@@ -27,14 +27,16 @@ from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
-from ._dvc_state import delivery, outs_matching, path_covers
-from ._fast_sync_ops import FastSyncOps, normalize_target
+from ._dvc_state import (
+    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+)
+from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
-from .data_ops import _default_dvc_remote, data_pull
+from .data_ops import data_pull
 from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
@@ -745,7 +747,7 @@ def _resolve_targets_in_clone(
     Raises `UnknownProductPath` for a path that reaches no out, naming what
     the clone really tracks; the caller removes the clone.
     """
-    remote_name = _default_dvc_remote(dest) or "origin"
+    remote_name = default_remote_name(dest) or ""  # outs match by path; data_pull refuses where a remote is needed
     resolved: set[str] = set()
     unverified: list[str] = []
     # Re-enumerates the clone once per selector (documented on
@@ -1009,9 +1011,8 @@ def clone_and_pull_product(
         resolved_rev = None
     remote_bucket: str | None = None
     try:
-        from ._fast_sync_ops import get_remote_config, parse_s3_url
-        remote_name = _default_dvc_remote(resolved_dest) or "origin"
-        url = get_remote_config(resolved_dest, remote_name).get("url", "")
+        from ._dvc_state import get_remote_config, parse_s3_url
+        url = get_remote_config(resolved_dest, require_default_remote(resolved_dest, local_ok=True)).get("url", "")
         remote_bucket, _ = parse_s3_url(url)
     except Exception:
         remote_bucket = None
