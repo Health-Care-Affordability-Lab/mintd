@@ -1071,18 +1071,166 @@ def test_registry_status_no_name_works_without_registry_url(
 # ---------------------------------------------------------------------------
 
 
-def test_python_m_mintd_version_smoke() -> None:
+@pytest.fixture
+def release_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A config whose cache already names the newest release, so a test of
+    `--version` never reaches github.com or writes the developer's cache."""
+    cfg, cache = tmp_path / "cfg", tmp_path / "cache"
+    cfg.mkdir()
+    cache.mkdir()
+    (cfg / "config.yaml").write_text(f"cache_dir: {cache}\n")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)  # the suite turns the lookup off
+    monkeypatch.delenv("CI", raising=False)
+
+    def seed(version: str) -> Path:
+        # Looked up today for the version mintd reports now (patchable per test).
+        (cache / "newest-release").write_text(f"{version}\n{cli.__version__}\n")
+        return cfg
+
+    return seed
+
+
+def test_version_prints_only_the_version_on_stdout_and_a_newer_release_on_stderr(
+    release_cache, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    monkeypatch.setattr(cli, "__version__", "1.0.0")  # a release, not this checkout's dev build
+    release_cache("999.0.0")
+    assert cli.main(["--version"]) == 0
+    out, err = capsys.readouterr()
+    assert out == "mintd 1.0.0\n"  # install.sh and scripts read this line
+    where = ", in PowerShell" if os.name == "nt" else ""
+    assert err == f"newest release: v999.0.0\n  update{where}: {cli._install_line()}\n"
+
+
+def test_a_dev_build_is_not_told_to_update(release_cache, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The newest release can be older than a dev build: the install line would downgrade it."""
+    monkeypatch.setattr(cli, "__version__", "1.0.1.dev3+g0123abc")
+    release_cache("1.0.0")
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr() == ("mintd 1.0.1.dev3+g0123abc\n", "newest release: v1.0.0\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="closes stderr with a POSIX shell")
+def test_with_stderr_closed_stdout_is_still_one_line(release_cache) -> None:
+    """With no stderr, rich would fall back to stdout, which scripts read."""
+    from importlib.metadata import version as pkg_version
+
+    release_cache("999.0.0")
+    result = subprocess.run(
+        ["bash", "-c", '"$0" -m mintd --version 2>&-', sys.executable],
+        capture_output=True, text=True, timeout=15, env=dict(os.environ),
+    )
+    assert result.stdout == f"mintd {pkg_version('mintd')}\n"
+
+
+def test_bare_mintd_prints_help_and_the_notice_but_a_bare_group_does_not(release_cache, capsys) -> None:
+    release_cache("999.0.0")
+    assert cli.main([]) == 0
+    out, err = capsys.readouterr()
+    assert "usage: mintd" in out and "newest release: v999.0.0" in err
+    cli.main(["data"])
+    assert "newest release" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["--json"], ["--json", "--version"], ["-q", "--version"]])
+def test_no_notice_under_json_or_quiet(release_cache, capsys, argv: list[str]) -> None:
+    release_cache("999.0.0")
+    assert cli.main(argv) == 0
+    assert "newest release" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["--json", "--version"], ["-q", "--version"]])
+def test_no_lookup_under_json_or_quiet(release_cache, tmp_path: Path, argv: list[str]) -> None:
+    release_cache("999.0.0")
+    (tmp_path / "cache" / "newest-release").unlink()  # nothing cached: a lookup would write it
+    assert cli.main(argv) == 0
+    assert not (tmp_path / "cache" / "newest-release").exists()
+
+
+@pytest.mark.parametrize("argv", [["--version"], []])
+def test_version_and_bare_mintd_leave_no_log_handler(release_cache, argv: list[str]) -> None:
+    """A handler left on the mintd logger keeps writing to the stderr it captured."""
+    import logging
+
+    release_cache("999.0.0")
+    before = list(logging.getLogger("mintd").handlers)
+    cli.main(argv)
+    assert logging.getLogger("mintd").handlers == before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="chmod can't stop Windows entering a folder")
+def test_version_still_exits_0_when_the_cache_folder_cannot_be_reached(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A parent of the cache folder that can't be entered (a share the user
+    can't open): no notice, and never a crash, since install.sh runs --version
+    to check the install. Mutation: drop newest_release's OSError guard -> red."""
+    if os.geteuid() == 0:
+        pytest.skip("root enters a chmod 000 folder")
+    locked, cfg = tmp_path / "locked", tmp_path / "cfg"
+    locked.mkdir()
+    cfg.mkdir()
+    (cfg / "config.yaml").write_text(f"cache_dir: {locked / 'cache'}\n")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)  # the lookup on, as for a user
+    monkeypatch.delenv("CI", raising=False)
+    locked.chmod(0)
+    try:
+        assert cli.main(["--version"]) == 0
+    finally:
+        locked.chmod(0o700)
+    out = capsys.readouterr()
+    assert out.out == f"mintd {cli.__version__}\n" and "newest release" not in out.err
+
+
+def test_no_notice_on_the_newest_release(release_cache, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A checkout's own version is a dev build, never a release: pretend to be one.
+    monkeypatch.setattr(cli, "__version__", "1.2.3")
+    release_cache("1.2.3")
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr() == ("mintd 1.2.3\n", "")
+
+
+@pytest.mark.parametrize(
+    "config",
+    [b"bogus: 1\n", b"author: Jos\xe9\n", "author: x\n".encode("utf-16")],  # unknown key, Latin-1, UTF-16
+)
+def test_version_works_with_a_broken_config(release_cache, capsys, config: bytes) -> None:
+    from mintd import __version__
+
+    cfg = release_cache("999.0.0")
+    (cfg / "config.yaml").write_bytes(config)
+    assert cli.main(["--version"]) == 0
+    out, err = capsys.readouterr()
+    assert (out, err) == (f"mintd {__version__}\n", "")
+
+
+def test_publishs_version_argument_is_not_the_version_flag() -> None:
+    """`--version` stores into `show_version`: publish's positional `version`
+    shares the namespace, and `mintd publish 1.2.3` must still publish."""
+    args = cli._build_parser().parse_args(["publish", "1.2.3"])
+    assert (args.version, args.show_version, args._handler) == ("1.2.3", False, cli._handle_publish)
+
+
+def test_python_m_mintd_version_smoke(release_cache) -> None:
     """End-to-end check that `python -m mintd --version` works via
     __main__.py and the installed package surface, and that the CLI
     derives its version from installed metadata (single source of truth)."""
+    import os
     from importlib.metadata import version as pkg_version
 
+    release_cache(pkg_version("mintd"))  # MINTD_CONFIG_DIR, so no lookup
     result = subprocess.run(
         [sys.executable, "-m", "mintd", "--version"],
         capture_output=True,
         text=True,
         timeout=15,
+        env=os.environ.copy(),
     )
+    assert result.stderr == ""
     assert result.returncode == 0
     out = result.stdout.strip()
     assert out.startswith("mintd ")

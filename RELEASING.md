@@ -90,6 +90,9 @@ gh release edit vBAD --prerelease   # the withdrawn one goes back to prerelease
 - Never roll back to a release without `install.sh` and `install.ps1`, such as one made before the
   install scripts shipped: the install line would then fail with "no mintd release is out yet".
 - In that order, so there is always an explicit latest release.
+- Users on vBAD are told when they next run `mintd --version` or bare `mintd`: "mintd X was
+  withdrawn or is not released yet", with the install line. Each install looks this up at most once
+  a day, so someone who already checked that day hears of the rollback up to a day later.
 - An emergency rollback skips the canary: vPREV already passed it.
 - When there is time, prefer a revert PR. It ships as the next patch, through the gate.
 - Nothing checks that older versions can read what a newer one wrote. Check whether vBAD wrote

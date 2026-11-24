@@ -193,6 +193,7 @@ def mintd(mintd_bin: Path, tmp_path: Path) -> Mintd:
         "DVC_SYSTEM_CONFIG_DIR": str(home / "dvc-system"),
         "DVC_SITE_CACHE_DIR": str(home / "dvc-site"),
         "DVC_NO_ANALYTICS": "1",
+        "MINTD_NO_UPDATE_CHECK": "1",  # no story asks github.com for the newest release
     }
     (home / "mintd").mkdir()
     return Mintd(mintd_bin, env, home / "mintd" / "config.yaml")
