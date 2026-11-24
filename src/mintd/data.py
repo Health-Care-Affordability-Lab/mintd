@@ -244,7 +244,16 @@ def import_product(
     # Where the OS reaches it, once, here: a `..` after a folder that is
     # missing or a link (`--dest-root foo/..`) otherwise reaches the index,
     # the refusals and the note unresolved, where `foo/..` reads as nothing.
+    # The checks and dvc use this; what is returned keeps the caller's own
+    # spelling of `dest_root` (relative for the default), as `--json` prints it.
     nested_root = _physical(dest_root) / namespace
+    given_root = dest_root / namespace
+
+    def as_given(q: Path) -> Path:
+        try:
+            return given_root / q.relative_to(nested_root)
+        except ValueError:  # not under the import root: nothing to respell
+            return q
 
     # Status feedback (slice 38a). Multi-output imports relabel the spinner
     # per output. We use the spinner (not the determinate progress bar)
@@ -376,7 +385,7 @@ def import_product(
                                             f".gitignore in {dest.parent}: {git_exc.stderr.strip()}"
                                         )
                             raise
-                    produced.append(written)
+                    produced.append(as_given(written))
                     new_dest, created_dirs = None, []
     except BaseException as exc:
         # The failing output's empty folders, after its own rollback above.
@@ -1049,8 +1058,8 @@ def _import_destination(
     # landing on ANOTHER product's `.dvc`.
     if not dest.resolve().is_relative_to(nested_root.resolve()):
         raise UnknownProductPath(
-            f"{name!r} resolves output {p!r} to {dest}, outside the "
-            f"import root {nested_root}; refusing to import or delete "
+            f"{name!r} resolves output {p!r} to {_shown(dest, cwd)}, outside the "
+            f"import root {_shown(nested_root, cwd)}; refusing to import or delete "
             f"outside it"
         )
     target_dvc = dest.parent / (dest.name + ".dvc")
@@ -1065,7 +1074,7 @@ def _import_destination(
         _require_owner(existing, repo_url, name=name)
         if not force:
             raise ImportDestinationExists(
-                f"{existing} already imports {p!r} of {name!r}; "
+                f"{_shown(existing, cwd)} already imports {p!r} of {name!r}; "
                 f"pass --force to re-import it, or remove that pointer and what it imported"
             )
         # Rewrite the pointer that exists rather than adding a sibling
@@ -1076,7 +1085,7 @@ def _import_destination(
         dest = existing.with_suffix("")
     elif _pointer_at(target_dvc) and not force:
         raise ImportDestinationExists(
-            f"{target_dvc} already exists; pass --force or remove it"
+            f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
         )
     elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
         # Something no pointer records is in the way: dvc imports INTO a
@@ -1561,7 +1570,7 @@ def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
     owner = DataDependency.from_dvc_file(dvc_path).producer_repo
     if owner != repo_url:
         raise UnknownProductPath(
-            f"{dvc_path} imports {owner}, not {repo_url}; refusing to "
+            f"{_shown(dvc_path, Path('.'))} imports {owner}, not {repo_url}; refusing to "
             f"overwrite another product's import as {name!r} — if that "
             f"producer's repo moved, delete the file and re-import"
         )

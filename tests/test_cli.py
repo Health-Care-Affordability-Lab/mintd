@@ -5358,3 +5358,19 @@ def test_cli_error_arms_only_render_in_main() -> None:
         ("_handle_enclave_package", "NothingNewToPackage"),
         ("_handle_update_metadata", "metadata_migrate.MetadataAlreadyV2"),
     }
+
+
+def test_cli_data_import_json_paths_stay_relative_for_a_default_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The import root is resolved for the checks and for dvc, but what
+    `--json` prints keeps the default `--dest-root`'s spelling: relative to
+    the project, as before. Mutation: return the resolved paths -> absolute, red."""
+    client, _ = patched_clients
+    _register_demo_xw(client)
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["--json", "data", "import", "demo-xw"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["produced"] and all(p.startswith("data/imports/") for p in payload["produced"]), payload
+    assert payload["dest"].startswith("data/imports/"), payload
