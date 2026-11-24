@@ -25,6 +25,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from ._cache_ops import dvc_tracked_paths
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import delivery, outs_matching, path_covers
@@ -140,6 +142,14 @@ class AmbiguousImport(MintdError):
     space here (the producer's output path), and this fires when it cannot
     name a single row.
     """
+
+
+class ProducerMoved(ImportDestinationExists):
+    """An import of this product sits there, but its pointer records the
+    product's repository under another org (``_producer_match`` says
+    "moved"). Never acted on without ``--force``: two repositories of one
+    name in two orgs (a fork) look the same to the match, and only the user
+    can tell a moved repository from someone else's."""
 
 
 class UnknownProductPath(MintdError, ValueError):
@@ -266,9 +276,14 @@ def import_product(
     # Every output's destination is checked before the first dvc call, so a
     # refusal at one output of `--all` (or of several `--path`s) leaves no
     # half-done import behind.
-    index = _imports_index(nested_root, name=name)
+    # Every import of this product under the import root, whatever folder it
+    # sits in: one kept under another folder name is still this product's.
+    index = _imports_index(_physical(dest_root), name=name, repo_url=repo_url, cwd=cwd)
     destinations = [
-        _import_destination(p, nested_root=nested_root, index=index, name=name, repo_url=repo_url, force=force, cwd=cwd)
+        _import_destination(
+            p, nested_root=nested_root, index=index, name=name, repo_url=repo_url, force=force, cwd=cwd,
+            reporter=reporter,
+        )
         for p in paths
     ]
     produced: list[Path] = []
@@ -1041,9 +1056,10 @@ def _remove_payload(path: Path) -> None:
 
 def _import_destination(
     p: str, *, nested_root: Path, index: dict[str, Path], name: str, repo_url: str, force: bool, cwd: Path,
+    reporter: "Reporter | None" = None,
 ) -> tuple[Path, Path]:
     """Where output ``p`` lands, ``(dest, its pointer)``, or the refusal that
-    stops the import. ``index`` is ``_imports_index`` of ``nested_root``."""
+    stops the import. ``index`` is ``_imports_index`` of the import root."""
     # Mirror the producer's own path under the namespace (D-A). The
     # basename-only form collided two outputs sharing a leaf name
     # (`data/final/` + `archive/final/`) on one dest under `--all`.
@@ -1071,8 +1087,19 @@ def _import_destination(
     # died on `AmbiguousImport`. Same lookup `--bump` uses.
     existing = index.get(p.rstrip("/"))
     if existing is not None:
-        _require_owner(existing, repo_url, name=name, cwd=cwd)
-        if not force:
+        recorded = DataDependency.from_dvc_file(existing).producer_repo  # the index read it
+        if _producer_match(recorded, repo_url) == "moved":
+            moved = (
+                f"{_shown(existing, cwd)} imports {p!r} of {name!r} from {_shown_url(recorded)}, "
+                f"but the catalog names {_shown_url(repo_url)}"
+            )
+            if not force:
+                raise ProducerMoved(
+                    moved, hint="if that repository moved, pass --force to re-import it there from the catalog's URL",
+                )
+            if reporter is not None:  # --force on the first try never saw the refusal
+                reporter.warn(f"{moved}; re-importing it from the catalog's URL")
+        elif not force:
             raise ImportDestinationExists(
                 f"{_shown(existing, cwd)} already imports {p!r} of {name!r}; "
                 f"pass --force to re-import it, or remove that pointer and what it imported"
@@ -1083,10 +1110,16 @@ def _import_destination(
         # re-import of a legacy import stays where it is.
         target_dvc = existing
         dest = existing.with_suffix("")
-    elif _pointer_at(target_dvc) and not force:
-        raise ImportDestinationExists(
-            f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
-        )
+    elif _pointer_at(target_dvc):
+        # Not in the index, so not this product's import of `p`: another
+        # product's import (the index keeps only this product's), one of this
+        # product's recording another path, or a `dvc add` file. Another
+        # product's is refused even with `--force`, which would replace it.
+        _require_owner(target_dvc, repo_url, name=name, cwd=cwd)
+        if not force:
+            raise ImportDestinationExists(
+                f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
+            )
     elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
         # Something no pointer records is in the way: dvc imports INTO a
         # folder, a level down, and the landed check counts what it held
@@ -1495,34 +1528,146 @@ def _import_namespace(entry: dict[str, Any], name: str) -> str:
     return ns
 
 
-def _imports_index(namespace_dir: Path, *, name: str) -> dict[str, Path]:
-    """Map each import's recorded producer path (`deps[0].path`) to its
-    `.dvc` file, within ONE product's namespace folder.
+#: Folders under an import root that hold no import of this project: DVC's own
+#: (its cache, with `--dest-root .`), git's, and a virtualenv. By name, not every
+#: dot-folder: a namespace such as `.demo`, or a producer path with a dot part,
+#: is mirrored under the root and holds real imports.
+_NOT_IMPORTS = frozenset({".dvc", ".git", ".venv"})
 
-    Keyed on what `--path` names, read from the `.dvc` itself — so legacy
-    (basename-flattened) and new (producer-path-mirrored) layouts resolve
-    identically, with no compatibility branch. Only `dvc import` shapes are
-    indexed; `dvc add` files raise `NotAnImportError` and are skipped.
+
+def _pointer_files(root: Path) -> list[Path]:
+    """Every `*.dvc` file under `root` that can be one of this project's imports.
+
+    The folders `_NOT_IMPORTS` names are not entered, and neither is a nested
+    project (a folder with its own `.dvc/`, `in_subrepo`'s rule): DVC skips its
+    files too, and they record that project's imports, not this one's. Links
+    are followed one level down only, for a linked folder directly under
+    `root` (a namespace folder kept elsewhere); deeper links are not walked.
+    One file reached twice, through a link and directly, is listed once."""
+    from ._push_verify import in_subrepo
+
+    if not root.is_dir():
+        return []
+    tops = [root, *sorted(c for c in root.iterdir() if c.is_symlink() and c.is_dir())]
+    found: dict[str, Path] = {}
+    for top in tops:
+        for folder, dirs, files in os.walk(top):  # never follows a link below `top`
+            dirs[:] = sorted(d for d in dirs if d not in _NOT_IMPORTS)
+            for f in sorted(files):
+                path = Path(folder) / f
+                rel = path.relative_to(root).as_posix() if top == root else f"{top.name}/{path.relative_to(top).as_posix()}"
+                if f.endswith(".dvc") and not in_subrepo(root, rel):
+                    found.setdefault(os.path.realpath(path), path)
+    return list(found.values())
+
+
+def _recorded_url(dvc_path: Path) -> str | None:
+    """The `repo.url` a pointer records, when it reads as text, else None:
+    read on its own, so a pointer broken elsewhere still says whose it is."""
+    try:
+        data = yaml.safe_load(dvc_path.read_text(encoding="utf-8"))
+        url = data["deps"][0]["repo"]["url"]
+    except (OSError, ValueError, yaml.YAMLError, LookupError, TypeError):
+        return None
+    return url if isinstance(url, str) else None
+
+
+def _producer_match(recorded: str, catalog: str) -> str | None:
+    """Whether a pointer's `repo.url` names this product's repository:
+    "same", "moved", or None (another product's).
+
+    An import belongs to a product when the two URLs name one host and one
+    repository name, case aside, after `https_remote` (so `git@github.com:o/r`,
+    `https://github.com/O/r.git` and `ssh://git@ssh.github.com:443/o/r` are one
+    repository). The org is left out of the match because an org can be
+    renamed, and a pointer committed before the rename keeps the old one:
+    `git@github.com:old-org/data_demo` against the catalog's
+    `https://github.com/new-org/data_demo` is "moved". The catalog's
+    `full_name` is not the test: it can differ from the repository's name.
+
+    "moved" is never acted on without `--force`. Two repositories of one name
+    in two orgs, a fork say, look alike here, and only the user can tell a
+    renamed org from someone else's copy.
+
+    A URL with no owner and repository (a local path, `file://`, a one-part
+    path on another host) matches only itself, compared as `https_remote`
+    gives it (credentials and `.git` out) less `file://` and a trailing slash."""
+    from ._registry_git_ops import https_remote, parse_repo_url
+
+    a, b = parse_repo_url(https_remote(recorded)), parse_repo_url(https_remote(catalog))
+    if a is None or b is None:
+        def bare(url: str) -> str:  # `https_remote` keeps such a URL's shape, credentials and `.git` out
+            return https_remote(url).removeprefix("file://").rstrip("/").removesuffix(".git")
+
+        return "same" if a is None and b is None and bare(recorded) == bare(catalog) else None
+    org_a, _, repo_a = f"{a.owner}/{a.repo}".casefold().rpartition("/")
+    org_b, _, repo_b = f"{b.owner}/{b.repo}".casefold().rpartition("/")
+    if a.host != b.host or repo_a != repo_b:
+        return None
+    return "same" if org_a == org_b else "moved"
+
+
+def _shown_url(url: str) -> str:
+    """A recorded or catalog URL as a message prints it: in the shape the
+    pointer or entry holds it, with no credentials."""
+    from ._registry_git_ops import _credentials_out
+
+    return _credentials_out(url)
+
+
+def _imports_index(
+    root: Path, *, name: str, repo_url: str | None = None, cwd: Path | None = None,
+) -> dict[str, Path]:
+    """Map each import's recorded producer path (`deps[0].path`) to its
+    `.dvc` file.
+
+    With `repo_url` (the catalog's), every pointer under the import `root`
+    (`_pointer_files`) whose `repo.url` names this product's repository
+    (`_producer_match`: "same" or "moved") is indexed, whatever folder it sits
+    in: an import kept under another folder name is still this product's, and
+    a re-import that looked in one folder wrote a second copy beside it.
+    Without one (a bump of a product the catalog no longer lists), `root` is
+    that product's folder and every import pointer in it is indexed.
+
+    Keyed on what `--path` names, read from the `.dvc` itself, so the legacy
+    (basename-flattened) and mirrored layouts resolve alike. `dvc add` files
+    raise `NotAnImportError` and are skipped, as `scan_imports` skips them.
+
+    A pointer that can't be read is skipped when its `repo.url` reads as text
+    and names another repository: it is another product's. Otherwise it is
+    refused, naming the file, because skipping one that is this product's
+    would write the duplicate again.
 
     Raises `AmbiguousImport` when two `.dvc` files record the same producer
-    path — the last-writer-wins shadowing D-A exists to kill; never resolved
-    silently.
+    path, naming both and the URLs they record; never resolved silently.
     """
+    where = (lambda p: _shown(p, cwd)) if cwd is not None else str
     index: dict[str, Path] = {}
-    if not namespace_dir.is_dir():
-        return index
-    for dvc_path in sorted(namespace_dir.rglob("*.dvc")):
+    urls: dict[str, str] = {}
+    for dvc_path in _pointer_files(root):
         try:
             dep = DataDependency.from_dvc_file(dvc_path)
         except NotAnImportError:
             continue
+        except (OSError, ValueError, yaml.YAMLError, LookupError, TypeError, AttributeError):
+            dep = None
+        url = dep.producer_repo if dep is not None and isinstance(dep.producer_repo, str) else _recorded_url(dvc_path)
+        if repo_url is not None and url is not None and _producer_match(url, repo_url) is None:
+            continue
+        if dep is None or url is None or not isinstance(dep.output_path, str):
+            raise MintdError(
+                f"can't read the import pointer {where(dvc_path)}, so mintd can't tell whether it "
+                f"is an import of {name!r}",
+                hint=f"fix or remove {where(dvc_path)}",
+            )
         key = dep.output_path.rstrip("/")
         if key in index:
             raise AmbiguousImport(
-                f"two imports of {name!r} record the same producer path "
-                f"{key!r}: {index[key]} and {dvc_path}; remove one"
+                f"two imports of {name!r} record the same producer path {key!r}: "
+                f"{where(index[key])} ({_shown_url(urls[key])}) and {where(dvc_path)} ({_shown_url(url)}); "
+                f"remove one"
             )
-        index[key] = dvc_path
+        index[key], urls[key] = dvc_path, url
     return index
 
 
@@ -1551,32 +1696,27 @@ def _namespace_by_scan(imports_root: Path, name: str) -> str:
 
 
 def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str, cwd: Path) -> None:
-    """Refuse a pointer found under this product's namespace that records a
-    DIFFERENT producer.
+    """Refuse an import pointer that records ANOTHER product's repository
+    (`_producer_match` says None), with or without `--force`.
 
-    `_import_namespace` checks the namespace's shape, never its identity, and
-    two single-component namespaces can name ONE directory: `full_name`
-    recased (APFS and NTFS are case-insensitive), copy-pasted verbatim from a
-    sibling repo (bites on Linux too), or symlinked. The index then returns
-    another product's `.dvc`, whose payload the force path `shutil.rmtree`s
-    and whose pointer the import rewrites — exit 0, "✓ imported".
+    Two namespaces can name one folder (`full_name` recased on a
+    case-insensitive disk, copied from another product, or a linked folder),
+    and a pointer at an import's destination may be another product's. The
+    force path would move its payload aside and rewrite its pointer, and the
+    import would end "✓ imported".
 
-    Compares the URLs' https forms (``https_remote``): an import through a
-    ``git@github.com:`` catalog entry records the https URL git used, and is
-    the same producer. No case or unicode normalization is needed.
-    `repo_url is None` skips the check: the bump reader has no catalog entry
-    to compare against for a de-listed product.
+    A pointer that isn't an import (a `dvc add` file) or can't be read is left
+    to the caller. `repo_url is None` skips the check: the bump reader has no
+    catalog entry to compare against for a de-listed product.
     """
-    from ._registry_git_ops import https_remote
-
     if repo_url is None:
         return
-    owner = DataDependency.from_dvc_file(dvc_path).producer_repo
-    if https_remote(owner) != https_remote(repo_url):
+    owner = _recorded_url(dvc_path)
+    if owner is not None and _producer_match(owner, repo_url) is None:
         raise UnknownProductPath(
-            f"{_shown(dvc_path, cwd)} imports {owner}, not {repo_url}; refusing to "
-            f"overwrite another product's import as {name!r} — if that "
-            f"producer's repo moved, delete the file and re-import"
+            f"{_shown(dvc_path, cwd)} imports {_shown_url(owner)}, not {_shown_url(repo_url)}; refusing to "
+            f"overwrite another product's import as {name!r}",
+            hint="nothing was changed; if that file is not an import you keep, remove it and what it imported",
         )
 
 
@@ -1602,15 +1742,20 @@ def _resolve_import_source(
         # the scan at the whole `data/` tree.
         namespace = _import_namespace({}, name)
     imports_root = project_path / "data" / "imports"
-    if not (imports_root / namespace).is_dir():
-        # The namespace comes from `project.full_name`, and the folder on disk
-        # froze it at import time. Two ways they part company, and BOTH left
-        # the import unbumpable: the entry is gone (so the fallback above is
-        # the catalog name, which is never `<type>_<name>`), or the producer
-        # renamed `full_name` since. Find the folder rather than insist on the
-        # derived name.
-        namespace = _namespace_by_scan(imports_root, name)
-    index = _imports_index(imports_root / namespace, name=name)
+    if not isinstance(owner, str):  # an entry's malformed URL is no evidence either
+        owner = None
+    if owner is not None:
+        # Every import of this product under the root, whatever folder it sits in.
+        index = _imports_index(imports_root, name=name, repo_url=owner, cwd=project_path)
+    else:
+        if not (imports_root / namespace).is_dir():
+            # The namespace comes from `project.full_name`, and the folder on disk
+            # froze it at import time. With no catalog URL to match pointers on,
+            # find the folder rather than insist on the derived name: the entry
+            # is gone (so the fallback above is the catalog name, never
+            # `<type>_<name>`), or the producer renamed `full_name` since.
+            namespace = _namespace_by_scan(imports_root, name)
+        index = _imports_index(imports_root / namespace, name=name, cwd=project_path)
 
     if path is not None:
         key = path.rstrip("/")
@@ -1635,6 +1780,17 @@ def _resolve_import_source(
     # The bump arm has no containment check, so this is its only guard
     # against acting on another product's pointer.
     _require_owner(resolved, owner, name=name, cwd=project_path)
+    dep = DataDependency.from_dvc_file(resolved)
+    if owner is not None and _producer_match(dep.producer_repo, owner) == "moved":
+        # Bump re-pins from the URL the pointer records, so it can't move a
+        # pointer to the catalog's: a forced re-import of that same path does.
+        retry = shlex.join(["mintd", "data", "import", name, "--force", "--path", dep.output_path])
+        raise ProducerMoved(
+            f"{_shown(resolved, project_path)} imports {dep.output_path!r} of {name!r} from "
+            f"{_shown_url(dep.producer_repo)}, but the catalog names {_shown_url(owner)}; "
+            f"bump re-pins from the URL a pointer records",
+            hint=f"if that repository moved, re-import it from the catalog's URL: {retry}",
+        )
     return resolved
 
 

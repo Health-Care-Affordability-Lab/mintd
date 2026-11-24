@@ -15,7 +15,10 @@ import pytest
 
 from mintd.catalog import CatalogEntry, CatalogNotFound, InMemoryCatalogClient
 from mintd.data import (
+    AmbiguousImport,
+    ProducerMoved,
     StaleBackupExists,
+    _producer_match,
     _tracked_output_targets,
     _validate_requested_targets,
     ImportDestinationExists,
@@ -24,6 +27,7 @@ from mintd.data import (
     UnknownProductPath,
     import_product,
 )
+from mintd.errors import MintdError
 from mintd.model import Metadata
 from mintd.producer import FetchError, ProducerError, ProducerView
 
@@ -1713,3 +1717,259 @@ def test_another_producers_import_is_named_relative_to_the_imports_working_folde
     assert str(refused.value).startswith(
         "data_demo_xw/outputs/cms_based.dvc imports https://github.com/example-org/demo_xw, not "
     ), str(refused.value)
+
+
+# --- A re-import finds the product's import wherever it sits under the import root ---------------------------------
+
+_DEMO_URL = "https://github.com/example-org/demo"
+
+
+def _pointer(dvc: Path, *, url: str, producer_path: str = "data/final") -> Path:
+    """An import pointer recording `url` and `producer_path`, at `dvc`."""
+    dvc.parent.mkdir(parents=True, exist_ok=True)
+    leaf = dvc.name.removesuffix(".dvc")
+    dvc.write_text(
+        f"outs:\n- md5: {'e' * 32}.dir\n  path: {leaf}\n"
+        f"deps:\n- path: {producer_path}\n  repo:\n    url: {url}\n    rev_lock: \"{'a' * 40}\"\n"
+    )
+    return dvc
+
+
+def _demo(tmp_path: Path) -> tuple[InMemoryCatalogClient, Path]:
+    client = InMemoryCatalogClient()
+    _register(client, "demo", mutate=_with_primary("data/final/"))
+    return client, tmp_path / "data" / "imports"
+
+
+@pytest.mark.parametrize(
+    "recorded,catalog,expected",
+    [
+        ("git@github.com:example-org/demo", _DEMO_URL, "same"),
+        ("ssh://git@ssh.github.com:443/example-org/demo.git", _DEMO_URL, "same"),
+        ("https://www.github.com/Example-Org/DEMO/", _DEMO_URL, "same"),
+        ("https://x-access-token:s3cret@github.com/example-org/demo", _DEMO_URL, "same"),
+        ("git@github.com:old-org/demo", _DEMO_URL, "moved"),
+        ("https://github.com/example-org/other", _DEMO_URL, None),
+        ("https://gitlab.com/example-org/demo", _DEMO_URL, None),
+        ("/repos/demo", "/repos/demo/", "same"),
+        ("file:///repos/demo", "/repos/demo.git", "same"),
+        ("/repos/demo", "/repos/other", None),
+        ("/repos/demo", _DEMO_URL, None),
+    ],
+    ids=["ssh", "ssh-443", "case-www-slash", "token", "old-org", "other-repo", "other-host",
+         "local-slash", "file-url", "local-other", "local-vs-github"],
+)
+def test_producer_match_reads_host_and_repository_not_the_org(recorded: str, catalog: str, expected: str | None) -> None:
+    """Mutations: compare the org too -> old-org reads None; drop the host or the
+    repository-name compare -> other-host or other-repo reads a match; drop the
+    local-path normalising -> local-slash and file-url read None."""
+    assert _producer_match(recorded, catalog) == expected
+
+
+def test_a_reimport_finds_the_products_import_under_another_folder_name(tmp_path: Path) -> None:
+    """The duplicate: an import of `demo` committed under `data/imports/demo/`, a
+    folder the namespace isn't, was invisible to a re-import, which wrote a
+    second copy under `data/imports/data_demo/`.
+
+    Mutation: index only the namespace folder -> the import goes ahead."""
+    client, root = _demo(tmp_path)
+    _pointer(root / "demo" / "final.dvc", url=_DEMO_URL)
+    fake = _FakeDvcOps()
+
+    with pytest.raises(ImportDestinationExists) as refused:
+        import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    assert "data/imports/demo/final.dvc already imports 'data/final/' of 'demo'" in str(refused.value)
+    assert not isinstance(refused.value, ProducerMoved)
+    assert fake.calls == [] and not (root / "data_demo").exists()
+
+
+@pytest.mark.parametrize(
+    "dvc",
+    [Path(".demo") / "final.dvc", Path("data_demo") / "data" / ".staging" / "final.dvc"],
+    ids=["dot-namespace", "dot-path-part"],
+)
+def test_a_pointer_under_a_dot_named_folder_is_found(tmp_path: Path, dvc: Path) -> None:
+    """A namespace such as `.demo`, or a producer path with a dot part, holds
+    real imports; only `.dvc`, `.git` and `.venv` are left unread.
+
+    Mutation: skip every dot-folder -> the import goes ahead."""
+    client, root = _demo(tmp_path)
+    _pointer(root / dvc, url=_DEMO_URL)
+
+    with pytest.raises(ImportDestinationExists, match="already imports"):
+        import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root)
+
+
+def test_a_linked_folder_directly_under_the_root_is_read(tmp_path: Path) -> None:
+    """A folder kept elsewhere and linked in under the import root is read, as
+    the one-folder index read a linked namespace folder.
+
+    Mutation: walk only the root, never a linked child -> the import goes ahead."""
+    client, root = _demo(tmp_path)
+    kept = _pointer(tmp_path / "elsewhere" / "demo" / "final.dvc", url=_DEMO_URL)
+    root.mkdir(parents=True)
+    try:
+        (root / "demo").symlink_to(kept.parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("no symlinks here")
+
+    with pytest.raises(ImportDestinationExists, match="already imports"):
+        import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root)
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    ["git@github.com:old-org/demo", "https://x-access-token:s3cret@github.com/old-org/demo"],
+    ids=["ssh", "https-token"],
+)
+def test_an_import_under_another_org_is_refused_naming_both_urls(tmp_path: Path, recorded: str) -> None:
+    """Mutation: treat "moved" as "same" -> the plain "already imports" refusal,
+    which names neither URL. Print the raw URL -> the token shows."""
+    client, root = _demo(tmp_path)
+    _pointer(root / "demo" / "final.dvc", url=recorded)
+    fake = _FakeDvcOps()
+
+    with pytest.raises(ProducerMoved) as refused:
+        import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    message = str(refused.value)
+    assert "old-org/demo" in message and "but the catalog names https://github.com/example-org/demo" in message
+    assert "s3cret" not in message
+    assert refused.value.hint == "if that repository moved, pass --force to re-import it there from the catalog's URL"
+    assert fake.calls == []
+
+
+def test_force_reimports_an_import_under_another_org_in_place_and_says_so(tmp_path: Path) -> None:
+    """A `--force` on the first try never sees the refusal, so the rewrite is
+    printed: with two same-named repositories in two orgs (a fork), it is the
+    only word that another org's import was re-pinned.
+
+    Mutation: drop the warning -> `warns` is empty."""
+    client, root = _demo(tmp_path)
+    legacy = _pointer(root / "demo" / "final.dvc", url="git@github.com:old-org/demo")
+    reporter = _RecordingReporter()
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=root, force=True, reporter=reporter)
+
+    assert fake.calls[0].dest == legacy.with_suffix("")
+    assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*.dvc")) == ["demo/final.dvc"]
+    assert _DEMO_URL in legacy.read_text()
+    assert reporter.warns == [
+        "data/imports/demo/final.dvc imports 'data/final/' of 'demo' from git@github.com:old-org/demo, "
+        "but the catalog names https://github.com/example-org/demo; re-importing it from the catalog's URL"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "deps:\n- path: data/final\n  repo:\n    url: https://github.com/example-org/other\n",
+        "deps:\n- repo:\n    url: https://github.com/example-org/other\n",
+    ],
+    ids=["readable", "no-path-but-its-url-reads"],
+)
+def test_another_products_import_under_the_root_is_left_alone(tmp_path: Path, body: str) -> None:
+    """Another repository's pointer, readable or broken around a URL that
+    still reads, is another product's: skipped, and the import goes ahead.
+
+    Mutation: drop the repository-name compare -> a false refusal. Refuse
+    every unreadable pointer -> the broken case is refused."""
+    client, root = _demo(tmp_path)
+    other = root / "other" / "final.dvc"
+    other.parent.mkdir(parents=True)
+    other.write_text(body)
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    assert [c.dest for c in fake.calls] == [root / "data_demo" / "data" / "final"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "deps: [unclosed\n",
+        "deps:\n- path: data/final\n  repo:\n    url: 7\n",
+        f"deps:\n- repo:\n    url: {_DEMO_URL}\n",
+    ],
+    ids=["bad-yaml", "url-not-text", "matches-without-a-path"],
+)
+def test_an_unreadable_import_pointer_under_the_root_is_refused_naming_it(tmp_path: Path, body: str) -> None:
+    """Skipping it could write the duplicate again if it is this product's.
+
+    Mutation: skip every unreadable pointer -> the import goes ahead."""
+    client, root = _demo(tmp_path)
+    broken = root / "somewhere" / "final.dvc"
+    broken.parent.mkdir(parents=True)
+    broken.write_text(body)
+    fake = _FakeDvcOps()
+
+    with pytest.raises(MintdError) as refused:
+        import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    assert "can't read the import pointer data/imports/somewhere/final.dvc" in str(refused.value)
+    assert refused.value.hint == "fix or remove data/imports/somewhere/final.dvc"
+    assert fake.calls == []
+
+
+def test_two_imports_of_one_path_in_two_folders_are_ambiguous(tmp_path: Path) -> None:
+    """The maintainer's state after the duplicate: named, not doubled again."""
+    client, root = _demo(tmp_path)
+    _pointer(root / "demo" / "final.dvc", url="git@github.com:old-org/demo")
+    _pointer(root / "data_demo" / "data" / "final.dvc", url=_DEMO_URL)
+
+    with pytest.raises(AmbiguousImport) as refused:
+        import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root, force=True)
+
+    message = str(refused.value)
+    assert "data/imports/data_demo/data/final.dvc (https://github.com/example-org/demo)" in message
+    assert "data/imports/demo/final.dvc (git@github.com:old-org/demo)" in message
+
+
+def test_a_nested_project_under_the_root_is_not_read(tmp_path: Path) -> None:
+    """A project checked out under the import root has its own `.dvc/`: its
+    pointers record ITS imports, and a broken one there is not this project's
+    to fix.
+
+    Mutation: drop the `in_subrepo` skip -> refused as ambiguous or unreadable."""
+    client, root = _demo(tmp_path)
+    (root / "clone" / ".dvc").mkdir(parents=True)
+    _pointer(root / "clone" / "data" / "imports" / "final.dvc", url=_DEMO_URL)
+    (root / "clone" / "broken.dvc").write_text("deps: [unclosed\n")
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    assert [c.dest for c in fake.calls] == [root / "data_demo" / "data" / "final"]
+
+
+def test_dvc_git_and_venv_folders_under_the_root_are_not_read(tmp_path: Path) -> None:
+    """With `--dest-root .` the walk would otherwise read DVC's cache, git's
+    folder and a virtualenv.
+
+    Mutation: drop `_NOT_IMPORTS` -> refused as unreadable."""
+    client = InMemoryCatalogClient()
+    _register(client, "demo", mutate=_with_primary("data/final/"))
+    for folder in (".dvc", ".git", ".venv"):
+        (tmp_path / folder / "x").mkdir(parents=True)
+        (tmp_path / folder / "x" / "broken.dvc").write_text("deps: [unclosed\n")
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=tmp_path)
+
+    assert [c.dest for c in fake.calls] == [tmp_path / "data_demo" / "data" / "final"]
+
+
+def test_a_dvc_add_pointer_at_the_destination_is_refused_as_before(tmp_path: Path) -> None:
+    """The owner check at the destination reads only import pointers: a `dvc
+    add` file there is "already exists" without `--force`, not an error about
+    whose import it is."""
+    client, root = _demo(tmp_path)
+    added = root / "data_demo" / "data" / "final.dvc"
+    added.parent.mkdir(parents=True)
+    added.write_text(f"outs:\n- md5: {'e' * 32}.dir\n  path: final\n")
+
+    with pytest.raises(ImportDestinationExists, match="final.dvc already exists; pass --force or remove it"):
+        import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root)

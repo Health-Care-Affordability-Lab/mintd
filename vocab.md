@@ -157,9 +157,15 @@ Why: it unifies the two ways DVC records imports on the consumer side.
 
 ### Import namespace (`data/imports/<full_name>/<producer path>`)
 
-`mintd data import` writes each output to `<dest_root>/<namespace>/<the producer's own output path>`. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The import writer and the bump reader share one definition.
+`mintd data import` writes each output to `<dest_root>/<namespace>/<the producer's own output path>`. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The namespace says where a new import lands, not where to look for an existing one: that is Import identity, below.
 
 Why: without the namespace, two products that both publish `data/final/` would collide. Mirroring the full producer path, not just the basename, keeps `data/final/` and `archive/final/` apart under `--all`.
+
+### Import identity (`_producer_match`)
+
+An import pointer belongs to a product when its `repo.url` names the same host and repository name as the product's catalog `github_url`, case aside, after `https_remote`: `git@github.com:demo-org/data_demo` and `https://github.com/Demo-Org/data_demo.git` are one repository. The org is not part of the match. The same repository name under another org is "moved". A re-import (`--force`) or a bump acts on a "moved" pointer only when told to, and says so: without `--force`, `mintd data import` refuses, naming the pointer and both URLs; with it, the import re-imports into that pointer from the catalog's URL and prints a line saying so. `--bump` refuses it and names the forced re-import of that path. A re-import and a bump look for an existing import among every pointer under the import root, whatever folder it sits in. They skip `.dvc`, `.git` and `.venv`, nested projects (a folder with its own `.dvc/`), and links below the root's own children. Two pointers recording one producer path are refused as ambiguous, naming both.
+
+Why: an org can be renamed, and pointers committed before the rename keep the old name, often over SSH, so comparing URLs as text refused the product's own imports. A folder name is no identity either: an import kept under another folder was invisible to the re-import, which wrote a second copy beside it. The catalog's `full_name` can differ from the repository's name. "Moved" waits for the user because a fork (one repository name in two orgs) looks the same to the match.
 
 ### Pin (`contract_pin` / `artifact_pin`)
 

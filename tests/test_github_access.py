@@ -399,8 +399,10 @@ def test_an_import_made_through_an_ssh_form_catalog_url_is_the_same_producer(tmp
     )
     for catalog_url in ("git@github.com:example-lab/demo.git", "ssh://git@github.com/example-lab/demo", _REPO + ".git"):
         _require_owner(dvc, catalog_url, name="demo", cwd=tmp_path)
+    # Another repository is another product. The same repository under another
+    # org is "moved", which import and bump refuse unless `--force` says so.
     with pytest.raises(UnknownProductPath):
-        _require_owner(dvc, "git@github.com:other-lab/demo.git", name="demo", cwd=tmp_path)
+        _require_owner(dvc, "git@github.com:example-lab/other.git", name="demo", cwd=tmp_path)
 
 
 def test_an_import_that_landed_nothing_from_an_unreachable_producer_gets_the_shared_hint(

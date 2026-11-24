@@ -4893,6 +4893,11 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # deliver. Its hint is computed per case, so the raise carries it.
     "UndeliverableImport": "ask the producer",
     "MissingPrimaryDataProduct": None,
+    # An import pointer under the import root that can't be read, and an
+    # import of the product recorded under another org: each raise carries
+    # its own hint ("fix or remove <pointer>", "pass --force ...").
+    "MintdError": None,
+    "ProducerMoved": None,
     "NoTrackedOutputs": None,
     "UnknownProductPath": "relative to the producer",
     "ValueError": None,

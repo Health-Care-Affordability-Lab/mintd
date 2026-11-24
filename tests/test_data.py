@@ -28,8 +28,10 @@ from mintd.data import (
     ImportDestinationExists,
     ImportNotFound,
     PrimaryRemovedAtHead,
+    ProducerMoved,
     UnknownProductPath,
     bump_import,
+    import_product,
 )
 from mintd.model import DataProductOutput, DataProducts, Metadata
 from mintd.producer import ProducerError, ProducerView
@@ -1413,6 +1415,77 @@ def test_bump_never_touches_another_products_import(tmp_path: Path) -> None:
     assert (payload / "irreplaceable.csv").is_file(), "the victim's payload was deleted"
     assert FIXTURE_URL in victim.read_text(encoding="utf-8")
     assert fake.calls == [], "re-imported another product's pointer"
+
+
+def _import_of_the_fixture(tmp_path: Path, *, url: str, under: str, producer_path: str, name: str) -> Path:
+    """One import of the fixture product recording `url`, under any folder:
+    https, so bump's own check isn't stopped by #118's SSH refusal first."""
+    from tests._harness.consumer import Import, write_import
+
+    shutil.copy(MINIMAL, tmp_path / "metadata.json")
+    return write_import(
+        tmp_path,
+        Import(name=name, producer_url=url, pin=PIN_SHA, producer_path=producer_path, local_path=name),
+        under=under,
+    )
+
+
+def test_bump_finds_the_products_import_under_another_folder_name(tmp_path: Path) -> None:
+    """Bump reads every import of the product under `data/imports/`, as a
+    re-import does, so one kept under a bare-name folder is bumped in place.
+
+    Mutation: index only the namespace folder -> `ImportNotFound`."""
+    client = InMemoryCatalogClient()
+    _register_fixture_product(client)
+    kept = _import_of_the_fixture(
+        tmp_path, url=FIXTURE_URL, under="data/imports/test_project", producer_path="data/final/", name="final",
+    )
+    fake = _FakeDvcOps()
+
+    result = bump_import(
+        client, fake, project_path=tmp_path, name="test_project",
+        producer_view_factory=lambda repo: (_view_with_primary("data/final/"), HEAD_SHA),
+        check_findings=[_drift_finding(kept)],
+    )
+
+    assert result.changed is True
+    assert fake.calls[0].dest == kept.with_suffix("")
+
+
+def test_bump_refuses_an_import_under_another_org_and_names_the_import_that_moves_it(tmp_path: Path) -> None:
+    """Bump re-pins from the URL a pointer records, so it can't move a pointer
+    to the catalog's org. Its hint is a forced re-import of the SAME recorded
+    path: without `--path`, a non-primary pointer would stay refused while the
+    primary landed as a second copy.
+
+    Mutations: drop bump's "moved" refusal -> dvc is called; drop `--path` from
+    the hint -> the hint differs."""
+    client = InMemoryCatalogClient()
+    _register_fixture_product(client)
+    old = "https://github.com/old-org/data_test_project"
+    kept = _import_of_the_fixture(
+        tmp_path, url=old, under="data/imports/test_project", producer_path="data/raw", name="raw",
+    )
+    fake = _FakeDvcOps()
+
+    with pytest.raises(ProducerMoved) as refused:
+        bump_import(client, fake, project_path=tmp_path, name="test_project", check_findings=[_drift_finding(kept)])
+
+    assert "imports 'data/raw' of 'test_project' from https://github.com/old-org/data_test_project" in str(refused.value)
+    assert refused.value.hint == (
+        "if that repository moved, re-import it from the catalog's URL: "
+        "mintd data import test_project --force --path data/raw"
+    )
+    assert fake.calls == []
+
+    # The hint, followed: that pointer is rewritten in place, with no second copy.
+    import_product(
+        client, fake, "test_project", cwd=tmp_path, dest_root=tmp_path / "data" / "imports",
+        path="data/raw", force=True,
+    )
+    assert [c.dest for c in fake.calls] == [kept.with_suffix("")]
+    assert [p for p in (tmp_path / "data" / "imports").rglob("*.dvc")] == [kept]
+    assert FIXTURE_URL in kept.read_text(encoding="utf-8")
 
 
 def test_bump_names_an_unreadable_dvc_lock_instead_of_a_missing_import(tmp_path: Path) -> None:
