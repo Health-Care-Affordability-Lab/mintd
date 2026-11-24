@@ -61,21 +61,16 @@ class PushRefused(MintdError):
 
 
 def _version_aware(cfg: dict[str, str], name: str) -> bool:
-    """dvc's version-aware rule for the remote ``name``. A ``version_aware`` or
-    ``worktree`` that dvc reads as neither true nor false raises ``PushRefused``:
-    dvc refuses the whole config then, and reading it as "not version-aware"
-    would skip every check on the remote's pins."""
-    from ._storage_state import remote_is_version_aware
+    """dvc's version-aware rule for the remote ``name``, read by the one reader
+    (``_storage_state.remote_is_version_aware``). A value dvc refuses stops push
+    and ``check`` as ``PushRefused``: reading it as "not version-aware" would skip
+    every check on the remote's pins."""
+    from ._storage_state import VersionAwareRefused, remote_is_version_aware
 
-    for key in ("version_aware", "worktree"):
-        value = cfg.get(key)
-        if value is not None and str(value).lower() not in ("true", "false"):  # dvc's Bool: lowercased, one of two
-            raise PushRefused(
-                f"the DVC remote {name} sets {key} to {value!r}, which dvc reads as neither true nor false, "
-                "so dvc refuses the config",
-                hint=f"set {key} to true or false in .dvc/config or .dvc/config.local",
-            )
-    return remote_is_version_aware(cfg.get)
+    try:
+        return remote_is_version_aware(cfg.get, name)
+    except VersionAwareRefused as exc:
+        raise PushRefused(str(exc), hint=exc.hint) from exc
 
 
 def default_for_pins(root: Path) -> str | None:

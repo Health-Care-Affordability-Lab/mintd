@@ -445,9 +445,28 @@ def test_remote_refuses_a_remote_it_cant_read_as_dvc_does(pushed, how: str) -> N
     _folder_pointer(proj, "final", _broken(files))
     _commit(proj)
     message, hint = _config_dvc_refuses(proj, how)
-    (finding,) = [f for f in check_project(proj, remote=True) if (f.kind or "").startswith("remote_")]
-    assert (finding.severity, finding.kind, finding.message, finding.hint) == ("error", "remote_unreadable",
-                                                                               message, hint)
+    findings = check_project(proj, remote=True)
+    assert not [f for f in findings if f.kind == "remote_not_checked"]
+    (finding,) = [f for f in findings if f.message == message]
+    assert (finding.severity, finding.hint) == ("error", hint)
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["check", "check-remote"])
+@pytest.mark.parametrize("how", ["a-note-after-true", "yes"])
+def test_a_version_aware_dvc_refuses_is_one_finding(pushed, how: str, remote: bool) -> None:
+    """Unpinned files behind `version_aware = yes`: one finding says dvc refuses
+    the value, where check also said the remote "is version_aware" beside it.
+
+    Mutations: read `yes` as true in the storage check -> a second finding, red;
+    drop the offline check's finding -> none in plain check, red; say the
+    remote lane's again -> two under --remote, red.
+    """
+    proj, _, _, files = pushed
+    _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+    _commit(proj)
+    message, hint = _config_dvc_refuses(proj, how)
+    about = [f for f in check_project(proj, remote=remote) if "version_aware" in f.message]
+    assert [(f.severity, f.message, f.hint) for f in about] == [("error", message, hint)]
 
 
 def test_remote_with_no_remote_at_all_says_so(tmp_path: Path) -> None:

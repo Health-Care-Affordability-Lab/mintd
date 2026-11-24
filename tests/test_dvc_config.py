@@ -98,13 +98,15 @@ def test_the_cache_dir_is_the_one_dvc_uses(real_dvc, tmp_path: Path, monkeypatch
 def test_version_aware_reads_as_dvc_reads_it(real_dvc, tmp_path: Path, value, dvc_raw, version_aware) -> None:
     """`version_aware` decides whether a consumer's pull needs an S3 version ID per file. dvc
     strips the quotes and keeps a `;`, and its schema refuses `true ; note`, so the storage
-    check reads the md5 layout there, never a traceback.
+    check never reads it as version-aware, and says dvc refuses it, never a traceback.
     Mutation that must redden this: strip `;` comments again in `_storage_state`."""
     from mintd._storage_state import _read_dvc_config
 
     root = _project(real_dvc, tmp_path, f"[core]\n    remote = storage\n{R}    url = s3://b/p\n    version_aware = {value}\n")
     assert _dvc_reads(real_dvc, root, "remote.storage.version_aware", "--project") == dvc_raw
-    assert _read_dvc_config(root / ".dvc" / "config") == ("storage", "s3://b/p", version_aware)
+    name, url, aware, refused = _read_dvc_config(root / ".dvc" / "config")
+    assert (name, url, aware) == ("storage", "s3://b/p", version_aware)
+    assert (refused is not None) == (value == "true ; note")
 
 
 # --- what changes on purpose: dvc can't read these files, so mintd stops too ----------------
@@ -147,7 +149,7 @@ def test_two_remotes_and_no_default_give_the_storage_check_no_remote(tmp_path: P
     from mintd._storage_state import _read_dvc_config
 
     (tmp_path / "config").write_text(f"{R}    url = s3://b/p\n['remote \"other\"']\n    url = s3://o/p\n")
-    assert _read_dvc_config(tmp_path / "config") == (None, None, False)
+    assert _read_dvc_config(tmp_path / "config") == (None, None, False, None)
 
 
 def test_a_remote_only_in_config_local_is_read_by_fast_sync(real_dvc, tmp_path: Path) -> None:
