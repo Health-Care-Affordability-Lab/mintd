@@ -1333,7 +1333,7 @@ def test_a_github_import_whose_producer_pointer_has_a_bad_hash(
     Mutations: drop the gh check in the fetcher's `_run` -> the not-ready case reads
     the pointer and raises, red; drop the hash check in `_entries_from_producer_pointer`
     -> the ready case reaches S3 and returns a rescue failure instead, red."""
-    from mintd._fast_sync_ops import PointerCutShort
+    from mintd._dvc_state import PointerCutShort
     from mintd._import_rescue_ops import rescue_import_pull
     from mintd.data_ops import _pull_targets_with_import_rescue
     from types import SimpleNamespace
