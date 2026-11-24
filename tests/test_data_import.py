@@ -2057,3 +2057,20 @@ def test_no_rewrite_is_announced_when_a_later_output_is_refused(tmp_path: Path) 
                        reporter=reporter)
 
     assert reporter.warns == [] and fake.calls == []
+
+
+def test_a_caller_with_no_reporter_still_sees_a_forced_rewrite_under_another_org(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A library caller passes no reporter: the line goes to stderr through the
+    default one, never dropped.
+
+    Mutation: print the lines only through a reporter the caller gave -> stderr
+    is empty."""
+    client, root = _demo(tmp_path)
+    _pointer(root / "demo" / "final.dvc", url="git@github.com:old-org/demo")
+
+    import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root, force=True)
+
+    err = " ".join(capsys.readouterr().err.split())
+    assert "warning: data/imports/demo/final.dvc imports 'data/final/' of 'demo' from git@github.com:old-org/demo" in err

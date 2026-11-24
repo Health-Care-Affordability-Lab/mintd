@@ -289,8 +289,17 @@ def import_product(
     ]
     # Only once every output has passed its refusals: a note about a rewrite
     # that a later refusal stops would describe something that never happens.
-    for note in notes if reporter is not None else ():
-        reporter.warn(note)
+    # Through the default reporter when the caller gave none: a rewrite of an
+    # import recorded under another org is never silent.
+    if notes:
+        if reporter is None:
+            from ._console import Reporter as _DefaultReporter
+
+            say: "Reporter" = _DefaultReporter()
+        else:
+            say = reporter
+        for note in notes:
+            say.warn(note)
     produced: list[Path] = []
     # What the output being imported made, for the `except` below: its
     # destination if that did not exist yet, and the folders above it that did
@@ -1127,10 +1136,10 @@ def _import_destination(
             raise ImportDestinationExists(
                 f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
             )
-        recorded = recorded_url(target_dvc)
-        if recorded is not None and _producer_match(recorded, repo_url) == "moved":
+        at_dest = recorded_url(target_dvc)
+        if at_dest is not None and _producer_match(at_dest, repo_url) == "moved":
             notes.append(
-                f"{_shown(target_dvc, cwd)} imports {name!r} from {_shown_url(recorded)}, but the catalog "
+                f"{_shown(target_dvc, cwd)} imports {name!r} from {_shown_url(at_dest)}, but the catalog "
                 f"names {_shown_url(repo_url)}; re-importing it from the catalog's URL"
             )
     elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
