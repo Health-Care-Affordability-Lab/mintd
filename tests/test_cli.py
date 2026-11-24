@@ -2959,6 +2959,30 @@ def test_cli_config_setup_set_missing_equals_exits_one(
     assert not p.exists()
 
 
+def test_cli_config_setup_set_timeouts_alone_says_how_to_set_its_parts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    assert cli.main(["config", "setup", "--path", str(p), "--set", "timeouts=600"]) == 1
+    err = capsys.readouterr().err
+    assert "timeouts: Input should be a valid dictionary" in err and "--set timeouts.fast=" in err
+    assert "errors.pydantic.dev" not in err
+    assert not p.exists()
+
+
+def test_cli_config_setup_fed_by_yes_exits_1_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`yes | mintd config setup`: an answer that is never valid ends setup, as on main."""
+    import io
+
+    p = tmp_path / "cfg.yaml"
+    monkeypatch.setattr("sys.stdin", io.StringIO("y\n" * 1000))
+    assert cli.main(["config", "setup", "--path", str(p)]) == 1
+    assert "interactive setup aborted" in capsys.readouterr().err
+    assert not p.exists()
+
+
 def test_cli_config_setup_from_stdin(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
