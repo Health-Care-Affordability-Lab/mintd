@@ -1103,7 +1103,9 @@ def data_push(
         except PointerCutShort as exc:  # a path target is found by reading every pointer
             from ._push_verify import PushRefused
 
-            pointer = Path(exc.pointer).resolve().relative_to(Path(project_path).resolve()).as_posix()
+            from ._paths import rel
+
+            pointer = rel(Path(project_path), Path(exc.pointer), read="follow")
             raise PushRefused(
                 f"nothing was written or pushed: {pointer} is cut short or damaged ({exc.detail}), and a push "
                 "naming a path reads every pointer to find what it names",

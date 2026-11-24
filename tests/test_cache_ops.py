@@ -502,6 +502,51 @@ def test_enumerate_collects_any_repo_files(tmp_path: Path) -> None:
     assert scan.symlinks == [] and scan.refused == [] and scan.empty_args == []
 
 
+def _stage(tmp_path: Path, out: str) -> None:
+    """One stage writing ``out``, recorded in dvc.yaml and dvc.lock."""
+    (tmp_path / ".dvc").mkdir(exist_ok=True)
+    _write(tmp_path / "dvc.yaml", f"stages:\n  make:\n    cmd: run\n    outs:\n      - {out}\n")
+    _write(tmp_path / "dvc.lock", f"schema: '2.0'\nstages:\n  make:\n    cmd: run\n    outs:\n"
+                                  f"    - path: {out}\n      md5: '11111111111111111111111111111111'\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_a_one_file_out_checked_out_as_a_link_is_tracked_by_its_own_name(tmp_path: Path) -> None:
+    """dvc checks a file out as a link into `.dvc/cache/` when it can't reflink or
+    hardlink. Resolved, it was tracked by its cache path; now it is `data/x.csv`. No
+    refusal changes: pull's `.git/`/`.dvc/` screens and push's link skip answer first.
+
+    Mutation: read the out fully resolved only -> `data/x.csv` missing, red."""
+    _stage(tmp_path, "data/x.csv")
+    cached = tmp_path / ".dvc" / "cache" / "files" / "md5" / "11" / ("1" * 30)
+    _write(cached, "x")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "x.csv").symlink_to(cached)
+    assert "data/x.csv" in c.dvc_tracked_paths(tmp_path, "origin")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+@pytest.mark.parametrize(("out", "tracked_has", "refused_args"), [
+    pytest.param("data/f.bin", {"store/f.bin"}, ["data/f.bin", "store/f.bin"], id="an-out-under-a-linked-folder"),
+    pytest.param("data", {"data", "store"}, ["data/f.bin", "store/f.bin", "store"], id="an-out-that-is-a-linked-folder"),
+])
+def test_an_out_through_a_linked_folder_is_refused_by_either_spelling(
+    tmp_path: Path, out: str, tracked_has: set[str], refused_args: list[str],
+) -> None:
+    """`data -> store`: push refuses the DVC-tracked bytes whichever spelling names
+    them, because the set holds the out read both ways (folder resolved, and fully).
+
+    Mutations: read outs lexically -> `store/f.bin` uploads (first case), red; read
+    them with the folder resolved only -> `store/f.bin` uploads (second case), red."""
+    _stage(tmp_path, out)
+    _write(tmp_path / "store" / "f.bin", "x")
+    (tmp_path / "data").symlink_to(tmp_path / "store", target_is_directory=True)
+    tracked = c.dvc_tracked_paths(tmp_path, "origin")
+    assert tracked_has <= tracked
+    for arg in refused_args:
+        assert _enum(tmp_path, [arg], tracked=tracked).items == [], arg
+
+
 def test_enumerate_collects_a_top_level_file(tmp_path: Path) -> None:
     _write(tmp_path / "notes.txt", "x")
     scan = _enum(tmp_path, ["notes.txt"])

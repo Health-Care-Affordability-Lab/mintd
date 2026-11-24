@@ -60,14 +60,10 @@ def _escapes(project_path: Path, rel: str) -> bool:
     satisfied by the link and write_text then follows it out of the project.
     Resolving the whole path is what closes that.
     """
-    try:
-        resolved = (project_path / rel).resolve()
-        resolved.relative_to(project_path.resolve())
-    except OSError:
-        return False
-    except ValueError:
-        return True
-    return False
+    from ._paths import inside
+
+    # A link loop (3.11's resolve raises on one) reads as outside: refused, not a traceback.
+    return inside(project_path, project_path / rel, read="follow", root_ok=True) is None
 
 
 def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:

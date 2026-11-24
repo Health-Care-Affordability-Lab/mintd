@@ -116,8 +116,8 @@ def push_key(prefix: str, rel_posix: str) -> str:
 
 
 def _is_forbidden_path(path_posix: str) -> bool:
-    """Forbidden-set test: a leading ``/``, any ``\\``, or any path *segment*
-    that is empty (``""``), a single dot (``.``), or ``..``. Segment-scoped
+    """Forbidden-set test: a leading ``/``, any ``\\``, a drive (``C:``), or any
+    path *segment* that is empty (``""``), a single dot (``.``), or ``..``. Segment-scoped
     (not substring) so real traversal (``../evil``, ``x/../../y``, ``..``) is
     refused while a legitimate filename containing consecutive dots
     (``v1..2.csv``, ``report..final.parquet``) is allowed — a bare ``..``
@@ -143,11 +143,10 @@ def _is_forbidden_path(path_posix: str) -> bool:
     ``..``/``/``/``\\`` gate and, on a sha match, downloads and writes a file
     whose NAME is a forged status line (or, on a mismatch, smuggles that forged
     line into the pull's stderr). None belong in a cache key."""
-    if path_posix.startswith("/") or "\\" in path_posix:
+    if _has_control_char(path_posix) or any(seg in ("", ".") for seg in path_posix.split("/")):
         return True
-    if _has_control_char(path_posix):
-        return True
-    return any(seg in ("", ".", "..") for seg in path_posix.split("/"))
+    # A leading `/`, a `\`, a drive or a `..` segment: a recorded path that isn't inside.
+    return inside(Path("."), path_posix, read="recorded", dotdot="refuse") is None
 
 
 def safe_cache_remainder(remainder: str) -> str:
@@ -270,14 +269,17 @@ def dvc_tracked_paths(project_path: Path, remote_name: str) -> set[str]:
     ``.dvc``-file/``dvc.lock`` outs record — so it matches where DVC materializes
     each out. Outs that resolve outside the project (shouldn't happen) are
     skipped."""
-    root = project_path.resolve()
     tracked: set[str] = set()
     for out in _all_dvc_outs(project_path, remote_name):
-        try:
-            rel = workspace_path_for(project_path, out).resolve().relative_to(root).as_posix()
-        except ValueError:
-            continue
-        tracked.add(rel)
+        where = workspace_path_for(project_path, out)
+        # Both readings, as pull screens both spellings of a key: the folder
+        # resolved with the out's own name kept (a one-file out dvc checked out
+        # as a link into the cache stays `data/x.csv`), and fully resolved (an
+        # out that is itself a linked folder, `data -> store`, is `store` too).
+        for read in ("folder", "follow"):
+            found = inside(project_path, where, read=read)
+            if found is not None:
+                tracked.add(found)
     return tracked
 
 
@@ -315,10 +317,7 @@ def _dvc_outs_under_cache(project_path: Path, remote_name: str) -> list[_Collisi
         if key == CACHE_DIR_NAME or key.startswith(f"{CACHE_DIR_NAME}/"):
             source = out.path
             if out.dvc_file is not None:
-                try:
-                    source = out.dvc_file.relative_to(project_path).as_posix()
-                except ValueError:
-                    source = out.dvc_file.name
+                source = inside(project_path, out.dvc_file, read="lexical", root_ok=True) or out.dvc_file.name
             collisions.append(_Collision(key=key, out_path=out.path, source=source))
     return collisions
 
@@ -1217,8 +1216,10 @@ def cache_pull(
         resolved_rel: str | None = None
         try:
             safe_cache_remainder(remainder)
-            resolved_rel = dest.resolve().relative_to(project_root).as_posix()
-        except (CacheKeyError, ValueError):
+            resolved_rel = inside(project_root, dest, read="follow", root_ok=True)
+        except CacheKeyError:
+            pass
+        if resolved_rel is None:
             refusal = f"unsafe key refused (escapes the project root): {_display_safe(full_key)}"
         screen_paths = [remainder] + ([resolved_rel] if resolved_rel is not None else [])
         if refusal is None and any(_is_protected_repo_path(p) for p in screen_paths):
