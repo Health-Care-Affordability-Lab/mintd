@@ -419,8 +419,9 @@ def test_import_product_returns_produced_dvc_files(tmp_path: Path) -> None:
         client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path
     )
 
-    assert produced == [tmp_path / "data_demo_xw" / "outputs" / "main.parquet.dvc"]
-    assert produced[0].exists()
+    # relative to the `cwd` the import was given, as `--json` prints them
+    assert produced == [Path("data_demo_xw/outputs/main.parquet.dvc")]
+    assert (tmp_path / produced[0]).exists()
 
 
 def test_import_product_refuses_existing_dvc(tmp_path: Path) -> None:
@@ -1026,7 +1027,7 @@ def test_import_product_force_clears_an_existing_directory_dest(
 
     assert len(fake.calls) == 1
     assert not (dest / "stale.csv").exists()
-    assert produced == [dest.parent / "cms_based.dvc"]
+    assert produced == [(dest.parent / "cms_based.dvc").relative_to(tmp_path)]
 
 
 @pytest.mark.parametrize("shape", ["dir", "file", "symlink"])
@@ -1328,7 +1329,7 @@ def test_force_reimport_of_a_legacy_import_rewrites_it_in_place(
     )
 
     assert [p.name for p in ns.rglob("*.dvc")] == ["main.parquet.dvc"]
-    assert produced == [ns / "main.parquet.dvc"]
+    assert produced == [(ns / "main.parquet.dvc").relative_to(tmp_path)]
     assert fake.calls[0].dest == ns / "main.parquet"
 
 
@@ -1406,7 +1407,7 @@ def test_import_never_clobbers_another_products_import(tmp_path: Path) -> None:
     _register(client, "provider_b", mutate=impostor)
     dest_root = tmp_path / "data" / "imports"
 
-    a_dvc = import_product(
+    a_dvc = tmp_path / import_product(
         client, _FakeDvcOps(), "provider_a", cwd=tmp_path, dest_root=dest_root
     )[0]
     payload = a_dvc.with_suffix("")
@@ -1447,7 +1448,7 @@ def test_import_never_clobbers_a_sibling_namespace(tmp_path: Path) -> None:
     )
     dest_root = tmp_path / "data" / "imports"
 
-    a_dvc = import_product(
+    a_dvc = tmp_path / import_product(
         client, _FakeDvcOps(), "provider_a", cwd=tmp_path, dest_root=dest_root
     )[0]
     payload = a_dvc.with_suffix("")
@@ -1522,7 +1523,7 @@ def test_import_reports_a_v1_shaped_entry_instead_of_tracebacking(
             client, fake, "provider_a", cwd=tmp_path, dest_root=tmp_path
         )
         # namespace fell back to the product name; nothing crashed
-        assert produced == [tmp_path / "provider_a" / "data" / "final.dvc"]
+        assert produced == [Path("provider_a/data/final.dvc")]
         return
 
     with pytest.raises(expected):
@@ -1616,3 +1617,99 @@ def test_a_non_string_path_row_is_dropped_by_both_readers() -> None:
     # And the user gets the listing error rather than an AttributeError.
     with pytest.raises(UnknownProductPath, match="no tracked output"):
         _validate_requested_targets(entry, requested=["data/final/"], name="provider_a")
+
+
+# --- `--dest-root foo/..` with `foo` missing, and a `..` in the producer's path ---
+# Resolved once where they enter (`_physical`): unresolved, `foo/..` reads as
+# nothing, so the index saw no earlier import and a link at the destination
+# read as absent.
+
+
+def test_a_folder_inside_an_earlier_import_through_a_dotdot_dest_root_names_that_import(tmp_path: Path) -> None:
+    """agy's reproduction: the index read `foo/../data_demo_xw` as missing, so
+    `within` was empty and the earlier import's empty folder got "it is empty
+    and safe to remove: rmdir". Mutation: build `nested_root` from `dest_root`
+    unresolved -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/"))
+    fake = _FakeDvcOps()
+    import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    (tmp_path / "data_demo_xw" / "outputs" / "cms_based").mkdir()
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is inside an earlier import "
+                                                      r"\(data_demo_xw/outputs\.dvc\)") as refused:
+        import_product(client, fake, "demo_xw", path="outputs/cms_based/", cwd=tmp_path,
+                       dest_root=tmp_path / "foo" / "..")
+    assert "safe to remove" not in str(refused.value) + refused.value.hint
+    assert "rmdir" not in refused.value.hint
+
+
+def test_a_folder_holding_earlier_imports_through_a_dotdot_dest_root_names_them(tmp_path: Path) -> None:
+    """agy's reproduction: `holds` was empty, so a folder holding an earlier
+    import's pointer was "no pointer records it ... rm -r". Mutation: build
+    `nested_root` unresolved -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    import_product(client, fake, "demo_xw", path="outputs/cms_based/a.csv", cwd=tmp_path, dest_root=tmp_path)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based already holds imports "
+                                                      r"\(data_demo_xw/outputs/cms_based/a\.csv\.dvc\)") as refused:
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path / "foo" / "..")
+    assert "no pointer records" not in str(refused.value) and "rm" not in refused.value.hint
+
+
+@pytest.mark.parametrize("via", ["dest-root", "producer-path"])
+def test_a_dangling_link_reached_through_a_dotdot_is_refused(tmp_path: Path, via: str) -> None:
+    """agy's reproduction, with real dvc: through `foo/..`, `is_symlink()` read
+    the link as absent, the import ran without --force, and dvc replaced the
+    link and exited 0. The same through a `..` in the producer's own path.
+    Mutations: build `dest` unresolved -> the producer-path case red; build
+    both `nested_root` and `dest` unresolved -> both red (either resolution
+    alone catches the dest-root case)."""
+    client = InMemoryCatalogClient()
+    primary = "outputs/cms_based/" if via == "dest-root" else "outputs/missing/../cms_based/"
+    _register(client, mutate=_with_primary(primary))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(dest.parent / "gone")
+    root = tmp_path / "foo" / ".." if via == "dest-root" else tmp_path
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a link and no pointer records it"):
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=root)
+    assert fake.calls == [] and dest.is_symlink()
+
+
+def test_paths_under_a_symlinked_home_are_named_relative_to_where_the_project_is(tmp_path: Path) -> None:
+    """A caller that names the project through a link (`~/proj`, the home on
+    another disk) gets paths relative to it, not absolute ones: the working
+    folder is resolved as the destination is. Through the CLI, `os.getcwd()`
+    already gives the resolved folder. Mutation: compare against the working
+    folder unresolved (`_where`) -> absolute, red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    (tmp_path / "real" / "proj").mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "real", target_is_directory=True)
+    proj = tmp_path / "home" / "proj"
+    produced = import_product(client, _FakeDvcOps(), "demo_xw", cwd=proj, dest_root=proj / "data" / "imports")
+    assert produced == [Path("data/imports/data_demo_xw/outputs/cms_based.dvc")]
+
+
+def test_another_producers_import_is_named_relative_to_the_imports_working_folder(tmp_path: Path) -> None:
+    """The pointer an earlier import of another producer left is named against
+    the `cwd` the import was given, as every other path it reports is.
+    Mutation: name it against `Path('.')` in `_require_owner` -> the process's
+    own folder, where this pointer isn't, gives an absolute path, red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+
+    def moved(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = "outputs/cms_based/"
+        d["repository"]["github_url"] = "https://github.com/example-org/someone_else"
+
+    elsewhere = InMemoryCatalogClient()  # the same name, now pointing at another producer
+    _register(elsewhere, mutate=moved)
+    with pytest.raises(UnknownProductPath) as refused:
+        import_product(elsewhere, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert str(refused.value).startswith(
+        "data_demo_xw/outputs/cms_based.dvc imports https://github.com/example-org/demo_xw, not "
+    ), str(refused.value)
