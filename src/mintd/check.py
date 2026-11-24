@@ -424,6 +424,12 @@ def _check_repository_identity(meta: Metadata, metadata_path: Path) -> list[Chec
     ]
 
 
+def _example_output(path: str) -> str:
+    """One complete ``data_products.outputs[]`` entry, for a hint shown when
+    there is none to copy."""
+    return json.dumps({"path": path, "description": "…", "primary": True}, ensure_ascii=False)
+
+
 def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
     findings: list[CheckFinding] = []
     primary = meta.data_products.primary
@@ -431,7 +437,11 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
         # A declared primary must be valid regardless of project type.
         output_paths = [o.path for o in meta.data_products.outputs]
         if primary not in output_paths:
-            hint = f"available outputs: {', '.join(output_paths) or '(none)'}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
+            hint = (
+                f"available outputs: {', '.join(output_paths)}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
+                if output_paths
+                else f"available outputs: (none); add an entry to data_products.outputs[] whose path is {primary!r}, for example {_example_output(primary)}."
+            )
             findings.append(
                 CheckFinding(
                     severity="error",
@@ -453,7 +463,11 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
                 field_path="data_products.primary",
                 source=metadata_path,
                 kind="data_products_primary_missing",
-                hint="set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). Consumers can't import this product without it.",
+                hint=(
+                    "set data_products.primary to one of your outputs[] paths (e.g. 'data/final/')."
+                    if meta.data_products.outputs
+                    else f"add an entry to data_products.outputs[], for example {_example_output('data/final/')}, and set data_products.primary to its path."
+                ) + " Consumers can't import this product without it.",
             )
         )
     return findings
