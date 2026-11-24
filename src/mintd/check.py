@@ -170,6 +170,7 @@ class CheckFinding:
         if self.source:
             return str(self.source)
         if self.field_path:
+            # pydantic's loc joined with dots: a key holding a dot would split (no field has one today).
             parts = self.field_path.split(".")
             return "".join(f"[{p}]" if p.isdigit() else f".{p}" for p in parts).removeprefix(".")
         return "<project>"

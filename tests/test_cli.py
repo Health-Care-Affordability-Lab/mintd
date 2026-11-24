@@ -2381,7 +2381,7 @@ def test_cli_publish_blocked_by_check_errors_exits_one(
 
 def _outputs_missing_their_fields(project: Path) -> None:
     """metadata.json whose one output gives only its path, as a producer
-    writing it by hand might: description, primary and last_published missing."""
+    writing it by hand might: description and primary missing."""
     meta = json.loads(MINIMAL.read_text(encoding="utf-8"))
     meta["data_products"]["outputs"] = [{"path": "data/final/"}]
     (project / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")

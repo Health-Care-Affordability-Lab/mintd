@@ -3011,3 +3011,23 @@ def test_check_does_not_swallow_a_consumer_walk_failure_it_cannot_attribute(tmp_
 
     with pytest.raises(TypeError):
         check_project(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "source, field_path, shown",
+    [
+        (Path("data/final.dvc"), "data_products.outputs.0.path", str(Path("data/final.dvc"))),
+        (None, "data_products.outputs.0.description", "data_products.outputs[0].description"),
+        (None, None, "<project>"),
+    ],
+)
+def test_a_finding_names_its_file_else_its_field_else_the_project(source, field_path, shown) -> None:
+    """What check's text, publish's blocked list and its post-push error print
+    before a finding's message.
+
+    Mutations: the `<project>` fallback returning anything else, the field
+    ignored, or the field winning over the file -> red.
+    """
+    finding = CheckFinding(severity="error", section="producer", message="m", kind="metadata_invalid",
+                           source=source, field_path=field_path)
+    assert finding.location == shown
