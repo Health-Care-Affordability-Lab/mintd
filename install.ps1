@@ -49,7 +49,7 @@ if (-not (Test-Path $ToolPython)) {
 
 if (Test-Path $ToolPython) {
     Write-Host "Installing reflink support..."
-    uv pip install --python $ToolPython cffi reflink
+    uv pip install --no-config --python $ToolPython cffi reflink
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "Could not install reflink. DVC will fall back to hardlink/symlink/copy."
         Write-Warning "Run 'mintd --version' to verify your installation."

@@ -77,7 +77,7 @@ if [[ ! -f "$TOOL_PYTHON" ]]; then
 fi
 
 echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
-uv pip install --python "$TOOL_PYTHON" cffi reflink || {
+uv pip install --no-config --python "$TOOL_PYTHON" cffi reflink || {
     echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
 }
 
