@@ -18,6 +18,7 @@ from __future__ import annotations
 import configparser
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -286,12 +287,20 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
 
 
 def _version_aware(parser: configparser.ConfigParser, section: str) -> bool:
+    return remote_is_version_aware(lambda key: parser.get(section, key, fallback=None))
+
+
+def remote_is_version_aware(setting: Callable[[str], str | None]) -> bool:
+    """dvc's rule for a remote whose raw settings ``setting`` reads, one key
+    at a time: ``version_aware``, else ``worktree`` (dvc turns version_aware
+    on for a worktree remote that doesn't set it). The one reader of this
+    setting, for storage inspection, push and ``check`` alike."""
     # dvc's own reader (configobj) strips an inline comment and surrounding
     # quotes; configparser keeps both, so mirror the strip before deciding.
     # Anything else -- a hand edit configparser would choke on -- reads as
     # the md5 layout: this is a read-only classifier, it never raises.
     def flag(key: str) -> bool | None:
-        raw = parser.get(section, key, fallback=None)
+        raw = setting(key)
         if raw is None:
             return None
         value = raw.split("#", 1)[0].split(";", 1)[0].strip().strip("'\"").lower()

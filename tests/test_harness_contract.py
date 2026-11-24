@@ -1711,6 +1711,135 @@ def test_s3_server_records_each_object_get_and_the_bytes_it_served(s3_server) ->
     assert state.bytes_served == {"a.csv": 12}
 
 
+def test_s3_server_fails_a_named_get_with_a_checksummed_500(s3_server, tmp_path: Path) -> None:
+    """A path in `fail_gets` answers its GET with the 5xx real S3 sent,
+    checksum header included, until it is removed or for a count; HEAD still
+    answers, and a failed GET is recorded in `failed_gets`, not as a download. The canary: through that header botocore
+    raises AttributeError from the call mintd's download makes, the failure #68
+    fixed; if a botocore upgrade stops that, story 9 can no longer catch it. A
+    count fails that many GETs, then the key serves. Mutations that turn it
+    red: the header dropped (header assert, canary); `fail_gets` ignored (the
+    500 assert); the count never spent (the one-off case)."""
+    import urllib.error
+    import urllib.request
+
+    from tests._harness.s3 import BUCKET
+
+    s3, key = s3_server.client, "lab/p/a.csv"
+    s3.put_object(Bucket=BUCKET, Key=key, Body=b"alpha\n")
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (500, None)
+    with pytest.raises(urllib.error.HTTPError) as failed:
+        urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
+    assert failed.value.code == 500 and failed.value.headers["x-amz-checksum-crc32"]
+    assert s3.head_object(Bucket=BUCKET, Key=key)["ContentLength"] == 6
+    with pytest.raises(AttributeError):
+        s3.download_file(BUCKET, key, str(tmp_path / "a.csv"), ExtraArgs={"ChecksumMode": "ENABLED"})
+    assert s3_server.gets == []
+    del s3_server.fail_gets[f"/{BUCKET}/{key}"]
+    assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (503, 1)  # a one-off 503: the next GET serves
+    with pytest.raises(urllib.error.HTTPError) as once:
+        urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
+    assert once.value.code == 503 and once.value.headers["x-amz-checksum-crc32"]
+    assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
+    assert s3_server.failed_gets == [f"/{BUCKET}/{key}"] * 3  # the 500 twice (urlopen, the canary), the 503 once
+
+
+def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_path: Path) -> None:
+    """Story 3's Pass line, on one committed pointer and one dvc.lock out: a
+    pin storage holds counts; other bytes, a version storage lacks, or no
+    version id fails. Mutations that turn it red: the md5 compare dropped (the
+    other-bytes case passes); the dvc.lock branch never taken (2 pins read as 1);
+    dvc.yaml not read from git (the wdir lost, the `cache: false` out pinned)."""
+    from tests._harness.expect import assert_storage_holds_pins
+    from tests._harness.s3 import BUCKET
+
+    put = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/a.csv", Body=b"alpha\n")
+    repo = tmp_path / "repo"
+    _git(["init", "-q", "-b", "main", str(repo)])
+
+    def pin(digest: str, cloud: dict | None) -> None:
+        out = {"md5": digest, "size": 6, "path": "a.csv", **({"cloud": {"storage": cloud}} if cloud else {})}
+        (repo / "data").mkdir(exist_ok=True)
+        (repo / "data" / "a.csv.dvc").write_text(yaml.safe_dump({"outs": [out]}), encoding="utf-8")
+        _git(["add", "-A"], cwd=repo)
+        _git(["commit", "-q", "--allow-empty", "-m", "pin"], cwd=repo)
+
+    pin(md5(b"alpha\n"), {"version_id": put["VersionId"]})
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 1
+    built = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/built/out.csv", Body=b"built")
+    (repo / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build": {"cmd": "true", "outs": [
+        {"path": "data/built", "files": [{"relpath": "out.csv", "md5": md5(b"built"),
+                                         "cloud": {"storage": {"version_id": built["VersionId"]}}}]},
+    ]}}}), encoding="utf-8")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "a lock out"], cwd=repo)
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 2  # the .dvc pointer's and the lock's
+    # A stage with a wdir and a `cache: false` out, read from git as the landed-file check reads them from disk.
+    staged = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/staged.csv", Body=b"staged")
+    (repo / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"wdir": "code", "cmd": "true", "outs": [
+        "../data/built", "../data/staged.csv", {"../data/report.json": {"cache": False}}]}}}), encoding="utf-8")
+    (repo / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build": {"cmd": "true", "outs": [
+        {"path": "../data/built", "files": [{"relpath": "out.csv", "md5": md5(b"built"),
+                                            "cloud": {"storage": {"version_id": built["VersionId"]}}}]},
+        {"path": "../data/staged.csv", "md5": md5(b"staged"), "cloud": {"storage": {"version_id": staged["VersionId"]}}},
+        {"path": "../data/report.json", "md5": "0" * 32},  # committed to git, never pushed: no pin
+    ]}}}), encoding="utf-8")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "a stage with a wdir"], cwd=repo)
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 3
+    for digest, cloud, said in (
+        (md5(b"other\n"), {"version_id": put["VersionId"]}, "holds other bytes"),
+        (md5(b"alpha\n"), {"version_id": "nonexistent-version"}, "data/a.csv"),
+        (md5(b"alpha\n"), None, "no version id"),
+    ):
+        pin(digest, cloud)
+        with pytest.raises(AssertionError, match=said):
+            assert_storage_holds_pins(s3_server, repo, "lab/p")
+
+
+def test_a_registered_producer_keeps_its_catalog_entry_current(tmp_path: Path, remote_registry_empty: Path) -> None:
+    """import reads a product's outputs from its catalog entry, so an output
+    the producer adds after registering must reach the entry too, and a write
+    that changes nothing registers nothing. Mutations that turn it red:
+    `_write_metadata` not registering again; `register` committing an
+    unchanged entry (git refuses an empty commit)."""
+    producer = build_local_producer(tmp_path / "prod")
+    producer.register_in(remote_registry_empty, tmp_path / "registry-work")
+    producer.add_output("data/new/")
+    producer._write_metadata(producer.metadata())  # unchanged: nothing to register, and no error
+    meta = producer.metadata()
+    entry = yaml.safe_load(_git(
+        ["show", f"main:catalog/{meta['project']['type']}/{meta['project']['name']}.yaml"], cwd=remote_registry_empty))
+    assert "data/new/" in [o["path"] for o in entry["data_products"]["outputs"]]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a shell hook")
+def test_fixture_git_sees_no_host_ignore_file_or_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host ignore file must not hide a new `.dvc` file from a story's
+    `git status`, and a host global config must not reach a fixture commit.
+    Mutations that turn it red: `core.excludesFile` not overridden (git's
+    default ~/.config/git/ignore hides the pointer); GIT_CONFIG_GLOBAL not
+    defaulted to nothing (the host's failing hook stops the commit)."""
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "ignore").write_text("*.dvc\n", encoding="utf-8")
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    (home / ".gitconfig").write_text(f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.delenv(var, raising=False)
+    repo = tmp_path / "repo"
+    _git(["init", "-q", "-b", "main", str(repo)])
+    (repo / "x.csv.dvc").write_text("outs: []\n", encoding="utf-8")
+    assert "x.csv.dvc" in _git(["status", "--porcelain", "--untracked-files=all"], cwd=repo)
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "x"], cwd=repo)
+
+
 def test_story_2_deletes_only_on_the_emulator() -> None:
     """Any other endpoint is refused with HarnessError, which the
     partial-transfer case's `xfail(raises=AssertionError)` cannot report as
