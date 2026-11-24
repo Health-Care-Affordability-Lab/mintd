@@ -32,18 +32,9 @@ __all__ = ["Read", "inside", "physical", "rel"]
 
 Read = Literal["recorded", "lexical", "follow", "folder"]
 
-_ELOOP_WINDOWS = 1921  # ERROR_CANT_RESOLVE_FILENAME: Windows' symlink loop
 
-
-def inside(
-    root: Path,
-    path: Path | str,
-    *,
-    read: Read,
-    root_ok: bool = False,
-    dotdot: Literal["collapse", "refuse"] = "collapse",
-    wdir: str | None = None,
-) -> str | None:
+def inside(root: Path, path: Path | str, *, read: Read, root_ok: bool = False,
+           dotdot: Literal["collapse", "refuse"] = "collapse", wdir: str | None = None) -> str | None:
     """``path`` relative to ``root``, as a posix string, or None when it isn't inside
     ``root``. A recorded ``path`` is relative to ``root``; a native one, like ``root``,
     is read from the working folder when relative, as ``os.path`` reads it, so a caller
@@ -67,17 +58,14 @@ def inside(
     # relative path, so absolute paths work from a deleted one, as `relative_to` did.
     if p.absolute() == Path(root).absolute():
         return "." if root_ok else None  # the root itself, however a link names it, in every mode
-    there: str | None
-    base: str | None
-    if read == "lexical":
-        there, base = os.path.abspath(p), os.path.abspath(root)
-    elif read == "follow":
-        there, base = _real(str(p)), _real(str(root))
-    else:  # folder
-        there, base = _real_folder(p), _real(str(root))
+    base = os.path.abspath(root) if read == "lexical" else _real(str(root))
+    there = os.path.abspath(p) if read == "lexical" else _real(str(p)) if read == "follow" else _real_folder(p)
     if there is None or base is None:
         return None
-    return _relative(there, base, root_ok=root_ok)
+    try:
+        return _verdict(Path(os.path.relpath(there, base)).as_posix(), root_ok)
+    except ValueError:  # Windows: another drive
+        return None
 
 
 def rel(root: Path, path: Path | str, *, read: Read = "lexical", root_ok: bool = True) -> str:
@@ -96,24 +84,14 @@ def _recorded(path: str, *, root_ok: bool, dotdot: str, wdir: str | None) -> str
             return None
         if dotdot == "refuse" and ".." in s.split("/"):
             return None
-    joined = posixpath.normpath(posixpath.join(*parts))
-    if joined == ".":
-        return "." if root_ok else None
-    if joined == ".." or joined.startswith("../"):
-        return None
-    return joined
+    return _verdict(posixpath.normpath(posixpath.join(*parts)), root_ok)
 
 
-def _relative(there: str, base: str, *, root_ok: bool) -> str | None:
-    try:
-        found = os.path.relpath(there, base)
-    except ValueError:  # Windows: another drive
-        return None
+def _verdict(found: str, root_ok: bool) -> str | None:
+    """A posix path relative to the root: itself (``.``) only with ``root_ok``, never above it."""
     if found == ".":
         return "." if root_ok else None
-    if found == os.pardir or found.startswith(os.pardir + os.sep):
-        return None
-    return Path(found).as_posix()
+    return None if found == ".." or found.startswith("../") else found
 
 
 def _real(p: str) -> str | None:
@@ -122,7 +100,7 @@ def _real(p: str) -> str | None:
     try:
         return os.path.realpath(p, strict=True)
     except OSError as exc:
-        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == _ELOOP_WINDOWS:
+        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921:  # Windows' ERROR_CANT_RESOLVE_FILENAME
             return None
         return os.path.realpath(p)
 
@@ -139,7 +117,5 @@ def physical(p: Path) -> Path:
 
 def _real_folder(full: Path) -> str | None:
     """:func:`physical`, or None when the folder it resolves holds a link loop."""
-    absolute = full.absolute()
-    if _real(str(absolute if absolute.name in ("", "..") else absolute.parent)) is None:
-        return None
-    return str(physical(full))
+    full = full.absolute()
+    return None if _real(str(full if full.name in ("", "..") else full.parent)) is None else str(physical(full))
