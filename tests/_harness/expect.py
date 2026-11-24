@@ -10,11 +10,10 @@ import collections
 import dataclasses
 import hashlib
 import json
-import os
-from collections.abc import Iterator
+import posixpath
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-
-import yaml
+from typing import Any
 
 from tests._harness.git import _git
 from tests._harness.s3 import BUCKET, S3Server
@@ -71,31 +70,71 @@ def _cached(entry: str | dict) -> bool:
     return isinstance(entry, str) or (next(iter(entry.values())) or {}).get("cache", True)
 
 
-def _outs(project: Path) -> Iterator[tuple[Path, dict]]:
-    """`(workspace path, out)` for each out dvc pulls: every `.dvc` pointer's,
-    then every cached out a `dvc.lock` records, against its stage's wdir. An
-    out its `dvc.yaml` marks `cache: false` is committed to git, never pulled."""
-    for pointer in sorted(project.rglob("*.dvc")):
-        if not pointer.is_file():
-            continue  # the `.dvc` folder itself
-        for out in yaml.safe_load(pointer.read_text(encoding="utf-8"))["outs"]:
-            yield pointer.parent / out["path"], out
-    for lock in sorted(project.rglob("dvc.lock")):
-        spec = lock.parent / "dvc.yaml"
-        stages = (yaml.safe_load(spec.read_text(encoding="utf-8")) or {}).get("stages", {}) if spec.is_file() else {}
-        for name, stage in (yaml.safe_load(lock.read_text(encoding="utf-8")) or {}).get("stages", {}).items():
+def _load(text: str | None) -> Any:
+    """YAML as DVC reads its files: 1.2, with ruamel, DVC's own library, so a
+    name like `on` or `no` stays a string. Not mintd's reader: the check shares
+    no code with what it checks."""
+    from ruamel.yaml import YAML
+
+    return YAML(typ="safe", pure=True).load(text) if text else None
+
+
+Reader = Callable[[str], "str | None"]
+
+
+def _outs(rels: Iterable[str], read: Reader) -> Iterator[tuple[str, dict]]:
+    """`(path under the project, out)` for each out dvc pulls: every `.dvc`
+    pointer's, then every cached out a `dvc.lock` records, against its stage's
+    wdir. An out its `dvc.yaml` marks `cache: false` is committed to git,
+    never pulled. `rels` are the project's pointers and locks; `read` gives a
+    file's text, or None when there is none."""
+    rels = sorted(rels)
+    for rel in rels:
+        if rel.endswith(".dvc"):
+            for out in _load(read(rel))["outs"]:
+                yield posixpath.normpath(posixpath.join(posixpath.dirname(rel), out["path"])), out
+    for rel in rels:
+        if posixpath.basename(rel) != "dvc.lock":
+            continue
+        base = posixpath.dirname(rel)
+        stages = (_load(read(posixpath.join(base, "dvc.yaml"))) or {}).get("stages", {})
+        for name, stage in (_load(read(rel)) or {}).get("stages", {}).items():
             body = stages.get(name.split("@")[0], {})
             body = body.get("do", body)  # a foreach or matrix stage
             # ponytail: a ${...} wdir or cache:false path is not expanded; expand it if a product needs it
-            wdir = lock.parent / body.get("wdir", ".")
+            wdir = posixpath.join(base, body.get("wdir", "."))
             uncached = {
-                os.path.normpath(wdir / _path_of(e))
+                posixpath.normpath(posixpath.join(wdir, _path_of(e)))
                 for kind in ("outs", "metrics", "plots") for e in body.get(kind, []) if not _cached(e)
             }
             for out in stage.get("outs", []):
-                path = os.path.normpath(wdir / out["path"])
+                path = posixpath.normpath(posixpath.join(wdir, out["path"]))
                 if path not in uncached:
-                    yield Path(path), out
+                    yield path, out
+
+
+def _on_disk(project: Path) -> tuple[list[str], Reader]:
+    """`project`'s pointers and locks as they are on disk, for `_outs`."""
+    rels = [p.relative_to(project).as_posix() for pattern in ("*.dvc", "dvc.lock")
+            for p in project.rglob(pattern) if p.is_file()]  # not the `.dvc` folder itself
+
+    def read(rel: str) -> str | None:
+        path = project / rel
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+
+    return rels, read
+
+
+def _at_rev(repo: Path, rev: str) -> tuple[list[str], Reader]:
+    """`repo`'s pointers and locks as git holds them at `rev`, for `_outs`."""
+    # -z: a path with non-ASCII or special characters comes back as it is, not quoted
+    tracked = set(filter(None, _git(["ls-tree", "-r", "-z", "--name-only", rev], cwd=repo).split("\0")))
+    rels = [r for r in tracked if r.endswith(".dvc") or posixpath.basename(r) == "dvc.lock"]
+
+    def read(rel: str) -> str | None:
+        return _git(["show", f"{rev}:{rel}"], cwd=repo) if rel in tracked else None
+
+    return rels, read
 
 
 def assert_landed_match_pointers(project: Path) -> dict[str, str]:
@@ -106,7 +145,8 @@ def assert_landed_match_pointers(project: Path) -> dict[str, str]:
     `counts` names no file."""
     expected: dict[str, str] = {}
     landed: dict[str, str] = {}
-    for root, out in _outs(project):
+    for rel, out in _outs(*_on_disk(project)):
+        root = project / rel
         expected.update(_files_of(project, root, out))
         for f in [root] if root.is_file() else root.rglob("*"):
             if f.is_file():
@@ -172,3 +212,38 @@ def s3_state(s3: S3Server, prefix: str) -> S3State:
             state.gets[path.removeprefix(root)] += 1
             state.bytes_served[path.removeprefix(root)] += size
     return state
+
+
+def assert_storage_holds_pins(s3: S3Server, repo: Path, prefix: str, *, rev: str = "main",
+                              remote: str = "storage") -> int:
+    """Story 3's Pass line: storage holds every version the pointers at `rev`
+    pin, read from git (the producer's bare repo, which importers read), never
+    from mintd. Outs are read as `assert_landed_match_pointers` reads them
+    (`_outs`: a stage's wdir applied, `cache: false` left out), at `rev`. A pin
+    is an out's md5 and its `cloud[remote]` version id; a folder out with a
+    `files:` list is one pin per file. Each pinned version is fetched and its bytes hashed. Fails
+    when no pin exists (never vacuous), or a pin has no version id, a version
+    storage does not hold, or other bytes. Returns the count of pins. Its GETs
+    land in the server's records, so read `s3_state` first."""
+    from botocore.exceptions import ClientError
+
+    pins = [
+        (root if entry is out else f"{root}/{entry['relpath']}", entry.get("md5", ""),
+         (entry.get("cloud") or {}).get(remote) or {})
+        for root, out in _outs(*_at_rev(repo, rev)) for entry in out.get("files") or [out]
+    ]
+    wrong: dict[str, str] = {}
+    for path, digest, cloud in pins:
+        if not cloud.get("version_id"):  # a .dir record with no file list has none either
+            wrong[path] = "no version id"
+            continue
+        try:
+            body = s3.client.get_object(Bucket=BUCKET, Key=f"{prefix}/{path}", VersionId=cloud["version_id"])["Body"].read()
+        except ClientError as e:
+            wrong[path] = e.response["Error"]["Code"]
+            continue
+        if md5(body) != digest:
+            wrong[path] = "holds other bytes"
+    assert pins, f"no pin at {rev} in {repo}"
+    assert not wrong, f"storage does not hold what the pointers pin: {wrong}"
+    return len(pins)
