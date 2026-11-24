@@ -470,11 +470,11 @@ def test_data_pull_total_bytes_sums_files_format_for_dvc_targets(
         "  - path: big\n"
         "    size: 128\n"  # manifest size — should NOT be the total
         "    files:\n"
-        "      - relpath: a.parquet\n        md5: a\n        size: 20000000\n"
+        "      - relpath: a.parquet\n        md5: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n        size: 20000000\n"
         "        cloud:\n          origin:\n            version_id: v1\n"
-        "      - relpath: b.parquet\n        md5: b\n        size: 30000000\n"
+        "      - relpath: b.parquet\n        md5: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n        size: 30000000\n"
         "        cloud:\n          origin:\n            version_id: v2\n"
-        "      - relpath: c.parquet\n        md5: c\n        size: 10000000\n"
+        "      - relpath: c.parquet\n        md5: cccccccccccccccccccccccccccccccc\n        size: 10000000\n"
         "        cloud:\n          origin:\n            version_id: v3\n"
     )
 
@@ -508,7 +508,7 @@ def test_data_pull_total_bytes_counts_denormalized_targets(
     project = tmp_path
     (project / "data").mkdir()
     (project / "data" / "foo.csv.dvc").write_text(
-        "outs:\n  - path: foo.csv\n    md5: cafe\n    size: 1234\n"
+        "outs:\n  - path: foo.csv\n    md5: cafecafecafecafecafecafecafecafe\n    size: 1234\n"
     )
 
     monkeypatch.setattr("mintd.data_ops.partition_pipeline_outs", lambda _p, _r, **_kw: ([], []))
@@ -590,7 +590,7 @@ def test_data_pull_catch_all_excludes_fallback_targets(
     again — it's already in `covered`, so `uncovered` is empty."""
     out = DvcOut(
         target="data/final/a.parquet", path="data/final/a.parquet",
-        md5="a", is_dir=False, version_id="v1",
+        md5="a" * 32, is_dir=False, version_id="v1",
     )
     monkeypatch.setattr("mintd.data_ops.discover_all_outs", lambda _p: [])
     monkeypatch.setattr(
@@ -614,8 +614,8 @@ def test_data_pull_catch_all_excludes_fallback_targets(
 
 _MD5_CACHED = "aa" + "0" * 30
 _MD5_MISSING = "bb" + "0" * 30
-_FF_BLOB_A = "1" * 32
-_FF_BLOB_B = "2" * 32
+_FF_BLOB_A = "a1" * 16  # not all digits: YAML reads 32 bare digits as a number
+_FF_BLOB_B = "b2" * 16
 
 
 def _write_single_file_dvc(project: Path, rel: str, md5: str) -> str:
@@ -1768,7 +1768,7 @@ def test_data_pull_crash_recovery_count_excludes_stage_out_failures(
     targets — a stage out that fails verification must drive error_count
     without being subtracted from the .dvc-target tally (previously a
     failed stage out understated targets_pulled)."""
-    stage_md5 = "5" * 32
+    stage_md5 = "5e" * 16
     cached = _write_single_file_dvc(tmp_path, "data/cached.csv", _MD5_CACHED)
     _seed_cache(tmp_path, _MD5_CACHED)
     _seed_cache(tmp_path, stage_md5)
@@ -1919,8 +1919,8 @@ def _lock_with_fan(root: Path) -> None:
     (root / "dvc.yaml").write_text("stages:\n  fan:\n    foreach: [p]\n    do:\n      cmd: x\n      outs: ['data/fan_${item}.csv']\n")
     (root / "dvc.lock").write_text(
         "schema: '2.0'\nstages:\n"
-        + "".join(f"  fan@{i}:\n    cmd: x\n    outs:\n    - path: data/fan_{i}.csv\n      md5: {i * 32}\n      size: 2\n"
-                  for i in "pq")
+        + "".join(f"  fan@{i}:\n    cmd: x\n    outs:\n    - path: data/fan_{i}.csv\n      md5: {h * 32}\n      size: 2\n"
+                  for i, h in zip("pq", "ab", strict=True))
     )
 
 
