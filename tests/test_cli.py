@@ -456,11 +456,32 @@ def test_import_from_a_folder_inside_a_project_still_runs_there(
     sub.mkdir()
     monkeypatch.chdir(sub)
     rc = cli.main(argv)
-    assert "not inside a mintd project" not in capsys.readouterr().err
-    if argv[0] == "import":
+    err = " ".join(capsys.readouterr().err.split())
+    assert "not inside a mintd project" not in err
+    if argv[0] != "import":
+        # --bump got past the project check and looked for the import where it
+        # was typed, as before; with nothing imported there it says so.
+        assert rc == 1
+        assert "'demo-map' not imported in ." in err
+    else:
         assert rc == 0
         (call,) = dvc_ops.calls
         assert (Path.cwd() / call.cwd / call.dest).resolve().is_relative_to(sub.resolve() / "data" / "imports")
+
+
+@pytest.mark.parametrize("verb", [["data", "pull"], ["cache", "ls"]], ids=["pull", "cache"])
+def test_pull_and_cache_take_their_path_as_the_project_itself(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: list[str],
+) -> None:
+    """Unlike import, pull and the cache verbs don't walk up: a --path one level
+    below a project is refused, as before the shared check."""
+    (tmp_path / ".dvc").mkdir()
+    sub = tmp_path / "analysis"
+    sub.mkdir()
+    rc = cli.main([*verb, "--path", str(sub)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1
+    assert f"not inside a mintd project (no .dvc/ at {sub.resolve()})" in err
 
 
 def test_cli_data_import_threads_dvc_args(
