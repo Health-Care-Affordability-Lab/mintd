@@ -40,6 +40,7 @@ class InitOps(Protocol):
     def git_unstage(self, target_dir: Path, paths: list[str]) -> None: ...
     def git_origin_url(self, target_dir: Path) -> str | None: ...
     def dvc_init(self, target_dir: Path) -> None: ...
+    def dvc_add(self, target_dir: Path, path: str) -> None: ...
     def dvc_remote_add(
         self, target_dir: Path, *,
         name: str, url: str, default: bool,
@@ -185,6 +186,25 @@ class SubprocessInitOps:
             raise InitOpError(
                 f"dvc config cache.type failed: {result.stderr.strip()}"
             )
+
+    def dvc_add(self, target_dir: Path, path: str) -> None:
+        """``dvc add <path>``: track a folder (an empty one too) as a DVC out."""
+        try:
+            result = subprocess.run(
+                [*dvc_cmd(), "add", path],
+                cwd=target_dir,
+                env=dvc_env(),
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            raise DvcNotInstalled("mintd's bundled dvc is missing — reinstall mintd.") from None
+        except subprocess.TimeoutExpired:
+            raise InitOpError(f"dvc add {path} timed out after {self._timeout:g}s") from None
+        if result.returncode != 0:
+            raise InitOpError(f"dvc add {path} failed: {result.stderr.strip()}")
 
     def dvc_remote_url(self, target_dir: Path, name: str) -> str | None:
         """The URL of remote ``name``, or None if it is not configured.

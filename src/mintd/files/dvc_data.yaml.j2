@@ -5,8 +5,10 @@ stages:
 # ---------------------------------------------------------------------------
 # Optional: uncomment the fetch stage to download raw data programmatically.
 # When enabled, this is the ONLY stage that writes data/raw/.
-# If raw data is hand-placed or tracked via `dvc add data/raw/`, leave this
-# block commented out. See fetch.{py,R,do} for the matching script stub.
+# `mintd init` tracks data/raw/ as data/raw.dvc, so before uncommenting run
+# `mintd data remove data/raw.dvc`: dvc refuses two outputs at one path.
+# If raw data is hand-placed, leave this block commented out. See
+# fetch.{py,R,do} for the matching script stub.
 #
 #  fetch:
 #    wdir: {{ source_dir }}

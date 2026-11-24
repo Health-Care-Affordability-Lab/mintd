@@ -205,6 +205,9 @@ def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
     # fetch ships as a commented-out block, not an active stage.
     assert "fetch" not in stages, "fetch must be commented out, not an active stage"
     assert "#  fetch:" in raw_text, "commented fetch block must be present"
+    # init tracks data/raw as data/raw.dvc, and dvc refuses two outputs at one
+    # path, so the fetch block says to untrack it first.
+    assert "mintd data remove data/raw.dvc" in raw_text
 
     # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
     # schema output into validate. Either way the DAG stays acyclic, and the

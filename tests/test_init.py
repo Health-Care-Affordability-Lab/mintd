@@ -918,7 +918,8 @@ def test_init_restages_dvc_config_after_dvc_init_no_classification(
     project_path, _ = init_project(
         project_type="data", name="foo", target_dir=tmp_path, ops=fake
     )
-    assert fake.git_add_calls == [(project_path, [".dvc/config"])]
+    # A data product's data/raw.dvc is staged with it (the scaffold tracks raw).
+    assert fake.git_add_calls == [(project_path, [".dvc/config", "data/raw.dvc"])]
     # restage happens after dvc was initialized
     assert fake.call_log.index("git_add") > fake.call_log.index("dvc_init")
 
@@ -938,8 +939,82 @@ def test_init_restages_dvc_config_after_remote_add_when_classified(
         endpoint="",
         ops=fake,
     )
-    assert fake.git_add_calls == [(project_path, [".dvc/config"])]
+    assert fake.git_add_calls == [(project_path, [".dvc/config", "data/raw.dvc"])]
     assert fake.call_log.index("git_add") > fake.call_log.index("dvc_remote_add")
+
+
+def test_init_data_tracks_an_empty_data_raw_and_stages_its_pointer(tmp_path: Path) -> None:
+    """A data product tracks data/raw from the first commit: `dvc add` after
+    `dvc init`, and data/raw.dvc staged with the config restage."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(project_type="data", name="foo", target_dir=tmp_path, ops=fake)
+    assert fake.dvc_add_calls == [(project_path, "data/raw")]
+    assert fake.call_log.index("dvc_init") < fake.call_log.index("dvc_add") < fake.call_log.index("git_add")
+
+
+@pytest.mark.parametrize("project_type", ["project", "code"])
+def test_init_tracks_data_raw_only_for_a_data_product(tmp_path: Path, project_type: str) -> None:
+    """`project` makes a data/raw too, but it isn't a product: nothing is added."""
+    fake = _FakeInitOps()
+    project_path, _ = init_project(project_type=project_type, name="foo", target_dir=tmp_path, ops=fake)
+    assert fake.dvc_add_calls == []
+    assert fake.git_add_calls == [(project_path, [".dvc/config"])]
+
+
+@pytest.mark.parametrize("already", ["a file in it", "a pointer for it"])
+def test_init_into_an_existing_repo_leaves_a_used_data_raw_alone(tmp_path: Path, already: str) -> None:
+    """--use-current-repo (or a resume) may meet a data/raw the producer
+    already filled or tracks: init adds only an empty, untracked one."""
+    (tmp_path / "data" / "raw").mkdir(parents=True)
+    if already == "a file in it":
+        (tmp_path / "data" / "raw" / "source.csv").write_text("a,b\n")
+    else:
+        (tmp_path / "data" / "raw.dvc").write_text("outs:\n- path: raw\n")
+    fake = _FakeInitOps()
+    init_project(project_type="data", name="foo", target_dir=tmp_path, use_current_repo=True, ops=fake)
+    assert fake.dvc_add_calls == []
+
+
+def test_init_still_succeeds_when_tracking_data_raw_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _isolated_config(monkeypatch, tmp_path, registry_org="acme")
+    fake = _FakeInitOps(fail_on={"dvc_add"})
+    reporter = _WarnRecorder()
+    project_path, _ = init_project(
+        project_type="data", name="foo", target_dir=tmp_path, ops=fake, reporter=reporter,
+    )
+    assert (project_path / "metadata.json").exists()
+    assert fake.git_add_calls == [(project_path, [".dvc/config"])]  # no pointer to stage
+    assert len(reporter.warnings) == 1
+    assert "mintd data add data/raw" in reporter.warnings[0]
+
+
+def test_init_data_live_tracks_data_raw_and_check_counts_it_covered(tmp_path: Path) -> None:
+    """Live: real git and dvc. The empty data/raw is a DVC out (`nfiles: 0`),
+    its pointer is staged, and a raw file placed afterwards draws no
+    pipeline_input_untracked warning from check while data/raw.dvc exists."""
+    import shutil
+    import subprocess
+
+    from mintd._init_ops import SubprocessInitOps
+    from mintd.check import check_project
+
+    if shutil.which("git") is None:
+        pytest.skip("git not on PATH")
+    project_path, _ = init_project(
+        project_type="data", name="foo", target_dir=tmp_path, ops=SubprocessInitOps()
+    )
+    pointer = (project_path / "data" / "raw.dvc").read_text(encoding="utf-8")
+    assert "nfiles: 0" in pointer
+    staged = subprocess.run(
+        ["git", "status", "--porcelain", "--", "data/raw.dvc"],
+        cwd=project_path, capture_output=True, text=True, check=True,
+    ).stdout
+    assert staged.startswith("A ")
+    (project_path / "data" / "raw" / "source.csv").write_text("a,b\n1,2\n")
+    findings = check_project(project_path, upgrades=False)
+    assert not [f for f in findings if f.kind == "pipeline_input_untracked"]
 
 
 def test_init_enclave_does_not_restage_dvc_config(tmp_path: Path) -> None:

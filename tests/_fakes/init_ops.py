@@ -20,6 +20,7 @@ class _FakeInitOps:
         self.dvc_calls: list[Path] = []
         self.remote_add_calls: list[dict] = []
         self.git_add_calls: list[tuple[Path, list[str]]] = []
+        self.dvc_add_calls: list[tuple[Path, str]] = []
         self.git_unstage_calls: list[tuple[Path, list[str]]] = []
         # Ordered log of method names, so tests can assert relative
         # sequencing (e.g. git_add fires after dvc_remote_add) without a
@@ -45,6 +46,12 @@ class _FakeInitOps:
             raise InitOpError("fake git_init failure")
         self.call_log.append("git_init")
         self.git_calls.append(target_dir)
+
+    def dvc_add(self, target_dir: Path, path: str) -> None:
+        if "dvc_add" in self.fail_on:
+            raise InitOpError("fake dvc_add failure")
+        self.call_log.append("dvc_add")
+        self.dvc_add_calls.append((target_dir, path))
 
     def git_add(self, target_dir: Path, paths: list[str]) -> None:
         if "git_add" in self.fail_on:

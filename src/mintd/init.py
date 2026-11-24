@@ -148,6 +148,13 @@ def _prompt_classification(
     return tier, slug
 
 
+def _raw_is_empty_and_untracked(project_path: Path) -> bool:
+    """``data/raw`` exists, holds nothing, and has no ``data/raw.dvc`` yet."""
+    raw = project_path / "data" / "raw"
+    return raw.is_dir() and not raw.is_symlink() and not any(raw.iterdir()) \
+        and not (project_path / "data" / "raw.dvc").exists()
+
+
 def init_project(
     *,
     project_type: Literal["data", "code", "project", "enclave"],
@@ -404,13 +411,28 @@ def init_project(
     # fires even when classification is None) in one place. A failed restage
     # must not fail an otherwise-healthy init — rerunning would then hit
     # InitDestinationExists — so warn and return success.
+    #
+    # A data product also tracks data/raw from the first commit, the lab's
+    # default: an empty folder is a valid DVC out (`nfiles: 0`), the ingest
+    # stage depends on it, and the producer can untrack it later (`mintd data
+    # remove data/raw.dvc`). Only a data/raw that is empty and untracked: a
+    # resume or --use-current-repo may meet one the producer already filled or
+    # tracks. Best-effort like the restage, and staged with it.
+    to_stage = [".dvc/config"]
+    if project_type == "data" and _raw_is_empty_and_untracked(project_path):
+        try:
+            ops.dvc_add(project_path, "data/raw")
+            to_stage.append("data/raw.dvc")
+        except InitOpError as exc:
+            if reporter is not None:
+                reporter.warn(f"left data/raw untracked ({exc}); to track it: mintd data add data/raw")
     if project_type in _DVC_INIT_TYPES:
         try:
-            ops.git_add(project_path, [".dvc/config"])
+            ops.git_add(project_path, to_stage)
         except InitOpError:
             if reporter is not None:
                 reporter.warn(
-                    "could not restage .dvc/config; run: git add .dvc/config"
+                    f"could not restage {' and '.join(to_stage)}; run: git add {' '.join(to_stage)}"
                 )
 
     # `mintd check` reports an empty repository.github_url as an *error*
