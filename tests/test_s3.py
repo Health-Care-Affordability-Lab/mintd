@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import shutil
 from pathlib import Path
 
 import pytest
@@ -284,7 +283,9 @@ def test_a_pull_falls_back_to_dvc_when_only_dvc_has_the_keys(
     real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
     real_dvc(["push", "-q"], cwd=project, check=True)
     (project / "x.csv").unlink()
-    shutil.rmtree(project / ".dvc" / "cache")
+    # Moved aside, not deleted: dvc makes its cache files read-only, and Windows won't
+    # delete those; pytest's own tmp cleanup handles them.
+    (project / ".dvc" / "cache").rename(tmp_path / "pushed-cache")
 
     for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
         monkeypatch.delenv(var, raising=False)
