@@ -222,6 +222,29 @@ def profile_endpoint(credentials: Path) -> str:
     return endpoint
 
 
+#: What a story's report shows in place of the test bucket's name.
+REDACTED_BUCKET = "<test-bucket>"
+
+
+def redact_bucket(report: Any, bucket: str | None) -> None:
+    """`report` with `bucket` replaced by `REDACTED_BUCKET` everywhere pytest
+    prints from it: the failure text (`-rA`'s summary included) and each
+    captured section (stdout, stderr, logs). A by-hand run's record is pasted
+    into a PR, and the bucket can reach it from dvc's errors
+    (`<bucket>/runs/...`), mintd's output, or a story's own print. This is the
+    one place the name is taken out, whatever printed it."""
+    if not bucket:
+        return
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple):  # a skip: (path, line, reason)
+        report.longrepr = (*longrepr[:2], str(longrepr[2]).replace(bucket, REDACTED_BUCKET))
+    elif longrepr is not None:
+        text = str(longrepr)
+        if bucket in text:
+            report.longrepr = text.replace(bucket, REDACTED_BUCKET)
+    report.sections = [(name, body.replace(bucket, REDACTED_BUCKET)) for name, body in report.sections]
+
+
 def require_no_version_listing(client: Any, bucket: str, prefix: str) -> None:
     """Refuse a key that may list versions under `prefix`, before anything is
     written. dvc's push lists an object's versions before it uploads it again,

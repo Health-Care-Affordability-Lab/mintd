@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 from types import SimpleNamespace
 
 import pytest
@@ -2040,8 +2041,7 @@ def test_a_tier_failure_on_real_storage_prints_no_frame_arguments(tmp_path: Path
 def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the name whose SHA-256 is the harness's constant passes. Mutations that turn it red: `story_bucket`
     returning the value unchecked, or comparing anything but the hash of the whole name (a prefix, `in`,
-    `lower()`, the bare hex); a delete, an abort or a transfer-manager upload added to story 11; story 11 printing
-    the bucket's name."""
+    `lower()`, the bare hex); a delete, an abort or a transfer-manager upload added to story 11."""
     assert re.fullmatch(r"[0-9a-f]{64}", TEST_BUCKET_SHA256)
     monkeypatch.setattr(live_harness, "TEST_BUCKET_SHA256", hashlib.sha256(DEMO_BUCKET.encode()).hexdigest())
     assert story_bucket(None) is None and story_bucket("") is None
@@ -2052,28 +2052,28 @@ def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch)
             story_bucket(named)
     story = (Path(__file__).parent / "stories" / "test_story_11_multipart.py").read_text(encoding="utf-8")
     assert re.search(r"\.(delete_\w+|abort_multipart_upload|upload_file\w*)\(", story) is None
-    assert re.search(r"print\(f?[\"'][^\n]*\{bucket\}", story) is None  # -rA's record is pasted into the PR
 
 
-def test_the_test_bucket_s_name_is_only_a_hash_in_tests_and_docs() -> None:
-    """No word in `tests/`, `docs/` or the README hashes to `TEST_BUCKET_SHA256`, so the plain name can't creep back
-    into this public repo. Every run of dot-separated labels is tried, so the name beside punctuation or in front of
-    a host is found too. Mutations that turn it red: the name written into any of those files, alone, as `<name>.` or
-    as `<name>.s3.wasabisys.com`."""
+def test_the_test_bucket_s_name_is_only_a_hash_in_every_tracked_file() -> None:
+    """No file git tracks holds the test bucket's name, only its hash. Every run of letters, digits, dots, hyphens and
+    underscores is split at its separators, and every stretch of whole pieces is hashed, so the name is found alone,
+    beside punctuation, in front of a host or inside a longer word (`<name>-credentials`). Mutations that turn it
+    red: the name written into any tracked file, `pyproject.toml` and `.github/` included, in any of those forms."""
     root = Path(__file__).parents[1]
-    text = {".py", ".md", ".txt", ".yaml", ".yml", ".toml", ".json", ".cfg", ".ini", ".patch", ".j2", ".sh", ".ps1"}
-    files = [f for d in ("tests", "docs") if (root / d).is_dir() for f in (root / d).rglob("*")
-             if f.is_file() and f.suffix in text and "__pycache__" not in f.parts]
-    files.append(root / "README.md")
+    names = _git(["ls-files", "-z"], cwd=root).split("\0")
     found = set()
-    for f in files:
-        for token in re.findall(r"[a-z0-9][a-z0-9.-]*", f.read_text(encoding="utf-8", errors="ignore").lower()):
-            labels = token.strip(".-").split(".")
-            for i in range(len(labels)):
-                for j in range(i + 1, len(labels) + 1):
-                    word = ".".join(labels[i:j]).strip("-")
-                    if hashlib.sha256(word.encode()).hexdigest() == TEST_BUCKET_SHA256:
-                        found.add(f.relative_to(root).as_posix())
+    for name in filter(None, names):
+        path = root / name
+        if not path.is_file():
+            continue
+        text = path.read_bytes().decode("utf-8", errors="ignore").lower()
+        for run in set(re.findall(r"[a-z0-9._-]+", text)):
+            pieces = re.split(r"([._-])", run)  # words at even indexes, separators at odd
+            words = range(0, len(pieces), 2)
+            for i in words:
+                for j in words:
+                    if j >= i and hashlib.sha256("".join(pieces[i:j + 1]).encode()).hexdigest() == TEST_BUCKET_SHA256:
+                        found.add(name)
     assert not found, sorted(found)
 
 
@@ -2183,6 +2183,37 @@ def test_a_bucket_run_needs_a_key_refused_version_listing(s3_server) -> None:
     with pytest.raises(HarnessError, match="NoSuchBucket"):
         require_no_version_listing(Client("NoSuchBucket"), DEMO_BUCKET, "runs/r/t")
     require_no_version_listing(s3_server.client, BUCKET, "runs/r/t")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a shebang fake")
+def test_a_failing_bucket_run_never_prints_the_bucket_s_name(tmp_path: Path, s3_server) -> None:
+    """Story 11 pointed at a made-up test bucket on the emulator, which refuses version listing as the test key must,
+    with a mintd that fails the way dvc does, naming `<bucket>/runs/...` on stdout and stderr. The whole `-rA` output
+    (the failure, its summary, captured output) shows `<test-bucket>` there and never the name. Mutation that turns
+    it red: the stories conftest's report redaction dropped."""
+    s3_server.client.create_bucket(Bucket=DEMO_BUCKET)
+    fake = tmp_path / "mintd"
+    fake.write_text(f"#!/bin/sh\necho pushing to s3://{DEMO_BUCKET}/runs/x\n"
+                    f"echo ERROR: failed to push data to the cloud - {DEMO_BUCKET}/runs/x: Access Denied >&2\nexit 1\n",
+                    encoding="utf-8")
+    fake.chmod(0o755)
+    (tmp_path / "key").write_text("[mintd-test]\naws_access_key_id = AKIASTORYTEST\n"
+                                  "aws_secret_access_key = story-test-secret\n", encoding="utf-8")
+    (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {s3_server.endpoint}\n",
+                                   encoding="utf-8")
+    where = urlsplit(s3_server.endpoint)
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+           BUCKET_VAR: DEMO_BUCKET, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"), "PYTHONPATH": str(tmp_path),
+           "AWS_CONFIG_FILE": str(tmp_path / "conf"), "MINTD_BIN": str(fake)}
+    got = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "-k", "past_the_multipart",
+         *_story_pin(tmp_path, DEMO_BUCKET, scheme=where.scheme, host=where.hostname, port=where.port),
+         "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
+        cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=300,
+    )
+    out = got.stdout + got.stderr
+    assert got.returncode == 1 and "<test-bucket>/runs/x" in out, out[-4000:]
+    assert DEMO_BUCKET not in out, out[-4000:]
 
 
 def test_a_bucket_run_stops_before_writing_when_its_key_may_list_versions(tmp_path: Path) -> None:
