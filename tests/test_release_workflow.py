@@ -19,7 +19,8 @@ from typing import Any
 import pytest
 import yaml
 
-_WORKFLOWS = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+_REPO = Path(__file__).resolve().parents[1]
+_WORKFLOWS = _REPO / ".github" / "workflows"
 _WF: dict[str, Any] = {p.name: yaml.safe_load(p.read_text()) for p in sorted(_WORKFLOWS.glob("*.yml"))}
 _JOBS = _WF["release.yml"]["jobs"]
 _TAG_JOB = _WF["tag.yml"]["jobs"]["tag"]
@@ -80,6 +81,8 @@ def test_each_job_gets_only_the_permissions_it_needs() -> None:
         "test": {"contents": "read"},
         "build": {"contents": "read"},
         "prerelease": {"contents": "write"},
+        "install": {"contents": "read"},
+        "evidence": {"contents": "write"},
         "promote": {"contents": "write", "actions": "read"},
     }
     assert _WF["tag.yml"]["permissions"] == {"contents": "write", "actions": "write"}
@@ -121,17 +124,25 @@ def test_the_build_runs_in_a_job_without_write_access() -> None:
     assert all("uv " not in step.get("run", "") for step in _JOBS["prerelease"]["steps"])
 
 
+#: `evidence` records a failed install too, so it runs whatever `install`
+#: did, but only once CI passed and the prerelease exists.
+_ALLOWED_IF = {"evidence": "always() && needs.prerelease.result == 'success'"}
+
+
 def test_every_job_waits_for_ci_on_a_tag() -> None:
     assert _JOBS["test"]["if"] == "github.ref_type == 'tag'"
     assert _JOBS["test"]["uses"] == "./.github/workflows/test.yml"
     for job in set(_JOBS) - {"test"}:
         assert "test" in _upstream(job), job
-        assert "if" not in _JOBS[job], f"{job} must not run when CI failed (`if: always()`)"
+        assert _JOBS[job].get("if") == _ALLOWED_IF.get(job), f"{job} must not run when CI failed (`if: always()`)"
 
 
 def test_only_the_approved_promote_job_marks_a_release_latest() -> None:
     assert _JOBS["promote"]["environment"] == "release"
     assert _upstream("promote") == set(_JOBS) - {"promote"}
+    # `evidence` runs after a failed install too, so needing it alone would
+    # let promote run after one.
+    assert "install" in _JOBS["promote"]["needs"]
     # One line per command: join the backslash-continued lines.
     others = "\n".join(_runs(job) for job in _JOBS if job != "promote").replace("\\\n", " ")
     assert not re.search(r"--latest(?!=false)", others)
@@ -205,6 +216,47 @@ def test_the_build_refuses_a_wheel_whose_version_is_not_the_tag(tmp_path: Path) 
     assert not list((tmp_path / "dist").glob("*.sha256"))
 
 
+# --- stamping the install scripts ----------------------------------------
+
+_PLACEHOLDERS = {"install.sh": 'MINTD_TAG=""', "install.ps1": '$MintdTag = ""'}
+
+
+def _stamp(tmp_path: Path, scripts: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """Run the build job's stamping step on `scripts` in an empty directory."""
+    (tmp_path / "dist").mkdir()
+    for name, text in scripts.items():
+        (tmp_path / name).write_text(text, newline="")
+    return subprocess.run(
+        ["bash", "-c", _step("build", "Stamp the install scripts")["run"]],
+        cwd=tmp_path, env={**os.environ, "TAG": "v1.2.3"}, capture_output=True, text=True,
+    )
+
+
+@_BASH
+def test_stamping_writes_the_tag_into_both_install_scripts(tmp_path: Path) -> None:
+    scripts = {name: (_REPO / name).read_text(encoding="utf-8") for name in _PLACEHOLDERS}
+    result = _stamp(tmp_path, scripts)
+    assert result.returncode == 0, result.stderr
+    for name, empty in _PLACEHOLDERS.items():
+        stamped = empty.replace('""', '"v1.2.3"')
+        expected = scripts[name].replace(f"\n{empty}\n", f"\n{stamped}\n")
+        assert expected != scripts[name]
+        assert (tmp_path / "dist" / name).read_text(encoding="utf-8") == expected
+    assert subprocess.run(["bash", "-n", str(tmp_path / "dist" / "install.sh")]).returncode == 0
+
+
+@_BASH
+@pytest.mark.parametrize("copies", [0, 2])
+def test_stamping_stops_unless_each_script_has_exactly_one_placeholder(tmp_path: Path, copies: int) -> None:
+    """An unstamped script on a release would install the newest release instead."""
+    scripts = {name: (_REPO / name).read_text(encoding="utf-8") for name in _PLACEHOLDERS}
+    empty = _PLACEHOLDERS["install.sh"]
+    scripts["install.sh"] = scripts["install.sh"].replace(f"\n{empty}\n", f"\n{empty}\n" * copies or "\n")
+    result = _stamp(tmp_path, scripts)
+    assert result.returncode != 0
+    assert "must appear exactly once" in result.stderr
+
+
 # --- publishing, run with a stub gh --------------------------------------
 
 _STUB_GH_PUBLISH = """#!/bin/bash
@@ -269,6 +321,67 @@ def test_publishing_never_replaces_a_release_file(
     assert any(line.startswith("gh release create v1.2.3 --verify-tag --prerelease --latest=false") for line in log) is created
     assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded[: 1 if case == "an upload fails" else None]
     assert not any(line.startswith("gh release edit") for line in log)
+
+
+# --- the evidence, run with a stub gh ------------------------------------
+
+_STUB_GH_EVIDENCE = """#!/bin/bash
+echo "gh $1 $2" >> "$LOG"
+case "$*" in
+  "release view"*"--json isPrerelease"*) echo "$PRERELEASE" ;;
+  "release view"*"--json body"*) cat "$BODY" ;;
+  "release edit"*)
+    prev=""
+    for a in "$@"; do [ "$prev" = --notes ] && printf '%s' "$a" > "$NOTES_OUT"; prev="$a"; done ;;
+esac
+exit 0
+"""
+_PLACEHOLDER = "The release gate is running: https://example/run. The `evidence` job replaces this note with its results."
+_FILLED = """commit: abc
+gate run: https://example/run
+
+- CI (test.yml) on this tag: passed
+- clean install with this release's install.sh and install.ps1 on Linux (--with-schema), macOS and Windows PowerShell 5.1 (plain, then -WithSchema), and the story tests against the Linux install: failure
+- live tier: run by hand on the lab Linux box when the change touches download or push paths; result: passed 12 of 12 checks on 3 products
+- canary: run by hand (RELEASING.md); result: passed
+
+A prerelease."""
+
+
+def _evidence(tmp_path: Path, body: str, prerelease: str = "true") -> tuple[int, str | None, str]:
+    (tmp_path / "body").write_text(body)
+    env = {
+        **_stubs(tmp_path, gh=_STUB_GH_EVIDENCE), "TAG": "v1.2.3", "INSTALL": "success", "PRERELEASE": prerelease,
+        "BODY": str(tmp_path / "body"), "NOTES_OUT": str(tmp_path / "notes"),
+        "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
+    }
+    result = subprocess.run(["bash", "-c", _runs("evidence")], env=env, capture_output=True, text=True)
+    notes = (tmp_path / "notes").read_text() if (tmp_path / "notes").exists() else None
+    return result.returncode, notes, result.stdout + result.stderr
+
+
+@_BASH
+def test_evidence_fills_the_notes_while_the_gate_placeholder_is_there(tmp_path: Path) -> None:
+    rc, notes, out = _evidence(tmp_path, _PLACEHOLDER)
+    assert rc == 0, out
+    assert notes is not None and notes.startswith("commit: abc\n")
+    assert "and the story tests against the Linux install: success\n" in notes
+    assert "- live tier: run by hand on the lab Linux box when the change touches download or push paths; result: not recorded yet" in notes
+
+
+@_BASH
+def test_evidence_on_a_rerun_replaces_only_the_install_line(tmp_path: Path) -> None:
+    """A rerun keeps the live-tier and canary results people wrote."""
+    rc, notes, out = _evidence(tmp_path, _FILLED)
+    assert rc == 0, out
+    assert notes == _FILLED.replace("against the Linux install: failure", "against the Linux install: success")
+
+
+@_BASH
+def test_evidence_never_changes_a_release_that_is_not_a_prerelease(tmp_path: Path) -> None:
+    rc, notes, out = _evidence(tmp_path, _FILLED, prerelease="false")
+    assert rc != 0 and "is not a prerelease" in out
+    assert notes is None
 
 
 # --- promoting, run with a stub gh ---------------------------------------

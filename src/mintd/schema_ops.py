@@ -24,9 +24,10 @@ DEFAULT_MISSING_VALUES = ["", "NA", "."]
 
 
 class SchemaExtraNotInstalled(MintdError):
-    """Raised when `mintd data schema generate` runs without the `[schema]` extra."""
+    """Raised when `mintd data schema generate` runs without the `[schema]` extra.
 
-    hint = "Reinstall mintd with: install.sh --with-schema (or: uv tool install --force 'mintd[schema]')"
+    No hint of its own: the CLI gives the install line, which lives in cli.py.
+    """
 
 
 def _lazy_pandas() -> Any:

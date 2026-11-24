@@ -5,23 +5,58 @@
 - Merging a PR into `main` tags its merge commit `vX.Y.Z` (`.github/workflows/tag.yml`) and starts
   `.github/workflows/release.yml` on that tag.
 - `release.yml` reruns CI (`test.yml`) on the tag, builds the wheel once, and publishes a GitHub
-  prerelease with the wheel, its SHA-256 (`<wheel>.sha256`) and `constraints.txt` (the locked
-  dependencies, with hashes). `releases/latest` never points at a prerelease.
+  prerelease with the wheel, its SHA-256 (`<wheel>.sha256`), `constraints.txt` (the locked
+  dependencies, with hashes), and `install.sh` and `install.ps1` with the tag written in. It then
+  installs that release with its own scripts, from its URL, on Linux, macOS and Windows, and runs
+  the story tests against the Linux install.
+- The install line, `…/releases/latest/download/install.sh` (or `install.ps1`), runs the latest
+  release's own script, and `releases/latest` never points at a prerelease.
 - The run's `promote` job then waits for the maintainer's approval in the `release` environment.
   Approved, it checks the release (see Promote) and marks that same release, built from that
   same commit, as the latest release.
 
+## What the install line checks
+
+- The release's wheel is checked against the release's SHA-256 before anything is installed. On a
+  mismatch, nothing is installed.
+- Every dependency is pinned to the version in the release's `constraints.txt`. That file also holds
+  their hashes, but `uv tool install` does not check hashes in a constraints file (uv 0.13.9, with
+  or without a cache), so dependencies are pinned by version, not by hash.
+- The reflink step does check hashes: `uv pip install --require-hashes` takes reflink's from the
+  scripts (it is not in the lock) and cffi's and pycparser's from `constraints.txt`. reflink has
+  no wheel for Python 3.13, so its pinned sdist is built on the user's machine; the build's own
+  tools (setuptools) come from PyPI by version, unchecked. The step runs with `--no-config`, so a
+  `uv.toml` or `pyproject.toml` where the line runs, or above it, changes nothing. That also skips
+  the user's own uv settings file; uv's environment variables still apply.
+- To bump reflink, set `REFLINK_REQ` in `install.sh` and `$ReflinkReq` in `install.ps1` from
+  `uv pip compile --no-config --universal --python-version 3.13 --generate-hashes` on
+  `reflink==<version>`; a test checks the two match.
+- Checking the dependencies' hashes would mean installing with `uv pip sync --require-hashes` into
+  a virtual environment the scripts manage themselves. That gives up what `uv tool` provides
+  (`uv tool list`, `uv tool uninstall`, the `mintd` command on PATH), so the scripts would have to
+  create the environment, the PATH entry and an uninstall path on each system.
+
 ## The gate's evidence
 
-It is on the prerelease's notes. The workflow writes the CI line; people fill in the rest.
+It is on the prerelease's notes. The workflow writes the first two lines; people fill in the rest.
 
 - **CI on this tag:** written by the workflow.
+- **Clean install:** written by the workflow: the release's own `install.sh` on Linux (with
+  `--with-schema`) and macOS, its `install.ps1` on Windows PowerShell 5.1 (plain, then
+  `-WithSchema` over it), and the story tests against the Linux install. The stories run on Linux
+  only.
 - **Live tier:** run by hand, read-only, on the lab Linux box, when the change touches download or
   push paths. Never in CI. Write the result on the live-tier line: `passed N of N checks on N
   products`, or `not run: <reason>`. Release notes are public: counts only, never the name of a
   non-public product.
 - **Canary:** the lab's own workflows, run by hand by the people the maintainer names. Write the
   result on the canary line.
+- **Pre-release sweep, for the first two releases:** every lab data product is cloned and imported
+  with the candidate's mintd on the lab Linux box, through the live tier, read-only. Add a line:
+  `pre-release sweep on the lab box: N of N data products cloned and imported`, or the failing count
+  and the issues filed for it. Counts only, never a product's name. For the release that first ships
+  the install scripts, the sweep runs on that PR's wheel before it merges, so the merge and the
+  promotion happen the same day.
 
 To edit the notes: `gh release view vX.Y.Z --json body --jq .body > notes.md`, edit `notes.md`,
 then `gh release edit vX.Y.Z --notes-file notes.md`. CI holds no storage credentials, so every
@@ -46,10 +81,14 @@ with write access, and any workflow token with `contents: write`, can still edit
 ## Roll back
 
 ```bash
+# vPREV must carry the install scripts: the install line runs the latest release's own.
+gh release view vPREV --json assets --jq '[.assets[].name] | (index("install.sh") != null) and (index("install.ps1") != null)'   # must print true
 gh release edit vPREV --latest      # the last good release is latest again
 gh release edit vBAD --prerelease   # the withdrawn one goes back to prerelease
 ```
 
+- Never roll back to a release without `install.sh` and `install.ps1`, such as one made before the
+  install scripts shipped: the install line would then fail with "no mintd release is out yet".
 - In that order, so there is always an explicit latest release.
 - An emergency rollback skips the canary: vPREV already passed it.
 - When there is time, prefer a revert PR. It ships as the next patch, through the gate.
