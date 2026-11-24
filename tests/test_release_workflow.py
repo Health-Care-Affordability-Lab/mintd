@@ -149,6 +149,7 @@ def test_only_the_approved_promote_job_marks_a_release_latest() -> None:
     assert "--prerelease=false" not in others
     create = re.search(r"gh release create[^\n]*", others)
     assert create and re.search(r"--prerelease(?![=\w-])", create[0]) and "--verify-tag" in create[0]
+    assert re.search(r"--draft(?![=\w-])", create[0])  # published only once its files are all up
 
 
 def test_the_tag_job_runs_only_on_a_merge_one_at_a_time() -> None:
@@ -262,38 +263,60 @@ def test_stamping_stops_unless_each_script_has_exactly_one_placeholder(tmp_path:
 _STUB_GH_PUBLISH = """#!/bin/bash
 echo "gh $*" >> "$LOG"
 case "$*" in
-  "release view"*"--json tagName"*) [ "$EXISTS" = 1 ] || { echo "release not found" >&2; exit 1; } ;;
-  "release view"*"--json isPrerelease"*) echo "$PRERELEASE" ;;
+  # The listing as `gh api --paginate --jq` prints it: one line per match, page
+  # after page. Without --paginate only the first page comes back.
+  "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
+  "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
   "release view"*"--json assets"*) [ "$ASSETS_FAIL" = 1 ] && exit 1; cat "$HAVE" ;;
-  "release upload"*) [ "${4##*/}" = "$UPLOAD_FAIL" ] && exit 1 ;;
+  "release upload"*)
+    name=${4##*/}
+    [ "$name" = "$UPLOAD_FAIL" ] && exit 1
+    if [ "$name" = "$UPLOAD_HALF" ]; then echo "$name open null" >> "$HAVE"
+    else echo "$name uploaded sha256:$(sha256sum "$4" | cut -d' ' -f1)" >> "$HAVE"; fi ;;
 esac
 exit 0
 """
 
 _SAME, _OTHER, _HALF = "same", "other", "half"
+# A release as the listing prints it: `<id> <draft> <prerelease> <url>`.
+_DRAFT, _NOT_PRE_DRAFT, _PUBLISHED, _PROMOTED = "true true", "true false", "false true", "false false"
+_CREATE = "gh release create v1.2.3 --verify-tag --draft --prerelease --latest=false"
+_PUBLISH = "gh release edit v1.2.3 --draft=false --prerelease --latest=false"
+_BOTH = ["a.whl", "b.txt"]
+_COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
 
 
 @_BASH
 @pytest.mark.parametrize(
-    ("case", "exists", "have", "created", "uploaded", "error"),
+    ("case", "pages", "have", "created", "uploaded", "published", "error"),
     [
-        ("new", False, {}, True, ["a.whl", "b.txt"], None),
-        ("rerun finishes it", True, {"a.whl": _SAME}, False, ["b.txt"], None),
-        ("nothing left", True, {"a.whl": _SAME, "b.txt": _SAME}, False, [], None),
-        # b differs: nothing is uploaded, not even the missing a
-        ("a file differs", True, {"b.txt": _OTHER}, False, [], "already has a different b.txt"),
-        ("an incomplete upload", True, {"a.whl": _HALF}, False, [], "incomplete upload of a.whl"),
-        ("not a prerelease", True, {}, False, [], "is not a prerelease"),
-        ("the asset lookup fails", True, {}, False, [], ""),
-        ("an upload fails", False, {}, True, ["a.whl", "b.txt"], ""),
+        ("none yet", ([], []), {}, True, _BOTH, True, None),
+        ("a complete draft", ([_DRAFT], []), _COMPLETE, False, [], True, None),
+        ("a partial draft", ([_DRAFT], []), {"a.whl": _SAME}, False, ["b.txt"], True, None),
+        # The draft's files are all checked before anything is uploaded.
+        ("a draft with a half upload", ([_DRAFT], []), {"a.whl": _HALF}, False, [], False, "incomplete upload of a.whl"),
+        ("a draft with a different file", ([_DRAFT], []), {"b.txt": _OTHER}, False, [], False, "already has a different b.txt"),
+        ("a draft with a stray file", ([_DRAFT], []), {"c.txt": _OTHER}, False, [], False, "has c.txt, which this build didn't make"),
+        ("a draft that isn't a prerelease", ([_NOT_PRE_DRAFT], []), {}, False, [], False, "has a draft that is not a prerelease"),
+        ("an empty dist/", ([], []), {}, False, [], False, "dist/ is empty"),
+        ("two releases, on two pages", ([_PUBLISHED], [_DRAFT]), {}, False, [], False, "several releases for v1.2.3"),
+        ("the listing fails", ([], []), {}, False, [], False, ""),
+        ("the file lookup fails", ([_DRAFT], []), {}, False, [], False, ""),
+        ("a complete published prerelease", ([_PUBLISHED], []), _COMPLETE, False, [], False, None),
+        ("a published prerelease short of a file", ([_PUBLISHED], []), {"a.whl": _SAME}, False, [], False, "is published without b.txt"),
+        ("a published prerelease with an extra file", ([_PUBLISHED], []), {**_COMPLETE, "c.txt": _OTHER}, False, [], False, "which this build didn't make"),
+        ("a promoted release", ([_PROMOTED], []), _COMPLETE, False, [], False, "a promoted release is never changed"),
+        ("an upload fails", ([], []), {}, True, ["a.whl"], False, ""),
+        ("an upload lands incomplete", ([], []), {}, True, _BOTH, False, "incomplete upload of a.whl"),
     ],
 )
-def test_publishing_never_replaces_a_release_file(
-    tmp_path: Path, case: str, exists: bool, have: dict[str, str], created: bool, uploaded: list[str], error: str | None
+def test_the_prerelease_publishes_only_a_complete_draft(
+    tmp_path: Path, case: str, pages: tuple[list[str], list[str]], have: dict[str, str],
+    created: bool, uploaded: list[str], published: bool, error: str | None,
 ) -> None:
     dist = tmp_path / "dist"
     dist.mkdir()
-    files = {"a.whl": b"wheel", "b.txt": b"pins"}
+    files = {} if case == "an empty dist/" else {"a.whl": b"wheel", "b.txt": b"pins"}
     for name, data in files.items():
         (dist / name).write_bytes(data)
     answer = {
@@ -302,11 +325,16 @@ def test_publishing_never_replaces_a_release_file(
         _HALF: lambda n: "open null",
     }
     (tmp_path / "have").write_text("".join(f"{n} {answer[kind](n)}\n" for n, kind in have.items()))
+    for i, page in enumerate(pages, 1):
+        lines = (f"{100 * i + j} {flags} https://github.com/o/r/releases/tag/v1.2.3\n" for j, flags in enumerate(page))
+        (tmp_path / f"page{i}").write_text("".join(lines))
     env = {
-        **_stubs(tmp_path, gh=_STUB_GH_PUBLISH), "TAG": "v1.2.3", "EXISTS": "1" if exists else "0",
-        "PRERELEASE": "false" if case == "not a prerelease" else "true",
-        "ASSETS_FAIL": "1" if case == "the asset lookup fails" else "0",
+        **_stubs(tmp_path, gh=_STUB_GH_PUBLISH), "TAG": "v1.2.3", "GH_REPO": "o/r",
+        "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
+        "LIST_FAIL": "1" if case == "the listing fails" else "0",
+        "ASSETS_FAIL": "1" if case == "the file lookup fails" else "0",
         "UPLOAD_FAIL": "a.whl" if case == "an upload fails" else "",
+        "UPLOAD_HALF": "a.whl" if case == "an upload lands incomplete" else "",
         "HAVE": str(tmp_path / "have"), "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
         "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }
@@ -318,9 +346,25 @@ def test_publishing_never_replaces_a_release_file(
     assert (result.returncode == 0) is (error is None), result.stdout + result.stderr
     if error:
         assert error in result.stdout
-    assert any(line.startswith("gh release create v1.2.3 --verify-tag --prerelease --latest=false") for line in log) is created
-    assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded[: 1 if case == "an upload fails" else None]
-    assert not any(line.startswith("gh release edit") for line in log)
+    assert any(line.startswith(_CREATE) for line in log) is created
+    assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded
+    # The one edit is the publish, and it comes last: after every upload and the final check.
+    assert [line for line in log if line.startswith("gh release edit")] == ([_PUBLISH] if published else [])
+    assert (log[-1:] == [_PUBLISH]) is published
+
+
+def test_the_listing_reads_the_tag_from_env_on_every_page() -> None:
+    """The tag reaches the filter as gojq's `env.TAG`, never spliced into it, and
+    `.[] |` streams one line per match whatever the page count (a `[...]` filter
+    runs once per page)."""
+    run = re.sub(r"\s*\\\n\s*", " ", _step("prerelease", "Publish the prerelease")["run"])
+    assert "out=$(gh api --paginate \"repos/$GH_REPO/releases?per_page=100\" --jq '.[] | select(.tag_name == env.TAG) |" in run
+
+
+def test_one_prerelease_run_per_tag_at_a_time() -> None:
+    # On the job: at the workflow level a rerun would wait behind promote's approval.
+    assert _JOBS["prerelease"]["concurrency"] == {"group": "prerelease-${{ github.ref_name }}", "cancel-in-progress": False}
+    assert "concurrency" not in _WF["release.yml"]
 
 
 # --- the evidence, run with a stub gh ------------------------------------

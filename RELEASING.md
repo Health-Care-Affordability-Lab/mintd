@@ -90,6 +90,8 @@ gh release edit vBAD --prerelease   # the withdrawn one goes back to prerelease
 - Never roll back to a release without `install.sh` and `install.ps1`, such as one made before the
   install scripts shipped: the install line would then fail with "no mintd release is out yet".
 - In that order, so there is always an explicit latest release.
+- Never delete a published release. Once releases are immutable its tag can't be used again, so a
+  fix ships as the next version or a `.postN`.
 - An emergency rollback skips the canary: vPREV already passed it.
 - When there is time, prefer a revert PR. It ships as the next patch, through the gate.
 - Nothing checks that older versions can read what a newer one wrote. Check whether vBAD wrote
@@ -111,16 +113,30 @@ gh workflow run release.yml --ref vX.Y.Z.post1
 The maintainer pushes the tag; if only the tag job may create `v*` tags, an admin pushes it. The
 dispatch runs the `release.yml` in that tag's own tree. Then come the gate and promotion, as above.
 Land the same fix on `main` with a normal PR: `tag.yml` never creates or counts `.postN` tags.
+A hotfix branch cut from a commit before `prerelease` made its release as a draft must carry that
+change (cherry-pick it), or its release fails once releases are immutable: the older job uploads to
+a release it has already published.
 
 ## A failed run
 
-Use "Re-run failed jobs" in the same run: it reuses the build's files. If the prerelease already
-exists, the rerun uploads only the files it lacks and stops if one it has differs. A release's files
-are never replaced, and a release that is no longer a prerelease is never changed.
+Use "Re-run failed jobs" in the same run: it reuses the build's files. The `prerelease` job makes
+the release as a draft, and publishes it only once it holds exactly the build's files, each uploaded
+whole. A rerun uploads only the files a draft lacks, then publishes it. A published prerelease is
+checked, never changed. A release's files are never replaced, and a release that is no longer a
+prerelease is never changed. A draft is invisible to users and to the install line.
 
-- **An incomplete upload.** If the run stops with "has an incomplete upload of `<file>`", an
-  interrupted upload left that file half there. The maintainer deletes that one file from the
-  prerelease (`gh release delete-asset vX.Y.Z <file>`), then re-runs the failed jobs.
+- **A draft the run can't finish.** If the run stops on a draft (the Releases page marks it Draft)
+  with "has an incomplete upload of `<file>`", "already has a different `<file>`", "has `<file>`,
+  which this build didn't make" or "has a draft that is not a prerelease", delete the draft
+  (`gh release delete vX.Y.Z --yes`; the tag stays, since `--cleanup-tag` isn't given) and re-run the
+  failed jobs.
+- **A published prerelease short of a file**, or with an incomplete, different or extra one. Only
+  the job before drafts could leave one, since it published first. It can't be fixed in place once
+  releases are immutable: withdraw it as in Roll back, and ship the next version.
+- **"several releases for `vX.Y.Z`".** The step printed each one's id, draft flag and URL. Delete
+  each stray draft by its id, `gh api -X DELETE "repos/Health-Care-Affordability-Lab/mintd/releases/<id>"`
+  (or from the Releases page), keep at most one, and re-run. Never `gh release delete vX.Y.Z` here:
+  with a published release for the tag, it deletes that one.
 - **The tag job's `queue: max`.** `tag.yml` keeps every waiting tag run with
   `concurrency: queue: max`, which GitHub documents but actionlint does not know yet. After the
   first merge that uses it, check that the tag run succeeded and the merge got its tag. If GitHub
