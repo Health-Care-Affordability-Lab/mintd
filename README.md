@@ -423,7 +423,7 @@ mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
-mintd registry register|update|status|sync        Catalog operations
+mintd registry register|update|status|sync|rebuild   Catalog operations; rebuild: each entry from its product
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
 mintd config   show|setup|validate
 mintd update   metadata [path]                    Migrate v1 metadata.json → v2

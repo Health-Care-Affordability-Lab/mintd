@@ -204,6 +204,10 @@ class _FakeRegistryGitOps:
     def current_commit(self, work_dir: Path) -> str:
         return self.current_commit_value
 
+    def head_commit(self, work_dir: Path) -> tuple[str, str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().head_commit(work_dir)
+
     # `data push`'s commit lane: real git through the production seam, like
     # `uncommitted_pointers` above.
     def repo_toplevel(self, work_dir: Path) -> Path:

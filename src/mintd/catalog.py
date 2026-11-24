@@ -208,6 +208,14 @@ class InMemoryCatalogClient:
     def __init__(self) -> None:
         self._entries: dict[str, CatalogEntry] = {}
 
+    @classmethod
+    def of(cls, entries: list[CatalogEntry]) -> "InMemoryCatalogClient":
+        """A client serving exactly ``entries``, by name: a registry checkout
+        read once, as `rebuild_catalog` hands it to `check_project`."""
+        client = cls()
+        client._entries = {e.name: e for e in entries if e.name}
+        return client
+
     def register(self, metadata: Metadata, *, dry_run: bool = False, reporter: Optional["Reporter"] = None) -> RegisterResult:
         name = metadata.project.name
         if name in self._entries:
@@ -539,3 +547,229 @@ class GitCatalogClient:
 
 if TYPE_CHECKING:
     from ._registry_git_ops import RegistryGitOps
+
+
+# ---------------------------------------------------------------------------
+# registry rebuild: each entry from its product's default branch
+# ---------------------------------------------------------------------------
+
+#: The leaves a rebuild copies from a product's `metadata.json` into its entry,
+#: as dotted paths on `Metadata` ("[]" for each item of a list). Every other
+#: field of the entry is the registry's and stays as the entry has it: the
+#: registry's workflows act on some of them (repository permissions from
+#: `access_control`, bucket policies from `storage`, a public mirror from
+#: `repository.mirror.url`), so a product must never set them by editing its
+#: own file. Pinned here until the model tags the registry's own fields
+#: `Owner.REGISTRY`; a test then checks that the two agree.
+COPIED_LEAVES: tuple[str, ...] = (
+    "metadata.description",
+    "metadata.tags",
+    "ownership.team",
+    "ownership.maintainers",
+    "data_products.primary",
+    "data_products.outputs[].path",
+    "data_products.outputs[].description",
+    "data_products.outputs[].primary",
+    "status.state",
+)
+
+#: Fields the registry decides that a product's file may still say otherwise:
+#: a difference is reported, never copied. A reviewed registry PR changes them.
+_REPORTED: tuple[str, ...] = ("project.name", "storage", "governance.classification", "schema")
+
+
+@dataclass(frozen=True)
+class Rebuilt:
+    """One entry's outcome in ``rebuild_catalog``.
+
+    ``verdict``: "updated" (the entry takes the product's fields), "unchanged",
+    "held" (the product is refused: the entry keeps its last good fields and
+    records why in ``source.held``), "unreachable" (the repository couldn't be
+    read, so the entry is untouched), or "skipped" (the entry itself can't be
+    read or names no repository). ``reports`` are differences and leaks the
+    registry should know of; none changes the entry."""
+
+    name: str
+    entry: str
+    verdict: Literal["updated", "unchanged", "held", "unreachable", "skipped"]
+    commit: str | None = None
+    why: str | None = None
+    changes: tuple[FieldChange, ...] = ()
+    reports: tuple[str, ...] = ()
+
+
+def rebuild_catalog(registry: Path, *, git_ops: "RegistryGitOps", write: bool) -> list[Rebuilt]:
+    """Rebuild every entry under ``registry``'s ``catalog/`` from its product.
+
+    The entries already there are the join record: a product with no entry
+    gets none. For each, the product's repository (the entry's own
+    ``repository.github_url``) is cloned at the HEAD of its
+    ``repository.default_branch``, one commit deep and without DVC data, and
+    its ``metadata.json`` is read. Only ``COPIED_LEAVES`` are copied; the
+    entry records the commit (``source.commit``) and its date
+    (``status.last_updated``). An entry with nothing new is left byte for
+    byte, so a second run makes no change. ``write=False`` reports what would
+    change and writes nothing."""
+    from ._catalog_cache import _TYPE_DIRS
+    from ._catalog_serializer import deserialize
+
+    paths = [path for type_dir in _TYPE_DIRS for path in sorted((registry / "catalog" / type_dir).glob("*.yaml"))]
+    # The catalog as it stands, for check's enclave lookups: an enclave product
+    # resolves the products it subscribes to through the catalog.
+    readable = []
+    for path in paths:
+        try:
+            readable.append(deserialize(path.read_text(encoding="utf-8"), source=path))
+        except CatalogEntryInvalid:
+            continue  # reported by its own rebuild below
+    catalog = InMemoryCatalogClient.of(readable)
+    return [_rebuild_entry(registry, path, git_ops=git_ops, write=write, catalog=catalog) for path in paths]
+
+
+def _rebuild_entry(
+    registry: Path, path: Path, *, git_ops: "RegistryGitOps", write: bool, catalog: "CatalogClient",
+) -> Rebuilt:
+    import copy
+    import tempfile
+
+    import yaml
+
+    from ._catalog_serializer import deserialize
+    from ._registry_git_ops import GitOpError
+    from .errors import strip_userinfo
+
+    rel = path.relative_to(registry).as_posix()
+    text = path.read_text(encoding="utf-8")
+    try:
+        old = deserialize(text, source=rel)
+    except CatalogEntryInvalid as exc:
+        return Rebuilt(path.stem, rel, "skipped", why=str(exc))
+    entry = old.model_dump()
+    name = old.name or path.stem
+    url = old.repo_url
+    if not url:
+        return Rebuilt(name, rel, "skipped", why="the entry names no repository.github_url")
+    with tempfile.TemporaryDirectory(prefix="mintd-rebuild-") as tmp:
+        product = Path(tmp) / "product"
+        try:
+            git_ops.clone(url, product, shallow=True, branch=old._nested("repository", "default_branch") or None)
+            sha, date = git_ops.head_commit(product)
+        except GitOpError as exc:
+            last = (exc.stderr or str(exc)).strip().splitlines()[-1:] or [""]
+            return Rebuilt(name, rel, "unreachable", why=f"can't read the repository: {strip_userinfo(last[0])}")
+        why, meta = _refusal(product, catalog)
+    reports = _reports(entry, meta) if meta is not None else ()
+    new = copy.deepcopy(entry)
+    source = dict(new.get("source") or {})
+    if why is not None:
+        held = source.get("held")
+        since = held.get("since") if isinstance(held, dict) else None
+        source["held"] = {"since": since or date, "commit": sha, "why": why}
+    else:
+        assert meta is not None
+        _copy_leaves(new, meta.model_dump(mode="json"))
+        new.setdefault("status", {})["last_updated"] = date
+        source.pop("held", None)
+        source["commit"] = sha
+    new["source"] = source
+    if new == entry:
+        return Rebuilt(name, rel, "held" if why else "unchanged", commit=sha, why=why, reports=reports)
+    if write:
+        from ._atomic import _atomic_write_text
+
+        _atomic_write_text(path, yaml.safe_dump(new, sort_keys=False, default_flow_style=False))
+    changes = tuple(_dict_diff(entry, new))
+    return Rebuilt(name, rel, "held" if why else "updated", commit=sha, why=why, changes=changes, reports=reports)
+
+
+def _refusal(product: Path, catalog: "CatalogClient") -> tuple[str | None, "Metadata | None"]:
+    """Why a product can't update its entry, or None, and its metadata when it
+    could be read."""
+    from .check import check_project
+    from .model import Metadata
+
+    if not (product / "metadata.json").is_file():
+        return "the repository has no metadata.json", None
+    try:
+        meta = Metadata.from_json_file(product / "metadata.json")
+    except (OSError, ValueError) as exc:
+        return f"metadata.json doesn't validate: {str(exc).splitlines()[0]}", None
+    paths = [o.path for o in meta.data_products.outputs]
+    if meta.data_products.primary is not None:
+        paths.append(meta.data_products.primary)
+    bad = [p for p in paths if not _output_path_ok(p)]
+    if bad:
+        return f"the output path {bad[0]!r} is empty, absolute, holds '..' or a backslash", meta
+    errors = [f for f in check_project(product, upgrades=False, client=catalog) if f.severity == "error"]
+    if errors:
+        return f"mintd check reports {len(errors)} error(s), first: {errors[0].message}", meta
+    return None, meta
+
+
+def _output_path_ok(path: str) -> bool:
+    """A declared output path a consumer can import: relative, inside the
+    product, written with forward slashes. Pinned here until the model
+    validates `DataProductOutput.path` itself."""
+    from pathlib import PurePosixPath
+
+    return bool(path) and "\\" not in path and not path.startswith("/") and ":" not in path[:2] \
+        and ".." not in PurePosixPath(path).parts
+
+
+def _copy_leaves(entry: dict[str, Any], product: dict[str, Any]) -> None:
+    """Set each of ``COPIED_LEAVES`` in ``entry`` from ``product``. A list's
+    items are the product's, each starting from the entry's item at the same
+    path, so a key the entry keeps on an item (a publish stamp, a key the model
+    doesn't know) stays with it."""
+    lists: dict[str, list[str]] = {}
+    for leaf in COPIED_LEAVES:
+        if "[]." in leaf:
+            where, _, key = leaf.partition("[].")
+            lists.setdefault(where, []).append(key)
+            continue
+        *parents, key = leaf.split(".")
+        _at(entry, parents)[key] = _get(product, leaf)
+    for where, keys in lists.items():
+        *parents, field = where.split(".")
+        kept = {item.get("path"): item for item in (_get(entry, where) or []) if isinstance(item, dict)}
+        items = []
+        for item in _get(product, where) or []:
+            merged = dict(kept.get(item.get("path"), {}))
+            merged.update({k: item.get(k) for k in keys})
+            items.append(merged)
+        _at(entry, parents)[field] = items
+
+
+def _reports(entry: dict[str, Any], meta: "Metadata") -> tuple[str, ...]:
+    from ._registry_git_ops import _credentials_out
+
+    product = meta.model_dump(mode="json")
+    out = [
+        f"{field} differs from the entry's; the registry keeps its own (a registry PR changes it)"
+        for field in _REPORTED
+        if _get(product, field) is not None and _get(product, field) != _get(entry, field)
+    ]
+    url = meta.repository.github_url
+    if _credentials_out(url) != url.strip():
+        out.append("metadata.json holds a credential in repository.github_url; remove it from the file and revoke it")
+    return tuple(out)
+
+
+def _get(tree: dict[str, Any], dotted: str) -> Any:
+    cur: Any = tree
+    for part in dotted.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(part)
+    return cur
+
+
+def _at(tree: dict[str, Any], parents: list[str]) -> dict[str, Any]:
+    """The mapping at ``parents`` in ``tree``, made where missing."""
+    cur = tree
+    for part in parents:
+        nxt = cur.get(part)
+        if not isinstance(nxt, dict):
+            nxt = cur[part] = {}
+        cur = nxt
+    return cur
