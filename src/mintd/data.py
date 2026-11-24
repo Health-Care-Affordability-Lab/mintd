@@ -38,7 +38,7 @@ from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
 from .data_ops import _default_dvc_remote, data_pull
 from .errors import MintdError, unreachable_repo_hint
-from .imports import DataDependency, NotAnImportError
+from .imports import DataDependency, NotAnImportError, recorded_url
 from ._producer_git_ops import _classify_stderr
 from .producer import (
     FetchError,
@@ -279,13 +279,18 @@ def import_product(
     # Every import of this product under the import root, whatever folder it
     # sits in: one kept under another folder name is still this product's.
     index = _imports_index(_physical(dest_root), name=name, repo_url=repo_url, cwd=cwd)
+    notes: list[str] = []
     destinations = [
         _import_destination(
             p, nested_root=nested_root, index=index, name=name, repo_url=repo_url, force=force, cwd=cwd,
-            reporter=reporter,
+            notes=notes,
         )
         for p in paths
     ]
+    # Only once every output has passed its refusals: a note about a rewrite
+    # that a later refusal stops would describe something that never happens.
+    for note in notes if reporter is not None else ():
+        reporter.warn(note)
     produced: list[Path] = []
     # What the output being imported made, for the `except` below: its
     # destination if that did not exist yet, and the folders above it that did
@@ -1056,10 +1061,13 @@ def _remove_payload(path: Path) -> None:
 
 def _import_destination(
     p: str, *, nested_root: Path, index: dict[str, Path], name: str, repo_url: str, force: bool, cwd: Path,
-    reporter: "Reporter | None" = None,
+    notes: list[str] | None = None,
 ) -> tuple[Path, Path]:
     """Where output ``p`` lands, ``(dest, its pointer)``, or the refusal that
-    stops the import. ``index`` is ``_imports_index`` of the import root."""
+    stops the import. ``index`` is ``_imports_index`` of the import root.
+    A forced rewrite of a pointer recorded under another org adds a line to
+    ``notes``: `--force` on the first try never saw the refusal."""
+    notes = [] if notes is None else notes
     # Mirror the producer's own path under the namespace (D-A). The
     # basename-only form collided two outputs sharing a leaf name
     # (`data/final/` + `archive/final/`) on one dest under `--all`.
@@ -1097,8 +1105,7 @@ def _import_destination(
                 raise ProducerMoved(
                     moved, hint="if that repository moved, pass --force to re-import it there from the catalog's URL",
                 )
-            if reporter is not None:  # --force on the first try never saw the refusal
-                reporter.warn(f"{moved}; re-importing it from the catalog's URL")
+            notes.append(f"{moved}; re-importing it from the catalog's URL")
         elif not force:
             raise ImportDestinationExists(
                 f"{_shown(existing, cwd)} already imports {p!r} of {name!r}; "
@@ -1119,6 +1126,12 @@ def _import_destination(
         if not force:
             raise ImportDestinationExists(
                 f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
+            )
+        recorded = recorded_url(target_dvc)
+        if recorded is not None and _producer_match(recorded, repo_url) == "moved":
+            notes.append(
+                f"{_shown(target_dvc, cwd)} imports {name!r} from {_shown_url(recorded)}, but the catalog "
+                f"names {_shown_url(repo_url)}; re-importing it from the catalog's URL"
             )
     elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
         # Something no pointer records is in the way: dvc imports INTO a
@@ -1545,33 +1558,26 @@ def _pointer_files(root: Path) -> list[Path]:
     files too, and they record that project's imports, not this one's. Links
     are followed one level down only, for a linked folder directly under
     `root` (a namespace folder kept elsewhere); deeper links are not walked.
-    One file reached twice, through a link and directly, is listed once."""
+    One file reached twice, through a link and directly, is listed once, and a
+    link that leads nowhere is no pointer."""
     from ._push_verify import in_subrepo
 
     if not root.is_dir():
         return []
-    tops = [root, *sorted(c for c in root.iterdir() if c.is_symlink() and c.is_dir())]
+    linked = (c for c in root.iterdir() if c.is_symlink() and c.is_dir() and c.name not in _NOT_IMPORTS)
+    tops = [root, *sorted(linked)]
     found: dict[str, Path] = {}
     for top in tops:
         for folder, dirs, files in os.walk(top):  # never follows a link below `top`
             dirs[:] = sorted(d for d in dirs if d not in _NOT_IMPORTS)
-            for f in sorted(files):
+            for f in sorted(f for f in files if f.endswith(".dvc")):  # the suffix first: payload folders are large
                 path = Path(folder) / f
+                if not os.path.exists(path):  # a link that leads nowhere
+                    continue
                 rel = path.relative_to(root).as_posix() if top == root else f"{top.name}/{path.relative_to(top).as_posix()}"
-                if f.endswith(".dvc") and not in_subrepo(root, rel):
+                if not in_subrepo(root, rel):
                     found.setdefault(os.path.realpath(path), path)
     return list(found.values())
-
-
-def _recorded_url(dvc_path: Path) -> str | None:
-    """The `repo.url` a pointer records, when it reads as text, else None:
-    read on its own, so a pointer broken elsewhere still says whose it is."""
-    try:
-        data = yaml.safe_load(dvc_path.read_text(encoding="utf-8"))
-        url = data["deps"][0]["repo"]["url"]
-    except (OSError, ValueError, yaml.YAMLError, LookupError, TypeError):
-        return None
-    return url if isinstance(url, str) else None
 
 
 def _producer_match(recorded: str, catalog: str) -> str | None:
@@ -1653,7 +1659,7 @@ def _imports_index(
             continue
         except (OSError, ValueError, yaml.YAMLError, LookupError, TypeError, AttributeError):
             dep = None
-        url = dep.producer_repo if dep is not None and isinstance(dep.producer_repo, str) else _recorded_url(dvc_path)
+        url = dep.producer_repo if dep is not None and isinstance(dep.producer_repo, str) else recorded_url(dvc_path)
         if repo_url is not None and url is not None and _producer_match(url, repo_url) is None:
             continue
         if dep is None or url is None or not isinstance(dep.output_path, str):
@@ -1713,7 +1719,7 @@ def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str, cwd: Path
     """
     if repo_url is None:
         return
-    owner = _recorded_url(dvc_path)
+    owner = recorded_url(dvc_path)
     if owner is not None and _producer_match(owner, repo_url) is None:
         raise UnknownProductPath(
             f"{_shown(dvc_path, cwd)} imports {_shown_url(owner)}, not {_shown_url(repo_url)}; refusing to "

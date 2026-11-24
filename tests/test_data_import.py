@@ -1973,3 +1973,87 @@ def test_a_dvc_add_pointer_at_the_destination_is_refused_as_before(tmp_path: Pat
 
     with pytest.raises(ImportDestinationExists, match="final.dvc already exists; pass --force or remove it"):
         import_product(client, _FakeDvcOps(), "demo", cwd=tmp_path, dest_root=root)
+
+
+def _link(link: Path, target: Path, *, directory: bool) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError:
+        pytest.skip("no symlinks here")
+
+
+def test_a_linked_venv_directly_under_the_root_is_not_read(tmp_path: Path) -> None:
+    """`.dvc`, `.git` and `.venv` are left unread when linked in too, not only
+    as folders.
+
+    Mutation: walk every linked child whatever its name -> refused as unreadable."""
+    client = InMemoryCatalogClient()
+    _register(client, "demo", mutate=_with_primary("data/final/"))
+    project = tmp_path / "project"
+    venv = tmp_path / "venv"  # outside the import root, reached only through the link
+    (venv / "lib").mkdir(parents=True)
+    (venv / "lib" / "broken.dvc").write_text("deps: [unclosed\n")
+    project.mkdir()
+    _link(project / ".venv", venv, directory=True)
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=project, dest_root=project)
+
+    assert [c.dest for c in fake.calls] == [project / "data_demo" / "data" / "final"]
+
+
+def test_a_dangling_link_named_like_a_pointer_is_no_pointer(tmp_path: Path) -> None:
+    """A link that leads nowhere reads as nothing, not as an unreadable pointer
+    that stops every import.
+
+    Mutation: drop the dangling-link skip -> refused as unreadable."""
+    client, root = _demo(tmp_path)
+    (root / "old").mkdir(parents=True)
+    _link(root / "old" / "final.dvc", tmp_path / "gone.dvc", directory=False)
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=root)
+
+    assert [c.dest for c in fake.calls] == [root / "data_demo" / "data" / "final"]
+
+
+def test_a_forced_rewrite_at_the_destination_of_a_pointer_under_another_org_says_so(tmp_path: Path) -> None:
+    """A pointer at the destination that records another org and another path
+    is indexed under that path, so the import reaches it as "a pointer at the
+    destination": `--force` rewrites it, and says so as the indexed case does.
+
+    Mutation: drop the destination's note -> `warns` is empty."""
+    client, root = _demo(tmp_path)
+    at_dest = _pointer(root / "data_demo" / "data" / "final.dvc", url="git@github.com:old-org/demo",
+                       producer_path="data/raw")
+    reporter = _RecordingReporter()
+    fake = _FakeDvcOps()
+
+    import_product(client, fake, "demo", cwd=tmp_path, dest_root=root, force=True, reporter=reporter)
+
+    assert fake.calls[0].dest == at_dest.with_suffix("")
+    assert reporter.warns == [
+        "data/imports/data_demo/data/final.dvc imports 'demo' from git@github.com:old-org/demo, but the catalog "
+        "names https://github.com/example-org/demo; re-importing it from the catalog's URL"
+    ]
+
+
+def test_no_rewrite_is_announced_when_a_later_output_is_refused(tmp_path: Path) -> None:
+    """The notes print only once every output has passed its refusals.
+
+    Mutation: print each note as its output is checked -> the first output's
+    note shows although nothing is rewritten."""
+    client = InMemoryCatalogClient()
+    _register(client, "demo", mutate=_with_outputs("data/final/", "data/raw/"))
+    root = tmp_path / "data" / "imports"
+    _pointer(root / "demo" / "final.dvc", url="git@github.com:old-org/demo")  # moved: a note under --force
+    _pointer(root / "data_demo" / "data" / "raw.dvc", url="https://github.com/example-org/other",
+             producer_path="data/raw")  # another product's, at the second output's destination
+    reporter = _RecordingReporter()
+    fake = _FakeDvcOps()
+
+    with pytest.raises(UnknownProductPath):
+        import_product(client, fake, "demo", cwd=tmp_path, dest_root=root, all_outputs=True, force=True,
+                       reporter=reporter)
+
+    assert reporter.warns == [] and fake.calls == []

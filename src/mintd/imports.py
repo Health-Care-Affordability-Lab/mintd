@@ -39,12 +39,8 @@ class DataDependency(BaseModel):
     @classmethod
     def from_dvc_file(cls, path: Path) -> "DataDependency":
         data = _read_yaml(path)
-        deps = data.get("deps") or []
         outs = data.get("outs") or []
-        if not deps or not isinstance(deps[0], dict) or "repo" not in deps[0]:
-            raise NotAnImportError(f"{path} has no deps[*].repo — not an import")
-
-        dep = deps[0]
+        dep = _import_dep(path, data)
         repo = dep["repo"]
         out = outs[0] if outs else {}
         return cls(
@@ -161,6 +157,28 @@ def _pin(repo: dict[str, Any]) -> str:
     is refused rather than coerced."""
     value = repo.get("rev_lock")
     return value if isinstance(value, str) else ""
+
+
+def _import_dep(path: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """The `deps[0]` of a parsed `.dvc` file that records an import: the one
+    place a pointer's `repo` block is found. `NotAnImportError` when there is
+    none (a `dvc add` pointer)."""
+    deps = data.get("deps") or []
+    if not deps or not isinstance(deps[0], dict) or "repo" not in deps[0]:
+        raise NotAnImportError(f"{path} has no deps[*].repo — not an import")
+    return deps[0]
+
+
+def recorded_url(path: Path) -> str | None:
+    """The `repo.url` an import pointer records, when it reads as text, else
+    None (not an import, unreadable, or not text). Found as
+    `DataDependency.from_dvc_file` finds it, but on its own, so a pointer
+    broken elsewhere still says whose it is."""
+    try:
+        url = _import_dep(path, _read_yaml(path))["repo"]["url"]
+    except (NotAnImportError, OSError, ValueError, yaml.YAMLError, LookupError, TypeError):
+        return None
+    return url if isinstance(url, str) else None
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
