@@ -114,16 +114,30 @@ try {
 
     # The tool's Python, where uv keeps its tools (UV_TOOL_DIR when set).
     $ToolPython = Join-Path $ToolsDir "mintd\Scripts\python.exe"
+    $ReflinkRefused = $false
     if (Test-Path -LiteralPath $ToolPython) {
         Write-Host "Installing reflink support..."
         # Only files whose hashes are pinned (see install.sh). --no-config: a
         # uv.toml or pyproject.toml where this runs, or above, can't add an index.
         $ReflinkTxt = Join-Path $Tmp "reflink.txt"
         Set-Content -LiteralPath $ReflinkTxt -Value $ReflinkReq -Encoding ascii
-        uv pip install --no-config --python $ToolPython --require-hashes --constraints $Constraints --requirements $ReflinkTxt
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Could not install reflink. DVC will fall back to hardlink/symlink/copy."
-            Write-Warning "Run 'mintd --version' to verify your installation."
+        # uv's messages are kept, so a refused hash can be told from a network
+        # failure. Continue while they are: Windows PowerShell 5.1 turns a native
+        # command's redirected stderr into errors, which Stop would make fatal.
+        $ErrorActionPreference = "Continue"
+        $ReflinkOut = @(uv pip install --no-config --python $ToolPython --require-hashes --constraints $Constraints --requirements $ReflinkTxt 2>&1 | ForEach-Object { "$_" })
+        $ReflinkExit = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+        $ReflinkOut | ForEach-Object { Write-Host $_ }
+        if ($ReflinkExit -ne 0) {
+            $ReflinkRefused = [bool]($ReflinkOut -match "Hash mismatch")
+            if ($ReflinkRefused) {
+                Write-Warning "reflink was refused: a download didn't match its pinned hash, so it may have been tampered with. mintd works without it; DVC falls back to hardlink/symlink/copy."
+            } else {
+                Write-Warning "Could not install reflink. DVC will fall back to hardlink/symlink/copy."
+                Write-Warning "This step ignores uv settings files (uv.toml, pyproject.toml), your own included. If you reach PyPI only through a mirror set in one, set UV_DEFAULT_INDEX to it and run the install line again."
+                Write-Warning "Run 'mintd --version' to verify your installation."
+            }
         }
     } else {
         Write-Warning "Could not locate mintd tool Python - skipping reflink install."
@@ -193,6 +207,7 @@ function Test-OnPath($Name, $Means) {
 $Problems = @(
     Test-OnPath mintd "You are likely running an OLDER mintd (pipx / pip --user / another install)."
     Test-OnPath dvc "Typing 'dvc' (as in 'dvc repro') runs that one; mintd itself runs the dvc installed with it."
+    if ($ReflinkRefused) { "reflink was refused: a download didn't match its pinned hash, so it may have been tampered with. mintd works without it; DVC falls back to hardlink/symlink/copy." }
 )
 
 # Surface what uv knows about the install.

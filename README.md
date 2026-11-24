@@ -71,7 +71,8 @@ whose hashes are pinned (reflink's in the scripts, cffi's in `constraints.txt`),
 builds reflink on your machine from its pinned source, and ignores uv settings
 files (`uv.toml`, `pyproject.toml`) in the folder you run the line from or
 above it. Their last line says whether `mintd` and `dvc`
-are both on your PATH, or which one is missing or shadowed by another copy.
+are both on your PATH, or which one is missing or shadowed by another copy,
+and whether reflink was refused because a download didn't match its hash.
 
 - To update, run the same line again. `uv tool upgrade mintd` does not apply.
 - For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on

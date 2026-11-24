@@ -172,16 +172,28 @@ uv tool install --force --reinstall --refresh --python 3.13 --with-executables-f
 
 # The tool's own Python, wherever uv keeps its tools (UV_TOOL_DIR moves them).
 TOOL_PYTHON="${TOOLS_DIR}/mintd/bin/python"
+REFLINK_REFUSED=""
 if [[ -f "$TOOL_PYTHON" ]]; then
     echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
     # Only files whose hashes are pinned: reflink's above, cffi's and pycparser's
     # in the release's constraints. --no-config: a uv.toml or pyproject.toml in
     # the folder this runs in, or a parent, can't add an index or a setting.
     echo "$REFLINK_REQ" > "$TMP/reflink.txt"
-    uv pip install --no-config --python "$TOOL_PYTHON" --require-hashes \
-        --constraints "$TMP/constraints.txt" --requirements "$TMP/reflink.txt" || {
-        echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
-    }
+    # uv's messages go to a file first, so a refused hash can be told from a
+    # network failure (uv 0.13.9 says "Hash mismatch for ...").
+    if uv pip install --no-config --python "$TOOL_PYTHON" --require-hashes \
+        --constraints "$TMP/constraints.txt" --requirements "$TMP/reflink.txt" 2>"$TMP/reflink.err"; then
+        cat "$TMP/reflink.err" >&2
+    else
+        cat "$TMP/reflink.err" >&2
+        if grep -q "Hash mismatch" "$TMP/reflink.err"; then
+            REFLINK_REFUSED=1
+            echo "Warning: reflink was refused: a download didn't match its pinned hash, so it may have been tampered with. mintd works without it; DVC falls back to hardlink/symlink/copy." >&2
+        else
+            echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
+            echo "  This step ignores uv settings files (uv.toml, pyproject.toml), your own included. If you reach PyPI only through a mirror set in one, set UV_DEFAULT_INDEX to it and run the install line again." >&2
+        fi
+    fi
 else
     echo "Warning: could not locate mintd tool Python — skipping reflink install." >&2
 fi
@@ -236,6 +248,7 @@ uv tool list 2>/dev/null || echo "  (could not run 'uv tool list')" >&2
 
 echo ""
 if [[ "$WITH_SCHEMA" -eq 1 ]]; then WITH="dvc + [schema] extra"; else WITH="dvc"; fi
+[[ -z "$REFLINK_REFUSED" ]] || PROBLEMS+=$'\n'"  - reflink was refused: a download didn't match its pinned hash, so it may have been tampered with. mintd works without it; DVC falls back to hardlink/symlink/copy."
 if [[ -z "$PROBLEMS" ]]; then
     echo "mintd installed successfully (with ${WITH}, both on your PATH). Run 'mintd --help' to get started."
 else
