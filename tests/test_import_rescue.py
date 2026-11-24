@@ -27,6 +27,7 @@ from mintd import imports
 from mintd._dvc_ops import DvcPullError
 from mintd._fast_sync_ops import (
     DvcFileEntry,
+    PointerCutShort,
     ensure_dir_manifest,
     is_cached,
 )
@@ -546,7 +547,7 @@ def test_mixed_pull_non_import_batched_and_import_rescued(producer_bucket, tmp_p
     # A plain (non-import) dvc-tracked target alongside the import.
     own = consumer / "data" / "own.csv.dvc"
     own.parent.mkdir(parents=True, exist_ok=True)
-    own.write_text("outs:\n  - md5: abc\n    size: 3\n    path: own.csv\n")
+    own.write_text("outs:\n  - md5: " + "a" * 32 + "\n    size: 3\n    path: own.csv\n")
     non_import = "data/own.csv.dvc"
 
     fake = _FakeDvcOps()
@@ -683,8 +684,8 @@ def test_resolve_producer_memoized_by_repo_and_pin():
 def test_entries_from_producer_pointer_reads_dvc_file():
     dep = _dep()
     entries = [
-        DvcFileEntry(md5="m1", relpath="big.dta", size=3),
-        DvcFileEntry(md5="m2", relpath="small.dta", size=4),
+        DvcFileEntry(md5="a" * 32, relpath="big.dta", size=3),
+        DvcFileEntry(md5="b" * 32, relpath="small.dta", size=4),
     ]
     pointer = _pointer_dvc(entries)
 
@@ -701,6 +702,29 @@ def test_entries_from_producer_pointer_reads_dvc_file():
     got = _entries_from_producer_pointer(dep, producer, fetcher=_F())
     assert got is not None
     assert {e.relpath for e in got} == {"big.dta", "small.dta"}
+
+
+def test_a_producer_pointer_hash_dvc_never_writes_is_refused_naming_the_producer_file():
+    """The rescue reads the producer's pointer itself, past the pointer
+    readers' check. A hash dvc never writes there stops the pull naming that
+    file and where it came from, not "a pointer or folder list", and holds
+    no credentials from the producer's URL, so no log line or traceback can.
+    Mutations: drop the check in `_entries_from_producer_pointer` -> red;
+    drop `strip_userinfo` there -> red."""
+    pointer = _pointer_dvc([DvcFileEntry(md5="ab/../../a.csv", relpath="a.csv", size=1)])
+
+    class _F:
+        def fetch_path_at(self, repo, pin, path):
+            if path == "data/final.dvc":
+                return pointer.encode()
+            raise FetchError.path_missing(repo, pin)
+
+    from mintd._import_rescue_ops import _Producer
+    producer = _Producer(bucket="lab", prefix="p", remote_cfg={}, remote_name="storage")
+    with pytest.raises(PointerCutShort, match=r"data/final\.dvc in https://h/r at 1234567 is cut short or damaged: "
+                                              r"a hash in it is not in the shape dvc writes: 'ab/\.\./\.\./a\.csv'") as refused:
+        _entries_from_producer_pointer(_dep(repo="https://user:TOKEN@h/r", pin="1234567abc"), producer, fetcher=_F())
+    assert "TOKEN" not in str(refused.value) and "TOKEN" not in str(refused.value.pointer)
 
 
 def test_rescue_reads_the_producers_bucket_with_the_consumers_credentials(producer_bucket, tmp_path):

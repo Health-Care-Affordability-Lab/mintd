@@ -781,8 +781,13 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
     ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out.csv\n", []),
     ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - null\n", []),
     ("data/final.dvc", "outs:\n- path: final\n  hash: md5\n  files:\n", []),
+    ("data/final.dvc", "outs:\n- path: final\n  md5: ab/home/u/notes.dir\n", []),
+    ("data/final.dvc", "outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: ab/../../a.csv\n", []),
+    ("dvc.lock", "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out.csv\n"
+                 "      md5: 9A0364B9E99BB480DD25E1F0284C8555\n", []),
 ], ids=["empty", "outs-only", "targeted", "lock-empty", "lock-stage-targeted", "outs-empty-list",
-        "unresolved-target", "path-only", "lock-stage-null", "lock-out-path-only", "lock-outs-null", "files-null"])
+        "unresolved-target", "path-only", "lock-stage-null", "lock-out-path-only", "lock-outs-null", "files-null",
+        "hash-names-a-path", "file-hash-climbs-out", "lock-hash-not-dvcs"])
 def test_push_refuses_a_pointer_in_scope_that_does_not_parse_before_any_upload(
     push_clients: _FakeDvcOps, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str], pointer: str, cut: str, targets: list[str],
@@ -800,7 +805,9 @@ def test_push_refuses_a_pointer_in_scope_that_does_not_parse_before_any_upload(
     let `outs: []` through -> that case and path-only red; skip a null
     stage entry -> lock-stage-null red; let a lock out without a hash
     through -> lock-out-path-only and lock-outs-null red; check only the
-    selection when a target is unresolved -> unresolved-target red.
+    selection when a target is unresolved -> unresolved-target red; drop
+    the hash rule in `_check_out` -> the three hash cases red: on a remote
+    that isn't version-aware, dvc push exits 0 for them, "Missing cache files".
     """
     proj = _producer(tmp_path, version_aware=False)
     write_pipeline(proj, "data/out.csv")
