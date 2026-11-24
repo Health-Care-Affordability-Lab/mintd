@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,6 @@ _REPO = Path(__file__).resolve().parents[1]
 _WORKFLOWS = _REPO / ".github" / "workflows"
 _WF: dict[str, Any] = {p.name: yaml.safe_load(p.read_text()) for p in sorted(_WORKFLOWS.glob("*.yml"))}
 _JOBS = _WF["release.yml"]["jobs"]
-_TAG_JOB = _WF["tag.yml"]["jobs"]["tag"]
 _BASH = pytest.mark.skipif(os.name == "nt" or shutil.which("bash") is None, reason="the step's script is bash")
 
 
@@ -66,8 +66,11 @@ def _stubs(tmp_path: Path, **scripts: str) -> dict[str, str]:
 
 
 def test_triggers_are_exactly_these() -> None:
-    assert _on(_WF["release.yml"]) == {"workflow_dispatch": None}
-    assert _on(_WF["tag.yml"]) == {"pull_request": {"types": ["closed"], "branches": ["main"]}}
+    """A release runs only when started by hand; no merge tags or starts one."""
+    assert _on(_WF["release.yml"]) == {"workflow_dispatch": {"inputs": {"bump": {
+        "description": "On main: patch or minor. Ignored on a hotfix/vX.Y.Z branch.",
+        "type": "choice", "options": ["patch", "minor"], "default": "patch"}}}}
+    assert "tag.yml" not in _WF
     assert _on(_WF["test.yml"]) == {
         "push": {"branches": ["main"]}, "pull_request": {"branches": ["main"]}, "workflow_call": None,
     }
@@ -78,15 +81,14 @@ def test_triggers_are_exactly_these() -> None:
 def test_each_job_gets_only_the_permissions_it_needs() -> None:
     assert _WF["release.yml"]["permissions"] == {}
     assert {job: spec.get("permissions") for job, spec in _JOBS.items()} == {
+        "version": {"contents": "read"},
         "test": {"contents": "read"},
         "build": {"contents": "read"},
         "prerelease": {"contents": "write"},
         "install": {"contents": "read"},
         "evidence": {"contents": "write", "pull-requests": "read"},
-        "supersede": {"actions": "write"},
         "promote": {"contents": "write", "actions": "read"},
     }
-    assert _WF["tag.yml"]["permissions"] == {"contents": "write", "actions": "write"}
 
 
 def test_no_expression_is_pasted_into_a_script() -> None:
@@ -130,10 +132,11 @@ def test_the_build_runs_in_a_job_without_write_access() -> None:
 _ALLOWED_IF = {"evidence": "always() && needs.prerelease.result == 'success'"}
 
 
-def test_every_job_waits_for_ci_on_a_tag() -> None:
-    assert _JOBS["test"]["if"] == "github.ref_type == 'tag'"
-    assert _JOBS["test"]["uses"] == "./.github/workflows/test.yml"
-    for job in set(_JOBS) - {"test"}:
+def test_every_job_after_the_version_waits_for_ci() -> None:
+    """CI runs on the very commit being released, once its version is chosen."""
+    assert _JOBS["test"] == {"needs": "version", "uses": "./.github/workflows/test.yml", "permissions": {"contents": "read"}}
+    assert "needs" not in _JOBS["version"]
+    for job in set(_JOBS) - {"version", "test"}:
         assert "test" in _upstream(job), job
         assert _JOBS[job].get("if") == _ALLOWED_IF.get(job), f"{job} must not run when CI failed (`if: always()`)"
 
@@ -149,18 +152,62 @@ def test_only_the_approved_promote_job_marks_a_release_latest() -> None:
     assert not re.search(r"--latest(?!=false)", others)
     assert "--prerelease=false" not in others
     create = re.search(r"gh release create[^\n]*", others)
-    assert create and re.search(r"--prerelease(?![=\w-])", create[0]) and "--verify-tag" in create[0]
+    assert create and re.search(r"--prerelease(?![=\w-])", create[0])
+    # The tag is made at publish, on this run's commit; it doesn't exist before.
+    assert '--target "$GITHUB_SHA"' in create[0] and "--verify-tag" not in create[0]
     assert re.search(r"--draft(?![=\w-])", create[0])  # published only once its files are all up
 
 
-def test_the_tag_job_runs_only_on_a_merge_one_at_a_time() -> None:
-    assert _TAG_JOB["if"] == "github.event.pull_request.merged == true"
-    # On the job: a workflow-level group would let a PR closed unmerged queue
-    # there and cancel a merge's pending run.
-    # queue: max keeps every waiting run; one pending run per group would let a
-    # third run cancel a merge's tagging.
-    assert _TAG_JOB["concurrency"] == {"group": "tag", "cancel-in-progress": False, "queue": "max"}
-    assert "concurrency" not in _WF["tag.yml"]
+def test_one_release_run_at_a_time() -> None:
+    """A second press waits until the first is approved, rejected or fails, so two runs
+    never claim one number. Mutation: drop the group -> red."""
+    assert _WF["release.yml"]["concurrency"] == {"group": "release", "cancel-in-progress": False}
+    assert all("concurrency" not in spec for spec in _JOBS.values())
+
+
+# --- the version, run with a stub python3 and gh -------------------------
+
+_STUB_PY_VERSION = """#!/bin/bash
+echo "python3 $*" >> "$LOG"
+[ "$2" = refs/heads/main ] && [ "$3" = abc ] && [ "$4" = minor ] || exit 9
+[ "$REFUSE" = 1 ] && { echo "::error::abc doesn't come after v1.2.2" >&2; exit 1; }
+echo v1.2.3
+"""
+_STUB_GH_VERSION = """#!/bin/bash
+echo "gh $*" >> "$LOG"
+case "$TAG_STATE" in
+  absent) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  present) echo '{"ref":"refs/tags/v1.2.3"}' ;;
+  *) echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1 ;;
+esac
+"""
+
+
+@_BASH
+@pytest.mark.parametrize(("case", "tag_state", "refuse", "made", "error"), [
+    ("a new version", "absent", False, True, None),
+    ("the script refuses", "absent", True, False, "doesn't come after"),
+    ("the tag already exists", "present", False, False, "v1.2.3 already exists; a version is never reused"),
+    ("the lookup fails", "error", False, False, "Bad Gateway"),
+])
+def test_the_version_is_new_or_the_run_stops(
+    tmp_path: Path, case: str, tag_state: str, refuse: bool, made: bool, error: str | None,
+) -> None:
+    """Only a 404 means the tag is new. Mutations: skip the existence check, or read any
+    lookup failure as "new" -> red."""
+    out = tmp_path / "github_output"
+    out.touch()
+    env = {
+        **_stubs(tmp_path, python3=_STUB_PY_VERSION, gh=_STUB_GH_VERSION), "GH_REPO": "o/r", "BUMP": "minor",
+        "GITHUB_REF": "refs/heads/main", "GITHUB_SHA": "abc", "GITHUB_OUTPUT": str(out),
+        "TAG_STATE": tag_state, "REFUSE": "1" if refuse else "0",
+    }
+    result = subprocess.run(["bash", "-c", _step("version", "Choose the version")["run"]],
+                            cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert (result.returncode == 0) is made, result.stdout + result.stderr
+    assert out.read_text() == ("tag=v1.2.3\n" if made else "")
+    if error:
+        assert error in result.stdout + result.stderr
 
 
 # --- the build step, run with a stub uv ----------------------------------
@@ -175,12 +222,13 @@ for a in "$@"; do
 done
 case "$1" in
   export) echo "pins" > "$out" ;;
-  build) mkdir -p "$outdir"; echo "a wheel" > "$outdir/mintd-$BUILT-py3-none-any.whl" ;;
+  # Named as setuptools-scm would: the pretend version when given, else a dev build.
+  build) mkdir -p "$outdir"; echo "a wheel" > "$outdir/mintd-${BUILT:-${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MINTD:-0.1.dev1+gabc}}-py3-none-any.whl" ;;
 esac
 """
 
 
-def _build(tmp_path: Path, tag: str, built: str) -> tuple[subprocess.CompletedProcess[str], str]:
+def _build(tmp_path: Path, tag: str, built: str = "") -> tuple[subprocess.CompletedProcess[str], str]:
     env = {**_stubs(tmp_path, uv=_STUB_UV), "TAG": tag, "BUILT": built, "RUNNER_TEMP": str(tmp_path)}
     result = subprocess.run(
         ["bash", "-c", _step("build", "Build the release files")["run"]],
@@ -192,7 +240,9 @@ def _build(tmp_path: Path, tag: str, built: str) -> tuple[subprocess.CompletedPr
 @_BASH
 @pytest.mark.parametrize("tag", ["v1.2.3", "v1.2.3.post1"])
 def test_the_build_writes_the_wheel_its_sha256_and_hashed_constraints(tmp_path: Path, tag: str) -> None:
-    result, log = _build(tmp_path, tag, tag[1:])
+    """No tag exists until publish, so the build names the version itself.
+    Mutation: drop SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MINTD -> a dev wheel, red."""
+    result, log = _build(tmp_path, tag)
     assert result.returncode == 0, result.stderr
     wheel = f"mintd-{tag[1:]}-py3-none-any.whl"
     digest = hashlib.sha256((tmp_path / "dist" / wheel).read_bytes()).hexdigest()
@@ -223,15 +273,19 @@ def test_the_build_refuses_a_wheel_whose_version_is_not_the_tag(tmp_path: Path) 
 _PLACEHOLDERS = {"install.sh": 'MINTD_TAG=""', "install.ps1": '$MintdTag = ""'}
 
 
-def _stamp(tmp_path: Path, scripts: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    """Run the build job's stamping step on `scripts` in an empty directory."""
-    (tmp_path / "dist").mkdir()
+def _stamp(tmp_path: Path, scripts: dict[str, str], *extra: str) -> subprocess.CompletedProcess[str]:
+    """Run the one stamper, as the build does, on `scripts` in an empty directory."""
     for name, text in scripts.items():
         (tmp_path / name).write_text(text, newline="")
     return subprocess.run(
-        ["bash", "-c", _step("build", "Stamp the install scripts")["run"]],
-        cwd=tmp_path, env={**os.environ, "TAG": "v1.2.3"}, capture_output=True, text=True,
+        [sys.executable, str(_REPO / "scripts" / "stamp_install_scripts.py"), "v1.2.3", "--out", "dist", *extra],
+        cwd=tmp_path, capture_output=True, text=True,
     )
+
+
+def test_the_build_stamps_with_the_one_stamper() -> None:
+    """CI's install checks call the same script, so they test what users get."""
+    assert _step("build", "Stamp the install scripts")["run"].strip() == 'python3 scripts/stamp_install_scripts.py "$TAG" --out dist'
 
 
 @_BASH
@@ -245,6 +299,17 @@ def test_stamping_writes_the_tag_into_both_install_scripts(tmp_path: Path) -> No
         assert expected != scripts[name]
         assert (tmp_path / "dist" / name).read_text(encoding="utf-8") == expected
     assert subprocess.run(["bash", "-n", str(tmp_path / "dist" / "install.sh")]).returncode == 0
+
+
+def test_only_ci_points_the_scripts_at_another_releases_url(tmp_path: Path) -> None:
+    """The release build passes no --releases, so a release's scripts keep GitHub's URL."""
+    scripts = {name: (_REPO / name).read_text(encoding="utf-8") for name in _PLACEHOLDERS}
+    assert _stamp(tmp_path, scripts).returncode == 0
+    assert 'RELEASES="https://github.com/Health-Care-Affordability-Lab/mintd/releases"' in (tmp_path / "dist" / "install.sh").read_text()
+    assert _stamp(tmp_path, scripts, "--releases", "http://127.0.0.1:8000").returncode == 0
+    assert '\nRELEASES="http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.sh").read_text()
+    assert '\n$Releases = "http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.ps1").read_text()
+    assert "--releases" not in yaml.safe_dump(_JOBS)
 
 
 @_BASH
@@ -264,12 +329,17 @@ def test_stamping_stops_unless_each_script_has_exactly_one_placeholder(tmp_path:
 _STUB_GH_PUBLISH = """#!/bin/bash
 echo "gh $*" >> "$LOG"
 case "$*" in
+  # The tag's commit: none (a 404) until a publish makes the tag, unless $TAG_AT holds one.
+  "api repos/o/r/commits/refs/tags/"*)
+    [ -s "$TAG_AT" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$TAG_AT" ;;
   # The listing as `gh api --paginate --jq` prints it: one line per match, page
   # after page. Without --paginate only the first page comes back.
   "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
   "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
   "release view"*"--json assets"*) [ "$ASSETS_FAIL" = 1 ] && exit 1; cat "$HAVE" ;;
-  "release create"*) [ "$UNLISTED" = 1 ] || echo "999 true true https://github.com/o/r/releases/tag/untagged-1" >> "$PAGE1" ;;
+  "release create"*) [ "$UNLISTED" = 1 ] || echo "999 true true $GITHUB_SHA https://github.com/o/r/releases/tag/untagged-1" >> "$PAGE1" ;;
+  # Publishing makes the tag, on the draft's commit unless $LANDS_ON says otherwise.
+  "release edit"*"--draft=false"*) echo "${LANDS_ON:-$GITHUB_SHA}" > "$TAG_AT" ;;
   "release upload"*)
     name=${4##*/}
     [ "$name" = "$UPLOAD_FAIL" ] && exit 1
@@ -280,9 +350,10 @@ exit 0
 """
 
 _SAME, _OTHER, _HALF = "same", "other", "half"
-# A release as the listing prints it: `<id> <draft> <prerelease> <url>`.
-_DRAFT, _NOT_PRE_DRAFT, _PUBLISHED, _PROMOTED = "true true", "true false", "false true", "false false"
-_CREATE = "gh release create v1.2.3 --verify-tag --draft --prerelease --latest=false"
+# A release as the listing prints it: `<id> <draft> <prerelease> <target> <url>`; this run's commit is abc.
+_DRAFT, _NOT_PRE_DRAFT, _OTHER_DRAFT = "true true abc", "true false abc", "true true def"
+_PUBLISHED, _PROMOTED = "false true abc", "false false abc"
+_CREATE = "gh release create v1.2.3 --draft --prerelease --latest=false --target abc"
 _PUBLISH = "gh release edit v1.2.3 --draft=false --prerelease --latest=false"
 _BOTH = ["a.whl", "b.txt"]
 _COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
@@ -290,31 +361,39 @@ _COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
 
 @_BASH
 @pytest.mark.parametrize(
-    ("case", "pages", "have", "created", "uploaded", "published", "error"),
+    ("case", "pages", "have", "tag_at", "created", "uploaded", "published", "error"),
     [
-        ("none yet", ([], []), {}, True, _BOTH, True, None),
-        ("a complete draft", ([_DRAFT], []), _COMPLETE, False, [], True, None),
-        ("a partial draft", ([_DRAFT], []), {"a.whl": _SAME}, False, ["b.txt"], True, None),
+        ("none yet", ([], []), {}, "", True, _BOTH, True, None),
+        ("a complete draft", ([_DRAFT], []), _COMPLETE, "", False, [], True, None),
+        ("a partial draft", ([_DRAFT], []), {"a.whl": _SAME}, "", False, ["b.txt"], True, None),
         # The draft's files are all checked before anything is uploaded.
-        ("a draft with a half upload", ([_DRAFT], []), {"a.whl": _HALF}, False, [], False, "draft 100 has an incomplete upload of a.whl"),
-        ("a draft with a different file", ([_DRAFT], []), {"b.txt": _OTHER}, False, [], False, "draft 100 already has a different b.txt"),
-        ("a draft with a stray file", ([_DRAFT], []), {"c.txt": _OTHER}, False, [], False, "draft 100 has c.txt, which this build didn't make"),
-        ("a draft that isn't a prerelease", ([_NOT_PRE_DRAFT], []), {}, False, [], False, "draft 100 is not a prerelease: delete it by its id"),
-        ("an empty dist/", ([], []), {}, False, [], False, "dist/ is empty"),
-        ("two releases, on two pages", ([_PUBLISHED], [_DRAFT]), {}, False, [], False, "several releases for v1.2.3"),
-        ("the listing fails", ([], []), {}, False, [], False, ""),
-        ("the file lookup fails", ([_DRAFT], []), {}, False, [], False, ""),
-        ("a complete published prerelease", ([_PUBLISHED], []), _COMPLETE, False, [], False, None),
-        ("a published prerelease short of a file", ([_PUBLISHED], []), {"a.whl": _SAME}, False, [], False, "published release is missing b.txt"),
-        ("a published prerelease with an extra file", ([_PUBLISHED], []), {**_COMPLETE, "c.txt": _OTHER}, False, [], False, "published release has c.txt, which this build didn't make"),
-        ("a promoted release", ([_PROMOTED], []), _COMPLETE, False, [], False, "a promoted release is never changed"),
-        ("an upload fails", ([], []), {}, True, ["a.whl"], False, ""),
-        ("an upload lands incomplete", ([], []), {}, True, _BOTH, False, "draft 999 has an incomplete upload of a.whl"),
-        ("a new draft that isn't listed", ([], []), {}, True, [], False, "new draft isn't listed as its only release"),
+        ("a draft with a half upload", ([_DRAFT], []), {"a.whl": _HALF}, "", False, [], False, "draft 100 has an incomplete upload of a.whl"),
+        ("a draft with a different file", ([_DRAFT], []), {"b.txt": _OTHER}, "", False, [], False, "draft 100 already has a different b.txt"),
+        ("a draft with a stray file", ([_DRAFT], []), {"c.txt": _OTHER}, "", False, [], False, "draft 100 has c.txt, which this build didn't make"),
+        ("a draft that isn't a prerelease", ([_NOT_PRE_DRAFT], []), {}, "", False, [], False, "draft 100 is not a prerelease: delete it by its id"),
+        # Its commit would become a permanent tag on the wrong commit.
+        ("a draft on another commit", ([_OTHER_DRAFT], []), _COMPLETE, "", False, [], False, "draft 100 targets def, not this run's abc"),
+        ("an empty dist/", ([], []), {}, "", False, [], False, "dist/ is empty"),
+        ("two releases, on two pages", ([_PUBLISHED], [_DRAFT]), {}, "abc", False, [], False, "several releases for v1.2.3"),
+        ("the listing fails", ([], []), {}, "", False, [], False, ""),
+        ("the file lookup fails", ([_DRAFT], []), {}, "", False, [], False, ""),
+        # "Re-run failed jobs" after this run published: nothing to do.
+        ("a complete published prerelease on this commit", ([_PUBLISHED], []), _COMPLETE, "abc", False, [], False, None),
+        ("a published prerelease on another commit", ([_PUBLISHED], []), _COMPLETE, "def", False, [], False, "published release is on another commit"),
+        ("a published prerelease short of a file", ([_PUBLISHED], []), {"a.whl": _SAME}, "abc", False, [], False, "published release is missing b.txt"),
+        ("a published prerelease with an extra file", ([_PUBLISHED], []), {**_COMPLETE, "c.txt": _OTHER}, "abc", False, [], False, "published release has c.txt, which this build didn't make"),
+        ("a promoted release", ([_PROMOTED], []), _COMPLETE, "abc", False, [], False, "a promoted release is never changed"),
+        ("an upload fails", ([], []), {}, "", True, ["a.whl"], False, ""),
+        ("an upload lands incomplete", ([], []), {}, "", True, _BOTH, False, "draft 999 has an incomplete upload of a.whl"),
+        ("a new draft that isn't listed", ([], []), {}, "", True, [], False, "new draft isn't listed as its only release"),
+        # Checked again seconds before publishing: publishing onto an existing tag would attach to its commit.
+        ("the tag appears before the publish", ([_DRAFT], []), _COMPLETE, "def", False, [], False, "appeared since this run began"),
+        # The tag is permanent once made: the run stops, and nothing after it runs.
+        ("the tag lands on another commit", ([_DRAFT], []), _COMPLETE, "", False, [], True, "landed on def, not abc"),
     ],
 )
 def test_the_prerelease_publishes_only_a_complete_draft(
-    tmp_path: Path, case: str, pages: tuple[list[str], list[str]], have: dict[str, str],
+    tmp_path: Path, case: str, pages: tuple[list[str], list[str]], have: dict[str, str], tag_at: str,
     created: bool, uploaded: list[str], published: bool, error: str | None,
 ) -> None:
     dist = tmp_path / "dist"
@@ -328,17 +407,19 @@ def test_the_prerelease_publishes_only_a_complete_draft(
         _HALF: lambda n: "open null",
     }
     (tmp_path / "have").write_text("".join(f"{n} {answer[kind](n)}\n" for n, kind in have.items()))
+    (tmp_path / "tag_at").write_text(f"{tag_at}\n" if tag_at else "")
     for i, page in enumerate(pages, 1):
         lines = (f"{100 * i + j} {flags} https://github.com/o/r/releases/tag/v1.2.3\n" for j, flags in enumerate(page))
         (tmp_path / f"page{i}").write_text("".join(lines))
     env = {
         **_stubs(tmp_path, gh=_STUB_GH_PUBLISH), "TAG": "v1.2.3", "GH_REPO": "o/r",
-        "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
+        "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"), "TAG_AT": str(tmp_path / "tag_at"),
         "LIST_FAIL": "1" if case == "the listing fails" else "0",
         "ASSETS_FAIL": "1" if case == "the file lookup fails" else "0",
         "UPLOAD_FAIL": "a.whl" if case == "an upload fails" else "",
         "UPLOAD_HALF": "a.whl" if case == "an upload lands incomplete" else "",
         "UNLISTED": "1" if case == "a new draft that isn't listed" else "0",
+        "LANDS_ON": "def" if case == "the tag lands on another commit" else "",
         "HAVE": str(tmp_path / "have"), "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
         "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }
@@ -352,9 +433,12 @@ def test_the_prerelease_publishes_only_a_complete_draft(
         assert error in result.stdout
     assert any(line.startswith(_CREATE) for line in log) is created
     assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded
-    # The one edit is the publish, and it comes last: after every upload and the final check.
-    assert [line for line in log if line.startswith("gh release edit")] == ([_PUBLISH] if published else [])
-    assert (log[-1:] == [_PUBLISH]) is published
+    # The one edit is the publish, after every upload and the final check; then only the tag's commit is read.
+    edits = [i for i, line in enumerate(log) if line.startswith("gh release edit")]
+    assert [log[i] for i in edits] == ([_PUBLISH] if published else [])
+    if published:
+        assert all(i < edits[0] for i, line in enumerate(log) if line.startswith("gh release upload"))
+        assert [line for line in log[edits[0] + 1:]] == ["gh api repos/o/r/commits/refs/tags/v1.2.3 --jq .sha"]
 
 
 def test_the_listing_reads_the_tag_from_env_on_every_page() -> None:
@@ -364,12 +448,6 @@ def test_the_listing_reads_the_tag_from_env_on_every_page() -> None:
     run = re.sub(r"\s*\\\n\s*", " ", _step("prerelease", "Publish the prerelease")["run"])
     assert "gh api --paginate \"repos/$GH_REPO/releases?per_page=100\" --jq '.[] | select(.tag_name == env.TAG) |" in run
     assert run.count("out=$(releases)") == 2  # before anything is made, and again for a new draft's id
-
-
-def test_one_prerelease_run_per_tag_at_a_time() -> None:
-    # On the job: at the workflow level a rerun would wait behind promote's approval.
-    assert _JOBS["prerelease"]["concurrency"] == {"group": "prerelease-${{ github.ref_name }}", "cancel-in-progress": False}
-    assert "concurrency" not in _WF["release.yml"]
 
 
 # --- the evidence, run with a stub gh ------------------------------------
@@ -508,77 +586,6 @@ def test_promote_takes_the_prerelease_line_out_of_the_notes_in_its_one_edit(tmp_
     assert result.returncode == 0, result.stdout + result.stderr
     assert len(edits) == 1 and edits[0].startswith("release edit v0.2.0 --prerelease=false --latest --notes ")
     assert (tmp_path / "notes").read_text() == _PROMOTED_BODY.split("\n\nA prerelease: ")[0]
-
-
-# --- only the newest release waits, run with a stub gh -------------------
-
-_STUB_GH_SUPERSEDE = """#!/bin/bash
-echo "gh $*" >> "$LOG"
-case "$*" in
-  # The listing as `gh api --paginate --jq` prints it: one line per run, page
-  # after page. Without --paginate only the first page comes back.
-  "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
-  # A run's status now: the last line for it in $STATUS, else still waiting.
-  "api repos/"*"/actions/runs/"*)
-    id=${2##*/}; [ "$id" = "$STATUS_FAIL" ] && { echo "gh: Server Error (HTTP 502)" >&2; exit 1; }; awk -v id="$id" '$1 == id {s = $2} END {print (s ? s : "waiting")}' "$STATUS" ;;
-  "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
-  "run cancel"*)
-    case " $CANCEL_FAIL " in *" $3 "*) exit 1 ;; esac
-    echo "$3 cancelled" >> "$STATUS" ;;
-esac
-exit 0
-"""
-
-
-@_BASH
-@pytest.mark.parametrize(
-    ("case", "tag", "pages", "cancelled", "ok"),
-    [
-        ("a newer release cancels the older ones, on every page", "v1.3.0", (["11 v1.2.0"], ["12 v1.1.0"]), ["11", "12"], True),
-        ("versions, not text", "v1.10.0", (["11 v1.9.0"], []), ["11"], True),
-        ("an older run stands down for a newer one waiting", "v1.2.0", (["60 v1.3.0"], []), ["50"], True),
-        ("the same tag twice keeps the later run", "v1.3.0", (["40 v1.3.0"], []), ["40"], True),
-        ("the same tag, started later, stands this one down", "v1.3.0", (["60 v1.3.0"], []), ["50"], True),
-        ("a waiting hotfix is left alone", "v1.3.0", (["13 v1.2.0.post1"], []), [], True),
-        ("a hotfix run cancels nothing", "v1.2.0.post1", (["11 v1.1.0"], []), [], True),
-        ("itself, and anything that isn't a release, is skipped", "v1.3.0", (["50 v1.3.0", "14 main", "abc v1.2.0", "15 v1.2.0;x"], []), [], True),
-        ("nothing waiting", "v1.3.0", ([], []), [], True),
-        ("the listing fails", "v1.3.0", (["11 v1.2.0"], []), [], False),
-        ("a run no longer waiting is left alone", "v1.3.0", (["16 v1.2.0", "11 v1.1.0"], []), ["11"], True),
-        ("a newer run no longer waiting doesn't stand this one down", "v1.2.0", (["16 v1.3.0", "11 v1.1.0"], []), ["11"], True),
-        ("a cancel that fails is a warning, and the rest go on", "v1.3.0", (["17 v1.2.0", "11 v1.1.0"], []), ["17", "11"], True),
-        ("a run listed twice is cancelled once", "v1.3.0", (["11 v1.2.0"], ["11 v1.2.0"]), ["11"], True),
-        ("a run whose status can't be read is left alone", "v1.3.0", (["18 v1.2.0", "11 v1.1.0"], []), ["11"], True),
-    ],
-)
-def test_only_the_newest_release_waits_for_approval(
-    tmp_path: Path, case: str, tag: str, pages: tuple[list[str], list[str]], cancelled: list[str], ok: bool
-) -> None:
-    for i, page in enumerate(pages, 1):
-        (tmp_path / f"page{i}").write_text("".join(f"{line}\n" for line in page))
-    env = {
-        **_stubs(tmp_path, gh=_STUB_GH_SUPERSEDE), "TAG": tag, "GH_REPO": "o/r", "GITHUB_RUN_ID": "50",
-        "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
-        "LIST_FAIL": "1" if case == "the listing fails" else "0",
-        "STATUS": str(tmp_path / "status"), "CANCEL_FAIL": "17", "STATUS_FAIL": "18",
-    }
-    (tmp_path / "status").write_text("16 completed\n")  # approved, rejected or finished since the listing
-    result = subprocess.run(["bash", "-c", _runs("supersede")], cwd=tmp_path, env=env, capture_output=True, text=True)
-    log = (tmp_path / "log").read_text().splitlines()
-    assert (result.returncode == 0) is ok, result.stdout + result.stderr
-    assert [line.split()[-1] for line in log if line.startswith("gh run cancel")] == cancelled
-    if case.startswith("a cancel that fails"):
-        assert "::warning::could not cancel run 17" in result.stdout
-
-
-def test_supersede_touches_only_runs_waiting_for_approval_once_the_gate_has_passed() -> None:
-    """Only `waiting` runs are listed, so an approved promote that is running is
-    never cancelled; and supersede runs only after the gate passed (no `if:`), before
-    promote. Mutations: list every run; promote without supersede -> red."""
-    run = re.sub(r"\s*\\\n\s*", " ", _runs("supersede"))
-    assert 'out=$(gh api --paginate "repos/$GH_REPO/actions/workflows/release.yml/runs?status=waiting&per_page=100"' in run
-    assert set(_JOBS["supersede"]["needs"]) == {"install", "evidence"} and "if" not in _JOBS["supersede"]
-    assert "supersede" in _JOBS["promote"]["needs"]
 
 
 # --- promoting, run with a stub gh ---------------------------------------

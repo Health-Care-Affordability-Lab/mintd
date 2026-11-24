@@ -115,7 +115,7 @@ def test_a_prs_release_notes_replace_its_line_and_lift_do_this_once_and_known_li
 
 @_BASH
 def test_with_nothing_promoted_yet_it_says_so(tmp_path: Path) -> None:
-    """Every merge's tag is a prerelease, so with no latest release there is nothing to compare with."""
+    """Only a promoted release is ever latest, so with none there is nothing to compare with."""
     result = _notes(tmp_path, latest="404")
     assert result.returncode == 0, result.stderr
     assert result.stdout == "No release has been promoted yet, so there is nothing to compare this one with.\n"

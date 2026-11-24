@@ -2,8 +2,8 @@
 """The "What changed" section of a release's notes: the PRs merged since the last promoted release.
 
 release.yml's `evidence` job runs `python3 scripts/release_notes.py vX.Y.Z` on a checkout of the tag with its
-history, with GH_TOKEN and GH_REPO set. The last promoted release is GitHub's `releases/latest`: every merge's tag
-is a prerelease, and only a promoted release is ever latest. Each first-parent commit from that tag to this one is
+history, with GH_TOKEN and GH_REPO set. The last promoted release is GitHub's `releases/latest`: a release run's tag
+is a prerelease until it is promoted, and only a promoted release is ever latest. Each first-parent commit from that tag to this one is
 a squash merge whose subject ends "(#N)", and a PR's title reads "<area>: <what>".
 
 - Entries are grouped by area, in merge order. PRs whose area is tests, stories, ci or lint are counted on one
