@@ -348,6 +348,15 @@ def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -
             f"AWS credentials could not be loaded: the {provider} provider failed",
             hint="run the profile's credential_process yourself to see its output" if provider == "custom-process" else hint,
         ) from None
+    except OSError as exc:
+        # botocore runs a credential_process without catching this: the program is missing or can't be
+        # run (on Windows, a script with a shebang). It never ran, so there is no output; the text names
+        # at most the program, never its arguments.
+        raise MintdError(
+            f"AWS credentials could not be loaded: the profile's credential_process couldn't start "
+            f"({type(exc).__name__}: {exc})",
+            hint="run the profile's credential_process yourself to see why",
+        ) from exc
     except Exception as exc:  # partial keys, an expired SSO token, a malformed file: their messages name no secret
         raise MintdError(f"AWS credentials could not be loaded ({type(exc).__name__}): {exc}", hint=hint) from exc
     if not (frozen.access_key or "").strip() or not (frozen.secret_key or "").strip():

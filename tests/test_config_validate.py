@@ -5,6 +5,7 @@ and the configured bucket. Made-up keys and buckets only; nothing reaches AWS
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import boto3
@@ -96,15 +97,25 @@ def test_an_sso_profile_with_no_token_fails_when_its_credentials_are_read(aws: P
 def test_a_failing_credential_process_is_named_without_its_output(aws: Path, tmp_path: Path) -> None:
     """A credential_process's stderr may hold anything; botocore puts it in its error.
     Mutation: put str(exc) back into the message -> STDERR-SECRET shows, red."""
-    script = tmp_path / "creds.sh"
-    script.write_text("#!/bin/sh\necho STDERR-SECRET >&2\nexit 1\n")
-    script.chmod(0o755)
-    (aws / "config").write_text(f"[profile lab]\ncredential_process = {script}\n")
+    code = "import sys; sys.stderr.write('STDERR-SECRET'); sys.exit(1)"  # Python, so it runs on Windows too
+    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{sys.executable}" -c "{code}"\n')
     with pytest.raises(MintdError) as raised:
         _s3.load_credentials({"profile": "lab"}, None)
     text = f"{raised.value} {raised.value.hint}"
     assert "custom-process provider failed" in text and "credential_process yourself" in text
     assert "STDERR-SECRET" not in text
+
+
+def test_a_credential_process_that_cannot_start_is_named_and_points_at_the_process(aws: Path, tmp_path: Path) -> None:
+    """botocore lets the OSError through; on Windows a script with a shebang raises one too.
+    Mutation: drop the OSError branch -> the hint about a [mintd] section, red."""
+    missing = tmp_path / "no-such-program"
+    (aws / "config").write_text(f'[profile lab]\ncredential_process = "{missing}" --token ARG-SECRET\n')
+    with pytest.raises(MintdError) as raised:
+        _s3.load_credentials({"profile": "lab"}, None)
+    assert "the profile's credential_process couldn't start" in str(raised.value)
+    assert raised.value.hint == "run the profile's credential_process yourself to see why"
+    assert "ARG-SECRET" not in f"{raised.value} {raised.value.hint}"
 
 
 # --- validate ----------------------------------------------------------------------
