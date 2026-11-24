@@ -89,15 +89,17 @@ def test_another_drive_is_outside(root: Path) -> None:
     assert inside(root, Path(other), read="lexical") is None
 
 
-def test_link_dotdot_is_the_folder_above_where_the_link_points(root: Path) -> None:
-    """`link/..`, with `link -> a/b`: `a` when links are followed (`follow`, `folder`),
-    the root itself when read as text (`lexical`).
+def test_link_dotdot_is_where_the_os_reaches_it(root: Path) -> None:
+    """`link/..`, with `link -> a/b`. POSIX takes `..` after the link, so the OS reaches
+    `a`; Windows takes it as text, so the OS reaches the root. `follow` and `folder` say
+    where the OS reaches; `lexical` reads the text on both.
 
-    Mutation: read `folder` as `lexical` -> `.`, red."""
+    Mutation: read `folder` as `lexical` -> `.` on POSIX, red."""
     _link(root / "link", root / "a" / "b")
-    assert inside(root, root / "link" / "..", read="follow") == "a"
-    assert inside(root, root / "link" / "..", read="folder") == "a"
-    assert inside(root, root / "link" / ".." / "x", read="folder") == "a/x"
+    posix = sys.platform != "win32"
+    assert inside(root, root / "link" / "..", read="follow", root_ok=True) == ("a" if posix else ".")
+    assert inside(root, root / "link" / "..", read="folder", root_ok=True) == ("a" if posix else ".")
+    assert inside(root, root / "link" / ".." / "x", read="folder") == ("a/x" if posix else "x")
     assert inside(root, root / "link" / "..", read="lexical", root_ok=True) == "."
 
 
@@ -135,10 +137,11 @@ def test_a_path_that_does_not_exist_yet_resolves_as_far_as_it_can(root: Path) ->
     assert inside(root, root / "a" / "new" / "deeper" / "file.bin", read="follow") == "a/new/deeper/file.bin"
 
 
-def test_case_is_not_folded(root: Path) -> None:
-    """`inside` compares as the OS spells paths; `path_covers` is the one that folds case."""
+def test_case_follows_the_os_rules(root: Path) -> None:
+    """Windows' path rules fold case, so a differently cased path is inside there; POSIX's
+    don't, on a case-insensitive macOS disk too. `path_covers` folds it everywhere."""
     other = root.parent / root.name.upper()
-    assert inside(root, other / "a", read="lexical") is None
+    assert inside(root, other / "a", read="lexical") == ("a" if sys.platform == "win32" else None)
 
 
 def test_rel_returns_the_path_or_raises(root: Path, tmp_path: Path) -> None:

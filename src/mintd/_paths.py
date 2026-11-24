@@ -14,7 +14,10 @@ The one place that answers it. Callers name how the path is read:
   link, and a file under a linked folder is named where it lands.
 
 Collapsing ``..`` as text and then following links is not a mode: where dvc asks both (a
-dep as written, then its real file) the caller makes two calls. Case is never folded.
+dep as written, then its real file) the caller makes two calls. ``follow`` and ``folder``
+take ``..`` where the OS does: after the links on POSIX, as text on Windows. Case is folded
+only where the OS's path rules fold it (Windows); on POSIX it isn't, macOS's
+case-insensitive disks included (``path_covers`` folds it everywhere).
 """
 
 from __future__ import annotations
