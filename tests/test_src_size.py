@@ -32,17 +32,19 @@ _NOT_CODE = {
 
 
 def code_lines(text: str) -> int:
-    """Lines holding part of a real token, minus docstring lines."""
-    lines: set[int] = set()
-    for tok in tokenize.generate_tokens(io.StringIO(text).readline):
-        if tok.type not in _NOT_CODE:
-            lines.update(range(tok.start[0], tok.end[0] + 1))
+    """Lines holding part of a real token. A docstring's own string token isn't one, but code sharing its line is."""
+    docstrings: set[tuple[int, int]] = set()
     for node in ast.walk(ast.parse(text)):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
             first = node.body[0]
             if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
                     and isinstance(first.value.value, str):
-                lines.difference_update(range(first.lineno, (first.end_lineno or first.lineno) + 1))
+                docstrings.add((first.lineno, first.end_lineno or first.lineno))
+    lines: set[int] = set()
+    for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+        if tok.type in _NOT_CODE or (tok.type == tokenize.STRING and (tok.start[0], tok.end[0]) in docstrings):
+            continue
+        lines.update(range(tok.start[0], tok.end[0] + 1))
     return len(lines)
 
 
@@ -90,7 +92,7 @@ def test_python_outside_mintd_is_found(tmp_path: Path) -> None:
 def test_growth_fails_and_a_cut_only_warns() -> None:
     with pytest.raises(AssertionError, match="no code lines"):
         _check(0, 1000)
-    with pytest.raises(AssertionError, match="say in the PR why"):
+    with pytest.raises(AssertionError, match="set tests/src_size_budget.txt to 1001 and say in the PR why"):
         _check(1001, 1000)
     with pytest.warns(UserWarning, match="Lower tests/src_size_budget.txt to 1000"):
         _check(1000, 1000 + MARGIN + 1)
@@ -114,3 +116,4 @@ def test_the_counter_skips_blanks_comments_and_docstrings() -> None:
     )
     # x = 1, def f(), and both lines of the returned string
     assert code_lines(sample) == 4
+    assert code_lines('def f(): """d"""; x = 1; return x\n') == 1  # code sharing a docstring's line counts
