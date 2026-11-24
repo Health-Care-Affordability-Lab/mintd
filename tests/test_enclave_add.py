@@ -17,7 +17,7 @@ from mintd.enclave import (
 from mintd.model import Metadata
 from mintd.producer import MissingPrimaryDataProduct, ProducerView
 
-REPO_URL = "https://github.com/example-org/demo-xw"
+REPO_URL = "https://github.com/example-org/demo-map"
 PIN_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 
@@ -26,8 +26,8 @@ FULL_METADATA: dict[str, Any] = {
     "mint": {"version": "1.0", "commit_hash": "x"},
     "project": {
         "type": "data",
-        "name": "demo-xw",
-        "full_name": "Demo XW",
+        "name": "demo-map",
+        "full_name": "Demo Map",
         "created_at": "2026-05-14T00:00:00",
         "created_by": "user",
     },
@@ -90,27 +90,27 @@ def _no_primary_view() -> ProducerView:
 
 def test_add_creates_new_manifest(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
     result = enclave_add(
         client,
         manifest_path=path,
-        name="demo-xw",
+        name="demo-map",
         pin=PIN_SHA,
     )
 
     assert result == path
     manifest = EnclaveManifest.load(path)
     assert len(manifest.approved_products) == 1
-    assert manifest.approved_products[0].repo == "demo-xw"
+    assert manifest.approved_products[0].repo == "demo-map"
     assert manifest.approved_products[0].pin == PIN_SHA
     assert manifest.enclave_name == tmp_path.name
 
 
 def test_add_appends_to_existing_manifest(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     client.register("other-repo")
     path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(
@@ -118,22 +118,22 @@ def test_add_appends_to_existing_manifest(tmp_path: Path) -> None:
         approved_products=[ApprovedProduct(repo="other-repo", registry_entry="x", pin=PIN_SHA)],
     ).save(path)
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=HEAD_SHA)
+    enclave_add(client, manifest_path=path, name="demo-map", pin=HEAD_SHA)
 
     manifest = EnclaveManifest.load(path)
     repos = [ap.repo for ap in manifest.approved_products]
-    assert repos == ["other-repo", "demo-xw"]
+    assert repos == ["other-repo", "demo-map"]
 
 
 def test_add_duplicate_raises_already_approved(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA)
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA)
 
     with pytest.raises(AlreadyApproved) as ei:
-        enclave_add(client, manifest_path=path, name="demo-xw", pin=HEAD_SHA)
-    assert ei.value.name == "demo-xw"
+        enclave_add(client, manifest_path=path, name="demo-map", pin=HEAD_SHA)
+    assert ei.value.name == "demo-map"
     assert ei.value.manifest_path == path
 
 
@@ -147,17 +147,17 @@ def test_add_unknown_repo_raises_catalog_not_found(tmp_path: Path) -> None:
 
 def test_add_explicit_pin_used_verbatim(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin="abc123")
+    enclave_add(client, manifest_path=path, name="demo-map", pin="abc123")
 
     assert EnclaveManifest.load(path).approved_products[0].pin == "abc123"
 
 
 def test_add_no_pin_resolves_head(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
     captured: list[str] = []
 
@@ -168,7 +168,7 @@ def test_add_no_pin_resolves_head(tmp_path: Path) -> None:
     enclave_add(
         client,
         manifest_path=path,
-        name="demo-xw",
+        name="demo-map",
         producer_view_factory=factory,
     )
 
@@ -178,13 +178,13 @@ def test_add_no_pin_resolves_head(tmp_path: Path) -> None:
 
 def test_add_with_source_path(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
     enclave_add(
         client,
         manifest_path=path,
-        name="demo-xw",
+        name="demo-map",
         pin=PIN_SHA,
         source_path="outputs/x.parquet",
     )
@@ -196,7 +196,7 @@ def test_add_with_source_path(tmp_path: Path) -> None:
 
 def test_add_preserves_transferred(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
     transferred = [
         TransferredItem(
@@ -211,7 +211,7 @@ def test_add_preserves_transferred(tmp_path: Path) -> None:
     ]
     EnclaveManifest(enclave_name="test", transferred=transferred).save(path)
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA)
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA)
 
     reloaded = EnclaveManifest.load(path)
     assert len(reloaded.transferred) == 2
@@ -223,7 +223,7 @@ def test_add_head_no_primary_no_overrides_raises(tmp_path: Path) -> None:
     """If HEAD's primary is None AND no --source-path / --all is given,
     `enclave_add` raises MissingPrimaryDataProduct (Decision #3α)."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
     factory = _factory_returning(_no_primary_view())
@@ -232,7 +232,7 @@ def test_add_head_no_primary_no_overrides_raises(tmp_path: Path) -> None:
         enclave_add(
             client,
             manifest_path=path,
-            name="demo-xw",
+            name="demo-map",
             producer_view_factory=factory,
         )
 
@@ -241,7 +241,7 @@ def test_add_head_no_primary_with_source_path_succeeds(tmp_path: Path) -> None:
     """When --source-path is given, missing primary is fine — user chose
     the path explicitly."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
     factory = _factory_returning(_no_primary_view())
@@ -249,7 +249,7 @@ def test_add_head_no_primary_with_source_path_succeeds(tmp_path: Path) -> None:
     enclave_add(
         client,
         manifest_path=path,
-        name="demo-xw",
+        name="demo-map",
         source_path="outputs/x.parquet",
         producer_view_factory=factory,
     )
@@ -277,15 +277,15 @@ def test_add_second_source_path_appends_and_inherits_pin(tmp_path: Path) -> None
     reddens this and has to re-make that decision deliberately.
     """
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
     def _exploding_factory(repo_url: str) -> tuple[ProducerView, str]:
         raise AssertionError("an inheriting add must not resolve HEAD")
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/a")
-    enclave_add(client, manifest_path=path, name="demo-xw",
+    enclave_add(client, manifest_path=path, name="demo-map",
                 source_path="data/final/b", producer_view_factory=_exploding_factory)
 
     manifest = EnclaveManifest.load(path)
@@ -298,12 +298,12 @@ def test_add_second_source_path_appends_and_inherits_pin(tmp_path: Path) -> None
 def test_add_primary_after_source_path_appends_and_inherits_pin(tmp_path: Path) -> None:
     """The field-report shape: a path subscription, then the producer's primary."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/a")
-    enclave_add(client, manifest_path=path, name="demo-xw",
+    enclave_add(client, manifest_path=path, name="demo-map",
                 producer_view_factory=_factory_returning(_full_view()))
 
     manifest = EnclaveManifest.load(path)
@@ -313,28 +313,28 @@ def test_add_primary_after_source_path_appends_and_inherits_pin(tmp_path: Path) 
 
 def test_add_identical_source_path_raises_naming_the_path(tmp_path: Path) -> None:
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/a")
 
     with pytest.raises(AlreadyApproved) as ei:
-        enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+        enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                     source_path="data/final/a")
     assert "data/final/a" in str(ei.value)
-    assert ei.value.name == "demo-xw"
+    assert ei.value.name == "demo-map"
 
 
 def test_add_conflicting_explicit_pin_refuses(tmp_path: Path) -> None:
     """D1: one pin per repo. A --pin that disagrees is refused, never split."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/a")
 
     with pytest.raises(ValueError) as ei:
-        enclave_add(client, manifest_path=path, name="demo-xw", pin=HEAD_SHA,
+        enclave_add(client, manifest_path=path, name="demo-map", pin=HEAD_SHA,
                     source_path="data/final/b")
     assert PIN_SHA in str(ei.value)
     assert "one pin per repo" in str(ei.value)
@@ -345,12 +345,12 @@ def test_add_conflicting_explicit_pin_refuses(tmp_path: Path) -> None:
 def test_add_matching_explicit_pin_is_accepted(tmp_path: Path) -> None:
     """Over-fire guard: the D1 refusal must fire on DISAGREEMENT, not on any --pin."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/a")
 
-    enclave_add(client, manifest_path=path, name="demo-xw", pin=PIN_SHA,
+    enclave_add(client, manifest_path=path, name="demo-map", pin=PIN_SHA,
                 source_path="data/final/b")
 
     assert len(EnclaveManifest.load(path).approved_products) == 2
@@ -361,18 +361,18 @@ def test_add_does_not_inherit_an_empty_pin(tmp_path: Path) -> None:
     pin_missing). Inheriting it would silently mint a SECOND unusable row.
     Unreachable before P5, when the repo-keyed guard refused every second add."""
     client = _Client()
-    client.register("demo-xw")
+    client.register("demo-map")
     path = tmp_path / "enclave_manifest.yaml"
     EnclaveManifest(
         enclave_name="test",
         approved_products=[
-            ApprovedProduct(repo="demo-xw", registry_entry="x", pin="",
+            ApprovedProduct(repo="demo-map", registry_entry="x", pin="",
                             source_path="data/final/a"),
         ],
     ).save(path)
 
     enclave_add(
-        client, manifest_path=path, name="demo-xw", source_path="data/final/b",
+        client, manifest_path=path, name="demo-map", source_path="data/final/b",
         producer_view_factory=_factory_returning(_full_view()),
     )
 

@@ -17,7 +17,9 @@
   traceback (the bug fixed in #68).
 
 Beyond the story's text (the coordinator's gate, 2026-11-20): a 500 that
-happens once is retried, so the first pull lands every file.
+happens once is retried, so the first pull lands every file. And a pull can
+name a path, as push does: `mintd cache pull results/sub` lands that folder and
+nothing beside it (a pull that ignores its path turns that case red).
 
 The 500 is the one real S3 sent, checksum header included (`fail_gets` in
 `tests/_harness/s3.py`): through it botocore raises AttributeError, #68's
@@ -112,3 +114,13 @@ def test_a_one_off_500_is_retried_and_the_pull_lands_everything(product, mintd, 
     assert pulled.returncode == 0, pulled.stderr
     assert _landed(clone) == {rel: md5(body) for rel, body in FILES.items()}
     assert s3_server.failed_gets == [f"/{BUCKET}/{product.prefix}/cache/{FAILING}"], "the 500 was served once"
+
+
+def test_a_path_pulls_that_folder_and_nothing_beside_it(product, mintd, s3_server, tmp_path: Path) -> None:
+    clone = _push_and_clone(product, mintd, s3_server, tmp_path)
+
+    pulled = mintd("cache", "pull", "results/sub", cwd=clone)
+
+    assert pulled.returncode == 0, pulled.stderr
+    assert result(pulled.stdout)["paths"] == ["results/sub"]
+    assert _landed(clone) == {"results/sub/b.txt": md5(FILES["results/sub/b.txt"])}

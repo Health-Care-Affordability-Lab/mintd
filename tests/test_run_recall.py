@@ -436,3 +436,10 @@ def test_a_row_whose_fix_tests_fail_at_head_is_an_error_and_never_built(
     assert got.verdict == "error" and "do not pass at HEAD" in got.detail["validation"] and built == []
     (reports / "head.xml").write_text(_junit(tmp_path, _case("test_x")).read_text(encoding="utf-8"), encoding="utf-8")
     assert rr.row_result(rr.ROWS[1], "HEAD").verdict == "red" and built == ["HEAD"]
+
+
+def test_a_recall_build_never_looks_up_a_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every process the runner starts gets the lookup turned off, whatever this process has.
+    Mutation: drop it from child_env -> red."""
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)
+    assert rr.child_env()["MINTD_NO_UPDATE_CHECK"] == "1"
