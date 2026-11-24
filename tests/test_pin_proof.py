@@ -10,7 +10,7 @@ import yaml
 
 from mintd._dvc_state import cache_path_for
 from mintd._s3 import HeadVerdict, probe_versions
-from mintd._pin_proof import CacheHashes, Entry, hash_cache_object, prove, publishable_scope
+from mintd._pin_proof import CacheHashes, Entry, hash_cache_object, plan_repair, prove, publishable_scope
 
 R = "storage"
 
@@ -131,6 +131,24 @@ def test_single_part_proof(tmp_path: Path) -> None:
     assert prove(_entry(md5, 3), HeadVerdict("found", "v", _md5(b"abd"), 3), cache) == "wrong_bytes"
     for kind in ("missing", "unpinned", "inconclusive"):
         assert prove(_entry(md5, 3), HeadVerdict(kind), cache) == kind
+
+
+def test_an_out_recorded_with_no_hash_is_unrecoverable_not_a_damaged_pointer(s3_versioned, tmp_path: Path) -> None:
+    """`dvc import-url --no-download` writes an out with no md5. A push to a
+    version-aware remote can't prove it, and says so, rather than calling the
+    pointer dvc wrote cut short."""
+    s3, bucket = s3_versioned
+    (tmp_path / "x.txt.dvc").write_text(
+        "md5: fd529d244111d84dcb4e57378b5e21f3\nfrozen: true\n"
+        "deps:\n- md5: 764efa883dda1e11db47671c4a3bbd9e\n  size: 3\n  hash: md5\n  path: /src/x.txt\n"
+        "outs:\n- hash: md5\n  path: x.txt\n"
+    )
+    cache = CacheHashes(tmp_path / ".dvc" / "cache")
+    scope = publishable_scope(tmp_path, remote="origin", prefix="", cache_dir=cache.cache_dir,
+                              dvc_files=["x.txt.dvc"])
+    plan = plan_repair(s3, bucket, scope.entries, cache)
+    assert [why for _, why in plan.unrecoverable] == [
+        "not provably on S3 at its current path and not in the local cache"]
 
 
 def test_multipart_without_a_cache_file_is_an_allowance_only_when_the_size_matches(tmp_path: Path) -> None:

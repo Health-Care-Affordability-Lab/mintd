@@ -10,6 +10,8 @@ from typing import Any, Callable
 
 import pytest
 
+from tests._harness.access import REAL_RUN, is_access_check
+
 from mintd._producer_git_ops import FetchError, GitArchiveFetcher
 
 REPO = "https://github.com/example-org/demo_xw"
@@ -48,7 +50,8 @@ def _make_symlink_tar() -> bytes:
 
 class _Dispatcher:
     """Mock for `subprocess.run`. Routes by the first non-flag argument and
-    respects the `text=` kwarg per the real subprocess contract.
+    respects the `text=` kwarg per the real subprocess contract. The access
+    check's commands pass through to the real one.
     """
 
     def __init__(self, plan: dict[str, dict[str, Any]]) -> None:
@@ -56,6 +59,8 @@ class _Dispatcher:
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str], **kwargs: Any) -> Any:
+        if is_access_check(argv):
+            return REAL_RUN(argv, **kwargs)
         self.calls.append(argv)
         subcmd = self._subcmd_for(argv)
         spec = self.plan.get(subcmd)
@@ -388,6 +393,10 @@ def test_show_empty_stdout_maps_to_metadata_missing(
 
 
 def test_git_not_installed_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The GitHub-access check runs git first, so it is what finds git missing,
+    and its hint says so."""
+    from mintd.errors import unreachable_repo_hint
+
     def boom(*args: Any, **kwargs: Any) -> Any:
         raise FileNotFoundError("git")
 
@@ -397,7 +406,7 @@ def test_git_not_installed_maps_to_unreachable(monkeypatch: pytest.MonkeyPatch) 
         GitArchiveFetcher().fetch_metadata_at(REPO, PIN)
 
     assert ei.value.reason == FetchError.Reason.UNREACHABLE
-    assert "not installed" in ei.value.detail
+    assert unreachable_repo_hint(REPO) == "git isn't installed, and mintd runs git: install it"
 
 
 def _timeout_raiser_for(target_subcmd: str, dispatcher: _Dispatcher) -> Callable[..., Any]:

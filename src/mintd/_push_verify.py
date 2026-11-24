@@ -58,7 +58,9 @@ class PushRefused(MintdError):
 
 
 def _version_aware(cfg: dict[str, str]) -> bool:
-    return str(cfg.get("version_aware", "")).strip().lower() in ("true", "1", "yes")
+    from ._storage_state import remote_is_version_aware
+
+    return remote_is_version_aware(cfg.get)
 
 
 def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
@@ -70,7 +72,8 @@ def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
             doc = read12((root / rel).read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             continue
-        for out in (doc.get("outs") or []) if isinstance(doc, dict) else []:
+        outs = doc.get("outs") if isinstance(doc, dict) else None
+        for out in outs if isinstance(outs, list) else []:  # not a list: the unreadable screen names it
             if isinstance(out, dict) and out.get("remote") not in (None, default):
                 named.append(f"{rel}: {out.get('path')}")
     try:
@@ -79,11 +82,49 @@ def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
         dvc_yaml = None
     stages = dvc_yaml.get("stages") if isinstance(dvc_yaml, dict) else None
     for stage, body in (stages or {}).items() if isinstance(stages, dict) else ():
-        for entry in (body.get("outs") or []) if isinstance(body, dict) else []:
+        outs = body.get("outs") if isinstance(body, dict) else None
+        for entry in outs if isinstance(outs, list) else []:
             for path, opts in entry.items() if isinstance(entry, dict) else ():
                 if isinstance(opts, dict) and opts.get("remote") not in (None, default):
                     named.append(f"dvc.yaml:{stage}: {path}")
     return named
+
+
+@dataclass(frozen=True)
+class PinnedRemote:
+    """A version-aware S3 remote, as push pins versions on it."""
+
+    name: str
+    cfg: dict[str, str]
+    bucket: str
+    prefix: str
+
+
+def pinned_remote(root: Path, name: str, tree: Path, dvc_files: list[str]) -> PinnedRemote | None:
+    """The remote ``name`` in ``root``'s DVC config, as push pins versions on
+    it and ``check`` reads them: None when it isn't a version-aware S3
+    remote, where nothing is pinned by version. Raises ``PushRefused`` when
+    mintd can't read it as the identity DVC uploads with: the remote
+    carries its own access keys, or an out in ``dvc_files`` or the
+    ``dvc.yaml`` (both read under ``tree``) names a remote of its own."""
+    cfg = merged_remote(root, name)
+    if not _version_aware(cfg):
+        return None
+    if any(cfg.get(k) for k in _CREDENTIAL_KEYS):
+        raise PushRefused(
+            f"the DVC remote {name} carries its own access keys, so mintd can't check it as the identity "
+            "DVC uploads with",
+            hint="use an AWS profile instead (dvc remote modify --unset)",
+        )
+    if not str(cfg.get("url", "")).startswith("s3://"):
+        return None
+    own = _own_remotes(tree, dvc_files, name)
+    if own:
+        raise PushRefused(
+            f"outputs with their own remote aren't supported on a version-aware remote: {abbreviate(own)}",
+        )
+    bucket, prefix = parse_s3_url(str(cfg["url"]))
+    return PinnedRemote(name, cfg, bucket, prefix)
 
 
 def _in_selection(entry: Entry | Out, selection: frozenset[str] | None) -> bool:
@@ -209,7 +250,6 @@ def prepare(
     name = remote_arg or default
     if name is None:
         return None
-    cfg = merged_remote(root, name)
     versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r))]
     if not versioned:
         return None
@@ -219,21 +259,11 @@ def prepare(
             "DVC records the versions it reads from the default remote, so the pins would point nowhere",
             hint="push to the default remote (drop --remote)",
         )
-    if any(cfg.get(k) for k in _CREDENTIAL_KEYS):
-        raise PushRefused(
-            f"the DVC remote {name} carries its own access keys, so mintd can't check the push "
-            "as the identity DVC uploads with",
-            hint="use an AWS profile instead (dvc remote modify --unset)",
-        )
-    if not str(cfg.get("url", "")).startswith("s3://"):
-        return None
     dvc_files = pushed_dvc_files(root)
-    own = _own_remotes(root, dvc_files, name)
-    if own:
-        raise PushRefused(
-            f"outputs with their own remote aren't supported on a version-aware remote: {abbreviate(own)}",
-        )
-    bucket, prefix = parse_s3_url(str(cfg["url"]))
+    remote = pinned_remote(root, name, root, dvc_files)
+    if remote is None:
+        return None
+    cfg, bucket, prefix = remote.cfg, remote.bucket, remote.prefix
     s3 = _create_s3_client(
         cfg, aws_profile, pool=16,  # the remote's profile, then AWS_PROFILE, then aws_profile: _s3.resolve_profile
     )
@@ -286,21 +316,21 @@ def prepare(
     )
 
 
-def _in_subrepo(root: Path, rel: str) -> bool:
+def in_subrepo(root: Path, rel: str) -> bool:
     """Whether ``rel`` is inside a subrepo (a folder with its own ``.dvc/``), which DVC skips."""
     return any((root / d / ".dvc").is_dir() for d in Path(rel).parents if d != Path("."))
 
 
 def pushed_dvc_files(root: Path) -> list[str]:
     """The ``.dvc`` files a push from ``root`` reads."""
-    return [f for f in discover_all_outs(root) if not _in_subrepo(root, f)]
+    return [f for f in discover_all_outs(root) if not in_subrepo(root, f)]
 
 
 def pushed_pipelines(root: Path) -> list[str]:
     """The ``dvc.yaml`` files a push from ``root`` reads (not in a folder
     ``.gitignore`` excludes, nor in a subrepo), with or without a
     ``dvc.lock`` beside them."""
-    return [y for y in pipeline_files(root) if not _in_subrepo(root, y)]
+    return [y for y in pipeline_files(root) if not in_subrepo(root, y)]
 
 
 def pushed_lockfiles(root: Path) -> list[str]:

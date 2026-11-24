@@ -47,8 +47,8 @@ def _delete_pinned(product, s3_server, names: set[str]):
     pointer = product.producer.work / "data" / "final.dvc"
     doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
     gone = [f for f in doc["outs"][0]["files"] if f["relpath"] in names]
-    if {f["relpath"] for f in gone} != names:  # pytest.fail: an xfail mark swallows a plain assert
-        pytest.fail(f"no pinned file for {names - {f['relpath'] for f in gone}}")
+    if {f["relpath"] for f in gone} != names:  # the Given broke, not mintd; and an xfail mark swallows a plain assert
+        raise HarnessError(f"no pinned file for {names - {f['relpath'] for f in gone}}")
     for f in gone:  # the emulator's client: never a real bucket
         s3_server.client.delete_object(
             Bucket=BUCKET, Key=f"{product.prefix}/data/final/{f['relpath']}",
@@ -136,9 +136,10 @@ def test_a_failed_import_leaves_the_project_as_it_was(
     }
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "Target: a failed import keeps the files that did land, and the rerun nests the primary at data/final/final"))
-def test_a_rerun_after_a_partial_transfer_lands_the_primary_flat(product, fresh_project, mintd, s3_server) -> None:
+def test_a_rerun_after_a_partial_transfer_never_lands_the_primary_nested(product, fresh_project, mintd, s3_server) -> None:
+    """A failed import keeps the files that did land (its rollback never deletes a file), and the rerun used to import
+    into that folder, a level down, and exit 0. The rerun must refuse, naming every file the failed import left, or
+    land the primary flat with nothing beside it."""
     project = fresh_project()
     fix = _delete_pinned(product, s3_server, {"b.csv"})  # a.csv still lands
 

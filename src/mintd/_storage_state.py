@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -279,10 +280,19 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
 
 
 def _version_aware(section: dict[str, str]) -> bool:
+    return remote_is_version_aware(section.get)
+
+
+def remote_is_version_aware(setting: Callable[[str], str | None]) -> bool:
+    """dvc's rule for a remote whose settings ``setting`` reads, one key at a
+    time, as ``_dvc_state.read_dvc_config`` leaves them: ``version_aware``,
+    else ``worktree`` (dvc turns version_aware on for a worktree remote that
+    doesn't set it). The one reader of this setting, for storage inspection,
+    push and ``check`` alike."""
     # The reader already stripped quotes and an inline `#` comment, as dvc does. Anything
     # else (`true ; note`, a typo) reads as the md5 layout: this classifier never raises.
     def flag(key: str) -> bool | None:
-        raw = section.get(key)
+        raw = setting(key)
         if raw is None:
             return None
         return str(raw).strip().lower() in ("true", "1", "yes", "on")

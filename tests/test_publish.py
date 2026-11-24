@@ -35,6 +35,10 @@ class _FakeCatalogClient:
     def __init__(self, entries: dict | None = None) -> None:
         self._entries = entries or {}
         self.updated: list = []
+        self.push_access_checks = 0
+
+    def require_push_access(self):
+        self.push_access_checks += 1
 
     def update(self, metadata, *, dry_run=False, reporter=None):
         self.updated.append(metadata)
@@ -129,6 +133,7 @@ def test_publish_calls_catalog_update_last(tmp_path):
     order = []
     
     class _OrderedClient:
+        def require_push_access(self): order.append("access")
         def update(self, meta, *, dry_run=False, reporter=None): order.append("update")
     
     dvc.push = lambda *a, **k: order.append("push")
@@ -141,7 +146,8 @@ def test_publish_calls_catalog_update_last(tmp_path):
         git_ops=git,
     )
     
-    assert order == ["push", "tag", "update"]
+    # The registry's push access is checked before anything is written.
+    assert order == ["access", "push", "tag", "update"]
 
 def test_publish_refuses_decreasing_version(tmp_path):
     proj = _seed_project(tmp_path)
@@ -419,6 +425,49 @@ def test_prepare_publish_stamps_timestamps_on_outputs_and_status(tmp_path):
         assert o.last_published == pinned.isoformat()
 
 
+def test_publish_refuses_an_origin_gh_cannot_reach_before_writing_anything(tmp_path, monkeypatch):
+    """Step 5 pushes to origin. Where origin will be pushed to -- here an SSH
+    pushurl beside a local fetch URL -- is refused before publish's first
+    side effect: no metadata.json write, dvc push, commit, tag or catalog
+    update. Publish asks through its own git_ops; this one asks for real."""
+    from mintd._registry_git_ops import SSH_TO_HTTPS, GitHubAccessMissing, SubprocessRegistryGitOps
+
+    class _RealCheck(_FakeRegistryGitOps):
+        def require_github_access(self, work_dir, remote="origin", *, push=False):
+            SubprocessRegistryGitOps().require_github_access(work_dir, remote, push=push)
+
+    proj = _seed_project(tmp_path)
+    subprocess.run(["git", "config", "remote.origin.pushurl", "git@github.com:example-lab/proj.git"], cwd=proj, check=True)
+    before = (proj / "metadata.json").read_bytes()
+    commits, tags = _commit_count(proj), _origin_tags(proj)
+    client, dvc, git = _FakeCatalogClient(), _FakeDvcOps(), _RealCheck()
+    with pytest.raises(GitHubAccessMissing) as raised:
+        publish_project(project_path=proj, client=client, dvc_ops=dvc, git_ops=git, version="0.1.1")
+    assert SSH_TO_HTTPS in (raised.value.hint or "")
+    assert (proj / "metadata.json").read_bytes() == before
+    assert (_commit_count(proj), _origin_tags(proj)) == (commits, tags)
+    assert dvc.push_calls == []
+    assert git.tag_calls == [] and git.push_with_tags_calls == []
+    assert client.updated == []
+
+
+def test_publish_asks_for_push_access_to_origin_and_the_registry_first(tmp_path):
+    client, git = _FakeCatalogClient(), _FakeRegistryGitOps()
+    proj = _seed_project(tmp_path)
+    prepare_publish(project_path=proj, version="0.1.1", dry_run=True, client=client, git_ops=git)
+    assert git.access_checks == [(proj, "origin", True)]
+    assert client.push_access_checks == 1
+
+
+def test_the_registry_is_checked_where_update_will_push_it(tmp_path):
+    from mintd.catalog import GitCatalogClient
+
+    git = _FakeRegistryGitOps()
+    client = GitCatalogClient(registry_repo_url="https://github.com/example-lab/registry", work_dir=tmp_path / "reg", git_ops=git)
+    client.require_push_access()
+    assert git.access_checks == [(tmp_path / "reg", "origin", True)]
+
+
 def test_prepare_publish_one_canonical_timestamp(tmp_path):
     """All outputs share the same byte-identical stamp string — one canonical
     `now()` per publish, not one per output."""
@@ -581,6 +630,63 @@ class _FailingCatalogClient(_FakeCatalogClient):
 
     def update(self, metadata, *, dry_run=False, reporter=None):
         raise self._exc
+
+
+def _refused():
+    from mintd._registry_git_ops import GitHubAccessMissing
+
+    return GitHubAccessMissing("git@github.com:example-lab/registry", hint="THE GH FIX")
+
+
+def _turned_away():
+    # What `_git` raises when GitHub refuses the active account: the account hint attached.
+    return GitOpError(["git", "push"], "fatal: unable to access 'https://github.com/example-lab/x/': 403", hint="THE GH FIX")
+
+
+_GH_FAILURES = [pytest.param(_refused, id="refused-before-git"), pytest.param(_turned_away, id="github-turned-git-away")]
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_catalog_read_keeps_its_own_hint(tmp_path, failure):
+    """Not the catalog read's "delete the registry cache" advice, which a
+    refused clone repeats forever."""
+
+    class _FailedRead(_FakeCatalogClient):
+        def fetch(self, name):
+            raise failure()
+
+    with pytest.raises(PublishError) as raised:
+        prepare_publish(
+            project_path=_seed_project(tmp_path), version="0.1.1", dry_run=True,
+            client=_FailedRead(), git_ops=_FakeRegistryGitOps(),
+        )
+    assert raised.value.recovery_hint == "THE GH FIX"
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_push_to_origin_keeps_its_own_hint(tmp_path, failure):
+    class _FailedPush(_FakeRegistryGitOps):
+        def push_with_tags(self, work_dir):
+            raise failure()
+
+    with pytest.raises(ProjectPushFailed) as raised:
+        publish_project(
+            project_path=_seed_project(tmp_path), client=_FakeCatalogClient(),
+            dvc_ops=_FakeDvcOps(), git_ops=_FailedPush(),
+        )
+    hint = raised.value.recovery_hint or ""
+    assert hint.startswith("THE GH FIX") and "git tag -d v0.1.1" in hint
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_catalog_update_keeps_its_own_hint(tmp_path, failure):
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=_seed_project(tmp_path), client=_FailingCatalogClient(failure()),
+            dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(),
+        )
+    hint = raised.value.recovery_hint or ""
+    assert "THE GH FIX" in hint and "mintd publish 0.1.1" in hint
 
 
 @pytest.mark.parametrize("exc", [

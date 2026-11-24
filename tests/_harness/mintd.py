@@ -123,27 +123,20 @@ def _uv(*args: str) -> None:
         subprocess.run(["uv", *args], check=True)
 
 
-@pytest.fixture(scope="session")
-def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    given = os.environ.get("MINTD_BIN")
-    if given:
-        # A bare name is looked up on PATH, as a shell would; a path is made absolute.
-        found = shutil.which(given) if os.sep not in given else given
-        if found is None:
-            pytest.fail(f"MINTD_BIN={given!r} is not on PATH")
-        return Path(found).resolve()
-    dirty = _git(["status", "--porcelain", "--", "src", "pyproject.toml", "uv.lock"], cwd=REPO)
-    if dirty:
-        pytest.fail(
-            "the stories build mintd from HEAD, which lacks these changes:\n"
-            f"{dirty}commit them, or set MINTD_BIN to a mintd built with them"
-        )
-    root = tmp_path_factory.mktemp("mintd-bin")
+def build_mintd(rev: str, root: Path, patch: Path | None = None) -> Path:
+    """mintd built from `rev` of this repo, with `patch` applied when given,
+    under `root`: the wheel, installed with exactly that commit's locked
+    dependencies into a throwaway venv. Returns its `mintd`. The clone is
+    `--shared`, so any commit in this repo's object store builds, reachable or
+    not; a patch that does not apply raises HarnessError with git's message."""
+    root.mkdir(parents=True, exist_ok=True)
     src, venv, locked = root / "src", root / "venv", root / "locked.txt"
     # Built in the checkout, setuptools writes build/ and src/mintd.egg-info/
     # there, and a stale build/lib ships modules HEAD has deleted.
     _git(["clone", "-q", "--shared", "--no-checkout", str(REPO), str(src)])
-    _git(["checkout", "-q", "--detach", _git(["rev-parse", "HEAD"], cwd=REPO).strip()], cwd=src)
+    _git(["checkout", "-q", "--detach", rev], cwd=src)
+    if patch is not None:
+        _git(["apply", str(patch)], cwd=src)
     subprocess.run(
         ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "-q", "-o", str(locked)],
         cwd=src, check=True,
@@ -154,6 +147,26 @@ def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
     (wheel,) = root.glob("*.whl")
     _uv("pip", "install", "-q", "--no-deps", "--python", str(venv), "-r", str(locked), str(wheel))
     return venv / "bin" / "mintd"
+
+
+@pytest.fixture(scope="session")
+def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    given = os.environ.get("MINTD_BIN")
+    if given:
+        # A bare name is looked up on PATH, as a shell would; a path is made absolute.
+        found = shutil.which(given) if os.sep not in given else given
+        if found is None:
+            pytest.fail(f"MINTD_BIN={given!r} is not on PATH")
+        return Path(found).resolve()
+    # normal, so a new untracked module counts even under status.showUntrackedFiles=no
+    dirty = _git(["status", "--porcelain", "--untracked-files=normal", "--", "src", "pyproject.toml", "uv.lock"],
+                 cwd=REPO, host=True)
+    if dirty:
+        pytest.fail(
+            "the stories build mintd from HEAD, which lacks these changes:\n"
+            f"{dirty}commit them, or set MINTD_BIN to a mintd built with them"
+        )
+    return build_mintd(_git(["rev-parse", "HEAD"], cwd=REPO).strip(), tmp_path_factory.mktemp("mintd-bin"))
 
 
 @pytest.fixture

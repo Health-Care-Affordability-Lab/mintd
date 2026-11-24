@@ -21,7 +21,9 @@ from mintd._dvc_state import (
     _DEFAULT_DVC_CACHE_REL,
     DvcFileEntry,
     DvcOut,
+    PointerCutShort,
     _dir_manifest_bytes,
+    _listed,
     cache_path_for,
     classify_targets,
     dir_manifest_md5,
@@ -415,6 +417,7 @@ def fetch_to_cache(
     version_id: str | None = None,
     *,
     progress: Callable[[int], None] | None = None,
+    check: Callable[[Path], None] | None = None,
 ) -> bool:
     """Download an object to the DVC cache atomically.
 
@@ -432,6 +435,9 @@ def fetch_to_cache(
     thread-safe — boto3's transfer manager runs multipart parts on its own
     internal pool.
 
+    ``check``, if provided, reads the verified tmp file before the rename; what
+    it raises propagates the same way, so an object it refuses never lands.
+
     Retry: ``_s3.download`` retries transient S3/network errors (3 attempts,
     capped backoff), a 5xx botocore mislabels among them. Non-transient errors
     (incl. md5 mismatch) propagate immediately, and the tmp file is unlinked.
@@ -446,6 +452,8 @@ def fetch_to_cache(
             vr = verify_download(tmp_path, expected_md5)
             if not vr.ok:
                 raise ValueError(f"md5 mismatch: expected {vr.expected}, got {vr.actual}")
+            if check is not None:
+                check(tmp_path)
 
             # fsync the tmp file's data, rename, then fsync the parent dir.
             # Both fsyncs are best-effort (no-op on platforms that reject
@@ -477,30 +485,33 @@ def fetch_dir_manifest(
     raw_md5 = full_md5[:-4]
     key = s3_key_for(prefix, full_md5)
     cache_path = cache_path_for(cache_dir, full_md5)
+    entries: list[DvcFileEntry] = []
+
+    def _read(tmp: Path) -> None:
+        # read before it lands in the cache, so a list that isn't one, or that
+        # records a hash dvc never writes, never does
+        payload = json.loads(tmp.read_bytes())
+        if not isinstance(payload, list):
+            raise ValueError("the folder list is not a list")
+        entries.extend(_listed([
+            DvcFileEntry(
+                md5=str(e.get("md5", "")),
+                relpath=str(e.get("relpath", "")),
+                size=int(e.get("size", 0) or 0),
+                version_id=None,
+            )
+            for e in payload
+        ], f"the folder list {full_md5} from storage"))
+
     try:
-        fetch_to_cache(s3, bucket, key, cache_path, raw_md5, version_id=None)
+        fetch_to_cache(s3, bucket, key, cache_path, raw_md5, version_id=None, check=_read)
+    except PointerCutShort:
+        raise
     except Exception as exc:
         logger.warning("fast-sync: dir manifest fetch failed for %s: %s", full_md5, exc)
         cache_path.unlink(missing_ok=True)
         return None
-    try:
-        payload = json.loads(cache_path.read_bytes())
-    except Exception as exc:
-        logger.warning("fast-sync: dir manifest JSON parse failed for %s: %s", full_md5, exc)
-        cache_path.unlink(missing_ok=True)
-        return None
-    if not isinstance(payload, list):
-        cache_path.unlink(missing_ok=True)
-        return None
-    return [
-        DvcFileEntry(
-            md5=str(e.get("md5", "")),
-            relpath=str(e.get("relpath", "")),
-            size=int(e.get("size", 0) or 0),
-            version_id=None,
-        )
-        for e in payload
-    ]
+    return entries
 
 
 
@@ -561,6 +572,8 @@ def fetch_dir_contents(
                 progress=progress,
             )
             return (entry.relpath, None)
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return (entry.relpath, f"{entry.relpath}: {exc}")
 
@@ -652,6 +665,8 @@ def fetch_files_dir_contents(
                 progress=progress,
             )
             return (entry.relpath, None)
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return (entry.relpath, f"{entry.relpath}: {exc}")
 
@@ -984,6 +999,8 @@ class SubprocessFastSyncOps:
                     _record_per_file_failures(out, failures)
                     continue
                 synced += 1
+            except PointerCutShort:
+                raise  # a hash that would name a path outside the cache: the user's to fix, not dvc pull's
             except _UnsyncableOut as exc:
                 _route_out(
                     out, exc.why,

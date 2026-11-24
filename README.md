@@ -44,60 +44,48 @@ See [`vocab.md`](vocab.md) for the long version.
 
 ### One-liner (recommended)
 
-Prerequisite: an SSH key on your GitHub account that has access to this
-repo (`ssh -T git@github.com` should greet you).
-
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
+curl -fsSL https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
+irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1 | iex
 ```
 
-Both scripts install `uv` if missing, run `uv tool install --python 3.13
-git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
-(isolated venv on the newest Python CI tests, `mintd` on PATH), then layer `cffi + reflink` into the
-tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
-to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
+These install the newest release the maintainer has promoted, with `dvc`:
+there is no separate DVC install. Both scripts install `uv` 0.13.9 if it is
+missing, and stop if your `uv` is older or doesn't report its version, naming
+the command that upgrades it.
+They download the release's wheel, check it against the release's SHA-256, and
+run `uv tool install --python 3.13 --with-executables-from dvc` with the
+release's `constraints.txt`, which pins every dependency (DVC included) to the
+versions that release was tested with. `uv tool install` does not check the
+hashes in that file, so the dependencies are pinned by version, not by hash.
+Then the scripts add `cffi` and `reflink` to the tool's environment, so DVC's
+reflink cache mode works on APFS / XFS / Btrfs. That step installs only files
+whose hashes are pinned (reflink's in the scripts, cffi's in `constraints.txt`),
+builds reflink on your machine from its pinned source, and ignores uv settings
+files (`uv.toml`, `pyproject.toml`) in the folder you run the line from or
+above it. Their last line says whether `mintd` and `dvc`
+are both on your PATH, or which one is missing or shadowed by another copy,
+and whether reflink was refused because a download didn't match its hash.
 
-
-### Manual install
-
-```bash
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
-# irm https://astral.sh/uv/install.ps1 | iex       # Windows
-
-uv tool install --python 3.13 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
-```
-
-Or `pipx install git+…` / `pip install --user git+…` if you prefer.
-(`pip install --user` needs the user-scripts dir on PATH — on Windows
-that's `%APPDATA%\Python\Python3XX\Scripts`.)
-
-Optionally add reflink support, which the one-liner does for you:
-
-```bash
-uv pip install --python ~/.local/share/uv/tools/mintd/bin/python cffi reflink
-```
-
-You'll also need **DVC** with the S3 backend, since `mintd` shells out to
-it for every data operation:
-
-```bash
-pip install 'dvc[s3]'
-# or: brew install dvc / winget install iterative.dvc
-```
+- To update, run the same line again. `uv tool upgrade mintd` does not apply.
+- For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on
+  Windows run
+  `& ([scriptblock]::Create((irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1))) -WithSchema`.
+- For a given release, use `releases/download/vX.Y.Z/` in place of
+  `releases/latest/download/`.
 
 Verify:
 
 ```bash
 mintd --version
+dvc --version
 mintd --help
 ```
 
@@ -106,7 +94,26 @@ mintd --help
 
 ## First-time setup
 
-Point `mintd` at your lab's registry and your S3 storage:
+mintd reaches GitHub through [gh](https://cli.github.com) only. Log in, and let git
+use gh for GitHub:
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+If your clones use SSH (`git@github.com:` or `ssh://git@github.com/`), point them at
+https once, so git goes through gh too:
+
+```bash
+git config --global --add url."https://github.com/".insteadOf git@github.com:
+git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/
+```
+
+When GitHub refuses access, mintd names the repo's org and your active gh account,
+and the account to switch to with `gh auth switch -u <account>`.
+
+Then point `mintd` at your lab's registry and your S3 storage:
 
 ```bash
 mintd config setup            # interactive walkthrough
@@ -150,6 +157,10 @@ cd data_my-cleaned-survey
 # rebuilds it from data/raw/ and deletes anything placed there by hand, so
 # keep source files in data/raw/:
 dvc repro
+# Nothing uploads data/raw/ on its own: git ignores it, and `dvc repro`
+# records it as an input without caching it, so a teammate's clone can't
+# rerun the pipeline. `mintd data add data/raw` tracks it if it should be
+# shared; `mintd check` warns while a pipeline input is tracked by neither.
 
 # Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status
@@ -356,7 +367,9 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
-mintd check    [path] [--upgrades]                Validate metadata, output delivery + (optionally) pins
+mintd check    [path] [--upgrades] [--remote [--all] | --staged]
+                                                  Validate metadata, output delivery + (optionally) pins;
+                                                  --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
 mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff

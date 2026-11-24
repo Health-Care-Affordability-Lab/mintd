@@ -75,21 +75,14 @@ import yaml
 from tests._harness import HarnessError
 from tests._harness.consumer import fresh_project  # noqa: F401
 from tests._harness.live import (
-    MARKER, RESULTS, SEEN, STARTED, LiveMintd, Product, catalog_entry, check_basetemp, readonly_credentials,
-    redact, run_read_only,
+    MARKER, RESULTS, SEEN, STARTED, LiveMintd, Product, catalog_entry, check_basetemp, lock_down,
+    readonly_credentials, quiet_tracebacks, redact, run_read_only,
 )
 from tests._harness.mintd import mintd_bin  # noqa: F401
 
 # Read at import, before any fixture runs: tests/conftest.py's autouse fixtures
 # later point AWS_SHARED_CREDENTIALS_FILE at a missing file and move dvc's dirs.
 _OPERATOR_ENV = dict(os.environ)
-
-
-def _kept(name: str) -> bool:
-    """Whether an operator variable reaches mintd: no AWS, boto or fsspec
-    setting but the trusted-certificates bundle, so no key but the copy is in
-    reach (fsspec's S3 defaults override a profile's key)."""
-    return name == "AWS_CA_BUNDLE" or not name.startswith(("AWS_", "BOTO_", "FSSPEC_"))
 
 
 def _products() -> list[str]:
@@ -112,11 +105,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    # A long traceback prints each frame's arguments, and -l its locals: the
-    # operator's environment among them, with any key or token it holds.
-    config.option.showlocals = config.option.fulltrace = False
-    if config.option.tbstyle in ("auto", "long"):
-        config.option.tbstyle = "short"
+    quiet_tracebacks(config)
     if config.option.help or config.option.collectonly:
         return
     try:
@@ -173,25 +162,16 @@ def live(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactor
         if handler is not signal.SIG_IGN:  # under nohup a hangup stays ignored, and the run goes on
             signal.signal(sig, stop)
     request.addfinalizer(lambda: [signal.signal(sig, handler) for sig, handler in previous.items()])
-    (work / "boto").touch()  # BOTO_CONFIG: an empty file, so no ~/.boto key
     (work / "mintd-config").mkdir(exist_ok=True)
     copy = work / "mintd-config" / "config.yaml"
     copy.write_text(yaml.safe_dump({**settings, "cache_dir": str(work / "mintd-cache")}), encoding="utf-8")
     bin_ = request.getfixturevalue("mintd_bin")
-    env = {k: v for k, v in _OPERATOR_ENV.items() if _kept(k)}
+    env = lock_down(_OPERATOR_ENV, credentials, work)
     env.update({
         "PATH": f"{bin_.parent}{os.pathsep}{_OPERATOR_ENV['PATH']}",  # the wheel's dvc, for mintd and plain runs
         "TMPDIR": str(work),
         "MINTD_CONFIG_DIR": str(copy.parent),
-        "AWS_SHARED_CREDENTIALS_FILE": str(credentials),
-        "AWS_CONFIG_FILE": str(credentials.with_name("config")),  # the read-only profile's region and endpoint only
-        "BOTO_CONFIG": str(work / "boto"),
-        "AWS_EC2_METADATA_DISABLED": "true",
-        "FSSPEC_CONFIG_DIR": str(work / "fsspec"),  # no folder there: no ~/.config/fsspec key
         "GIT_TERMINAL_PROMPT": "0",
-        # Empty, so no remote key in the box's dvc config can stand in for the read-only one.
-        "DVC_GLOBAL_CONFIG_DIR": str(work / "dvc-global"),
-        "DVC_SYSTEM_CONFIG_DIR": str(work / "dvc-system"),
         "DVC_SITE_CACHE_DIR": str(work / "dvc-site"),
         "DVC_NO_ANALYTICS": "1",
     })

@@ -289,9 +289,10 @@ def _mintd_imports(path: Path) -> set[str]:
 
 
 def test_dvc_state_has_no_import_cycle() -> None:
-    """`_dvc_state` imports no mintd module but the leaf `mintd.errors`, which imports none, so
-    any module may import `_dvc_state` without a cycle. It reads the source because an import
-    inside a function never runs at import time.
+    """`_dvc_state` imports no mintd module but the leaf `mintd.errors`, which imports none
+    but `_registry_git_ops` inside `unreachable_repo_hint` (GitHub's hint), so any module may
+    import `_dvc_state` without a cycle. It reads the source because an import inside a
+    function never runs at import time.
 
     Mutations: add `from ._fast_sync_ops import FastSyncOps` anywhere in `_dvc_state`, at the
     top or inside a function -> red; add a mintd import to `mintd.errors` -> red.
@@ -300,7 +301,7 @@ def test_dvc_state_has_no_import_cycle() -> None:
     import mintd.errors as errors
 
     assert _mintd_imports(Path(ds.__file__)) <= {"mintd.errors"}
-    assert _mintd_imports(Path(errors.__file__)) == set()
+    assert _mintd_imports(Path(errors.__file__)) <= {"mintd._registry_git_ops"}
 
 
 def test_dvc_state_names_are_imported_from_dvc_state() -> None:
@@ -889,7 +890,7 @@ def test_a_lock_entry_of_a_foreach_or_matrix_stage_is_checked_against_its_stage(
 
 @pytest.mark.parametrize("text", [
     pytest.param(None, id="OSError-a-folder"),
-    pytest.param("deps: 3\nouts:\n- md5: abc\n  path: x\n", id="TypeError"),
+    pytest.param("deps: 3\nouts:\n- md5: abcabcabcabcabcabcabcabcabcabcab\n  path: x\n", id="TypeError"),
     pytest.param("outs: " + "[" * 5000 + "]" * 5000 + "\n", id="RecursionError"),
 ])
 def test_a_pointer_that_cannot_be_parsed_has_no_outs(tmp_path: Path, text: str | None) -> None:

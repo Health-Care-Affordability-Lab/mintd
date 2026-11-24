@@ -30,6 +30,7 @@ from ._dvc_ops import (
     DvcOpError,
     DvcOps,
     DvcPullError,
+    DvcPullRefused,
     DvcPushResult,
     DvcStorageKeyError,
     pull_retry_hint,
@@ -64,7 +65,7 @@ from ._dvc_state import (
 )
 from ._pin_proof import unlisted_on_disk
 from ._import_rescue_ops import RescueResult, rescue_import_pull
-from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path
+from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path, specific_hint
 from ._storage_state import inspect_storage
 from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
@@ -358,12 +359,19 @@ def _pull_isolating_failures(
         )
 
     failed: dict[str, str] = {}
+    hints: dict[str, str] = {}  # a failure's own hint (a refused GitHub import's): retrying won't help
+
+    def _fail(target: str, exc: DvcPullError) -> None:
+        failed[target] = _dvc_failure_why(exc)
+        if (hint := specific_hint(exc)) is not None:
+            hints[target] = hint
+
     for group in _shape_groups(targets):
         try:
             _pull(group)
         except DvcPullError as exc:
             if len(group) == 1:
-                failed[group[0]] = _dvc_failure_why(exc)
+                _fail(group[0], exc)
             else:
                 # The exception text is dvc's raw stderr; each per-target retry
                 # reports its own trimmed reason, so it is not repeated here.
@@ -375,7 +383,7 @@ def _pull_isolating_failures(
                     try:
                         _pull([t])
                     except DvcPullError as exc_t:
-                        failed[t] = _dvc_failure_why(exc_t)
+                        _fail(t, exc_t)
     for t in targets:
         if t in failed:
             continue
@@ -387,7 +395,7 @@ def _pull_isolating_failures(
             )
     if reporter is not None:
         for t, why in failed.items():
-            _report_pull_failure(reporter, t, why)
+            _report_pull_failure(reporter, t, why, hint=hints.get(t))
     return list(failed)
 
 
@@ -521,6 +529,7 @@ def _pull_targets_with_import_rescue(
     rescue_failed: list[str] = []
     for t in import_targets:
         pull_raised = False
+        refused: DvcPullRefused | None = None
         try:
             dvc_ops.pull(
                 targets=[t], cwd=project_path, remote=remote, jobs=jobs,
@@ -531,6 +540,8 @@ def _pull_targets_with_import_rescue(
             # a version-aware import whose producer lock recorded no
             # version_id. Absorb it; the rescue lane below completes the pull.
             pull_raised = True
+            if isinstance(exc, DvcPullRefused):  # dvc never ran: GitHub access, maybe for another import
+                refused = exc
             logger.info(
                 "import %r: dvc pull did not materialize it (%s); "
                 "trying the import-rescue lane", t, exc,
@@ -558,7 +569,9 @@ def _pull_targets_with_import_rescue(
         )
         if not result.ok:
             rescue_failed.append(t)
-            if reporter is not None:
+            if reporter is not None and refused is not None:  # the gh fix first, not the rescue's advice
+                _report_pull_failure(reporter, t, _dvc_failure_why(refused), hint=specific_hint(refused))
+            elif reporter is not None:
                 _report_pull_failure(reporter, t, result.reason, hint=result.hint)
     return pull_failed + rescue_failed
 
@@ -1116,6 +1129,7 @@ def data_push(
         {y for k in stage_targets if (project_path / (y := k.split(":", 1)[0])).is_file()})
     behind: list[str] = []
     others: list[str] = []
+    unrun: list[str] = []  # pipelines with no dvc.lock: none of their stages has run
     for pipeline in pipelines:
         try:
             names = dvc_ops.stage_names(cwd=project_path / Path(pipeline).parent)
@@ -1127,6 +1141,8 @@ def data_push(
             k.split(":", 1)[1] for k in stage_targets if k.split(":", 1)[0] == pipeline}
         late = stages_behind(project_path, Path(pipeline).with_name("dvc.lock").as_posix(), names, stages=named)
         behind += [f"{pipeline}:{s}" for s in late]
+        if late and not (project_path / Path(pipeline).with_name("dvc.lock")).is_file():
+            unrun.append(pipeline)
         others += [f"{pipeline}:{s}" for s in with_outputs(project_path / pipeline, names) if s not in late]
     if behind:
         rest = [] if stage_targets is not None else [*others, *(p for p in scope if p.endswith(".dvc"))]
@@ -1136,14 +1152,18 @@ def data_push(
             path, colon, stage = (target, "", "") if target.endswith(".dvc") else target.partition(":")
             return f"{Path(os.path.relpath(Path(project_path) / path, here)).as_posix()}{colon}{stage}"
 
+        stale = [k for k in behind if k.split(":", 1)[0] not in unrun]
+        why = [*(f"the pipeline {p} hasn't run yet (there's no dvc.lock beside it), so DVC would push nothing "
+                 "for its stages" for p in unrun),
+               *([f"dvc.lock records fewer outputs than dvc.yaml declares for {abbreviate(stale)}, so DVC would "
+                  "push nothing for the missing ones: each stage hasn't run since, or dvc.lock was cut short"]
+                 if stale else [])]
         raise PushRefused(
-            f"nothing was written or pushed: dvc.lock records fewer outputs than dvc.yaml declares for "
-            f"{abbreviate(behind)}, so DVC would push nothing for the missing ones: each stage hasn't run "
-            "since, or dvc.lock was cut short",
+            "nothing was written or pushed: " + "; ".join(why),
             hint=f"run dvc repro {shlex.join(map(from_here, behind))}, then push"
             + (f"; or push the rest by naming it, for example mintd data push {shlex.join(map(from_here, rest[:3]))}"
                if rest else "")
-            + "; if dvc.lock was cut short, restore it from git",
+            + ("; if dvc.lock was cut short, restore it from git" if stale else ""),
         )
     # A folder pointer lists no count, so one cut at the end of an entry, or
     # recorded before files were added, reads as a smaller folder; DVC would
@@ -1232,7 +1252,7 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     """Why ``.dvc/config.local`` sends this push somewhere other than where
     importers pull, or None. dvc merges ``config.local`` over ``.dvc/config``;
     a consumer's clone has only the latter. So another ``[core] remote``, or
-    the default remote's ``url``, ``version_aware`` or endpoint set locally,
+    the default remote's ``url``, ``version_aware``, ``worktree`` or endpoint set locally,
     records version IDs (or an object layout) importers cannot use, or checks
     them against a service importers don't read. ``named``: the
     push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
@@ -1243,7 +1263,10 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     if redirected and redirected != default and not named:
         return f".dvc/config.local sends pushes to {redirected}; importers pull from the default remote {default}"
     section = local["remote"].get(default, {})
-    keys = sorted(k for k in ("url", "version_aware", "endpointurl", "endpoint") if k in section)
+    keys = sorted(
+        k for k in ("url", "version_aware", "worktree", "endpointurl", "endpoint")  # worktree: version-aware too
+        if k in section
+    )
     if keys:
         return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
     return None
@@ -1385,7 +1408,7 @@ def commit_pushed_pointers(
             commit=sha, hint="git pull --rebase, then git push (mintd never pulls, rebases or forces)",
         )
     except GitOpError as exc:
-        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint="git push")
+        return PointerCommit("push_failed", pts, reason=_last_line(exc), commit=sha, hint=specific_hint(exc) or "git push")
     upstream = info.merge_ref.removeprefix("refs/heads/")
     note = None
     reads = git_ops.remote_default_branch(root, info.remote)
