@@ -80,7 +80,7 @@ BANNED_TARGETS: dict[str, int] = {
 }
 
 # PERMITTED: the other half of the same census — composition root (33 sites /
-# 8 targets) plus process/network boundary (31 sites / 11 targets). Pinned so
+# 8 targets) plus process/network boundary (32 sites / 12 targets). Pinned so
 # the classifier above cannot be widened to launder a banned target.
 # `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
 # captures the config the factory receives, at the already-permitted site.
@@ -117,6 +117,7 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd._s3.time.sleep": 9,
     "mintd._producer_git_ops.subprocess.run": 6,
     "mintd._share_ops._create_s3_client": 2,
+    "mintd.check._create_s3_client": 1,
     "mintd._templates._render.importlib.metadata.version": 1,
     "mintd.cli.GitCatalogClient": 3,
     "mintd.cli.SubprocessDvcOps": 2,
