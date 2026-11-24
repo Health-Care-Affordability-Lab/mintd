@@ -1,0 +1,37 @@
+recall: undoes one S3 5xx aborts the whole cache pull with a botocore traceback (both layers: the AttributeError conversion, now in _s3.download, and cache_pull's per-file catch).
+fix: ed0a2ff (#68); before the fix: 907e928.
+validated: with this patch on HEAD, tests/test_cache_cli.py::test_cache_pull_unexpected_error_on_one_file_exit_1_no_traceback and tests/test_share_transport.py::test_download_persistent_5xx_attribute_error_maps_to_transfer_error goes red.
+
+diff --git a/src/mintd/_cache_ops.py b/src/mintd/_cache_ops.py
+index 6b295e9..c7179b6 100644
+--- a/src/mintd/_cache_ops.py
++++ b/src/mintd/_cache_ops.py
+@@ -1227,14 +1227,7 @@ def cache_pull(
+                 # _pull_one maps the failures it knows; anything else is still
+                 # one file's failure. Raised here it would discard every other
+                 # file's outcome. `remainder` passed safe_cache_remainder above.
+-                try:
+-                    outcomes.append(fut.result())
+-                except Exception as exc:
+-                    outcomes.append(TransferOutcome(
+-                        rel=futures[fut], status="failed",
+-                        reason=f"unexpected error: {type(exc).__name__}: {exc}",
+-                        hint="retry: mintd cache pull",
+-                    ))
++                outcomes.append(fut.result())  # recall: undoes #68
+                 done += 1
+                 advance.set_description(_pull_label(done, n_files))
+     return CachePullSummary(
+diff --git a/src/mintd/_s3.py b/src/mintd/_s3.py
+index 5ecf844..82f16f1 100644
+--- a/src/mintd/_s3.py
++++ b/src/mintd/_s3.py
+@@ -373,7 +373,7 @@ def download(
+     def attempt() -> None:
+         try:
+             s3.download_file(**kwargs)
+-        except AttributeError as exc:
++        except ZeroDivisionError as exc:  # recall: undoes #68
+             if not isinstance(exc.obj, StreamingChecksumBody):
+                 raise  # a real bug: propagate verbatim
+             raise ClientError(

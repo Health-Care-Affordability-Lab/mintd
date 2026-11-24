@@ -146,6 +146,7 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           mintd="$(uv tool dir --bin)/mintd"
           test "$("$mintd" --version)" = "mintd ${TAG#v}"
+          "$(uv tool dir --bin)/dvc" --version  # dvc landed beside mintd
           "$mintd" init enclave ci-smoke --path "$RUNNER_TEMP"
           if [ -n "$FLAGS" ]; then "$(uv tool dir)/mintd/bin/python" -c 'import pandas, pyarrow'; fi
           echo "MINTD_BIN=$mintd" >> "$GITHUB_ENV"
@@ -163,6 +164,8 @@ jobs:
           $mintd = Join-Path (uv tool dir --bin).Trim() "mintd.exe"
           $v = & $mintd --version
           if ($v -ne "mintd $($env:TAG.Substring(1))") { throw "installed '$v', expected $env:TAG" }
+          & (Join-Path (uv tool dir --bin).Trim() "dvc.exe") --version
+          if ($LASTEXITCODE -ne 0) { throw "dvc is not installed beside mintd" }
           & $mintd init enclave ci-smoke --path $env:RUNNER_TEMP
           if ($LASTEXITCODE -ne 0) { throw "mintd init failed" }
           & (Join-Path (uv tool dir).Trim() "mintd\Scripts\python.exe") -c "import pandas, pyarrow"

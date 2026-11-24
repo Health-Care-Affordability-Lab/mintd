@@ -47,8 +47,8 @@ def _delete_pinned(product, s3_server, names: set[str]):
     pointer = product.producer.work / "data" / "final.dvc"
     doc = yaml.safe_load(pointer.read_text(encoding="utf-8"))
     gone = [f for f in doc["outs"][0]["files"] if f["relpath"] in names]
-    if {f["relpath"] for f in gone} != names:  # pytest.fail: an xfail mark swallows a plain assert
-        pytest.fail(f"no pinned file for {names - {f['relpath'] for f in gone}}")
+    if {f["relpath"] for f in gone} != names:  # the Given broke, not mintd; and an xfail mark swallows a plain assert
+        raise HarnessError(f"no pinned file for {names - {f['relpath'] for f in gone}}")
     for f in gone:  # the emulator's client: never a real bucket
         s3_server.client.delete_object(
             Bucket=BUCKET, Key=f"{product.prefix}/data/final/{f['relpath']}",
