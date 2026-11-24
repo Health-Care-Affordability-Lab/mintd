@@ -562,7 +562,7 @@ def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_p
         "; the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv"
     )
     assert failed.value.hint.endswith(  # in order: tell the producer, clear the folder, re-run
-        "that is the producer's to fix: send them this error, then clear the folder (if these are files this import "
+        "that is the producer's to fix: send them this error, then clear the folder (if this is a folder this import "
         "left, not yours: rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder), then re-run the import"
     )
     assert DvcImportStorageMissing.hint.endswith("send them this error, then re-run the import")  # per instance
@@ -570,7 +570,7 @@ def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_p
     with pytest.raises(ImportDestinationExists) as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert refused.value.hint.startswith(
-        "if these are files an earlier mintd data import left, not yours: "
+        "if this is a folder an earlier mintd data import left, not yours: "
         "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"
     )
 
@@ -604,13 +604,30 @@ def test_a_destination_inside_an_earlier_import_names_that_import(tmp_path: Path
     assert "safe to remove" not in str(refused.value) + refused.value.hint
 
 
-def test_a_folder_of_only_empty_folders_is_not_called_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("held", ["an empty folder", "a link to a folder"])
+def test_a_folder_holding_no_files_is_not_called_safe_to_remove(tmp_path: Path, held: str) -> None:
+    """A folder that isn't empty is not known safe to remove, whatever it
+    holds: `os.walk` lists a link to a folder with the folders, so a folder
+    holding only that was called "holding only empty folders ... safe to
+    remove". Mutation: bring back that case -> red."""
     client = InMemoryCatalogClient()
     _register(client, mutate=_with_primary("outputs/cms_based/"))
-    (tmp_path / "data_demo_xw" / "outputs" / "cms_based" / "sub").mkdir(parents=True)
-    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a folder holding only empty folders") as refused:
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    dest.mkdir(parents=True)
+    if held == "an empty folder":
+        (dest / "sub").mkdir()
+    else:
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "keep.csv").write_text("not an import's\n")
+        (dest / "link").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a folder and no pointer records it "
+                                                      r"\(it holds folders but no files\)") as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
-    assert refused.value.hint == "it holds no files and is safe to remove: rm -r -- data_demo_xw/outputs/cms_based"
+    assert "safe to remove" not in refused.value.hint
+    assert refused.value.hint.startswith(
+        "if this is a folder an earlier mintd data import left, not yours: rm -r -- data_demo_xw/outputs/cms_based;"
+    )
 
 
 def _failing_after(write: Callable[[Path], None], exc: BaseException) -> type[_FakeDvcOps]:
@@ -670,7 +687,7 @@ def test_a_partial_failure_words_the_rm_as_an_if(tmp_path: Path) -> None:
         import_product(client, fails(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert str(failed.value).endswith(
         "; the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv; before "
-        "re-running, if these are files this import left, not yours: "
+        "re-running, if this is a folder this import left, not yours: "
         "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"
     )
 
@@ -772,7 +789,7 @@ def test_a_dest_root_through_a_links_dotdot_names_the_folder_dvc_wrote_to(tmp_pa
     assert (wrote / "a.csv").is_file()
     assert "my_thesis" not in str(failed.value)
     assert str(failed.value).endswith(
-        f"; the folder {there} now holds {there}/a.csv; before re-running, if these are files this import left, "
+        f"; the folder {there} now holds {there}/a.csv; before re-running, if this is a folder this import left, "
         f"not yours: {shlex.join(['rm', '-r', '--', there])}; otherwise move that folder"
     )
 
@@ -799,6 +816,33 @@ def test_a_link_to_a_folder_at_the_destination_is_refused_as_a_link(tmp_path: Pa
                                                       r"so the import would write where it points") as refused:
         import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
     assert "keep.csv" not in f"{refused.value} {refused.value.hint}"
+
+
+@pytest.mark.parametrize("name", [
+    pytest.param("a\x1b[2J\nb", id="escape-and-newline",
+                 marks=pytest.mark.skipif(sys.platform == "win32", reason="Windows names can't hold control characters")),
+    pytest.param("a\u202eb", id="right-to-left-override"),
+])
+@pytest.mark.parametrize("held", ["a file", "nothing"])
+def test_a_name_a_terminal_would_act_on_is_escaped_and_given_no_command(tmp_path: Path, name: str, held: str) -> None:
+    """An escape in a path reached the terminal raw, where it can repaint the
+    screen, and a newline split the hint's command in two. The name is shown
+    escaped, and no command is offered for it: the escaped form names another
+    path. Mutations: print the name as it is -> red; offer the command anyway -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary(f"outputs/{name}/"))
+    stray = tmp_path / "data_demo_xw" / "outputs" / name
+    stray.mkdir(parents=True)
+    if held == "a file":
+        (stray / "x.csv").write_text("x\n")
+    with pytest.raises(ImportDestinationExists) as refused:
+        import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    shown = name.encode("unicode_escape").decode("ascii")
+    for text in (str(refused.value), refused.value.hint):
+        assert not any(c in text for c in "\x1b\n\u202e"), text
+    assert f"data_demo_xw/outputs/{shown}" in str(refused.value)
+    assert "remove it by hand (its name has a character mintd won't print)" in refused.value.hint
+    assert "rmdir" not in refused.value.hint and "rm -" not in refused.value.hint
 
 
 def test_a_dest_root_that_reads_as_an_option_is_not_one_to_rm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -848,7 +892,7 @@ def test_an_interrupted_import_names_what_it_left_as_a_warning(tmp_path: Path) -
         import_product(client, _failing_after(landed, KeyboardInterrupt())(), "demo_xw", cwd=tmp_path,
                        dest_root=tmp_path, reporter=reporter)
     assert reporter.warns == ["the folder data_demo_xw/outputs/cms_based now holds data_demo_xw/outputs/cms_based/a.csv; "
-                              "before re-running, if these are files this import left, not yours: "
+                              "before re-running, if this is a folder this import left, not yours: "
                               "rm -r -- data_demo_xw/outputs/cms_based; otherwise move that folder"]
 
 

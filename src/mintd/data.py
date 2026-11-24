@@ -18,6 +18,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
@@ -401,10 +402,10 @@ def import_product(
             kind = "link" if new_dest.is_symlink() else "folder" if new_dest.is_dir() else "file"
             if kind == "folder":
                 left = _first_files(new_dest)
-                there = f"the folder {where} now holds {_named(left, cwd) if left else 'only empty folders'}"
+                there = f"the folder {where} now holds {_named(left, cwd) if left else 'folders but no files'}"
             else:  # a link's folder is not listed: `rm` removes the link, not what it holds
                 there = f"the {kind} {where} is now there"
-            step = _if_left("this import", where, kind)
+            step = _if_left("this import", new_dest, cwd, kind)
             if isinstance(exc, DvcImportStorageMissing):
                 exc.args = (f"{exc}; {there}", *exc.args[1:])
                 exc.clear_first(f"clear the {kind} ({step})")  # in order: tell the producer, clear, re-run
@@ -1107,12 +1108,36 @@ def _physical(p: Path) -> Path:
     return Path(os.path.realpath(p.parent)) / p.name
 
 
-def _shown(p: Path, cwd: Path) -> str:
-    """``p`` as a message names it, where the OS reaches it (``_physical``):
-    relative to the project inside it, and absolute outside it, where a
-    ``..`` would climb out from where the project really is."""
+def _where(p: Path, cwd: Path) -> str:
+    """``p`` where the OS reaches it (``_physical``): relative to the project
+    inside it, and absolute outside it, where a ``..`` would climb out from
+    where the project really is. Spelled as the file system spells it; a
+    message prints ``_shown``."""
     q, top = _physical(p), Path(os.path.realpath(cwd))
     return (q.relative_to(top) if q.is_relative_to(top) else q).as_posix()
+
+
+def _unprintable(c: str) -> bool:
+    """A character a terminal acts on or can't print: a control (an escape, a
+    newline), a format character (a right-to-left override), a lone surrogate
+    (a name's undecodable byte) or a line or paragraph separator."""
+    return unicodedata.category(c) in ("Cc", "Cf", "Cs", "Zl", "Zp")
+
+
+def _shown(p: Path, cwd: Path) -> str:
+    """``p`` as a message names it (``_where``), each unprintable character
+    escaped where it stands (``\\x1b``), so a name can neither repaint the
+    terminal nor split a line."""
+    return "".join(c.encode("unicode_escape").decode("ascii") if _unprintable(c) else c for c in _where(p, cwd))
+
+
+def _command(words: list[str], p: Path, cwd: Path) -> str:
+    """``words`` and then ``p``, as a command to paste; none for a name with an
+    unprintable character, whose escaped form would name another path."""
+    where = _where(p, cwd)
+    if any(_unprintable(c) for c in where):
+        return "remove it by hand (its name has a character mintd won't print)"
+    return shlex.join([*words, where])
 
 
 _NAMED = 8  # files a message names; walking stops once there is one more
@@ -1136,16 +1161,13 @@ def _named(paths: list[Path], cwd: Path) -> str:
     return ", ".join(_shown(p, cwd) for p in paths[:_NAMED]) + (" and more" if len(paths) > _NAMED else "")
 
 
-def _if_left(who: str, where: str, kind: str) -> str:
-    """How to clear the folder, file or link (``kind``) at ``where``, if what
-    it holds is what ``who`` left, and otherwise: a file another run or the
-    user put there can't be told apart. One wording for a failed import's
-    note and the refusal of its re-run."""
-    if kind == "folder":
-        whose, rm = f"these are files {who} left", ["rm", "-r", "--", where]
-    else:
-        whose, rm = f"this is a {kind} {who} left", ["rm", "--", where]
-    return f"if {whose}, not yours: {shlex.join(rm)}; otherwise move that {kind}"
+def _if_left(who: str, path: Path, cwd: Path, kind: str) -> str:
+    """How to clear the folder, file or link (``kind``) at ``path`` if ``who``
+    left it, and otherwise: what another run or the user put there can't be
+    told apart. One wording for a failed import's note and the refusal of its
+    re-run."""
+    rm = ["rm", "-r", "--"] if kind == "folder" else ["rm", "--"]
+    return f"if this is a {kind} {who} left, not yours: {_command(rm, path, cwd)}; otherwise move that {kind}"
 
 
 def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -> tuple[str, str]:
@@ -1170,16 +1192,16 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
             "move or remove it, or import somewhere else with --dest-root",
         )
     down = f"so dvc would import into it, a level down; {nothing}"
+    if next(folder.iterdir(), None) is None:
+        return (f"{where} is already a folder, an empty one, {down}",
+                f"it is empty and safe to remove: {_command(['rmdir', '--'], dest, cwd)}")
+    # Not empty, so not known safe to remove, whatever it holds: `_first_files`
+    # lists no file for a link to a folder.
     files = _first_files(folder)
-    if not files:
-        if next(folder.iterdir(), None) is None:
-            return (f"{where} is already a folder, an empty one, {down}",
-                    f"it is empty and safe to remove: {shlex.join(['rmdir', '--', where])}")
-        return (f"{where} is already a folder holding only empty folders, {down}",
-                f"it holds no files and is safe to remove: {shlex.join(['rm', '-r', '--', where])}")
+    held = _named(files, cwd) if files else "folders but no files"
     return (
-        f"{where} is already a folder and no pointer records it (it holds {_named(files, cwd)}), {down}",
-        f"{_if_left('an earlier mintd data import', where, 'folder')}, or import somewhere else with --dest-root",
+        f"{where} is already a folder and no pointer records it (it holds {held}), {down}",
+        f"{_if_left('an earlier mintd data import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
     )
 
 
