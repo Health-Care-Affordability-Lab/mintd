@@ -99,6 +99,9 @@ BANNED_TARGETS: dict[str, int] = {
 # `_fast_sync_ops._create_s3_client` 5 → 6: a pull with a pointer whose hash
 # names a file outside the cache needs a bucket to fail its manifest fetch
 # against, the boundary every other fast-sync pull test fakes too.
+# `check._create_s3_client` 0 → 1: `check --remote` asks S3 through its own
+# client, and one fixture (`tests/test_check_remote_and_staged.py`, `s3`) hands
+# in the moto client, or a wrapper that rewrites or refuses HEAD, at that seam.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -274,7 +277,7 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (211 sites / 49 targets), not
+    """The literals above are the *whole* census (212 sites / 50 targets), not
     a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
@@ -285,14 +288,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (211 → 210), or drop ``patch`` (211 → 180).
+    ``monkeypatch``-receiver calls (212 → 211), or drop ``patch`` (212 → 182).
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 211
+    assert sum(scanned.values()) == 212
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

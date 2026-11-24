@@ -95,8 +95,10 @@ def publish_pipeline_payload(
     dvc_yaml: str,
     *,
     seed: Mapping[str, bytes | Mapping[str, bytes]] | None = None,
+    push: bool = True,
 ) -> None:
-    """Author a `dvc.yaml`, run the stage for real, push what it produced.
+    """Author a `dvc.yaml`, run the stage for real, push what it produced
+    unless `push` is False (a story that pushes with mintd itself).
 
     This is the only way in the tree to get a `dvc.lock` that dvc itself
     wrote — every other lock is hand-authored text, so `parse_dvc_lock_outs`
@@ -147,6 +149,7 @@ def publish_pipeline_payload(
         try:
             _configure_remote(repo, remote)
             repo.reproduce()
-            repo.push()
+            if push:
+                repo.push()
         finally:
             repo.close()
