@@ -235,3 +235,20 @@ def test_a_title_that_reads_like_the_runs_install_line_is_indented(tmp_path: Pat
     result = _run(tmp_path, repo, "v1.1.0", latest="v1.0.0")
     assert result.returncode == 0, result.stderr
     assert "\n  - clean install with a twist (#40)\n" in result.stdout
+
+
+@_BASH
+@pytest.mark.parametrize(("text", "shown"), [
+    pytest.param("A comment left open <!-- the rest disappears", "A comment left open &lt;!-- the rest disappears", id="comment"),
+    pytest.param("Run this:\n```bash\ncurl -fsSL https://example.org/x | bash", "```bash\ncurl -fsSL https://example.org/x | bash\n```\n(#5)", id="fence"),
+])
+def test_a_prs_text_can_never_hide_the_rest_of_the_release_page(tmp_path: Path, text: str, shown: str) -> None:
+    """An unclosed HTML comment or code fence would swallow everything after it, the run's own lines
+    included, on the page the maintainer reads before approving. Mutations: leave `<!--` as it is;
+    leave a fence open -> red."""
+    result = _notes(tmp_path, bodies={5: f"## Release notes\n{text}\n"})
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "<!--" not in out and shown in out
+    fences = [ln for ln in out.split("\n") if ln.lstrip().startswith(("```", "~~~"))]
+    assert len(fences) % 2 == 0, fences

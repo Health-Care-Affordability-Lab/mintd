@@ -14,7 +14,9 @@ a squash merge whose subject ends "(#N)", and a PR's title reads "<area>: <what>
   it puts under "### Do this once" or "### Known limits" goes to those sections, at the top and the bottom.
 - A PR's text can be edited after it merges, so it is never trusted as is: control and format characters (an
   escape, a right-to-left override) are dropped, each part is cut at a length, the whole section too, and a line
-  that starts like one the release run writes itself is indented, so the run never takes it for its own.
+  that starts like one the release run writes itself is indented, so the run never takes it for its own. An
+  HTML comment's opening and a code fence left open, which would hide the rest of the release page, are
+  neutralised and closed.
 
 Only the standard library, plus the git and gh the runner has.
 """
@@ -34,6 +36,7 @@ MAX_SECTION = 60_000  # characters of the whole section; GitHub refuses notes pa
 RUN_LINES = ("- clean install with ", "A prerelease: ")
 # data._unprintable's rule: a control, format, surrogate or separator character; here newline and tab stay.
 _UNPRINTABLE = ("Cc", "Cf", "Cs", "Zl", "Zp")
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")  # a code fence's opening or closing line, as markdown reads it
 HOISTED = ("Do this once", "Known limits")
 _SUBJECT = re.compile(r"^(?P<title>.+) \(#(?P<number>\d+)\)$")
 
@@ -95,15 +98,31 @@ def release_notes(body: str) -> dict[str, str]:
             current = line[4:].strip()
         elif current is not None:
             parts.setdefault(current, []).append(line)
-    texts = {name: clean("\n".join(lines), MAX_PART).strip() for name, lines in parts.items()}
+    texts = {name: clean("\n".join(lines).strip(), MAX_PART) for name, lines in parts.items()}
     return {name: text for name, text in texts.items() if text}
 
 
 def clean(text: str, limit: int) -> str:
     """Text from a PR, safe in the notes: no control or format characters (newlines and tabs kept), at most
-    `limit` characters."""
+    `limit` characters, no HTML comment opening, and no code fence left open: either would hide the rest of the
+    release page, the run's own lines included."""
     text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in _UNPRINTABLE)
-    return text if len(text) <= limit else text[:limit].rstrip() + " … (cut)"
+    if len(text) > limit:
+        text = text[:limit].rstrip() + " … (cut)"
+    return _close_fence(text.replace("<!--", "&lt;!--"))
+
+
+def _close_fence(text: str) -> str:
+    """`text` with a closing line for a code fence it leaves open."""
+    open_fence = ""
+    for line in text.split("\n"):
+        if (m := _FENCE.match(line)) is None:
+            continue
+        if not open_fence:
+            open_fence = m[1]
+        elif m[1][0] == open_fence[0] and len(m[1]) >= len(open_fence):
+            open_fence = ""
+    return f"{text}\n{open_fence}" if open_fence else text
 
 
 def guard(section: str) -> str:
