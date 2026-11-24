@@ -176,10 +176,10 @@ dvc repro
 # outputs, and a teammate's clone can rerun the pipeline. Keeping raw out of
 # lab storage is your call: `mintd data remove data/raw.dvc`, and `mintd check`
 # then warns that a pipeline input is tracked by neither git nor DVC.
-# While data/raw.dvc exists, check counts data/raw as covered, so a file you
-# place there gets no warning before `dvc repro` records it; `mintd data push`
-# refuses files in data/raw/ that the pointer doesn't list, as for any tracked
-# folder.
+# While data/raw.dvc exists, a file you place in data/raw/ isn't flagged by
+# `mintd check` or `mintd data push` until `dvc repro` or
+# `mintd data add data/raw` records it in the pointer; until then a push
+# uploads the folder as last recorded, without it.
 
 # Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status
