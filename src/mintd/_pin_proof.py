@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import posixpath
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ._fast_sync_ops import load12 as _load12
 from ._fast_sync_ops import (
     DvcFileEntry,
     cache_path_for,
@@ -95,14 +97,16 @@ def _load(path: Path) -> Any:
 
 def read12(text: str | None) -> Any:
     """``text`` read as DVC reads its files (YAML 1.2, where an unquoted
-    ``on`` / ``no`` / ``12:30`` stays a string); None when absent or unparseable."""
+    ``on`` / ``no`` / ``12:30`` stays a string); None when absent or unparseable,
+    an impossible date included (ruamel raises a bare ``ValueError`` for
+    ``2023-02-29``)."""
     from ruamel.yaml import YAMLError
 
     if not text:
         return None
     try:
         return load12(text)
-    except YAMLError:
+    except (YAMLError, ValueError):
         return None
 
 
@@ -173,13 +177,15 @@ def _escapes(repo_path: str) -> bool:
 
 def publishable_scope(
     root: Path, *, remote: str, prefix: str, cache_dir: Path, dvc_files: list[str],
+    locks: Sequence[str] = ("dvc.lock",),
 ) -> Scope:
     """Every entry a ``dvc push`` to ``remote`` uploads and records.
 
     DVC's push predicate: outs in the repo, cached, not ``push: false``, from
     stages that are not repo imports (``deps[].repo``). Stages declared in
     ``dvc.yaml`` but never run have no lock entry, so they never appear.
-    Only the root ``dvc.lock`` is read; nested lock files are out of scope.
+    ``locks`` are the lockfiles read, each beside its ``dvc.yaml``: only the
+    root one by default, which is what push verification checks.
     """
     entries: list[Entry] = []
     unrecoverable: list[Out] = []
@@ -206,41 +212,44 @@ def publishable_scope(
             elif not got:
                 empty.append(Out(rel, None, i, out_path))
 
-    lock = _load(root / "dvc.lock")
-    stages = lock.get("stages") if isinstance(lock, dict) else None
-    if isinstance(stages, dict):
-        yaml_doc = _load(root / "dvc.yaml")
-        wdirs = wdir_map(yaml_doc)
-        skip = flagged_outs(yaml_doc, "cache")
-        for stage, paths in flagged_outs(yaml_doc, "push").items():
-            skip.setdefault(stage, set()).update(paths)
-        declared = set((yaml_doc.get("stages") or {}) if isinstance(yaml_doc, dict) else ())
-        for stage, data in stages.items():
-            # DVC pushes from dvc.yaml: a lock stage it no longer declares
-            # (renamed, removed) is never uploaded or re-pinned.
-            if declared and str(stage) not in declared and str(stage).split("@", 1)[0] not in declared:
-                continue
-            outs = data.get("outs") if isinstance(data, dict) else None
-            wdir = stage_wdir(wdirs, str(stage))
-            if wdir is None:  # an absolute wdir: outside the project
-                continue
-            declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
-            for i, raw in enumerate(outs if isinstance(outs, list) else []):
-                if not isinstance(raw, dict):
+    for lock_rel in locks:
+        base = posixpath.dirname(lock_rel) or "."
+        lock = _load(root / lock_rel)
+        stages = lock.get("stages") if isinstance(lock, dict) else None
+        if isinstance(stages, dict):
+            yaml_doc = _load(root / base / "dvc.yaml")
+            wdirs = wdir_map(yaml_doc)
+            skip = flagged_outs(yaml_doc, "cache")
+            for stage, paths in flagged_outs(yaml_doc, "push").items():
+                skip.setdefault(stage, set()).update(paths)
+            declared = set((yaml_doc.get("stages") or {}) if isinstance(yaml_doc, dict) else ())
+            for stage, data in stages.items():
+                # DVC pushes from dvc.yaml: a lock stage it no longer declares
+                # (renamed, removed) is never uploaded or re-pinned.
+                if declared and str(stage) not in declared and str(stage).split("@", 1)[0] not in declared:
                     continue
-                written = posixpath.normpath(str(raw.get("path", "")))
-                if written in declared_skip:
+                outs = data.get("outs") if isinstance(data, dict) else None
+                wdir = stage_wdir(wdirs, str(stage))
+                wdir = None if wdir is None else posixpath.join(base, wdir)
+                if wdir is None:  # an absolute wdir: outside the project
                     continue
-                out_path = resolve_out(wdir, written)
-                if _escapes(out_path):
-                    continue
-                got, ok = _out_entries(raw, pointer="dvc.lock", stage=str(stage), out_path=out_path,
-                                       remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
-                entries.extend(got)
-                if not ok:
-                    unrecoverable.append(Out("dvc.lock", str(stage), i, out_path))
-                elif not got:
-                    empty.append(Out("dvc.lock", str(stage), i, out_path))
+                declared_skip = skip.get(str(stage), skip.get(str(stage).split("@", 1)[0], set()))
+                for i, raw in enumerate(outs if isinstance(outs, list) else []):
+                    if not isinstance(raw, dict):
+                        continue
+                    written = posixpath.normpath(str(raw.get("path", "")))
+                    if written in declared_skip:
+                        continue
+                    out_path = resolve_out(wdir, written)
+                    if _escapes(out_path):
+                        continue
+                    got, ok = _out_entries(raw, pointer=lock_rel, stage=str(stage), out_path=out_path,
+                                           remote=remote, prefix=prefix, cache_dir=cache_dir, index=i)
+                    entries.extend(got)
+                    if not ok:
+                        unrecoverable.append(Out(lock_rel, str(stage), i, out_path))
+                    elif not got:
+                        empty.append(Out(lock_rel, str(stage), i, out_path))
     return Scope(tuple(entries), tuple(unrecoverable), tuple(empty))
 
 
@@ -300,6 +309,8 @@ class CacheHashes:
         self._seen = {}
 
     def get(self, md5: str) -> tuple[str, str | None, int] | None:
+        if not md5:  # an out dvc records with no hash (`dvc import-url --no-download`): no cache file
+            return None
         if md5 not in self._seen:
             path = cache_path_for(self.cache_dir, md5)
             self._seen[md5] = hash_cache_object(path) if path.is_file() else None
@@ -492,7 +503,9 @@ def _without_ids(doc: Any, remote: str) -> Any:
     for body in bodies:
         for out in body.get("outs") or []:
             for rec in [out, *((out.get("files") or []) if isinstance(out, dict) else [])]:
-                if isinstance(rec, dict) and isinstance(rec.get("cloud"), dict):
+                if isinstance(rec, dict) and "cloud" in rec and rec["cloud"] is None:
+                    del rec["cloud"]  # null, in a pointer cut short right after `cloud:`
+                elif isinstance(rec, dict) and isinstance(rec.get("cloud"), dict):
                     rec["cloud"].pop(remote, None)
                     if not rec["cloud"]:
                         del rec["cloud"]
@@ -517,7 +530,7 @@ def load_rt(text: str) -> Any:
 
 
 def load12(text: str) -> Any:
-    return _yaml12(False).load(text)
+    return _load12(text)
 
 
 def _dump(doc: Any) -> str:
@@ -600,7 +613,9 @@ def write_repair(root: Path, plan: RepairPlan, remote: str, *, dump: Any = _dump
                     if not cloud:
                         rec.pop("cloud", None)
                 else:
-                    rec.setdefault("cloud", {})[remote] = {"etag": new.etag, "version_id": new.version_id}
+                    if not isinstance(rec.get("cloud"), dict):  # null in a pointer cut short there
+                        rec["cloud"] = {}
+                    rec["cloud"][remote] = {"etag": new.etag, "version_id": new.version_id}
             originals[pointer] = raw
             _atomic_write_text(path, dump(doc))
             if _without_ids(load12(path.read_text(encoding="utf-8")), remote) != _without_ids(meant, remote):

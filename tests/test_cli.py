@@ -567,9 +567,8 @@ def test_data_import_timeout_reaches_the_dvc_ops_factory(
 
 def test_data_import_and_clone_share_the_selector_flags() -> None:
     """Parser parity: `--path` (repeatable), `--jobs` and `--timeout` parse
-    identically on `data import` and `data clone` — the clone help text
-    claims "same selector as `mintd data import --path`", which used to be
-    false."""
+    identically on `data import` and `data clone`. What each `--path` accepts
+    differs: import takes any tracked path, clone only declared outputs."""
     parser = cli._build_parser()
 
     imp = parser.parse_args([
@@ -656,17 +655,37 @@ def test_data_import_bump_drift_prints_path(
     assert "new7654" in msg
 
 
+def test_bump_blocked_on_an_empty_pin_keeps_the_findings_own_hint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty pin in the user's own manifest or `.dvc` is theirs to fix, not
+    the producer's. Mutation: print the producer-side text regardless -> red."""
+    finding = CheckFinding(
+        severity="error", section="consumer", kind="pin_missing",
+        message="approved product 'demo-xw' has an empty pin",
+        hint="set the pin for this row: `mintd enclave add demo-xw --pin=<commit>`",
+    )
+    assert cli._render_bump_blocked(BumpBlocked("demo-xw", finding)) == 1
+    err = capsys.readouterr().err
+    assert "hint: set the pin for this row" in err
+    assert "producer's history" not in err
+
+
 def test_data_import_bump_unreachable_exits_two_with_hint(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     patched_clients,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from mintd.errors import unreachable_repo_hint
+
+    # As check builds it: the finding carries the shared unreachable hint.
     finding = CheckFinding(
         severity="warning",
         section="consumer",
         message="producer unreachable: timeout",
         kind="unreachable",
+        hint=unreachable_repo_hint("https://example.org/demo-xw"),
     )
 
     def raises(*args: Any, **kwargs: Any) -> Any:
@@ -676,7 +695,7 @@ def test_data_import_bump_unreachable_exits_two_with_hint(
     rc = cli.main(["data", "import", "demo-xw", "--bump"])
     err = capsys.readouterr().err
     assert rc == 2
-    assert "retry" in err
+    assert "hint: could not reach the producer's repository https://example.org/demo-xw" in err
 
 
 def test_data_import_bump_pin_missing_exits_one(
@@ -700,6 +719,11 @@ def test_data_import_bump_pin_missing_exits_one(
     err = capsys.readouterr().err
     assert rc == 1
     assert "retry" not in err
+    # Mutation: drop bump's pin_missing hint -> red.
+    assert (
+        "hint: the producer's history no longer has your pinned commit; "
+        "ask the producer, or re-import at a commit that exists"
+    ) in err
 
 
 def test_bump_blocked_catalog_unresolved_prefers_the_findings_own_hint(
@@ -813,6 +837,32 @@ def test_registry_update_prints_diff(
     out_combined = captured.out + captured.err  # Reporter writes to stderr
     assert rc == 0
     assert "→" in out_combined
+
+
+@pytest.mark.parametrize("refused_before_git", [True, False])
+def test_a_gh_failed_registry_update_keeps_its_own_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch,
+    refused_before_git: bool,
+) -> None:
+    from mintd._registry_git_ops import GitHubAccessMissing
+
+    client, _ = patched_clients
+    _register_demo_xw(client, primary="outputs/old.parquet")
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["project"]["name"] = "demo-xw"
+    data["project"]["full_name"] = "data_demo-xw"
+    data["data_products"]["primary"] = "outputs/new.parquet"
+    (tmp_path / "metadata.json").write_text(json.dumps(data))
+
+    def refused(*args: Any, **kwargs: Any) -> None:
+        if refused_before_git:
+            raise GitHubAccessMissing("git@github.com:example-lab/registry", hint="THE GH FIX")
+        raise GitOpError(["git", "push"], "remote: Repository not found.", hint="THE GH FIX")
+
+    monkeypatch.setattr(client, "update", refused)
+    assert cli.main(["registry", "update", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "THE GH FIX" in err and "network access to the registry" not in err
 
 
 def test_registry_sync_prints_count(
@@ -1619,6 +1669,8 @@ def test_cli_data_clone_returns_one_on_producer_error(
     err = capsys.readouterr().err
     assert "boom" in err
     assert "/tmp/y" in err
+    # The shared unreachable-producer hint. Mutation: put back "check git auth" -> red.
+    assert "hint: could not reach the producer's repository https://x" in " ".join(err.split())
 
 def test_enclave_list_empty_sections(patched_clients, capsys, tmp_path):
     manifest_path = tmp_path / "enclave_manifest.yaml"
@@ -2798,6 +2850,18 @@ def test_cli_config_show_prints_yaml(
     assert "registry_url: https://e.com/r.git" in out
 
 
+@pytest.mark.parametrize("json_out", [False, True])
+def test_cli_config_show_prints_no_credentials(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], json_out: bool,
+) -> None:
+    """Mutation: print the rendered config without `strip_userinfo` -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("registry_url: https://x-access-token:s3cr3tTOKEN@e.com/r.git\n")
+    assert cli.main([*(["--json"] if json_out else []), "config", "show", "--path", str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "s3cr3tTOKEN" not in out and "https://e.com/r.git" in out
+
+
 def test_cli_config_setup_set_writes_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3149,6 +3213,24 @@ def test_cli_enclave_bump_force_producer_error_is_clean(
     errs = recording_reporter.events_of("error")
     assert errs and errs[0][2]  # has a non-empty hint
     assert "Traceback" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("argv", "verb"),
+    [(["enclave", "add", "demo-xw", "--pin", "a" * 40], "enclave_add"), (["enclave", "bump", "demo-xw", "--force"], "enclave_bump")],
+)
+def test_enclave_add_and_bump_force_give_an_unreachable_producer_the_shared_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, recording_reporter, argv: list[str], verb: str,
+) -> None:
+    """Not "check the repo/pin arguments": the shared hint names the gh fix,
+    here the insteadOf lines for an SSH catalog URL."""
+    from mintd.errors import unreachable_repo_hint
+    from mintd.producer import ProducerError
+
+    url = "git@github.com:example-lab/demo.git"
+    monkeypatch.setattr(cli, verb, _raises(ProducerError.unreachable(url, "a" * 40)))
+    assert cli.main([*argv, "--manifest", str(tmp_path / "m.yaml")]) == 1
+    assert recording_reporter.events_of("error")[0][2] == unreachable_repo_hint(url)
 
 
 def test_cli_enclave_bump_force_catalog_not_found_is_clean(
@@ -3561,8 +3643,9 @@ def test_cli_data_pull_error_count_exits_nonzero_with_summary_error(
 ) -> None:
     """Slice C (pull-all audit, fix 4): version-aware targets fast-sync could
     not serve make `mintd data pull` exit non-zero, with a summary error line
-    pointing at the per-target errors (each already carries its own
-    targeted-retry hint). No ✓ success line."""
+    pointing at the per-target errors (each already carries its own hint: a
+    targeted retry, or, for a target refused for GitHub access, the fix to
+    make first). No ✓ success line."""
     from mintd.data_ops import PullSummary
 
     (tmp_path / ".dvc").mkdir()
@@ -3579,7 +3662,7 @@ def test_cli_data_pull_error_count_exits_nonzero_with_summary_error(
     _, msg, hint = errs[0]
     assert "2 target(s) failed" in msg
     assert "3 file(s) pulled" in msg
-    assert "retry command" in hint
+    assert "says what to do next" in hint
     assert recording_reporter.events_of("success") == []
 
 
@@ -3654,6 +3737,8 @@ def test_cli_data_pull_incomplete_targets_exit_nonzero_no_success_line(
         for _, msg, hint in errors
     )
     assert any("pull incomplete" in msg for _, msg, _h in errors)
+    # Not "a retry command": a target refused for GitHub access has none.
+    assert any("says what to do next" in (h or "") for _, msg, h in errors if "pull incomplete" in msg)
     # Never handed to the plain dvc pull fallback.
     assert dvc_ops.pull_calls == []
 
@@ -3682,7 +3767,7 @@ def test_cli_data_clone_pull_errors_exit_nonzero_no_success_line(
     _, msg, hint = errors[0]
     assert "pull incomplete" in msg
     assert "2 target(s) failed" in msg
-    assert "retry command" in hint
+    assert "says what to do next" in hint and "retry command" in hint
 
 
 def test_cli_data_clone_pull_errors_json_mode_includes_errors(
@@ -4696,7 +4781,8 @@ def test_data_import_reads_the_producer_only_when_nothing_landed(
         assert pointer.is_file()
     else:
         assert rc == 1, err
-        assert "could not be read" in err and "check git access" in err
+        # The shared unreachable-producer hint (`unreachable_repo_hint`).
+        assert "could not be read" in err and "could not reach the producer's repository" in err
         assert "Traceback" not in err
         assert not pointer.exists()
 
@@ -4720,6 +4806,68 @@ def _undeliverable_producer(tmp_path: Path, client: InMemoryCatalogClient) -> st
     meta["repository"]["github_url"] = str(producer)
     client.register(Metadata.model_validate(meta))
     return _git(["rev-parse", "HEAD"], cwd=producer).strip()
+
+
+def test_cli_data_pull_stops_on_a_cut_pointer_with_its_name_and_a_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pointer cut right after `files:` used to pull as an empty folder at
+    exit 0. The pull stops before any download: exit 1, the file named, the
+    way out given, no traceback.
+
+    Mutations: make `PointerCutShort` a plain Exception, so `cli.main`'s
+    `MintdError` arm misses it -> the error escapes, red; let
+    `outs_for_target` swallow it -> the pull runs, rc 0, red.
+    """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
+    _, dvc_ops = patched_clients
+    stage_dvc_project(tmp_path)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    (tmp_path / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files:\n")
+
+    rc = cli.main(["data", "pull", "--path", str(tmp_path)])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "final.dvc is cut short or damaged: the file list of final is missing" in err
+    assert "restore it from git" in err and "Traceback" not in err
+    assert dvc_ops.pull_calls == []
+
+
+def test_data_import_stops_on_a_producer_pointer_cut_short(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The producer committed a pointer cut right after `files:`. The import
+    lands nothing, and the delivery verdict that explains why used to call
+    the cut folder "pinned (empty directory out)". Now it stops on the cut
+    pointer, naming it.
+
+    Mutation: read a null file list as `[]` -> the import is accepted, rc 0.
+    """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
+    from tests._harness.git import _git
+
+    client, dvc_ops = patched_clients
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer, declared=("data/final/",))
+    (producer / "data").mkdir()
+    (producer / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files:\n")
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+    sha = _git(["rev-parse", "HEAD"], cwd=producer).strip()
+    dvc_ops.import_lands_nothing = {"data/final"}
+
+    rc = cli.main(["data", "import", "test_project", "--path", "data/final/", "--rev", sha,
+                   "--dest-root", str(tmp_path / "imports")])
+    err = " ".join(capsys.readouterr().err.split())
+
+    assert rc == 1, err
+    assert "final.dvc is cut short or damaged" in err and "Traceback" not in err
 
 
 def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
@@ -4778,16 +4926,18 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
     assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
 
 
-def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+def test_data_import_all_refuses_before_any_output_lands_when_a_later_one_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--all`: the first output lands, then the second is refused before
-    anything is made for it (a file already sits at its pointer's path). The
-    failure rollback never touches the payload of the output that landed.
+    """`--all`: a file already sits at the second output's pointer path. Every
+    destination is checked before the first dvc call, so the import is refused
+    before the first output lands, rather than half done. (An output that
+    fails in dvc after an earlier one landed keeps that one:
+    `test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver`.)
 
-    Mutation: remove the destination whole on failure and keep the previous
-    output's rollback state -> `good/` is deleted.
+    Mutation: check each destination as its output is imported -> `good/` lands, red.
     """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
     client, _dvc_ops = patched_clients
     sha = _undeliverable_producer(tmp_path, client)
     root = tmp_path / "imports"
@@ -4801,7 +4951,9 @@ def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
     err = " ".join(capsys.readouterr().err.split())
 
     assert rc != 0, err
-    assert (ns / "good" / "payload").is_file(), err
+    assert "final.dvc already exists" in err
+    assert not (ns / "good").exists() and not (ns / "good.dvc").exists(), err
+    assert (ns / "final.dvc").read_text() == "not a pointer\n"
 
 
 def _reachable_raises(root: str) -> set[str]:
@@ -4850,7 +5002,7 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     # Raised behind `client.fetch` (`CatalogCache.ensure_fresh` -> git
     # clone/fetch/reset), so it is inside the handler's `try` without being
     # visible to a scan of data.py.
-    "GitOpError": "check git auth",
+    "GitOpError": "check GitHub access with `gh auth status`",
     "ImportDestinationExists": None,
     # D16 made the stale-backup refusal reachable from the PLAIN import arm as
     # well as `--bump`. Its own type, and its own hint, because the general
@@ -5203,6 +5355,83 @@ def test_a_missing_dvc_exits_2_with_the_install_hint(
     assert "hint: install DVC: pip install 'dvc[s3]'" in err
 
 
+@pytest.mark.parametrize("how", ["rev-metadata-read", "dvc-clone"])
+def test_a_token_in_the_catalog_url_is_never_printed(
+    how: str, patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A catalog URL can carry credentials; mintd prints URLs in the error line
+    and the hint. Mutation: drop `strip_userinfo` from `Reporter.error` -> red."""
+    import socket
+
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        bare = f"127.0.0.1:{s.getsockname()[1]}/priv.git"
+    url = f"http://alice:s3cr3tTOKEN@{bare}"
+    client, dvc_ops = patched_clients
+    _register_demo_xw(client, github_url=url)
+    argv = ["data", "import", "demo-xw", "--dest-root", str(tmp_path)]
+    if how == "rev-metadata-read":
+        argv += ["--rev", "v1"]
+    else:  # dvc's own clone failure echoes the URL
+        dvc_ops.import_raises = DvcImportRepoUnreachable(
+            f"dvc import failed (exit 1): ERROR: failed to import 'data/final/' - SCM error: "
+            f"Failed to clone repo '{url}' to '/tmp/x': Connection refused", url,
+        )
+
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "s3cr3tTOKEN" not in err and "alice" not in err, err
+    assert f"http://{bare}" in " ".join(err.split())
+
+
+def test_check_findings_print_no_credentials(capsys: pytest.CaptureFixture[str]) -> None:
+    """`mintd check` prints findings itself, text and JSON."""
+    finding = CheckFinding(
+        severity="error", section="consumer", kind="pin_missing",
+        message="producer pin missing: abc1234 not found in https://x-token:s3cr3tTOKEN@example.org/r.git",
+        hint="see https://s3cr3tTOKEN@example.org/r.git",
+    )
+    for json_out in (False, True):
+        cli._render_findings([finding], json_out=json_out)
+        out = capsys.readouterr().out
+        assert "s3cr3tTOKEN" not in out and "https://example.org/r.git" in out, out
+
+
+def test_import_at_a_rev_from_an_unreachable_producer_names_its_url(
+    patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--rev` with no `--path` reads the producer's metadata before dvc runs, so
+    the unreachable hint rides on the verb's `_hint`. A port bound and closed
+    again refuses at once.
+
+    Mutation: drop `_hint(ProducerError, _producer_unreachable)` from the plain
+    import -> no hint, red."""
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{s.getsockname()[1]}/demo-xw.git"
+    client, _ = patched_clients
+    _register_demo_xw(client, github_url=url)
+
+    assert cli.main(["data", "import", "demo-xw", "--rev", "v1", "--dest-root", str(tmp_path)]) == 1
+    err = " ".join(capsys.readouterr().err.split())
+    assert "error: unreachable:" in err
+    assert f"hint: could not reach the producer's repository {url}: check your network" in err
+
+
+def test_only_an_unreachable_producer_gets_the_unreachable_hint() -> None:
+    """A wrong `--rev` or a missing metadata.json is not a network problem.
+    Mutation: return the hint for every reason -> red."""
+    from mintd.producer import ProducerError
+
+    assert "could not reach" in (cli._producer_unreachable(ProducerError.unreachable("u", "v1")) or "")
+    for err in (ProducerError.pin_missing("u", "v9"), ProducerError.metadata_missing("u", "v1")):
+        assert cli._producer_unreachable(err) is None
+
+
 def test_a_failed_dvc_import_exits_1_with_the_verbose_retry_hint(
     patched_clients, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -5299,3 +5528,87 @@ def test_cli_error_arms_only_render_in_main() -> None:
         ("_handle_enclave_package", "NothingNewToPackage"),
         ("_handle_update_metadata", "metadata_migrate.MetadataAlreadyV2"),
     }
+
+
+def test_cli_data_import_json_paths_stay_relative_for_a_default_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The import root is resolved for the checks and for dvc, but what
+    `--json` prints keeps the default `--dest-root`'s spelling: relative to
+    the project, as before. Mutation: return the resolved paths -> absolute, red."""
+    client, _ = patched_clients
+    _register_demo_xw(client)
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["--json", "data", "import", "demo-xw"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    assert payload["produced"] and all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
+
+
+def _import_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake, *argv: str) -> dict:
+    """`mintd --json data import demo-xw <argv>`, its pointers recording 4096
+    bytes in 2 files, so the summary has something to report."""
+    real = fake.import_
+
+    def import_(**kw):
+        written = real(**kw)
+        for p in kw["dest"].parent.glob("*.dvc"):
+            p.write_text(p.read_text().replace("    size: 0\n", "    size: 4096\n    nfiles: 2\n"))
+        return written
+
+    monkeypatch.setattr(fake, "import_", import_)
+    rc = cli.main(["--json", "data", "import", "demo-xw", *argv])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0, payload
+    return payload
+
+
+def test_cli_data_import_through_a_missing_folders_dotdot_reports_where_it_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--dest-root foo/..` with `foo` missing: the import lands, and every path
+    it reports is where it landed, so the summary reads the pointer back (a
+    path through `foo/..` isn't there, and the summary reported no pin and
+    0 bytes). Mutation: report the path as the caller spelled it -> red."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    monkeypatch.chdir(tmp_path)
+    payload = _import_json(monkeypatch, capsys, fake, "--dest-root", "foo/..")
+    assert all(Path(p).is_file() and ".." not in Path(p).parts for p in payload["produced"]), payload
+    assert payload["pin"] and payload["producer_repo"] == "https://github.com/example-org/demo-xw", payload
+    assert payload["file_count"] == 2 and payload["total_bytes"] == 4096, payload
+
+
+def test_cli_data_import_under_a_symlinked_home_stays_short_and_relative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A project reached through a link (a home folder on another disk): paths
+    are named from where the project really is, so they stay relative. Through
+    the CLI the working folder (`os.getcwd()`) is already resolved; the case a
+    caller names through the link is
+    `test_paths_under_a_symlinked_home_are_named_relative_to_where_the_project_is`."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    (tmp_path / "real" / "proj").mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path / "home" / "proj")
+    payload = _import_json(monkeypatch, capsys, fake)
+    assert all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
+
+
+def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Outside the working folder a relative name would climb out through `..`;
+    the path is given in full. Mutation: always relative -> red."""
+    client, fake = patched_clients
+    _register_demo_xw(client)
+    (tmp_path / "proj").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.chdir(tmp_path / "proj")
+    payload = _import_json(monkeypatch, capsys, fake, "--dest-root", str(elsewhere))
+    real = os.path.realpath(elsewhere)
+    assert all(Path(p).is_absolute() and Path(p).is_relative_to(real) for p in payload["produced"]), payload
+    assert payload["total_bytes"] == 4096, payload

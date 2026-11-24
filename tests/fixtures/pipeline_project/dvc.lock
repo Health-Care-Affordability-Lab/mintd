@@ -39,18 +39,18 @@ stages:
             etag: ee2642ed1b6419304f85c85a0378f89-1
             version_id: 001779413884866418407-anAsWI_7fv-5
       - path: ../data/final/subdir/
-        md5: ccc82183dd1695aa4cd7e2730ef7ce.dir
+        md5: ccc82183dd1695aa4cd7e2730ef7ce00.dir
         size: 500
         files:
           - relpath: a.parquet
-            md5: 11182183dd1695aa4cd7e2730ef7ce
+            md5: 11182183dd1695aa4cd7e2730ef7ce00
             size: 250
             cloud:
               test-bucket:
                 etag: a1d2642ed1b6419304f85c85a0378f89-1
                 version_id: 001779413884866418407-anAsWI_7fv-d1
           - relpath: b.parquet
-            md5: 22282183dd1695aa4cd7e2730ef7ce
+            md5: 22282183dd1695aa4cd7e2730ef7ce00
             size: 250
             cloud:
               test-bucket:

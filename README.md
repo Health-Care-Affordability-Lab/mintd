@@ -56,15 +56,23 @@ Windows PowerShell:
 irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1 | iex
 ```
 
-These install the newest release the maintainer has promoted. Both scripts
-install `uv` 0.13.9 if it is missing, download the release's wheel, check it
-against the release's SHA-256, and run `uv tool install --python 3.13` with the
+These install the newest release the maintainer has promoted, with `dvc`:
+there is no separate DVC install. Both scripts install `uv` 0.13.9 if it is
+missing, and stop if your `uv` is older or doesn't report its version, naming
+the command that upgrades it.
+They download the release's wheel, check it against the release's SHA-256, and
+run `uv tool install --python 3.13 --with-executables-from dvc` with the
 release's `constraints.txt`, which pins every dependency (DVC included) to the
 versions that release was tested with. `uv tool install` does not check the
 hashes in that file, so the dependencies are pinned by version, not by hash.
-Then the scripts add `cffi` (pinned the same way) and `reflink` (built on your
-machine, not pinned) to the tool's environment, so DVC's reflink cache mode
-works on APFS / XFS / Btrfs.
+Then the scripts add `cffi` and `reflink` to the tool's environment, so DVC's
+reflink cache mode works on APFS / XFS / Btrfs. That step installs only files
+whose hashes are pinned (reflink's in the scripts, cffi's in `constraints.txt`),
+builds reflink on your machine from its pinned source, and ignores uv settings
+files (`uv.toml`, `pyproject.toml`) in the folder you run the line from or
+above it. Their last line says whether `mintd` and `dvc`
+are both on your PATH, or which one is missing or shadowed by another copy,
+and whether reflink was refused because a download didn't match its hash.
 
 - To update, run the same line again. `uv tool upgrade mintd` does not apply.
 - For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on
@@ -77,6 +85,7 @@ Verify:
 
 ```bash
 mintd --version
+dvc --version
 mintd --help
 ```
 
@@ -90,7 +99,26 @@ offline or under `--json` or `-q`.
 
 ## First-time setup
 
-Point `mintd` at your lab's registry and your S3 storage:
+mintd reaches GitHub through [gh](https://cli.github.com) only. Log in, and let git
+use gh for GitHub:
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+If your clones use SSH (`git@github.com:` or `ssh://git@github.com/`), point them at
+https once, so git goes through gh too:
+
+```bash
+git config --global --add url."https://github.com/".insteadOf git@github.com:
+git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/
+```
+
+When GitHub refuses access, mintd names the repo's org and your active gh account,
+and the account to switch to with `gh auth switch -u <account>`.
+
+Then point `mintd` at your lab's registry and your S3 storage:
 
 ```bash
 mintd config setup            # interactive walkthrough
@@ -134,6 +162,10 @@ cd data_my-cleaned-survey
 # rebuilds it from data/raw/ and deletes anything placed there by hand, so
 # keep source files in data/raw/:
 dvc repro
+# Nothing uploads data/raw/ on its own: git ignores it, and `dvc repro`
+# records it as an input without caching it, so a teammate's clone can't
+# rerun the pipeline. `mintd data add data/raw` tracks it if it should be
+# shared; `mintd check` warns while a pipeline input is tracked by neither.
 
 # Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status
@@ -211,8 +243,8 @@ mintd data ls my-cleaned-survey
 mintd data clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
 mintd data clone my-cleaned-survey --rev v0.1.0 --primary
-# or: only specific tracked outputs (repeatable; same selector as
-# `data import --path` — an unknown path lists the valid outputs):
+# or: only specific declared outputs (repeatable; an unknown path lists the
+# valid outputs):
 mintd data clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import one or more outputs
@@ -340,7 +372,9 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
-mintd check    [path] [--upgrades]                Validate metadata, output delivery + (optionally) pins
+mintd check    [path] [--upgrades] [--remote [--all] | --staged]
+                                                  Validate metadata, output delivery + (optionally) pins;
+                                                  --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
 mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff

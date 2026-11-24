@@ -70,7 +70,6 @@ def test_data_python_renders_all_files(tmp_path: Path) -> None:
     # Slice 41: scaffold no longer ships generate_schema.py; the CLI
     # (`mintd data schema generate`) replaces the vendored script.
     assert "schemas/generate_schema.py" not in rel
-    assert "scripts/check-dvc-sync.sh" in rel
 
 
 def test_project_python_renders_all_files(tmp_path: Path) -> None:
@@ -1034,19 +1033,17 @@ def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
         assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="POSIX exec bit; the scaffolded .sh are bash-only (Windows GA "
-    "tracks .ps1 siblings — see project_windows_support_followup)",
-)
-def test_data_scaffold_check_scripts_executable(tmp_path: Path) -> None:
-    """The data scaffold's pre-commit-driven check scripts must also be exec."""
-    render_scaffold(
-        project_type="data", name="foo", language="python", target_dir=tmp_path
+@pytest.mark.parametrize("project_type", ["data", "project", "code", "enclave"])
+def test_scaffolds_write_no_commit_hooks(tmp_path: Path, project_type: str) -> None:
+    """Nothing installed the scaffold's pre-commit hooks, so they never ran: init no
+    longer writes them. Mutation: put `.pre-commit-config.yaml` back in the data
+    scaffold's file list (and its template) -> the data case fails."""
+    written = render_scaffold(
+        project_type=project_type, name="foo", language="python", target_dir=tmp_path
     )
-    for rel in ("scripts/check-dvc-sync.sh", "scripts/check-env-lockfiles.sh"):
-        mode = (tmp_path / rel).stat().st_mode
-        assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
+    rel = {p.relative_to(tmp_path).as_posix() for p in written}
+    hooks = {".pre-commit-config.yaml", "scripts/check-dvc-sync.sh", "scripts/check-env-lockfiles.sh"}
+    assert not rel & hooks
 
 
 def test_scaffold_template_names_resolve_to_vendored_files() -> None:

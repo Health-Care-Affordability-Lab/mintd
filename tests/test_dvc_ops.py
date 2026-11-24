@@ -1005,3 +1005,154 @@ def test_objects_missing_from_the_remote_is_not_a_missing_path(
             dest=tmp_path / "d", cwd=tmp_path,
         )
     assert not isinstance(ei.value, DvcImportPathNotFound)
+
+
+# dvc 3.67.1, measured by story 2: the catalog points at a producer URL that
+# refuses connections, so dvc's git clone of it fails.
+CLONE_FAILED_STDERR = (
+    "ERROR: failed to import 'data/final/' - SCM error: Failed to clone repo "
+    "'http://127.0.0.1:62870/demo.git' to '/tmp/tmp91fby229dvc-clone': "
+    "HTTPConnectionPool(host='127.0.0.1', port=62870): Max retries exceeded with url: "
+    "/demo.git/info/refs?service=git-upload-pack (Caused by NewConnectionError("
+    "\"HTTPConnection(host='127.0.0.1', port=62870): Failed to establish a new "
+    "connection: [Errno 61] Connection refused\"))\n"
+)
+# The same, measured: every file of the primary deleted from the producer's
+# storage, so the pinned versions are gone.
+STORAGE_MISSING_STDERR = (
+    "ERROR: unexpected error - [Errno 2] No storage files available: 'data/final/a.csv'\n"
+    "Having any troubles? Hit us up at https://dvc.org/support, we are always happy to help!\n"
+)
+
+
+def test_import_from_an_unreachable_producer_names_the_url_it_tried(tmp_path: Path) -> None:
+    """Mutation: drop the `Failed to clone repo` match -> a plain DvcOpError, red."""
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    url = "http://127.0.0.1:62870/demo.git"
+    with pytest.raises(DvcImportRepoUnreachable) as ei:
+        _CannedStderrDvcOps(CLONE_FAILED_STDERR).import_(
+            repo_url=url, path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert ei.value.hint == (
+        f"could not reach the producer's repository {url}: check your network and git access "
+        f"(git ls-remote {url}); if it moved, the catalog entry is out of date, so tell the producer"
+    )
+    assert "Connection refused" in str(ei.value)  # dvc's own words stay in the error
+
+
+@pytest.mark.parametrize(("text", "shown"), [
+    ("http://alice:s3cr3t@host/r.git", "http://host/r.git"),
+    ("https://s3cr3t@github.com/org/r.git", "https://github.com/org/r.git"),  # a token as the user
+    ("ssh://git:s3cr3t@host/r.git", "ssh://git@host/r.git"),  # ssh keeps its login name
+    ("ssh://git@host/r.git", "ssh://git@host/r.git"),
+    ("git@github.com:org/r.git", "git@github.com:org/r.git"),
+    ("git+https://ghp_s3cr3t@github.com/o/r.git", "git+https://github.com/o/r.git"),  # pip-style
+    ("git+https://u:s3cr3t@h/r", "git+https://h/r"),
+    # No path, and an @ later: ordinary text, not userinfo.
+    ("https://example.org#frag@x", "https://example.org#frag@x"),
+    ("https://example.org?q=a@b", "https://example.org?q=a@b"),
+    ("see https://a.org,me@x", "see https://a.org,me@x"),
+    ("clone 'https://u:s3cr3t@a/r' then 'http://b/r'", "clone 'https://a/r' then 'http://b/r'"),
+])
+def test_strip_userinfo_takes_credentials_out_of_every_url(text: str, shown: str) -> None:
+    from mintd.errors import strip_userinfo
+
+    assert strip_userinfo(text) == shown
+
+
+def test_the_unreachable_hint_quotes_the_url_inside_its_command(tmp_path: Path) -> None:
+    """The producer controls the catalog URL; pasting the suggested command must
+    not run anything else. Mutation: drop `shlex.quote` -> red."""
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    url = "https://example.org/repo;touch pwned"
+    with pytest.raises(DvcImportRepoUnreachable) as ei:
+        _CannedStderrDvcOps(CLONE_FAILED_STDERR).import_(
+            repo_url=url, path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert "(git ls-remote 'https://example.org/repo;touch pwned')" in (ei.value.hint or "")
+
+
+def test_import_with_files_missing_from_storage_says_the_producer_must_fix_it(tmp_path: Path) -> None:
+    """Mutation: drop the `No storage files available` match -> a plain DvcOpError, red."""
+    from mintd._dvc_ops import DvcImportStorageMissing
+
+    with pytest.raises(DvcImportStorageMissing) as ei:
+        _CannedStderrDvcOps(STORAGE_MISSING_STDERR).import_(
+            repo_url="https://example.org/repo", path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert ei.value.hint == (
+        "the producer's data, or data it imports from another product, is missing from storage; "
+        "that is the producer's to fix: send them this error, then re-run the import"
+    )
+    assert "data/final/a.csv" in str(ei.value)
+
+
+def test_an_import_that_finds_dvcs_lock_held_says_it_wrote_nothing(tmp_path: Path) -> None:
+    """dvc stops before writing anything (checked with dvc 3.67.1), as it does
+    for no repo, no path and an unreachable producer, so a failed import names
+    nothing it finds at the destination as its own. Mutation: drop the lock
+    match -> a plain DvcOpError, which may have written, red."""
+    from mintd._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcRepoLocked
+
+    locked = (
+        "ERROR: Unable to acquire lock. Most likely another DVC process is running or was terminated abruptly.\n"
+    )
+    with pytest.raises(DvcRepoLocked) as ei:
+        _CannedStderrDvcOps(locked).import_(
+            repo_url="https://example.org/repo", path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert ei.value.wrote_nothing and "Unable to acquire lock" in str(ei.value)
+    assert all(e.wrote_nothing for e in (DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError))
+    assert not DvcOpError.wrote_nothing
+
+
+def test_any_other_import_failure_keeps_no_hint_of_its_own(tmp_path: Path) -> None:
+    """The verb's `_hint(DvcOpError, ...)` then supplies "retry with --dvc-arg=-v"."""
+    with pytest.raises(DvcOpError) as ei:
+        _CannedStderrDvcOps(OBJECTS_MISSING_STDERR).import_(
+            repo_url="https://example.org/repo", path="data/final", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert type(ei.value) is DvcOpError and ei.value.hint is None
+
+
+def test_a_real_dvc_import_never_prints_the_catalog_urls_token(tmp_path: Path, capsys) -> None:
+    """dvc's own live output echoes the URL it was given; the reporter's
+    passthrough strips it. A real `dvc import` against a port that refuses at
+    once (bound and closed again)."""
+    import socket
+    import subprocess as sp
+
+    from mintd._config import Timeouts
+    from mintd._console import Reporter
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        url = f"http://alice:s3cr3tTOKEN@127.0.0.1:{s.getsockname()[1]}/priv.git"
+    sp.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    SubprocessDvcOps(timeouts=Timeouts()).init(cwd=tmp_path)
+    reporter = Reporter(no_color=True)
+    with pytest.raises(DvcImportRepoUnreachable) as ei:
+        SubprocessDvcOps(timeouts=Timeouts(), reporter=reporter).import_(
+            repo_url=url, path="data/final", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    reporter.error(str(ei.value), hint=ei.value.hint)
+    out, err = capsys.readouterr()
+    assert "Failed to clone repo" in err  # dvc's own line was shown...
+    assert "s3cr3tTOKEN" not in out + err  # ...without the token
+
+
+def test_strip_userinfo_stays_linear_on_long_tokens() -> None:
+    """It runs over every printed line and every `--json` result, and a
+    producer controls descriptions. Mutation: start a match at `\\b` -> slow, red."""
+    import time
+
+    from mintd.errors import strip_userinfo
+
+    # Quadratic, this size takes tens of seconds; linear, about a millisecond.
+    text = "see-also-" * 20000 + " https://u:p@h/r a@b"
+    start = time.perf_counter()
+    assert strip_userinfo(text).endswith(" https://h/r a@b")
+    assert time.perf_counter() - start < 1.0

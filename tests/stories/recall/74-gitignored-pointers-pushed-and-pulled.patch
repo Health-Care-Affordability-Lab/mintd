@@ -1,0 +1,16 @@
+recall: undoes push, pull and check read the .dvc files DVC skips because .gitignore excludes them.
+fix: ac63fa6 (#74); before the fix: 894980d.
+validated: with this patch on HEAD, tests/test_dvc_state.py::test_pull_check_and_push_all_skip_a_pointer_gitignore_excludes goes red.
+
+diff --git a/src/mintd/_fast_sync_ops.py b/src/mintd/_fast_sync_ops.py
+index b7c89a8..165ef02 100644
+--- a/src/mintd/_fast_sync_ops.py
++++ b/src/mintd/_fast_sync_ops.py
+@@ -880,6 +880,7 @@ def _walk_pointers(
+             scm = Git(root, search_parent_directories=True)  # how dvc.scm.SCM opens it
+         except SCMError:  # not in a git repo: DVC without git ignores nothing
+             pass
++    scm = _NothingIgnored()  # recall: undoes #74
+     found: list[tuple[str, bool]] = []
+     ignored_dirs: set[str] = set()
+     with scm:

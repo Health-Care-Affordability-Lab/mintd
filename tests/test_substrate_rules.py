@@ -80,7 +80,7 @@ BANNED_TARGETS: dict[str, int] = {
 }
 
 # PERMITTED: the other half of the same census — composition root (33 sites /
-# 8 targets) plus process/network boundary (31 sites / 11 targets). Pinned so
+# 8 targets) plus process/network boundary (32 sites / 12 targets). Pinned so
 # the classifier above cannot be widened to launder a banned target.
 # `_resolve_dvc_ops` 4 → 5 at position 9: the `data import --timeout` test
 # captures the config the factory receives, at the already-permitted site.
@@ -96,6 +96,16 @@ BANNED_TARGETS: dict[str, int] = {
 # `GitCatalogClient` 2 → 3: the README produce-flow journey runs `registry
 # register` through the real CLI with real dvc and git, and `gh` can only be
 # faked at the catalog client's constructor, as the `journey` fixture does.
+# `_fast_sync_ops._create_s3_client` 5 → 6: a pull with a pointer whose hash
+# names a file outside the cache needs a bucket to fail its manifest fetch
+# against, the boundary every other fast-sync pull test fakes too.
+# `check._create_s3_client` 0 → 1: `check --remote` asks S3 through its own
+# client, and one fixture (`tests/test_check_remote_and_staged.py`, `s3`) hands
+# in the moto client, or a wrapper that rewrites or refuses HEAD, at that seam.
+# `_fast_sync_ops._create_s3_client` and `_producer_git_ops.subprocess.run` gain
+# a site each: tests/test_github_access.py's two tests of GitHub access together
+# with a pointer hash dvc never writes pull against moto, and serve a producer's
+# files as `git archive` would, at the boundaries every other such test fakes.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -106,14 +116,15 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._atomic.os.replace": 2,
     "mintd._aws_credentials.os.replace": 1,
-    "mintd._fast_sync_ops._create_s3_client": 5,
+    "mintd._fast_sync_ops._create_s3_client": 7,
     "mintd._push_verify._create_s3_client": 14,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     # The retry sleep and the boto3 guard live in mintd._s3: same sites, same totals.
     "mintd._s3.time.sleep": 9,
-    "mintd._producer_git_ops.subprocess.run": 6,
+    "mintd._producer_git_ops.subprocess.run": 7,
     "mintd._share_ops._create_s3_client": 2,
+    "mintd.check._create_s3_client": 1,
     "mintd._templates._render.importlib.metadata.version": 1,
     "mintd.cli.GitCatalogClient": 3,
     "mintd.cli.SubprocessDvcOps": 2,
@@ -270,8 +281,8 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (210 sites / 49 targets), not
-    a hand-copied excerpt, and the scanner is re-run here to prove it.
+    """The literals above are the *whole* census, every site of every target,
+    not a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
     cannot be: narrowing the matcher (e.g. requiring the receiver to be
@@ -281,14 +292,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (210 → 209), or drop ``patch`` (210 → 180).
+    ``monkeypatch``-receiver calls, or drop ``patch``: either changes a target's
+    count, and the comparison below names it.
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 210
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 
@@ -642,7 +653,9 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
     "src/mintd/_atomic.py": {"open-for-write": 1, "unlink": 1},
     "src/mintd/_aws_credentials.py": {"open-for-write": 1, "unlink": 2},
     "src/mintd/_catalog_cache.py": {"write_text": 1},
-    "src/mintd/_fast_sync_ops.py": {"unlink": 6, "write_bytes": 1},
+    # 6 -> 4: a fetched folder list is read before it lands in the cache, so
+    # the two unlinks that dropped a bad one after it landed are gone.
+    "src/mintd/_fast_sync_ops.py": {"unlink": 4, "write_bytes": 1},
     # The URL opener's .open(Request(...)): a fetch, which the scan can't tell from a write.
     "src/mintd/_release_check.py": {"open-for-write": 1},
     "src/mintd/_share_ops.py": {"unlink": 3},
@@ -878,3 +891,42 @@ def test_every_spinner_label_is_wrapped_in_text() -> None:
         "these spinner labels are raw strings and will be parsed as rich markup; "
         f"wrap each in Text(): _console.py lines {bare}"
     )
+
+
+#: The boto3 calls that download an object. Each runs botocore's response parsing,
+#: whose mislabelled 5xx only ``mintd._s3.download`` knows to retry.
+_S3_DOWNLOAD_CALLS = frozenset(
+    {"download_file", "download_fileobj", "get_object", "get_object_torrent", "select_object_content"}
+)
+
+
+def test_only_s3_download_downloads_from_s3() -> None:
+    """Every lane downloads through ``mintd._s3.download``, which retries a 5xx
+    botocore raises as ``AttributeError``; a second path would fail a file on it.
+    Scaffold templates (``*.j2``) render into users' projects, not mintd's own
+    code, so they are not scanned.
+    Mutations that must redden this: ``s3.download_file(...)`` back in
+    ``_fast_sync_ops.fetch_to_cache``, ``s3.get_object(...)`` anywhere outside
+    ``_s3.download``, or ``import s3transfer`` in any module."""
+
+    def calls(node: ast.AST, owner: str | None):
+        for child in ast.iter_child_nodes(node):
+            inner = owner
+            if owner is None and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                inner = child.name
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                if child.func.attr in _S3_DOWNLOAD_CALLS:
+                    yield owner, child.func.attr
+            yield from calls(child, inner)
+
+    sites, imports = [], []
+    for path in sorted((REPO_ROOT / "src").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        sites += [(rel, owner, attr) for owner, attr in calls(tree, None)]
+        for node in ast.walk(tree):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else (
+                [node.module or ""] if isinstance(node, ast.ImportFrom) else [])
+            imports += [(rel, n) for n in names if n.split(".")[0] == "s3transfer"]
+    assert sites == [("src/mintd/_s3.py", "download", "download_file")]
+    assert imports == []

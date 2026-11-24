@@ -106,12 +106,18 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _classify_stderr(stderr: str) -> FetchError.Reason | None:
+    # Lowercased: git 2.48 says "couldn't find remote ref", older git
+    # "Couldn't"; "not our ref" is an unknown SHA; "not found in upstream" is
+    # `git clone --branch` on a branch, tag or SHA the remote lacks. A
+    # reachable repo, wrong rev.
     if any(
-        token in stderr
+        token in stderr.lower()
         for token in (
-            "Could not resolve revision",
-            "Couldn't find remote ref",
+            "could not resolve revision",
+            "couldn't find remote ref",
             "unknown revision",
+            "not our ref",
+            "not found in upstream",
         )
     ):
         return FetchError.Reason.PIN_MISSING
@@ -124,6 +130,8 @@ def _classify_stderr(stderr: str) -> FetchError.Reason | None:
             "unable to access",
             "timed out",
             "Connection refused",
+            "Repository not found",  # GitHub, when the account can't see the repo
+            "could not read Username",  # no credential came
         )
     ):
         return FetchError.Reason.UNREACHABLE
@@ -300,8 +308,15 @@ def _run(
     """The single subprocess chokepoint for this module.
 
     Translates FileNotFoundError and TimeoutExpired into typed FetchError so
-    callers never see raw subprocess exceptions.
+    callers never see raw subprocess exceptions. Every producer git call
+    reaches ``repo``, so GitHub access through gh is checked here first.
     """
+    from ._registry_git_ops import GitHubAccessMissing, require_github_access  # imports this module lazily too
+
+    try:
+        require_github_access(repo)
+    except GitHubAccessMissing as e:  # this seam's own error, so its callers handle it
+        raise FetchError.unreachable(repo, pin, detail=str(e)) from e
     try:
         return subprocess.run(
             argv,

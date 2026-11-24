@@ -11,13 +11,25 @@ walker produced — never on a double's recorded call.
 
 from __future__ import annotations
 
+import configparser
+import contextlib
+import hashlib
 import json
 import os
+import re
+import select
+import shutil
+import signal
+import stat
 import subprocess
+import sys
+import threading
 from pathlib import Path
+from urllib.parse import urlsplit
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from mintd._config import Timeouts
 from mintd._dvc_ops import DvcOpError, SubprocessDvcOps
@@ -34,9 +46,16 @@ from mintd.model import Metadata
 from mintd.producer import ProducerError, ProducerView
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._harness import HarnessError
+from tests._harness import live as live_harness
 from tests._harness.consumer import Import
+from tests._harness.expect import CannotCheck, Mismatch, _outs, assert_landed_match_pointers, md5
 from tests._harness.git import _git
 from tests._harness.producer import LocalProducer, build_local_producer
+from tests._harness.live import (
+    BUCKET_VAR, MARKER, TEST_BUCKET_SHA256, TEST_PROFILE, LiveMintd, Product, catalog_entry, check_basetemp, lock_down,
+    profile_endpoint, read_only, readonly_credentials, redact, require_no_version_listing, run_read_only,
+    story_bucket,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
@@ -1693,6 +1712,142 @@ def test_s3_server_records_each_object_get_and_the_bytes_it_served(s3_server) ->
     assert state.bytes_served == {"a.csv": 12}
 
 
+def test_s3_server_fails_a_named_get_with_a_checksummed_500(s3_server, tmp_path: Path) -> None:
+    """A path in `fail_gets` answers its GET with the 5xx real S3 sent,
+    checksum header included, until it is removed or for a count; HEAD still
+    answers, and a failed GET is recorded in `failed_gets`, not as a download. The canary: through that header botocore
+    raises AttributeError from the call mintd's download makes, the failure #68
+    fixed; if a botocore upgrade stops that, story 9 can no longer catch it. A
+    count fails that many GETs, then the key serves. Mutations that turn it
+    red: the header dropped (header assert, canary); `fail_gets` ignored (the
+    500 assert); the count never spent (the one-off case)."""
+    import urllib.error
+    import urllib.request
+
+    from tests._harness.s3 import BUCKET
+
+    s3, key = s3_server.client, "lab/p/a.csv"
+    s3.put_object(Bucket=BUCKET, Key=key, Body=b"alpha\n")
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (500, None)
+    with pytest.raises(urllib.error.HTTPError) as failed:
+        urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
+    assert failed.value.code == 500 and failed.value.headers["x-amz-checksum-crc32"]
+    assert s3.head_object(Bucket=BUCKET, Key=key)["ContentLength"] == 6
+    with pytest.raises(AttributeError):
+        s3.download_file(BUCKET, key, str(tmp_path / "a.csv"), ExtraArgs={"ChecksumMode": "ENABLED"})
+    assert s3_server.gets == []
+    del s3_server.fail_gets[f"/{BUCKET}/{key}"]
+    assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
+    s3_server.fail_gets[f"/{BUCKET}/{key}"] = (503, 1)  # a one-off 503: the next GET serves
+    with pytest.raises(urllib.error.HTTPError) as once:
+        urllib.request.urlopen(f"{s3_server.endpoint}/{BUCKET}/{key}")
+    assert once.value.code == 503 and once.value.headers["x-amz-checksum-crc32"]
+    assert s3.get_object(Bucket=BUCKET, Key=key)["Body"].read() == b"alpha\n"
+    assert s3_server.failed_gets == [f"/{BUCKET}/{key}"] * 3  # the 500 twice (urlopen, the canary), the 503 once
+
+
+def test_storage_holds_pins_reads_each_pinned_version_from_git(s3_server, tmp_path: Path) -> None:
+    """Story 3's Pass line, on one committed pointer and one dvc.lock out: a
+    pin storage holds counts; other bytes, a version storage lacks, or no
+    version id fails. Mutations that turn it red: the md5 compare dropped (the
+    other-bytes case passes); the dvc.lock branch never taken (2 pins read as 1);
+    dvc.yaml not read from git (the wdir lost, the `cache: false` out pinned);
+    the checkout ignoring `rev` (the first commit read as main, 3 pins)."""
+    from tests._harness.expect import assert_storage_holds_pins
+    from tests._harness.s3 import BUCKET
+
+    put = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/a.csv", Body=b"alpha\n")
+    repo = tmp_path / "repo"
+    _git(["init", "-q", "-b", "main", str(repo)])
+    (repo / ".dvc").mkdir()  # a dvc project, so dvc can list its steps
+    (repo / ".dvc" / "config").write_text("", encoding="utf-8")
+
+    def pin(digest: str, cloud: dict | None) -> None:
+        out = {"md5": digest, "size": 6, "path": "a.csv", **({"cloud": {"storage": cloud}} if cloud else {})}
+        (repo / "data").mkdir(exist_ok=True)
+        (repo / "data" / "a.csv.dvc").write_text(yaml.safe_dump({"outs": [out]}), encoding="utf-8")
+        _git(["add", "-A"], cwd=repo)
+        _git(["commit", "-q", "--allow-empty", "-m", "pin"], cwd=repo)
+
+    pin(md5(b"alpha\n"), {"version_id": put["VersionId"]})
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 1
+    first = _git(["rev-parse", "HEAD"], cwd=repo).strip()
+    built = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/built/out.csv", Body=b"built")
+    (repo / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"cmd": "true", "outs": ["data/built"]}}}),
+                                   encoding="utf-8")
+    (repo / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build": {"cmd": "true", "outs": [
+        {"path": "data/built", "files": [{"relpath": "out.csv", "md5": md5(b"built"),
+                                         "cloud": {"storage": {"version_id": built["VersionId"]}}}]},
+    ]}}}), encoding="utf-8")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "a lock out"], cwd=repo)
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 2  # the .dvc pointer's and the lock's
+    # A stage with a wdir and a `cache: false` out, read from git as the landed-file check reads them from disk.
+    staged = s3_server.client.put_object(Bucket=BUCKET, Key="lab/p/data/staged.csv", Body=b"staged")
+    (repo / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"wdir": "code", "cmd": "true", "outs": [
+        "../data/built", "../data/staged.csv", {"../data/report.json": {"cache": False}}]}}}), encoding="utf-8")
+    (repo / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build": {"cmd": "true", "outs": [
+        {"path": "../data/built", "files": [{"relpath": "out.csv", "md5": md5(b"built"),
+                                            "cloud": {"storage": {"version_id": built["VersionId"]}}}]},
+        {"path": "../data/staged.csv", "md5": md5(b"staged"), "cloud": {"storage": {"version_id": staged["VersionId"]}}},
+        {"path": "../data/report.json", "md5": "0" * 32},  # committed to git, never pushed: no pin
+    ]}}}), encoding="utf-8")
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "a stage with a wdir"], cwd=repo)
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p") == 3
+    assert assert_storage_holds_pins(s3_server, repo, "lab/p", rev=first) == 1  # a commit, read as it was
+    for digest, cloud, said in (
+        (md5(b"other\n"), {"version_id": put["VersionId"]}, "holds other bytes"),
+        (md5(b"alpha\n"), {"version_id": "nonexistent-version"}, "data/a.csv"),
+        (md5(b"alpha\n"), None, "no version id"),
+    ):
+        pin(digest, cloud)
+        with pytest.raises(AssertionError, match=said):
+            assert_storage_holds_pins(s3_server, repo, "lab/p")
+
+
+def test_a_registered_producer_keeps_its_catalog_entry_current(tmp_path: Path, remote_registry_empty: Path) -> None:
+    """import reads a product's outputs from its catalog entry, so an output
+    the producer adds after registering must reach the entry too, and a write
+    that changes nothing registers nothing. Mutations that turn it red:
+    `_write_metadata` not registering again; `register` committing an
+    unchanged entry (git refuses an empty commit)."""
+    producer = build_local_producer(tmp_path / "prod")
+    producer.register_in(remote_registry_empty, tmp_path / "registry-work")
+    producer.add_output("data/new/")
+    producer._write_metadata(producer.metadata())  # unchanged: nothing to register, and no error
+    meta = producer.metadata()
+    entry = yaml.safe_load(_git(
+        ["show", f"main:catalog/{meta['project']['type']}/{meta['project']['name']}.yaml"], cwd=remote_registry_empty))
+    assert "data/new/" in [o["path"] for o in entry["data_products"]["outputs"]]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a shell hook")
+def test_fixture_git_sees_no_host_ignore_file_or_global_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host ignore file must not hide a new `.dvc` file from a story's
+    `git status`, and a host global config must not reach a fixture commit.
+    Mutations that turn it red: `core.excludesFile` not overridden (git's
+    default ~/.config/git/ignore hides the pointer); GIT_CONFIG_GLOBAL not
+    defaulted to nothing (the host's failing hook stops the commit)."""
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "ignore").write_text("*.dvc\n", encoding="utf-8")
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    (home / ".gitconfig").write_text(f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    for var in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+        monkeypatch.delenv(var, raising=False)
+    repo = tmp_path / "repo"
+    _git(["init", "-q", "-b", "main", str(repo)])
+    (repo / "x.csv.dvc").write_text("outs: []\n", encoding="utf-8")
+    assert "x.csv.dvc" in _git(["status", "--porcelain", "--untracked-files=all"], cwd=repo)
+    _git(["add", "-A"], cwd=repo)
+    _git(["commit", "-q", "-m", "x"], cwd=repo)
+
+
 def test_story_2_deletes_only_on_the_emulator() -> None:
     """Any other endpoint is refused with HarnessError, which the
     partial-transfer case's `xfail(raises=AssertionError)` cannot report as
@@ -1702,3 +1857,977 @@ def test_story_2_deletes_only_on_the_emulator() -> None:
     server = SimpleNamespace(endpoint="https://s3.wasabisys.com", client=None)
     with pytest.raises(HarnessError, match="refusing to delete on https://s3.wasabisys.com"):
         _delete_pinned(SimpleNamespace(), server, {"b.csv"})
+
+
+def _tracked_project(root: Path) -> None:
+    """A project shaped like the lab's real products: a foreach stage with a
+    wdir, one cached out and one `cache: false` out in `dvc.lock`, and a
+    folder pointer written with its `files:` list and no top-level md5. A git
+    work tree with a `.dvc` folder, as dvc needs to list the steps."""
+    _git(["init", "-q"], cwd=root)
+    (root / ".dvc").mkdir()
+    (root / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"build": {"foreach": ["x"], "do": {
+        "wdir": "code", "cmd": "true",
+        "outs": ["../data/final/a.csv", {"../data/final/report.json": {"cache": False}}],
+    }}}}), encoding="utf-8")
+    (root / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": {"build@x": {"cmd": "true", "outs": [
+        {"path": "../data/final/a.csv", "hash": "md5", "md5": md5(b"a"), "size": 1},
+        {"path": "../data/final/report.json", "hash": "md5", "md5": "0" * 32, "size": 2},
+    ]}}}), encoding="utf-8")
+    (root / "data" / "final").mkdir(parents=True)
+    (root / "data" / "raw").mkdir()
+    (root / "data" / "raw.dvc").write_text(yaml.safe_dump({"outs": [
+        {"hash": "md5", "path": "raw", "files": [{"relpath": "r.csv", "md5": md5(b"r")}]},
+    ]}), encoding="utf-8")
+    (root / "data" / "final" / "a.csv").write_bytes(b"a")
+    (root / "data" / "final" / "report.json").write_bytes(b"{}")
+    (root / "data" / "raw" / "r.csv").write_bytes(b"r")
+
+
+def test_landed_files_include_dvc_lock_outs_and_files_list_folders(tmp_path: Path) -> None:
+    """Mutations that turn it red: drop the `dvc.lock` loop in `_outs`, the
+    `cache: false` skip, the `do` lookup, or `_files_of` reading `files:` first."""
+    _tracked_project(tmp_path)
+    assert assert_landed_match_pointers(tmp_path) == {"data/final/a.csv": md5(b"a"), "data/raw/r.csv": md5(b"r")}
+
+
+
+def _lock_project(root: Path, dvc_yaml: str | None, lock: dict, files: dict[str, bytes],
+                  extra: dict[str, str] | None = None) -> None:
+    """A git work tree with a `.dvc` folder, `dvc_yaml` (none when None), a
+    hand-written `dvc.lock` whose outs record `files`' md5s, the files on disk,
+    and `extra` text files such as `params.yaml`."""
+    _git(["init", "-q"], cwd=root)
+    (root / ".dvc").mkdir()
+    if dvc_yaml is not None:
+        (root / "dvc.yaml").write_text(dvc_yaml, encoding="utf-8")
+    stages = {name: {"cmd": "true", "outs": [{"path": out, "hash": "md5", "md5": md5(files.get(out, b"")), "size": 1}
+                                              for out in outs]} for name, outs in lock.items()}
+    (root / "dvc.lock").write_text(yaml.safe_dump({"schema": "2.0", "stages": stages}), encoding="utf-8")
+    for rel, body in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(body)
+    for rel, text in (extra or {}).items():
+        (root / rel).write_text(text, encoding="utf-8")
+
+
+MATRIX_AND_ROWS = """stages:
+  mat:
+    matrix:
+      m: [x, y]
+    cmd: "true"
+    outs:
+      - data/m_${item.m}.csv
+  rows:
+    foreach:
+      - {n: one}
+    do:
+      cmd: "true"
+      outs:
+        - data/r_${item.n}.csv
+"""
+
+
+def test_landed_files_expect_the_steps_dvc_lists_and_skip_the_rest(tmp_path: Path) -> None:
+    """dvc names a matrix `mat@x` and a list-of-dicts foreach `rows@0`; the
+    lock still holds `rows@1`, an item since dropped, whose file never landed.
+    Mutation that turns it red: `_outs` trusting every lock step."""
+    files = {"data/m_x.csv": b"x", "data/m_y.csv": b"y", "data/r_one.csv": b"1"}
+    _lock_project(tmp_path, MATRIX_AND_ROWS, {"mat@x": ["data/m_x.csv"], "mat@y": ["data/m_y.csv"],
+                                              "rows@0": ["data/r_one.csv"], "rows@1": ["data/r_two.csv"]}, files)
+    skipped: list[str] = []
+    assert assert_landed_match_pointers(tmp_path, skipped) == {k: md5(v) for k, v in files.items()}
+    assert skipped == ["dvc.lock:rows@1"]
+    (tmp_path / "data" / "m_y.csv").unlink()
+    with pytest.raises(Mismatch, match=r"not expected: \['dvc.lock:rows@1'\]"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_lock_key_dvc_lists_without_its_trailing_space_stops_the_check(tmp_path: Path) -> None:
+    """dvc 3.67.1 writes item `t ` into the lock as `fan@t ` and lists it as
+    `fan@t`, and `dvc pull` lands it; the check can't match the two, so it
+    says so. Mutation that turns it red: the trailing-whitespace guard gone
+    (the step is skipped as stale and the check passes without its file)."""
+    files = {"data/fan_t .csv": b"t", "data/fan_s.csv": b"s"}
+    fan = 'stages:\n  fan:\n    foreach: ["t ", "s"]\n    do:\n      cmd: "true"\n      outs:\n        - data/fan_${item}.csv\n'
+    _lock_project(tmp_path, fan, {"fan@t ": ["data/fan_t .csv"], "fan@s": ["data/fan_s.csv"]}, files)
+    with pytest.raises(CannotCheck, match=r"dvc lists step 'fan@t' without the trailing whitespace of lock key 'fan@t '"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_lock_with_no_dvc_yaml_expects_nothing(tmp_path: Path) -> None:
+    """dvc reads steps only from a `dvc.yaml`, so a lock left without one
+    adds nothing, and dvc isn't asked. Mutation that turns it red: listing
+    the steps of a folder with no `dvc.yaml` (dvc exits 255 there)."""
+    pointer = yaml.safe_dump({"outs": [{"path": "a.csv", "hash": "md5", "md5": md5(b"a")}]})
+    _lock_project(tmp_path, None, {"gone": ["data/gone.csv"]}, {"data/a.csv": b"a"})
+    (tmp_path / "data" / "a.csv.dvc").write_text(pointer, encoding="utf-8")
+    assert assert_landed_match_pointers(tmp_path) == {"data/a.csv": md5(b"a")}
+
+
+@pytest.mark.parametrize("dvc_yaml, extra, named", [
+    ("stages:\n  build:\n    wdir: ${dir}\n    cmd: \"true\"\n    outs:\n      - x.csv\n",
+     {"params.yaml": "dir: code\n"}, "${dir}"),
+    ("stages:\n  build:\n    foreach: [x]\n    do:\n      cmd: \"true\"\n      outs:\n"
+     "        - data/${item}.json:\n            cache: false\n", {}, "data/${item}.json"),
+], ids=["wdir", "cache-false-path"])
+def test_a_path_the_check_would_have_to_expand_is_refused_by_name(tmp_path, dvc_yaml, extra, named) -> None:
+    """dvc's CLI gives no resolved wdir, and expanding `${...}` here would
+    re-derive dvc's rules, so the check names what it can't resolve rather
+    than check a path it guessed. Mutation that turns it red: dropping the
+    `templated` refusal in `_outs`."""
+    step = "build" if "wdir" in dvc_yaml else "build@x"
+    _lock_project(tmp_path, dvc_yaml, {step: ["x.csv" if step == "build" else "data/x.json"]}, {}, extra)
+    with pytest.raises(CannotCheck, match=re.escape(named)) as caught:
+        assert_landed_match_pointers(tmp_path)
+    assert step in str(caught.value)
+
+
+@pytest.mark.parametrize("recorded", ["../escape.csv", "/etc/escape.csv"], ids=["dotdot", "absolute"])
+def test_a_lock_out_outside_the_project_is_a_mismatch(tmp_path: Path, recorded: str) -> None:
+    """The lock disagrees with `dvc.yaml` and names an out dvc would never
+    write. Mutation that turns it red: `_inside` returning the path as it is
+    (the absolute one then reaches `relative_to`, the `..` one counts as missing)."""
+    _lock_project(tmp_path, "stages:\n  build:\n    cmd: \"true\"\n    outs:\n      - data/x.csv\n",
+                  {"build": [recorded]}, {"data/x.csv": b"x"})
+    with pytest.raises(Mismatch, match="an out resolves outside the project") as caught:
+        assert_landed_match_pointers(tmp_path)
+    assert caught.value.counts == "1 out outside the project"
+
+
+def test_a_pointer_out_outside_the_project_is_a_mismatch(tmp_path: Path) -> None:
+    """Mutation that turns it red: the pointer loop yielding without `_inside`."""
+    (tmp_path / "x.dvc").write_text(yaml.safe_dump({"outs": [{"path": "../x", "md5": "0" * 32}]}), encoding="utf-8")
+    with pytest.raises(Mismatch, match="an out resolves outside the project"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_dvc_yaml_dvc_cant_read_stops_the_check(tmp_path: Path) -> None:
+    """`stage list --all` would skip this file and exit 0; plain `stage list`
+    exits 255. Mutation that turns it red: ignoring its exit code."""
+    _lock_project(tmp_path, "stages:\n  build: [\n", {"build": ["data/x.csv"]}, {"data/x.csv": b"x"})
+    with pytest.raises(CannotCheck, match="dvc stage list exited"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_step_name_dvc_yaml_doesnt_define_stops_the_check() -> None:
+    """If dvc ever printed names in another form (`dvc.yaml:build`), no lock
+    step would match and every one would be skipped. The check stops instead.
+    Mutation that turns it red: dropping the `unknown` check in `_outs`."""
+    texts = {"dvc.lock": yaml.safe_dump({"stages": {"build": {"outs": [{"path": "x.csv", "md5": "0" * 32}]}}}),
+             "dvc.yaml": "stages:\n  build:\n    cmd: \"true\"\n"}
+    with pytest.raises(CannotCheck, match="doesn't define"):
+        list(_outs(["dvc.lock"], texts.get, lambda base: {"dvc.yaml:build"}))
+
+
+def test_the_live_tier_runs_only_read_only_commands(tmp_path: Path) -> None:
+    """Mutation that turns it red: `read_only` returning without raising (the
+    push then reaches Popen on a binary that is not there)."""
+    live = LiveMintd(tmp_path / "no-mintd", {}, tmp_path / "config.yaml")
+    with pytest.raises(HarnessError, match="read-only"):
+        live("data", "push", cwd=tmp_path)
+    with pytest.raises(HarnessError, match="read-only"):
+        live.start("registry", "register", "x", cwd=tmp_path)
+    for argv in (["git", "push"], ["dvc", "push"], ["dvc", "gc"], ["git", "-c", "a=b", "clone"]):
+        with pytest.raises(HarnessError, match="read-only"):
+            run_read_only(argv, cwd=tmp_path, env={})  # an empty folder: a broken guard pushes nothing
+    read_only(["mintd", "data", "clone", "x"])
+    read_only(["dvc", "pull"])
+    spawns = re.compile(r"\bsubprocess\.(run|Popen|call|check_)|\bos\.system|\b_git\(")
+    for module in (Path(__file__).parent / "live").glob("*.py"):
+        assert not spawns.search(module.read_text(encoding="utf-8")), f"{module} spawns outside the read-only runners"
+
+
+def test_a_hidden_products_failure_says_counts_only(tmp_path: Path) -> None:
+    """Mutations that turn it red: `redact` returning at its top, or
+    `Product.shown` always True."""
+    _tracked_project(tmp_path)
+    (tmp_path / "data" / "final" / "a.csv").write_bytes(b"changed")
+    (tmp_path / "data" / "raw" / "r.csv").unlink()
+    with pytest.raises(Mismatch) as caught:
+        assert_landed_match_pointers(tmp_path)
+    exc = caught.value
+    named = ("data/final", "data/raw", md5(b"a"), md5(b"r"))
+    assert "data/final/a.csv" in str(exc)  # the full message names files; a hidden product's report must not
+    item = SimpleNamespace(callspec=SimpleNamespace(params={"product": "made-up"}))
+    call = SimpleNamespace(excinfo=SimpleNamespace(value=exc))
+
+    def failed() -> SimpleNamespace:
+        return SimpleNamespace(failed=True, longrepr=str(exc), sections=[("Captured stdout call", str(exc))])
+
+    for classification in ("licensed", "private", None, "something-new"):
+        report = failed()
+        redact(item, call, report, {"made-up": Product("made-up", classification, None)})
+        assert "1 missing, 1 differ" in report.longrepr, report.longrepr
+        assert not any(n in report.longrepr for n in named), report.longrepr
+        assert report.sections == []
+    public, unseen = failed(), failed()
+    redact(item, call, public, {"made-up": Product("made-up", "public", None)})
+    redact(item, call, unseen, {})  # failed before its catalog entry was read
+    assert public.longrepr == unseen.longrepr == str(exc) and public.sections and unseen.sections
+    passed = SimpleNamespace(failed=False, longrepr=None, sections=[("Captured stdout call", "data/raw/r.csv")])
+    redact(item, call, passed, {"made-up": Product("made-up", "licensed", None)})
+    assert passed.sections == []
+    assert Product("made-up", "licensed", None).line("clone", "2 files", "9 bytes") == "made-up clone: 2 files"
+
+
+def test_the_live_tier_takes_only_the_read_only_key(tmp_path: Path) -> None:
+    """Mutations that turn it red: accepting a credentials file that also holds
+    `[mintd]` or `[DEFAULT]`, or a section without both halves of a key, or
+    reading it with configparser's defaults (it inherits [DEFAULT]'s); running without
+    `AWS_CONFIG_FILE`; copying more of the read-only section than its key, or
+    of the profile than its region and endpoint."""
+    secrets = ("AKIAREADONLY", "readonly-secret", "AKIAWRITE", "write-secret", "AKIAOTHER", "other-secret",
+               "AKIACONFIG", "config-secret", "AKIADEFAULT", "default-secret")
+    good = tmp_path / "readonly"
+    good.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n"
+                    "credential_process = /bin/false\n", encoding="utf-8")
+    halves = tmp_path / "halves"  # boto would go on down its chain for a key
+    halves.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key =\n", encoding="utf-8")
+    keyless = tmp_path / "keyless"
+    keyless.write_text("[mintd-live-readonly]\nregion = us-east-1\n", encoding="utf-8")
+    inherited = tmp_path / "inherited"  # configparser and botocore let the section inherit [DEFAULT]'s key
+    inherited.write_text("[DEFAULT]\naws_access_key_id = AKIADEFAULT\naws_secret_access_key = default-secret\n"
+                         "[mintd-live-readonly]\n", encoding="utf-8")
+    beside = tmp_path / "beside"
+    beside.write_text(good.read_text(encoding="utf-8") + "[DEFAULT]\naws_access_key_id = AKIADEFAULT\n", encoding="utf-8")
+    both = tmp_path / "both"
+    both.write_text(good.read_text(encoding="utf-8")
+                    + "[mintd]\naws_access_key_id = AKIAWRITE\naws_secret_access_key = write-secret\n", encoding="utf-8")
+    other = tmp_path / "other"
+    other.write_text("[default]\naws_access_key_id = AKIAOTHER\naws_secret_access_key = other-secret\n", encoding="utf-8")
+    conf = tmp_path / "readonly-config"
+    conf.write_text("[profile mintd-live-readonly]\nregion = us-east-1\nendpoint_url = https://s3.example.test\n"
+                    "output = json\naws_access_key_id = AKIACONFIG\naws_secret_access_key = config-secret\n",
+                    encoding="utf-8")
+    ok = {"AWS_SHARED_CREDENTIALS_FILE": str(good), "AWS_CONFIG_FILE": str(conf)}
+    for env in (
+        {"AWS_CONFIG_FILE": str(conf)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": ""},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "missing")},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(both)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(other)},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(halves)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(keyless)},
+        {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(inherited)}, {**ok, "AWS_SHARED_CREDENTIALS_FILE": str(beside)},
+        {"AWS_SHARED_CREDENTIALS_FILE": str(good)}, {**ok, "AWS_CONFIG_FILE": ""},
+        {**ok, "AWS_CONFIG_FILE": str(tmp_path / "missing")}, {**ok, "AWS_CONFIG_FILE": str(other)},
+    ):
+        with pytest.raises(HarnessError) as refused:
+            readonly_credentials(env, tmp_path / "out")
+        assert not any(s in str(refused.value) for s in secrets), refused.value
+    path = readonly_credentials(ok, tmp_path / "out")
+    copy = configparser.ConfigParser(interpolation=None)
+    copy.read(path, encoding="utf-8")
+    assert copy.sections() == ["mintd"]
+    assert dict(copy["mintd"]) == {"aws_access_key_id": "AKIAREADONLY", "aws_secret_access_key": "readonly-secret"}
+    profile = configparser.ConfigParser(interpolation=None)
+    profile.read(path.with_name("config"), encoding="utf-8")
+    assert profile.sections() == ["profile mintd"]
+    assert dict(profile["profile mintd"]) == {"region": "us-east-1", "endpoint_url": "https://s3.example.test"}
+    if os.name != "nt":  # Windows keeps no group or other bits; the tier runs on a Linux box
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+#: A made-up bucket the tests stand in for the lab's test bucket, whose name this public repo holds only as a hash.
+DEMO_BUCKET = "demo-story-bucket"
+
+
+def _story_pin(tmp_path: Path, bucket: str, *, scheme: str | None = None, host: str | None = None,
+               port: int | None = None) -> list[str]:
+    """A plugin for a child pytest that points story 11's allow-list at `bucket` (and the endpoint pin at
+    `scheme`://`host`:`port`), as the operator's own bucket and endpoint would pass. Production code keeps no
+    override."""
+    lines = ["import hashlib, re", "def pytest_configure(config):", "    import tests._harness.live as live",
+             f"    live.TEST_BUCKET_SHA256 = hashlib.sha256({bucket!r}.encode()).hexdigest()"]
+    if scheme is not None:
+        lines.append(f"    live.TEST_ENDPOINT_SCHEME = {scheme!r}")
+    if host is not None:
+        lines.append(f"    live.TEST_ENDPOINT_HOST = re.compile(re.escape({host!r}))")
+    if port is not None:
+        lines.append(f"    live.TEST_ENDPOINT_PORT = {port!r}")
+    (tmp_path / "story_pin.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return ["-p", "story_pin"]
+
+
+@pytest.mark.parametrize("tier", ["tests/live", "tests/stories/test_story_11_multipart.py"],
+                         ids=["live", "story-bucket"])
+def test_a_tier_failure_on_real_storage_prints_no_frame_arguments(tmp_path: Path, tier: str) -> None:
+    """A refusal, under pytest's defaults and under `--tb=long -l --full-trace`,
+    names the missing file and prints none of the operator's environment: in
+    the live tier, and in story 11 pointed at the test bucket. Mutations that
+    turn it red: dropping `quiet_tracebacks` from either conftest, or any one
+    override inside it (`auto` or `long` to short, no locals, no full trace)."""
+    planted = {"AWS_ACCESS_KEY_ID": "AKIAPLANTEDWRITE", "AWS_SECRET_ACCESS_KEY": "planted-write-secret"}
+    creds = tmp_path / "readonly"
+    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n"
+                     "[mintd-test]\naws_access_key_id = AKIATEST\naws_secret_access_key = test-secret\n",
+                     encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("registry_url: https://example.invalid/registry.git\n", encoding="utf-8")
+    env = {**planted, **{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+           "MINTD_CONFIG_DIR": str(tmp_path), "AWS_SHARED_CREDENTIALS_FILE": str(creds),  # no AWS_CONFIG_FILE
+           BUCKET_VAR: DEMO_BUCKET, "MINTD_BIN": str(tmp_path / "no-mintd"),  # no wheel is built for a refusal
+           "PYTHONPATH": str(tmp_path)}
+    pin = _story_pin(tmp_path, DEMO_BUCKET)
+    for i, flags in enumerate(([], ["--tb=long", "-l", "--full-trace"])):
+        got = subprocess.run(
+            [sys.executable, "-m", "pytest", tier, "-x", *flags, *pin, "-p", "no:cacheprovider",
+             f"--basetemp={tmp_path / f'base{i}'}"],
+            cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
+        )
+        out = got.stdout + got.stderr
+        assert got.returncode != 0 and "set AWS_CONFIG_FILE" in out, out
+        assert not any(v in out for v in (*planted.values(), "readonly-secret", "test-secret")), out
+
+
+def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the name whose SHA-256 is the harness's constant passes. Mutations that turn it red: `story_bucket`
+    returning the value unchecked, or comparing anything but the hash of the whole name (a prefix, `in`,
+    `lower()`, the bare hex); a delete, an abort or a transfer-manager upload added to story 11."""
+    assert re.fullmatch(r"[0-9a-f]{64}", TEST_BUCKET_SHA256)
+    monkeypatch.setattr(live_harness, "TEST_BUCKET_SHA256", hashlib.sha256(DEMO_BUCKET.encode()).hexdigest())
+    assert story_bucket(None) is None and story_bucket("") is None
+    assert story_bucket(DEMO_BUCKET) == DEMO_BUCKET
+    for named in ("journey-bucket", f"{DEMO_BUCKET}2", DEMO_BUCKET[:-1], DEMO_BUCKET.upper(), f" {DEMO_BUCKET}",
+                  f"{DEMO_BUCKET}/", live_harness.TEST_BUCKET_SHA256):
+        with pytest.raises(HarnessError, match="isn't the lab's test bucket"):
+            story_bucket(named)
+    story = (Path(__file__).parent / "stories" / "test_story_11_multipart.py").read_text(encoding="utf-8")
+    assert re.search(r"\.(delete_\w+|abort_multipart_upload|upload_file\w*)\(", story) is None
+
+
+def _bucket_name_in(text: str, digest=lambda s: hashlib.sha256(s.encode()).hexdigest()) -> bool:
+    """Whether `text` holds a word whose hash is `TEST_BUCKET_SHA256`. Each run of letters, digits, dots, hyphens and
+    underscores is split at its separators, and each stretch of whole pieces up to 63 characters (S3's longest
+    bucket name) is hashed, so the name is found alone, beside punctuation, in front of a host or inside a longer
+    word (`<name>-credentials`), in time linear in the text."""
+    for run in set(re.findall(r"[a-z0-9._-]+", text.lower())):
+        pieces = re.split(r"([._-])", run)  # words at even indexes, separators at odd
+        for i in range(0, len(pieces), 2):
+            stretch = ""
+            for j in range(i, len(pieces)):
+                stretch += pieces[j]
+                if len(stretch) > 63:
+                    break
+                if j % 2 == 0 and digest(stretch) == TEST_BUCKET_SHA256:
+                    return True
+    return False
+
+
+def test_the_test_bucket_s_name_is_only_a_hash_in_every_tracked_file() -> None:
+    """No file git tracks holds the test bucket's name, only its hash (`_bucket_name_in`). Mutations that turn it
+    red: the name written into any tracked file, `pyproject.toml` and `.github/` included, alone, beside punctuation,
+    in front of a host or inside a longer word."""
+    root = Path(__file__).parents[1]
+    names = [n for n in _git(["ls-files", "-z"], cwd=root).split("\0") if n and (root / n).is_file()]
+    found = [n for n in names if _bucket_name_in((root / n).read_bytes().decode("utf-8", errors="ignore"))]
+    assert not found, found
+
+
+def test_the_name_check_hashes_no_stretch_longer_than_a_bucket_name() -> None:
+    """One long hyphenated token took minutes when every stretch was hashed. Mutation that turns it red: the
+    63-character cap dropped."""
+    hashed: list[int] = []
+    assert not _bucket_name_in("-".join(["ab"] * 300), digest=lambda s: hashed.append(len(s)) or "")
+    assert hashed and max(hashed) <= 63
+
+
+def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutations that turn it red: `readonly_credentials` ignoring `profile`; the default-file check
+    dropped, or comparing paths rather than files (a hard link to the default file gets through);
+    `profile_endpoint` accepting a missing endpoint, one with a path (requests would land in the bucket
+    the path names), or any host but the bucket's service host: one with a bucket label in front, another
+    host, plain http, a port, or credentials in the URL; the host pattern's dots unescaped; a URL it can't
+    parse raising anything but HarnessError."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))  # never the real ~/.aws
+    monkeypatch.setenv("USERPROFILE", str(home))
+    key = "[mintd-test]\naws_access_key_id = AKIATEST\naws_secret_access_key = test-secret\n"
+    conf = "[profile mintd-test]\nregion = us-east-1\nendpoint_url = https://s3.wasabisys.com\n"
+    (home / ".aws").mkdir(parents=True)
+    for path, text in ((tmp_path / "key", key), (tmp_path / "conf", conf),
+                       (home / ".aws" / "credentials", key), (home / ".aws" / "config", conf)):
+        path.write_text(text, encoding="utf-8")
+    good = {"AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"), "AWS_CONFIG_FILE": str(tmp_path / "conf")}
+
+    copy = readonly_credentials(good, tmp_path / "out", profile=TEST_PROFILE)
+    assert copy.read_text(encoding="utf-8").split() == ["[mintd]", "aws_access_key_id", "=", "AKIATEST",
+                                                        "aws_secret_access_key", "=", "test-secret"]
+    assert "[profile mintd]" in copy.with_name("config").read_text(encoding="utf-8")
+    assert profile_endpoint(copy) == "https://s3.wasabisys.com"
+    with pytest.raises(HarnessError, match="no \\[mintd-live-readonly\\] section"):
+        readonly_credentials(good, tmp_path / "out2")  # the live tier still takes only its read-only key
+    os.link(home / ".aws" / "credentials", tmp_path / "linked")  # the default file under another name
+    for named in ({**good, "AWS_SHARED_CREDENTIALS_FILE": "~/.aws/credentials"},
+                  {**good, "AWS_SHARED_CREDENTIALS_FILE": str(home / ".aws" / "credentials")},
+                  {**good, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "linked")},
+                  {**good, "AWS_CONFIG_FILE": "~/.aws/config"}):
+        with pytest.raises(HarnessError, match="default AWS file") as refused:
+            readonly_credentials(named, tmp_path / "out3", profile=TEST_PROFILE)
+        assert not any(v in str(refused.value) for v in ("AKIATEST", "test-secret", "s3.wasabisys.com"))
+    (tmp_path / "conf").write_text("[profile mintd-test]\nregion = us-east-1\n", encoding="utf-8")
+    bare = readonly_credentials(good, tmp_path / "out4", profile=TEST_PROFILE)
+    with pytest.raises(HarnessError, match="endpoint_url"):
+        profile_endpoint(bare)
+    for endpoint, refusal in (("https://s3.wasabisys.com/", None), ("https://s3.us-east-1.wasabisys.com", None),
+                              ("https://S3.WasabiSys.com", None),
+                              ("https://s3.wasabisys.com/other-bucket", "has a path"),
+                              ("https://s3.wasabisys.com?bucket=other", "has a path"),
+                              ("https://other-bucket.s3.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://other-bucket.s3.us-east-1.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com.example.test", "isn't the test bucket's endpoint"),
+                              ("https://s3.example.test", "isn't the test bucket's endpoint"),
+                              ("http://s3.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://u:p@s3.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://other-bucket@s3.wasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://s3xwasabisys.com", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisysxcom", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:8443", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:443", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:", "isn't the test bucket's endpoint"),
+                              ("https://s3.wasabisys.com:x", "isn't a URL"),
+                              ("https://[s3.wasabisys.com]", "isn't a URL")):
+        (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {endpoint}\n",
+                                       encoding="utf-8")
+        copy = readonly_credentials(good, tmp_path / "out5", profile=TEST_PROFILE)
+        if refusal is None:
+            assert profile_endpoint(copy) == endpoint
+        else:
+            with pytest.raises(HarnessError, match=refusal):
+                profile_endpoint(copy)
+
+
+def test_a_key_copy_runs_with_no_other_key_in_reach(tmp_path: Path) -> None:
+    """Both tiers' environment lock-down. Mutations that turn it red: an AWS, boto or fsspec variable kept
+    (fsspec's S3 defaults override a profile's key); `AWS_CA_BUNDLE` dropped; a key source left open."""
+    creds = tmp_path / "aws" / "credentials"
+    got = lock_down({**_PLANTED_ENV, "AWS_CA_BUNDLE": "/certs.pem", "HOME": "/home/op"}, creds, tmp_path)
+    assert got == {
+        "AWS_CA_BUNDLE": "/certs.pem", "HOME": "/home/op",
+        "AWS_SHARED_CREDENTIALS_FILE": str(creds), "AWS_CONFIG_FILE": str(creds.with_name("config")),
+        "BOTO_CONFIG": str(tmp_path / "boto"), "AWS_EC2_METADATA_DISABLED": "true",
+        "FSSPEC_CONFIG_DIR": str(tmp_path / "fsspec"),
+        "DVC_GLOBAL_CONFIG_DIR": str(tmp_path / "dvc-global"), "DVC_SYSTEM_CONFIG_DIR": str(tmp_path / "dvc-system"),
+    }
+    assert (tmp_path / "boto").read_text(encoding="utf-8") == ""
+
+
+def test_a_bucket_run_needs_a_key_refused_version_listing(s3_server) -> None:
+    """mintd's push deletes the object it uploads again when its key may list versions. Mutations that turn
+    it red: the check dropped; any error (not AccessDenied) read as a refusal. The emulator refuses, as the
+    test key must."""
+    from botocore.exceptions import ClientError
+
+    from tests._harness.s3 import BUCKET
+
+    class Client:
+        def __init__(self, code: str | None) -> None:
+            self.code, self.asked = code, []
+
+        def list_object_versions(self, **kw: object) -> dict:
+            self.asked.append(kw)
+            if self.code:
+                raise ClientError({"Error": {"Code": self.code, "Message": "no"}}, "ListObjectVersions")
+            return {"Versions": []}
+
+    refused = Client("AccessDenied")
+    require_no_version_listing(refused, DEMO_BUCKET, "runs/r/t")
+    assert refused.asked == [{"Bucket": DEMO_BUCKET, "Prefix": "runs/r/t", "MaxKeys": 1}]
+    with pytest.raises(HarnessError, match="may list versions"):
+        require_no_version_listing(Client(None), DEMO_BUCKET, "runs/r/t")
+    with pytest.raises(HarnessError, match="NoSuchBucket"):
+        require_no_version_listing(Client("NoSuchBucket"), DEMO_BUCKET, "runs/r/t")
+    require_no_version_listing(s3_server.client, BUCKET, "runs/r/t")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a shebang fake")
+def test_a_failing_bucket_run_never_prints_the_bucket_s_name(tmp_path: Path, s3_server) -> None:
+    """Story 11 pointed at a made-up test bucket on the emulator, which refuses version listing as the test key must,
+    with a mintd that fails the way dvc does, naming `<bucket>/runs/...` on stdout and stderr. The whole `-rA` output
+    (the failure, its summary, captured output) shows `<test-bucket>` there and never the name. Mutations that turn
+    it red: the stories conftest's report redaction dropped, either of its two replaces dropped, or mintd's wide
+    COLUMNS dropped."""
+    s3_server.client.create_bucket(Bucket=DEMO_BUCKET)
+    fake = tmp_path / "mintd"
+    fake.write_text(f"#!/bin/sh\necho pushing to s3://{DEMO_BUCKET}/runs/x\n"
+                    f"echo ERROR: failed to push data to the cloud - {DEMO_BUCKET}/runs/x: Access Denied >&2\n"
+                    "echo COLUMNS=$COLUMNS >&2\nexit 1\n", encoding="utf-8")
+    # mintd's output reaches the report only in the failure text; this prints the name outside it, on stdout,
+    # on stderr and to the log, as a story's own output would
+    (tmp_path / "story_loud.py").write_text(
+        "import logging, os, sys\nimport pytest\n\n@pytest.fixture(autouse=True)\ndef _loud():\n"
+        "    name = os.environ['MINTD_STORY_BUCKET']\n    print(f'loud stdout {name}/runs/y')\n"
+        "    print(f'loud stderr {name}/runs/y', file=sys.stderr)\n"
+        "    logging.getLogger('story').warning('loud log %s/runs/y', name)\n    yield\n", encoding="utf-8")
+    fake.chmod(0o755)
+    (tmp_path / "key").write_text("[mintd-test]\naws_access_key_id = AKIASTORYTEST\n"
+                                  "aws_secret_access_key = story-test-secret\n", encoding="utf-8")
+    (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {s3_server.endpoint}\n",
+                                   encoding="utf-8")
+    where = urlsplit(s3_server.endpoint)
+    env = {**{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+           BUCKET_VAR: DEMO_BUCKET, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"), "PYTHONPATH": str(tmp_path),
+           "AWS_CONFIG_FILE": str(tmp_path / "conf"), "MINTD_BIN": str(fake)}
+    got = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "-k", "past_the_multipart",
+         *_story_pin(tmp_path, DEMO_BUCKET, scheme=where.scheme, host=where.hostname, port=where.port),
+         "-p", "story_loud", "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
+        cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=300,
+    )
+    out = got.stdout + got.stderr
+    assert got.returncode == 1 and "<test-bucket>/runs/x" in out, out[-4000:]  # the failure text
+    for where in ("loud stdout", "loud stderr", "loud log"):  # the captured sections
+        assert f"{where} <test-bucket>/runs/y" in out, (where, out[-4000:])
+    assert "COLUMNS=1000" in out, out[-4000:]  # mintd gets a wide terminal, so Rich can't split the name
+    assert DEMO_BUCKET not in out, out[-4000:]
+
+
+def test_a_bucket_run_stops_before_writing_when_its_key_may_list_versions(tmp_path: Path) -> None:
+    """Story 11 pointed at the test bucket, here a local S3 that lets the key list versions, run with
+    `--log-level=DEBUG`. Mutations that turn it red: the version-listing check dropped from the story's
+    bucket branch (the run goes on and writes); `quiet_tracebacks` leaving botocore's request log on (the
+    key id prints in each request's Authorization header)."""
+    import boto3
+    from moto.moto_server.werkzeug_app import DomainDispatcherApplication, create_backend_app
+    from werkzeug.serving import make_server
+
+    server = make_server("127.0.0.1", 0, DomainDispatcherApplication(create_backend_app))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        s3 = boto3.client("s3", endpoint_url=endpoint, region_name="us-east-1", aws_access_key_id="admin",
+                          aws_secret_access_key="admin")
+        s3.create_bucket(Bucket=DEMO_BUCKET)
+        (tmp_path / "key").write_text("[mintd-test]\naws_access_key_id = AKIASTORYTEST\n"
+                                      "aws_secret_access_key = story-test-secret\n", encoding="utf-8")
+        (tmp_path / "conf").write_text(f"[profile mintd-test]\nregion = us-east-1\nendpoint_url = {endpoint}\n",
+                                       encoding="utf-8")
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "MINTD_"))},
+               BUCKET_VAR: DEMO_BUCKET, "AWS_SHARED_CREDENTIALS_FILE": str(tmp_path / "key"), "PYTHONPATH": str(tmp_path),
+               "AWS_CONFIG_FILE": str(tmp_path / "conf"), "MINTD_BIN": str(tmp_path / "no-mintd")}
+        got = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "--log-level=DEBUG",
+             *_story_pin(tmp_path, DEMO_BUCKET, scheme="http", host="127.0.0.1", port=server.server_port),
+             "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
+            cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=120,
+        )
+        written = s3.list_objects_v2(Bucket=DEMO_BUCKET)["KeyCount"]
+    finally:
+        server.shutdown()
+    out = got.stdout + got.stderr
+    assert got.returncode == 1 and out.count("may list versions") >= 3 and "3 errors" in out, out[-4000:]
+    assert written == 0
+    assert "ListObjectVersions" in out and not any(v in out for v in ("AKIASTORYTEST", "story-test-secret")), out
+
+
+#: A fake mintd for the live tier's own tests. It records each call's argv,
+#: environment and the key file it was given, then acts by product: see
+#: `_live_world` for what each made-up product does.
+_FAKE_MINTD = """
+import hashlib, json, os, pathlib, sys, time
+
+world = pathlib.Path(os.environ["FAKE_MINTD_WORLD"])
+args = [a for a in sys.argv[1:] if a != "--json"]
+creds = pathlib.Path(os.environ.get("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent"))
+with (world / "calls.jsonl").open("a", encoding="utf-8") as fh:
+    fh.write(json.dumps({"argv": args, "env": dict(os.environ),
+                         "creds": creds.read_text(encoding="utf-8") if creds.is_file() else None}) + "\\n")
+if args == ["--version"]:
+    sys.exit(print("mintd 0.0.0 (fake)"))
+
+
+def track(root, rel, body, *, cached=True, landed=True):
+    h = hashlib.md5(body).hexdigest()
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.with_name(path.name + ".dvc").write_text(f"outs:\\n- md5: {h}\\n  size: {len(body)}\\n  path: {path.name}\\n")
+    if cached:
+        obj = root / ".dvc" / "cache" / "files" / "md5" / h[:2] / h[2:]
+        obj.parent.mkdir(parents=True, exist_ok=True)
+        obj.write_bytes(body)
+    if landed and not path.exists():
+        path.write_bytes(body)
+
+
+def track_folder(root, rel, files):
+    # A folder out with its files list, as dvc import writes it: every file of the folder, git-tracked ones too.
+    folder = root / rel
+    entries = "".join(f"  - relpath: {n}\\n    md5: {hashlib.md5(b).hexdigest()}\\n" for n, b in files.items())
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    folder.with_name(folder.name + ".dvc").write_text(f"outs:\\n- path: {folder.name}\\n  files:\\n{entries}")
+    for n, b in files.items():
+        (folder / n).parent.mkdir(parents=True, exist_ok=True)
+        (folder / n).write_bytes(b)
+
+
+def metadata(dest, name, classification, primary="data"):
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "metadata.json").write_text(json.dumps({
+        "fake": name, "governance": {"classification": classification} if classification else {},
+        "data_products": {"primary": primary}}))
+
+
+cmd, rest, here = args[1], args[2:], pathlib.Path.cwd()
+if cmd == "clone":
+    name, dest = rest[0], pathlib.Path(rest[rest.index("--dest") + 1])
+elif cmd == "import":
+    name, dest = rest[0], here
+else:
+    name, dest = json.loads((here / "metadata.json").read_text())["fake"], here
+killed = "killed" in str(dest)  # the killed-clone check's own folder
+if name == "made-up-licensed" and cmd == "clone" and not killed:  # the repo says public: licensed still wins
+    metadata(dest, name, "public")
+    sys.exit("PLANTED-STDERR: the clone failed on data/secret.csv")
+elif name == "made-up-licensed" and cmd == "clone":
+    pass  # exits 0 having landed nothing
+elif name == "made-up-public" and cmd == "clone":  # the repo says licensed, and says it before the clone fails
+    metadata(dest, name, "licensed")
+    sys.exit("PLANTED-STDERR: the clone failed on data/secret.csv")
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file") and cmd == "clone":
+    tiny = name == "made-up-tiny"  # its repo gives no classification (counts only) and writes its primary oddly
+    primary = "./data/" if tiny else "notes.md" if name == "made-up-file" else "data"
+    metadata(dest, name, None if tiny else "public", primary)
+    (dest / "notes.md").write_bytes(b"notes\\n")  # kept in git, no pointer
+    track(dest, "data/x.csv", b"x\\n", cached=False)
+    (dest / "data" / ".gitignore").write_bytes(b"/x.csv\\n")
+    if name == "made-up-wide":  # a sibling of the primary whose name starts with the primary's
+        track(dest, "data2/y.csv", b"y\\n", cached=False)
+    if name == "made-up-odd" and killed:
+        sys.exit("the clone failed after every file landed")
+elif name == "made-up-file" and cmd == "import":  # its one-file primary, kept in git
+    track(dest, f"data/imports/data_{name}/notes.md", b"notes\\n", cached=False)
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd") and cmd == "import":  # the primary whole, .gitignore too
+    root = f"data/imports/data_{name}"
+    ignore = b"other\\n" if name == "made-up-odd" else b"/x.csv\\n"
+    track_folder(dest, f"{root}/data", {"x.csv": b"x\\n", ".gitignore": ignore})
+    if name == "made-up-wide":  # more than the primary
+        track(dest, f"{root}/data2/y.csv", b"y\\n", cached=False)
+elif name in ("made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty") and cmd == "pull":
+    pass  # changes nothing
+elif name == "made-up-empty" and cmd == "clone":  # its pointer's file never lands
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n", cached=False, landed=False)
+elif name == "made-up-empty":
+    sys.exit("the import failed")
+elif name == "made-up-small" and cmd == "clone":
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n", landed=not killed)
+    if killed:  # every object has landed: wait for the Ctrl-C
+        time.sleep(300)
+elif name == "made-up-small" and cmd == "pull":  # lands what is missing, touching nothing else
+    if not (dest / "data" / "x.csv").exists():
+        (dest / "data" / "x.csv").write_bytes(b"x\\n")
+elif name == "made-up-small" and cmd == "import":  # bytes the producer never tracked
+    track(dest, "data/imports/data_made-up-small/data/x.csv", b"other\\n", cached=False)
+elif name == "made-up-held-git" and cmd == "clone":  # works, so the time check's plain git clone runs (and holds)
+    metadata(dest, name, "public")
+    track(dest, "data/x.csv", b"x\\n")
+elif name == "made-up-held":  # says it started, through a FIFO, and holds a second one open until it dies
+    held = os.open(world / "held", os.O_WRONLY)
+    (world / "started").write_text(f"{os.getpid()}\\n")
+    time.sleep(300)
+else:
+    sys.exit("PLANTED-STDERR: mintd failed on data/secret.csv")
+"""
+
+#: The fake git's hold: says it started, through a FIFO, and holds a second one open until it dies.
+_HOLD = """
+import os, pathlib, time
+world = pathlib.Path(__file__).parent
+held = os.open(world / "held", os.O_WRONLY)
+(world / "started").write_text(f"{os.getpid()}\\n")
+time.sleep(300)
+"""
+
+#: A pytest plugin for the tier's own run: whether the signal handlers it
+#: found at the start are back at the end, written beside it.
+_SIGNAL_CHECK = """
+import pathlib, signal
+_found = {}
+def pytest_configure(config):
+    _found.update({s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)})
+def pytest_unconfigure(config):
+    back = all(signal.getsignal(s) == h for s, h in _found.items())
+    (pathlib.Path(__file__).parent / "restored").write_text(str(back))
+"""
+
+#: What the operator's environment holds that must never reach mintd.
+_PLANTED_ENV = {
+    "AWS_ACCESS_KEY_ID": "AKIAPLANTEDWRITE", "AWS_SECRET_ACCESS_KEY": "planted-write-secret",
+    "AWS_SESSION_TOKEN": "planted-token", "AWS_PROFILE": "planted-profile", "AWS_ROLE_ARN": "planted-role",
+    "AWS_WEB_IDENTITY_TOKEN_FILE": "/planted/token", "AWS_CONTAINER_CREDENTIALS_FULL_URI": "http://planted.invalid/",
+    "AWS_ENDPOINT_URL": "https://planted.invalid", "BOTO_CONFIG": "/planted/boto",
+    "FSSPEC_S3_KEY": "AKIAPLANTEDFSSPEC", "FSSPEC_S3_SECRET": "planted-fsspec-secret",
+    "FSSPEC_CONFIG_DIR": "/planted/fsspec",
+    "DVC_GLOBAL_CONFIG_DIR": "/planted/dvc-global", "DVC_SYSTEM_CONFIG_DIR": "/planted/dvc-system",
+}
+
+
+def _live_world(tmp_path: Path, names: list[str]) -> SimpleNamespace:
+    """A registry of made-up products, the box's config, the read-only key
+    files and a fake mintd, for running `pytest tests/live` with no storage.
+
+    - made-up-licensed: licensed in the catalog, public in its repo; its clone
+      fails with a planted line after writing metadata.json, and its killed
+      clone exits 0 having landed nothing.
+    - made-up-broken: its catalog entry does not parse, quoting a planted line.
+    - made-up-public: public in the catalog, licensed in its repo; both its
+      clones fail with a planted line after writing metadata.json.
+    - made-up-tiny: public in the catalog, no classification in its repo, its
+      primary written `./data/`; one file and a .gitignore beside it, all of
+      which the import brings. Every check passes or skips (too small to
+      interrupt).
+    - made-up-wide: as tiny, but public, and its import also brings a file of
+      the clone's from outside the primary, in `data2/` beside `data/`.
+    - made-up-odd: as tiny, but public; its import's .gitignore has other
+      bytes, and its killed clone exits 1 once every file has landed.
+    - made-up-file: as tiny, but public, and its primary is one file kept in
+      git, which the import brings.
+    - made-up-empty: public; its clone exits 0 with its one file missing, a
+      pull lands nothing, its import fails.
+    - made-up-small: public; one file, which the killed clone has wholly
+      cached when it is interrupted; its import lands other bytes.
+    - made-up-held: its clone says it started, then waits (the signal tests).
+    - made-up-held-git: its clone works; the plain `git clone` of the time
+      check says it started, then waits (the signal tests). Every other git
+      call is the real git.
+    """
+    registry = tmp_path / "registry"
+    (registry / "catalog" / "data").mkdir(parents=True)
+    for name in ("made-up-licensed", "made-up-public", "made-up-tiny", "made-up-wide", "made-up-odd", "made-up-file",
+                 "made-up-empty", "made-up-small", "made-up-held", "made-up-held-git"):
+        classification = "licensed" if name == "made-up-licensed" else "public"
+        (registry / "catalog" / "data" / f"{name}.yaml").write_text(
+            f"governance: {{classification: {classification}}}\nrepository: {{github_url: https://example.invalid/{name}}}\n",
+            encoding="utf-8")
+    (registry / "catalog" / "data" / "made-up-broken.yaml").write_text(
+        'governance: {classification: public}\nrepository:\n  github_url: "PLANTED-ENTRY\n', encoding="utf-8")
+    _git(["init", "-q", "-b", "main", str(registry)])
+    _git(["add", "-A"], cwd=registry)
+    _git(["commit", "-q", "-m", "catalog"], cwd=registry)
+    (tmp_path / "config.yaml").write_text(f"registry_url: {registry}\n", encoding="utf-8")
+    creds, conf = tmp_path / "readonly", tmp_path / "readonly-config"
+    creds.write_text("[mintd-live-readonly]\naws_access_key_id = AKIAREADONLY\naws_secret_access_key = readonly-secret\n",
+                     encoding="utf-8")
+    conf.write_text("[profile mintd-live-readonly]\nregion = us-east-1\nendpoint_url = https://s3.example.test\n",
+                    encoding="utf-8")
+    world = tmp_path / "world"
+    world.mkdir()
+    (world / "mintd.py").write_text(_FAKE_MINTD, encoding="utf-8")
+    fake = world / "mintd"
+    fake.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{world / "mintd.py"}" "$@"\n', encoding="utf-8")
+    fake.chmod(0o755)
+    (world / "hold.py").write_text(_HOLD, encoding="utf-8")
+    git = world / "git"  # first on the tier's PATH, beside the fake mintd
+    git.write_text(f'#!/bin/sh\ncase "$*" in *made-up-held-git*) exec "{sys.executable}" "{world / "hold.py"}" ;; esac\n'
+                   f'exec "{shutil.which("git")}" "$@"\n', encoding="utf-8")
+    git.chmod(0o755)
+    (world / "plugin").mkdir()
+    (world / "plugin" / "live_signal_check.py").write_text(_SIGNAL_CHECK, encoding="utf-8")
+    (tmp_path / "products.txt").write_text("\n".join(names) + "\n", encoding="utf-8")
+    kept = {k: v for k, v in os.environ.items() if not k.startswith(("AWS_", "BOTO_", "FSSPEC_", "MINTD_", "DVC_"))}
+    env = {**_PLANTED_ENV, **kept,
+           "AWS_CA_BUNDLE": "/planted/ca-bundle.pem", "AWS_SHARED_CREDENTIALS_FILE": str(creds),
+           "AWS_CONFIG_FILE": str(conf), "MINTD_CONFIG_DIR": str(tmp_path), "MINTD_BIN": str(fake),
+           "MINTD_LIVE_PRODUCTS": str(tmp_path / "products.txt"), "FAKE_MINTD_WORLD": str(world)}
+    return SimpleNamespace(env=env, world=world, base=(tmp_path / "base").resolve())
+
+
+def _live_pytest(*args: str) -> list[str]:
+    return [sys.executable, "-m", "pytest", "tests/live", "-p", "no:cacheprovider", "-rA", *args]
+
+
+_ON_POSIX = pytest.mark.skipif(os.name == "nt", reason="the live tier runs on Linux and macOS: a shell-script mintd")
+
+
+@_ON_POSIX
+def test_the_live_tier_gives_mintd_only_its_copy_of_the_key_and_withholds_hidden_details(tmp_path: Path) -> None:
+    """Every mintd call sees the key copy, the shut boto and fsspec sources and
+    dvc's empty config dirs, and none of the operator's AWS, boto or fsspec
+    settings but `AWS_CA_BUNDLE`. No planted line reaches the output, a hidden
+    product's results show counts only, the key copy is gone afterwards, and
+    each check fails or skips where it should.
+
+    Mutations that turn it red: the env filter dropped, or fsspec left out of
+    it; the key, config, boto, metadata, fsspec or dvc-dir lines not set;
+    `redact` not called from `pytest_runtest_makereport`, or showing a
+    non-Mismatch failure's message; the SEEN placeholder dropped; either clone
+    not consulting the repo's metadata.json, or the shared clone consulting it
+    only after its exit check; `stricter` always taking the repo's, or keeping
+    the catalog's when the repo has none; results lines reading the catalog's
+    classification; the key-copy finalizer, or the one restoring the signal
+    handlers, dropped; the second pull not
+    checking what landed; the import not compared with the clone's primary,
+    refusing the git-tracked files a folder import brings, accepting a file
+    from outside the primary or with other bytes, refusing a one-file primary
+    kept in git, or reading `./data/` as no primary at all; a killed clone that exits non-zero, or lands nothing,
+    skipping as too small, or a too-small one failing; a wholly cached one
+    passing."""
+    world = _live_world(tmp_path, ["made-up-licensed", "made-up-broken", "made-up-public", "made-up-tiny",
+                                   "made-up-wide", "made-up-odd", "made-up-file", "made-up-empty", "made-up-small"])
+    got = subprocess.run(
+        _live_pytest("-k", "not time", f"--basetemp={world.base}", "-p", "live_signal_check"),
+        cwd=Path(__file__).parents[1], env={**world.env, "PYTHONPATH": str(world.world / "plugin")},
+        capture_output=True, text=True, timeout=300,
+    )
+    out = got.stdout + got.stderr
+    assert (world.world / "plugin" / "restored").read_text() == "True", "the tier left its signal handlers installed"
+    assert "PLANTED" not in out and not any(v in out for v in _PLANTED_ENV.values()), out
+    calls = [json.loads(line) for line in (world.world / "calls.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(calls) > 5 and calls[0]["argv"] == ["--version"], calls
+    aws = world.base / "aws"
+    for call in calls:
+        env = call["env"]
+        assert {k for k in env if k.startswith(("AWS_", "BOTO_", "FSSPEC_"))} == {
+            "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_CA_BUNDLE", "BOTO_CONFIG", "AWS_EC2_METADATA_DISABLED",
+            "FSSPEC_CONFIG_DIR",
+        }, (call["argv"], sorted(env))
+        assert Path(env["AWS_SHARED_CREDENTIALS_FILE"]) == aws / "credentials", call["argv"]
+        assert Path(env["AWS_CONFIG_FILE"]) == aws / "config", call["argv"]
+        assert "[mintd]" in call["creds"] and "AKIAREADONLY" in call["creds"], call["argv"]
+        assert (Path(env["BOTO_CONFIG"]), env["AWS_EC2_METADATA_DISABLED"]) == (world.base / "boto", "true")
+        assert Path(env["FSSPEC_CONFIG_DIR"]) == world.base / "fsspec" and not (world.base / "fsspec").exists()
+        assert env["AWS_CA_BUNDLE"] == "/planted/ca-bundle.pem"
+        assert (Path(env["DVC_GLOBAL_CONFIG_DIR"]), Path(env["DVC_SYSTEM_CONFIG_DIR"])) == (
+            world.base / "dvc-global", world.base / "dvc-system")
+    assert (world.base / "boto").read_bytes() == b""
+    assert not (aws / "credentials").exists(), "the key copy outlived the run"
+    summary = out[out.index("short test summary info"):]
+    for outcome, check, product in (
+        ("PASSED", "test_a_second_pull_downloads_nothing", "made-up-small"),
+        ("FAILED", "test_a_second_pull_downloads_nothing", "made-up-empty"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-small"),
+        ("PASSED", "test_import_lands_the_primary", "made-up-tiny"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-wide"),
+        ("FAILED", "test_import_lands_the_primary", "made-up-odd"),
+        ("PASSED", "test_import_lands_the_primary", "made-up-file"),
+        ("FAILED", "test_a_killed_clone_restarts_and_finishes", "made-up-licensed"),
+        ("FAILED", "test_a_killed_clone_restarts_and_finishes", "made-up-odd"),
+    ):
+        assert f"{outcome} tests/live/test_live.py::{check}[{product}]" in summary, (outcome, check, product, summary)
+    assert "too small to interrupt: mintd finished before any object was seen" in summary, summary
+    assert re.search(r"not interrupted: all 1 objects had landed when mintd stopped \(.*1 objects cached at the "
+                     r"interrupt", summary), summary
+    results = out[out.index(" live results "):out.index("short test summary info")]
+    tiny = [ln for ln in results.splitlines() if ln.startswith("made-up-tiny ")]
+    assert len(tiny) == 4 and not any(";" in ln for ln in tiny), results  # clone, second pull, import, killed
+    # The killed clone alone, with no shared clone to read the repo's metadata.json first.
+    alone = subprocess.run(
+        _live_pytest("-k", "killed and made-up-public", f"--basetemp={tmp_path / 'alone'}"),
+        cwd=Path(__file__).parents[1], env=world.env, capture_output=True, text=True, timeout=120,
+    )
+    assert "1 failed" in alone.stdout and "PLANTED" not in alone.stdout + alone.stderr, alone.stdout + alone.stderr
+
+
+@_ON_POSIX
+def test_the_live_tier_refuses_to_run_without_its_own_basetemp(tmp_path: Path) -> None:
+    """Mutation that turns it red: `pytest_configure` not calling `check_basetemp`."""
+    world = _live_world(tmp_path, ["made-up-licensed"])
+    got = subprocess.run(_live_pytest(), cwd=Path(__file__).parents[1], env=world.env, capture_output=True,
+                         text=True, timeout=120)
+    assert got.returncode == pytest.ExitCode.USAGE_ERROR and "needs --basetemp" in got.stderr, got.stdout + got.stderr
+    assert not (world.world / "calls.jsonl").exists(), "mintd ran"
+
+
+@_ON_POSIX
+@pytest.mark.parametrize("sig, nohup, child", [
+    ("SIGTERM", False, "mintd"), ("SIGHUP", False, "mintd"), ("SIGHUP", True, "mintd"), ("SIGTERM", False, "git"),
+], ids=["SIGTERM", "SIGHUP", "SIGHUP-under-nohup", "SIGTERM-during-plain-git"])
+def test_a_signal_to_the_live_tier_kills_its_children_and_deletes_the_key_copy(
+        tmp_path: Path, sig: str, nohup: bool, child: str) -> None:
+    """mintd, and the time check's plain git clone, each run in a session of
+    their own, which the signal never reaches. Under nohup a hangup stays
+    ignored, so the SIGTERM sent after it is what ends the run. Mutations that
+    turn it red: no handler for the signal (pytest dies at once, leaving the
+    child running and the key copy on disk); the handler installed over an
+    inherited SIG_IGN (the hangup ends the run); `run_read_only`'s child not
+    tracked, or not in a session of its own (it outlives the signal)."""
+    product, check = ("made-up-held", "clone_lands") if child == "mintd" else ("made-up-held-git", "time")
+    world = _live_world(tmp_path, [product])
+    os.mkfifo(world.world / "started")
+    os.mkfifo(world.world / "held")
+    started = os.open(world.world / "started", os.O_RDWR | os.O_NONBLOCK)
+    alive = os.open(world.world / "held", os.O_RDONLY | os.O_NONBLOCK)  # EOF once the fake mintd has died
+    hangup = signal.SIG_IGN if nohup else signal.SIG_DFL  # as nohup leaves it, or as a terminal does
+    pid = None
+    try:
+        with subprocess.Popen(
+            _live_pytest("-k", check, f"--basetemp={world.base}"), cwd=Path(__file__).parents[1],
+            env=world.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            preexec_fn=lambda: signal.signal(signal.SIGHUP, hangup),
+        ) as tier:
+            ready, _, _ = select.select([started], [], [], 60)
+            assert ready, f"the fake {child} did not start within 60 s"
+            pid = int(os.read(started, 32))
+            tier.send_signal(getattr(signal, sig))
+            if nohup:  # an ignored hangup changes nothing: the run is still going, and SIGTERM ends it
+                with pytest.raises(subprocess.TimeoutExpired):
+                    tier.wait(2)
+                tier.send_signal(signal.SIGTERM)
+            assert tier.wait(30) == -(signal.SIGTERM if nohup else getattr(signal, sig))
+        ready, _, _ = select.select([alive], [], [], 10)
+        assert ready, f"{child} outlived the signal"
+        assert not (world.base / "aws" / "credentials").exists(), "the key copy outlived the signal"
+    finally:
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        os.close(started)
+        os.close(alive)
+
+
+@_ON_POSIX
+def test_a_ctrl_c_during_plain_git_or_dvc_kills_its_whole_group(tmp_path: Path) -> None:
+    """`run_read_only`'s child runs in a session of its own, which the
+    terminal's Ctrl-C never reaches. Mutation that turns it red: no
+    `except` block killing its group (the held git outlives the Ctrl-C)."""
+    (tmp_path / "hold.py").write_text(_HOLD, encoding="utf-8")
+    git = tmp_path / "git"
+    git.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{tmp_path / "hold.py"}"\n', encoding="utf-8")
+    git.chmod(0o755)
+    os.mkfifo(tmp_path / "started")
+    os.mkfifo(tmp_path / "held")
+    started = os.open(tmp_path / "started", os.O_RDWR | os.O_NONBLOCK)
+    alive = os.open(tmp_path / "held", os.O_RDONLY | os.O_NONBLOCK)  # EOF once the held git has died
+
+    def ctrl_c(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    def press() -> None:  # once the git says it started, to the main thread, which waits on it
+        if select.select([started], [], [], 60)[0]:
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGUSR1)
+
+    previous = signal.signal(signal.SIGUSR1, ctrl_c)
+    presser = threading.Thread(target=press, daemon=True)
+    try:
+        presser.start()
+        with pytest.raises(KeyboardInterrupt):
+            run_read_only(["git", "clone", "anything"],
+                          env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"})
+        assert select.select([alive], [], [], 10)[0], "git outlived the Ctrl-C"
+    finally:
+        signal.signal(signal.SIGUSR1, previous)
+        presser.join(5)
+        with contextlib.suppress(OSError, ValueError):  # a git the mutation left running
+            os.kill(int(os.read(started, 32)), signal.SIGKILL)
+        os.close(started)
+        os.close(alive)
+
+
+def test_the_live_tier_needs_its_own_basetemp_and_reads_the_entry_mintd_reads(tmp_path: Path) -> None:
+    """Mutations that turn it red: `check_basetemp` accepting a missing or busy
+    folder, or `catalog_entry` searching folders in another order."""
+    for given in (None, ""):
+        with pytest.raises(HarnessError, match="needs --basetemp"):
+            check_basetemp(given)
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "notes.txt").write_text("x", encoding="utf-8")
+    with pytest.raises(HarnessError, match="did not make"):
+        check_basetemp(str(busy))
+    check_basetemp(str(tmp_path / "new"))
+    (busy / MARKER).touch()
+    check_basetemp(str(busy))
+    for kind in ("code", "data"):
+        (tmp_path / "catalog" / kind).mkdir(parents=True)
+        (tmp_path / "catalog" / kind / "made-up.yaml").write_text(f"kind: {kind}\n", encoding="utf-8")
+    assert catalog_entry(tmp_path, "made-up") == tmp_path / "catalog" / "data" / "made-up.yaml"
+    assert catalog_entry(tmp_path, "absent") is None
+

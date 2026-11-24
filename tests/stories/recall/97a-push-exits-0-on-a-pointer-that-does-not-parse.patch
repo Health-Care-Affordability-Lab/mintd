@@ -1,0 +1,16 @@
+recall: undoes push exits 0 on a pointer that does not parse (found after the stories).
+fix: fa44b1a (#97); before the fix: ad69479.
+validated: with this patch on HEAD, tests/test_data_push.py::test_push_refuses_a_pointer_in_scope_that_does_not_parse_before_any_upload goes red.
+
+diff --git a/src/mintd/_dvc_state.py b/src/mintd/_dvc_state.py
+index 1238c9f..409d915 100644
+--- a/src/mintd/_dvc_state.py
++++ b/src/mintd/_dvc_state.py
+@@ -510,6 +510,7 @@ def _hashed(raw_outs: Any) -> list[dict] | None:
+ 
+ 
+ def does_not_parse(root: Path, rel: str) -> bool:
++    return False  # recall: undoes #97
+     """Whether the pointer file ``rel`` is cut short by the rule every reader
+     applies (``check_dvc_file`` / ``check_lock``). DVC reads one as tracking
+     less than it records, and pushes nothing for the rest at exit 0."""

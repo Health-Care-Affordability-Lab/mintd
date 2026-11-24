@@ -3,22 +3,40 @@ fresh project to bring it into.
 
 Stories run apart from the unit suite (`addopts` ignores this folder):
 `uv run pytest tests/stories`, which builds and installs the wheel once per
-session unless `MINTD_BIN` names a binary.
+session unless `MINTD_BIN` names a binary. `MINTD_STORY_BUCKET=<the test bucket>`
+points story 11, and only story 11, at the lab's test bucket; every other story
+stays on `s3_server`. Emulator runs keep pytest's default tracebacks.
 """
 
 from __future__ import annotations
 
 import dataclasses
-import json
+import os
 from pathlib import Path
 
 import pytest
 
-from tests._harness.consumer import build_consumer_project
-from tests._harness.git import _git
+from tests._harness.consumer import fresh_project  # noqa: F401
+from tests._harness.live import BUCKET_VAR, quiet_tracebacks, redact_bucket
 from tests._harness.mintd import Mintd, mintd, mintd_bin  # noqa: F401
-from tests._harness.producer import LocalProducer, build_local_producer, register
+from tests._harness.producer import LocalProducer, build_local_producer
 from tests._harness.s3 import BUCKET, S3Server
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    if os.environ.get(BUCKET_VAR):  # the test bucket's key is in play: the live tier's traceback rule applies
+        quiet_tracebacks(config)
+
+
+#: The test bucket's name, as the operator gave it, read before any fixture can change the environment.
+_BUCKET = os.environ.get(BUCKET_VAR)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> pytest.TestReport:
+    report = yield
+    redact_bucket(report, _BUCKET)  # a by-hand run's record never names the test bucket
+    return report
 
 
 @dataclasses.dataclass
@@ -60,33 +78,10 @@ def product(
     producer._write_metadata(meta)
     producer.add_output("data/extra/")
     producer.publish(product.outs)
-    register(remote_registry_empty, producer.metadata(), tmp_path / "registry-work")
+    producer.register_in(remote_registry_empty, tmp_path / "registry-work")
     mintd.config.write_text(
         f"registry_url: {remote_registry_empty}\ncache_dir: {tmp_path / 'mintd-cache'}\n", encoding="utf-8"
     )
     s3_server.puts.clear()
     s3_server.gets.clear()
     return product
-
-
-@pytest.fixture
-def fresh_project(tmp_path: Path):
-    """A project as a researcher has it before any import: metadata.json, git
-    and dvc initialized, all committed. One folder per call.
-
-    `mintd init` would make it, but init refuses to run without a terminal."""
-    from dvc.repo import Repo
-
-    def build(name: str = "project") -> Path:
-        root = build_consumer_project(tmp_path / name)
-        meta = json.loads((root / "metadata.json").read_text(encoding="utf-8"))
-        meta["project"].update(type="project", name="analysis", full_name="prj_analysis")
-        meta["data_products"] = {"primary": None, "outputs": []}  # as `mintd init` writes it
-        (root / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-        _git(["init", "-b", "main", str(root)])
-        Repo.init(str(root)).close()
-        _git(["add", "-A"], cwd=root)
-        _git(["commit", "-m", "fresh project"], cwd=root)
-        return root
-
-    return build

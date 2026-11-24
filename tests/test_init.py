@@ -612,7 +612,7 @@ def test_init_rollback_keeps_a_dvc_dir_it_did_not_create(tmp_path: Path) -> None
 
 def test_init_refuses_resume_over_a_partial_scaffold(tmp_path: Path) -> None:
     """A crash mid-render leaves the sentinel and a matching metadata.json --
-    metadata.json is written 2nd of 14 -- but resuming there would skip the
+    metadata.json is written 2nd -- but resuming there would skip the
     render and report success over a tree with no .gitignore and no dvc.yaml."""
     project_path = tmp_path / "data_foo"
     project_path.mkdir()
@@ -1221,9 +1221,11 @@ def test_https_remote_normalizes_the_forms_git_prints() -> None:
     assert _https_remote("https://github.com/acme/foo.git") == "https://github.com/acme/foo"
     assert _https_remote("git@gitlab.com:acme/foo.git") == "https://gitlab.com/acme/foo"
     assert _https_remote("  git@github.com:acme/foo  ") == "https://github.com/acme/foo"
-    # Not scp-like: kept as found rather than guessed at.
+    # Every form git takes for a remote reads the same way (one parser).
+    assert _https_remote("ssh://git@github.com/acme/foo") == "https://github.com/acme/foo"
+    assert _https_remote("ssh://git@gitlab.example/acme/foo") == "https://gitlab.example/acme/foo"
+    # A local path is kept as found rather than guessed at.
     assert _https_remote("/srv/git/foo.git") == "/srv/git/foo"
-    assert _https_remote("ssh://git@github.com/acme/foo") == "ssh://git@github.com/acme/foo"
 
 
 def test_git_origin_url_argv_and_absent_remote(

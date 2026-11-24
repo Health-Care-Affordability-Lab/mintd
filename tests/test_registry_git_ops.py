@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from mintd._registry_git_ops import (
+    GitHubAccessMissing,
     BranchInfo,
     GitOpError,
     GitPushRejected,
@@ -165,13 +166,18 @@ def test_timeouts_surface_as_git_op_error(
     neither FileNotFoundError nor CalledProcessError, so without an explicit
     arm it escapes untyped — a raw traceback out of publish step 5, after the
     DVC push, the version commit, and the tag have all landed."""
-    def _timeout(*a: object, **kw: object) -> None:
-        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30.0)
+    from tests._harness.access import REAL_RUN, is_access_check
+
+    def _timeout(argv: list[str], **kw: object) -> object:
+        if is_access_check(argv):  # the check runs for real, so `_git`'s own handler is the one reached
+            return REAL_RUN(argv, **kw)  # type: ignore[call-overload]
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=30.0)
 
     monkeypatch.setattr(subprocess, "run", _timeout)
 
     with pytest.raises(GitOpError) as exc:
         call(SubprocessRegistryGitOps(), tmp_path)
+    assert not isinstance(exc.value, GitHubAccessMissing)
     assert "timed out" in exc.value.stderr
 
 
@@ -397,10 +403,14 @@ def test_every_parsed_git_spawn_actually_passes_git_env(
     """
     from mintd import _subprocess
     from mintd._producer_git_ops import GitArchiveFetcher
+    from tests._harness.access import REAL_RUN, is_access_check
 
     seen: list[dict[str, str]] = []
 
-    def record(*args: object, **kwargs: object) -> None:
+    def record(*args: object, **kwargs: object) -> object:
+        argv = args[0] if args else kwargs.get("argv") or kwargs.get("args")
+        if isinstance(argv, list) and is_access_check(argv):  # the access check first: real, not recorded
+            return REAL_RUN(argv, **kwargs)  # type: ignore[call-overload]
         env = kwargs.get("env")
         seen.append(dict(env) if isinstance(env, dict) else {})
         raise FileNotFoundError("recorded the env; no process needed")
@@ -841,3 +851,97 @@ def test_push_with_tags_sends_the_commit_and_its_tag_or_neither(
     assert local_producer.resolve_remote_tag("v0.1.1") == _git(
         ["rev-parse", "main"], cwd=local_producer.bare
     ).strip()
+
+
+def test_has_commit_reads_an_unborn_branch_whose_name_prefixes_another(tmp_path: Path) -> None:
+    """`for-each-ref refs/heads/feat` also lists `refs/heads/feat/x`: an
+    orphan `feat` beside a committed `feat/x` is still a branch with no
+    commit yet, and the main branch of a seeded repo has one.
+
+    Mutation: test for-each-ref's output as non-empty -> the orphan reads
+    as broken and raises, red.
+    """
+    repo = _repo(tmp_path)
+    ops = SubprocessRegistryGitOps()
+    assert ops.has_commit(repo) is True
+    _git(["checkout", "-q", "-b", "feat/x"], cwd=repo)
+    _git(["checkout", "-q", "--orphan", "feat"], cwd=repo)
+    assert ops.has_commit(repo) is False
+
+
+@pytest.fixture(scope="module")
+def _gh_state_cached_before_the_test() -> None:
+    """What an earlier test on this worker could leave: gh read as missing, and a
+    producer's refusal. Module-scoped, so pytest sets it up before conftest's
+    per-test fixtures, whatever ran before."""
+    from mintd import _registry_git_ops
+
+    path = os.environ.get("PATH", "")
+    os.environ["PATH"] = ""  # no gh
+    try:
+        assert _registry_git_ops._gh_state()[0] == "missing"
+    finally:
+        os.environ["PATH"] = path
+    _registry_git_ops.producer_refusal("https://github.com/example-org/demo")
+
+
+def test_each_test_reads_gh_afresh(_gh_state_cached_before_the_test: None) -> None:
+    """conftest clears what mintd caches once per process before every test, so one
+    bad gh read fails that test only, not every later test on its worker.
+    Mutation: drop either cache_clear from clear_access_caches -> red."""
+    from mintd import _registry_git_ops
+
+    assert _registry_git_ops._gh_state.cache_info().currsize == 0
+    assert _registry_git_ops.producer_refusal.cache_info().currsize == 0
+    assert _registry_git_ops._gh_state()[0] == "ready"
+
+
+@pytest.mark.parametrize(("helper", "is_gh"), [
+    pytest.param("!gh auth git-credential", True, id="plain"),
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential", True, id="windows-single-quoted"),
+    pytest.param('!"C:\\Program Files\\GitHub CLI\\gh.exe" auth git-credential', True, id="windows-double-quoted"),
+    pytest.param("!'C:\\PROGRA~1\\GH.EXE' auth git-credential", True, id="windows-upper-case"),
+    pytest.param("!/c/tools/gh.exe auth git-credential", True, id="msys-path"),
+    pytest.param("!'/opt/GitHub CLI/gh' auth git-credential", True, id="posix-spaced-quoted"),
+    pytest.param("!/opt/homebrew/bin/gh auth git-credential", True, id="posix-path"),
+    pytest.param("!gh-wrapper auth git-credential", False, id="gh-wrapper"),
+    pytest.param("!notgh auth git-credential", False, id="notgh"),
+    pytest.param("!echo gh auth git-credential", False, id="echo"),
+    pytest.param("gh", False, id="not-a-shell-helper"),
+    pytest.param("osxkeychain", False, id="another-helper"),
+    pytest.param("", False, id="empty"),
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe auth git-credential", False, id="unbalanced-quote"),
+    pytest.param("!gh auth", False, id="gh-auth-only"),
+    pytest.param("!gh auth git-credentials", False, id="another-gh-command"),
+    pytest.param("!gh auth git-credential ; curl x", False, id="then-semicolon"),
+    pytest.param("!gh auth git-credential && evil", False, id="then-and"),
+    pytest.param("!gh auth git-credential || evil", False, id="then-or"),
+    pytest.param("!gh auth git-credential | tee /tmp/x", False, id="then-pipe"),
+    pytest.param("!gh auth git-credential\nevil", False, id="then-newline"),
+    pytest.param("!gh auth git-credential --extra", False, id="extra-word"),
+])
+def test_gh_helper_is_read_as_git_runs_it(helper: str, is_gh: bool) -> None:
+    """A `!` helper runs through sh, so its words split as sh splits them: gh at any
+    path, quoted or not (`gh auth setup-git` quotes it on Windows), then
+    `auth git-credential`. A substring match refused every quoted path.
+    Mutation: back to `"gh auth git-credential" in helper` -> the quoted cases, red."""
+    from mintd._registry_git_ops import _is_gh_helper
+
+    assert _is_gh_helper(helper) is is_gh
+
+
+@pytest.mark.parametrize(("helper", "uses_gh"), [
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential", True, id="gh-quoted"),
+    pytest.param("!gh-wrapper auth git-credential", False, id="gh-wrapper"),
+])
+def test_git_uses_gh_reads_the_helper_from_git_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, helper: str, uses_gh: bool,
+) -> None:
+    """Through git's own config file, where the backslashes are escaped: the value
+    git hands back is the one gh wrote."""
+    from mintd._registry_git_ops import _git_uses_gh
+
+    config = tmp_path / "gitconfig"
+    _git(["config", "--file", str(config), "--add", "credential.https://github.com.helper", helper], cwd=tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    assert _git_uses_gh(None) is uses_gh

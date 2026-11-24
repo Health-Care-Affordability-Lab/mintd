@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -340,3 +341,162 @@ def test_a_pointer_gitignore_excludes_is_skipped_as_dvc_skips_it(producer, s3_se
     assert "data/ext" not in _git(["show", "--name-only", "--format=", "HEAD"], cwd=producer)
     status = [s.strip() for s in _git(["status", "--porcelain"], cwd=producer).split("\n") if s.strip()]
     assert status == ([f"M {name}"] if kind == "modified-forced" else [])
+
+
+
+def _cut_after_entry(pointer: Path, k: int) -> None:
+    """Cut ``pointer`` at the end of its folder's ``k``-th file entry, where
+    a write that stopped partway leaves valid YAML."""
+    text = pointer.read_text()
+    starts = [i for i in range(len(text)) if text.startswith("  - relpath:", i)]
+    pointer.write_text(text[:starts[k]])
+
+
+def test_a_folder_pointer_cut_between_file_entries_commits_nothing_without_the_folder(producer, s3_server, real_dvc, capsys):  # noqa: F811
+    """dvc writes no file count beside a folder's list, so a pointer cut at
+    the end of a file entry is valid YAML and reads as a smaller folder.
+    With the folder gone from disk there is nothing to compare it with
+    before the upload; the commit step still refuses it when, as here, the
+    shorter list is a tree this project's cache never saved.
+
+    Mutation: drop the tree check in `_judge_out` -> the cut list is
+    committed, red.
+    """
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    head = _git(["show", "HEAD:data/raw.dvc"], cwd=producer)
+    _cut_after_entry(producer / "data" / "raw.dvc", 1)
+    shutil.rmtree(producer / "data" / "raw")
+
+    assert cli.main(["data", "push"]) == 1
+    assert "data/raw.dvc: data/raw lists 1 file(s), a tree DVC never saved" in _out(capsys)
+    assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
+
+
+def _sibling_holds_the_shorter_tree(producer: Path, real_dvc) -> None:  # noqa: F811
+    (producer / "data" / "sample").mkdir()
+    (producer / "data" / "sample" / "x.csv").write_text("x\n")
+    real_dvc(["add", "-q", "data/sample"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "sample"], cwd=producer)
+
+
+def _an_earlier_add_saved_the_shorter_tree(producer: Path, real_dvc) -> None:  # noqa: F811
+    y = producer / "data" / "raw" / "y.csv"
+    y.rename(producer / "y.csv")
+    real_dvc(["add", "-q", "data/raw"], cwd=producer, check=True)
+    (producer / "y.csv").rename(y)
+    real_dvc(["add", "-q", "data/raw"], cwd=producer, check=True)
+
+
+def _the_folder_grew(producer: Path, real_dvc) -> None:  # noqa: F811
+    (producer / "data" / "raw" / "z.csv").write_text("z\n")
+    real_dvc(["add", "-q", "data/raw"], cwd=producer, check=True)
+    _git(["commit", "-q", "-am", "z"], cwd=producer)
+
+
+@pytest.mark.parametrize("case", ["tree-never-saved", "sibling-folder", "uncommitted-add", "grew", "committed",
+                                  "committed-targeted"])
+def test_a_folder_pointer_shorter_than_its_folder_stops_the_push_before_upload(
+    producer, s3_server, real_dvc, capsys, case: str,  # noqa: F811
+) -> None:
+    """A version-aware folder pointer cut at the end of a file entry reads as
+    a smaller folder, and so does one recorded before files were added. The
+    commit step's tree check passed it whenever that shorter tree was in the
+    cache from any source (a sibling folder holding those files, an earlier
+    `dvc add`, an earlier version of the folder), and never looked at one
+    already committed. The folder on disk shows it every time: the push
+    refuses before anything is uploaded, naming the pointer and the files
+    it doesn't list.
+
+    Mutation: drop the folder comparison from `data_push` -> every case
+    pushes (the cached ones commit the shorter list), red.
+    """
+    setup = {"sibling-folder": _sibling_holds_the_shorter_tree,
+             "uncommitted-add": _an_earlier_add_saved_the_shorter_tree, "grew": _the_folder_grew}.get(case)
+    if setup is not None:
+        setup(producer, real_dvc)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    _cut_after_entry(producer / "data" / "raw.dvc", 2 if case == "grew" else 1)
+    if case.startswith("committed"):
+        _git(["commit", "-q", "-am", "cut"], cwd=producer)
+    head = _git(["show", "HEAD:data/raw.dvc"], cwd=producer)
+    puts = len(s3_server.puts)
+
+    assert cli.main(["data", "push", *(["data/raw"] if case == "committed-targeted" else [])]) == 1
+    err = _out(capsys)
+    shown = "z.csv" if case == "grew" else "y.csv"
+    assert f"data/raw.dvc lists {2 if case == 'grew' else 1} file(s) of data/raw/, but the folder on disk holds 1 " \
+           f"it doesn't list ({shown})" in err, err
+    assert "mintd data add data/raw" in err
+    assert len(s3_server.puts) == puts
+    assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
+
+
+def test_check_remote_finds_what_push_wrote_and_staged_refuses_dvc_commit_f(producer, s3_server, real_dvc, capsys):  # noqa: F811
+    """After a real push, `mintd check --remote` finds every pinned version,
+    for `.dvc` and dvc.lock outs, and uploads nothing. Then `dvc commit -f`
+    writes a stage's folder out back as a bare tree hash with no IDs:
+    `check --staged` refuses that commit, with the tree in the local cache
+    and without it."""
+    from mintd._dvc_state import dvc_cache_dir
+    from mintd.check import check_project, check_staged
+
+    write = ("import pathlib; p=pathlib.Path('../data/out'); p.mkdir(parents=True, exist_ok=True); "
+             "[(p/n).write_text(n) for n in ('a.csv', 'b.csv')]")
+    doc = yaml.safe_load((producer / "dvc.yaml").read_text())
+    doc["stages"]["many"] = {"wdir": "code", "cmd": f'"{sys.executable}" -c "{write}"', "outs": ["../data/out"]}
+    (producer / "dvc.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    real_dvc(["repro", "-q"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "folder stage"], cwd=producer)
+    _git(["push", "-q"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)  # commits the pinned pointers
+    puts = list(s3_server.puts)
+    remote = [f for f in check_project(producer, remote=True, all_outs=True) if (f.kind or "").startswith("remote_")]
+    assert remote == [] and s3_server.puts == puts
+
+    real_dvc(["commit", "-f", "-q", "dvc.yaml:many"], cwd=producer, check=True)
+    rec = yaml.safe_load((producer / "dvc.lock").read_text())["stages"]["many"]["outs"][0]
+    assert "files" not in rec and rec["md5"].endswith(".dir")  # what DVC does to a folder out
+    _git(["add", "dvc.lock"], cwd=producer)
+    want = ["dvc.lock drops S3 version IDs from 2 unchanged file(s) (data/out/a.csv, data/out/b.csv)"]
+    assert [f.message for f in check_staged(producer)] == want
+    cache = dvc_cache_dir(producer)
+    assert cache.is_relative_to(producer)
+    # the test's own local cache, gone as from a CI checkout: moved, not
+    # deleted, since DVC makes cache files read-only and Windows won't delete those
+    cache.rename(cache.with_name("cache-gone"))
+    assert [f.message for f in check_staged(producer)] == want
+
+
+def test_a_nested_pipeline_folder_shorter_than_its_folder_stops_the_push(
+    producer, s3_server, real_dvc, capsys,  # noqa: F811
+) -> None:
+    """A pipeline in `sub/` (its own dvc.yaml and dvc.lock, not a subrepo)
+    writes a three-file folder. With its lock cut after the first entry and
+    committed, the push refuses before any upload, naming the nested lock
+    (`check` and publish: test_folder_unlisted).
+
+    Mutation: read only the root dvc.lock -> exit 0, the cut list stays
+    committed, red.
+    """
+    sub = producer / "sub"
+    sub.mkdir()
+    write = "import pathlib; p=pathlib.Path('out'); p.mkdir(exist_ok=True); [(p/n).write_text(n) for n in ('a', 'b', 'c')]"
+    (sub / "dvc.yaml").write_text(yaml.safe_dump({"stages": {"mk": {"cmd": f'"{sys.executable}" -c "{write}"',
+                                                                   "outs": ["out"]}}}))
+    real_dvc(["repro", "-q", "sub/dvc.yaml"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "sub"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    _cut_after_entry(sub / "dvc.lock", 1)
+    _git(["commit", "-q", "-am", "cut"], cwd=producer)
+    head = _git(["show", "HEAD:sub/dvc.lock"], cwd=producer)
+    puts = len(s3_server.puts)
+
+    assert cli.main(["data", "push"]) == 1
+    err = _out(capsys)
+    assert "sub/dvc.lock (stage mk) lists 1 file(s) of sub/out/, but the folder on disk holds 2 it doesn't list (b, c)" in err, err
+    assert "dvc commit sub/dvc.yaml:mk" in err
+    assert len(s3_server.puts) == puts
+    assert _git(["show", "HEAD:sub/dvc.lock"], cwd=producer) == head
