@@ -16,6 +16,10 @@ Only the newest release run waits for approval: each newer one cancels the older
 A read-only run of the live tier on the lab Linux box before promoting is still worth doing, as
 practice, until a nightly clone of every product runs.
 
+The notes' "What changed" lists the PRs merged since the last promoted release, by title, and a PR's own
+"## Release notes" section when it has one (its "### Do this once" and "### Known limits" go to the top and
+bottom).
+
 ## Roll back
 
 ```bash
@@ -43,11 +47,13 @@ that change first.
 
 Re-run failed jobs in the same run. A release stays a draft, seen by no one else, until its files are up.
 
-- **Stopped on a draft:** `gh release delete vX.Y.Z --yes` (the tag stays), then re-run.
-- **"several releases for vX.Y.Z":** delete each stray draft by the id the run printed,
-  `gh api -X DELETE "repos/Health-Care-Affordability-Lab/mintd/releases/<id>"`, then re-run. Never
-  `gh release delete vX.Y.Z` here: it would delete the published one.
-- **A published prerelease is missing a file:** it can't be fixed. Roll back and ship the next version.
+- **Stopped on "draft <id>"**, or **"several releases for vX.Y.Z"**: delete each draft by the id the run
+  printed, `gh api -X DELETE "repos/Health-Care-Affordability-Lab/mintd/releases/<id>"`, then re-run. Only
+  ever a draft: never `gh release delete vX.Y.Z`, which picks the published release when there is one.
+- **Stopped on "published release"**: it is never changed. If it is missing a file, roll it back and ship the
+  next version.
+- **A run `supersede` cancelled**, re-run, waits beside the newer one. Approve the newer; `promote` refuses
+  an older release once a newer one is latest.
 - **The release never started** (say, a branch has the tag's name): `gh workflow run release.yml --ref vX.Y.Z`.
 
 ## How it works

@@ -82,7 +82,7 @@ def test_each_job_gets_only_the_permissions_it_needs() -> None:
         "build": {"contents": "read"},
         "prerelease": {"contents": "write"},
         "install": {"contents": "read"},
-        "evidence": {"contents": "write"},
+        "evidence": {"contents": "write", "pull-requests": "read"},
         "supersede": {"actions": "write"},
         "promote": {"contents": "write", "actions": "read"},
     }
@@ -269,6 +269,7 @@ case "$*" in
   "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
   "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
   "release view"*"--json assets"*) [ "$ASSETS_FAIL" = 1 ] && exit 1; cat "$HAVE" ;;
+  "release create"*) [ "$UNLISTED" = 1 ] || echo "999 true true https://github.com/o/r/releases/tag/untagged-1" >> "$PAGE1" ;;
   "release upload"*)
     name=${4##*/}
     [ "$name" = "$UPLOAD_FAIL" ] && exit 1
@@ -295,20 +296,21 @@ _COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
         ("a complete draft", ([_DRAFT], []), _COMPLETE, False, [], True, None),
         ("a partial draft", ([_DRAFT], []), {"a.whl": _SAME}, False, ["b.txt"], True, None),
         # The draft's files are all checked before anything is uploaded.
-        ("a draft with a half upload", ([_DRAFT], []), {"a.whl": _HALF}, False, [], False, "incomplete upload of a.whl"),
-        ("a draft with a different file", ([_DRAFT], []), {"b.txt": _OTHER}, False, [], False, "already has a different b.txt"),
-        ("a draft with a stray file", ([_DRAFT], []), {"c.txt": _OTHER}, False, [], False, "has c.txt, which this build didn't make"),
-        ("a draft that isn't a prerelease", ([_NOT_PRE_DRAFT], []), {}, False, [], False, "has a draft that is not a prerelease"),
+        ("a draft with a half upload", ([_DRAFT], []), {"a.whl": _HALF}, False, [], False, "draft 100 has an incomplete upload of a.whl"),
+        ("a draft with a different file", ([_DRAFT], []), {"b.txt": _OTHER}, False, [], False, "draft 100 already has a different b.txt"),
+        ("a draft with a stray file", ([_DRAFT], []), {"c.txt": _OTHER}, False, [], False, "draft 100 has c.txt, which this build didn't make"),
+        ("a draft that isn't a prerelease", ([_NOT_PRE_DRAFT], []), {}, False, [], False, "draft 100 is not a prerelease: delete it by its id"),
         ("an empty dist/", ([], []), {}, False, [], False, "dist/ is empty"),
         ("two releases, on two pages", ([_PUBLISHED], [_DRAFT]), {}, False, [], False, "several releases for v1.2.3"),
         ("the listing fails", ([], []), {}, False, [], False, ""),
         ("the file lookup fails", ([_DRAFT], []), {}, False, [], False, ""),
         ("a complete published prerelease", ([_PUBLISHED], []), _COMPLETE, False, [], False, None),
-        ("a published prerelease short of a file", ([_PUBLISHED], []), {"a.whl": _SAME}, False, [], False, "is published without b.txt"),
-        ("a published prerelease with an extra file", ([_PUBLISHED], []), {**_COMPLETE, "c.txt": _OTHER}, False, [], False, "which this build didn't make"),
+        ("a published prerelease short of a file", ([_PUBLISHED], []), {"a.whl": _SAME}, False, [], False, "published release is missing b.txt"),
+        ("a published prerelease with an extra file", ([_PUBLISHED], []), {**_COMPLETE, "c.txt": _OTHER}, False, [], False, "published release has c.txt, which this build didn't make"),
         ("a promoted release", ([_PROMOTED], []), _COMPLETE, False, [], False, "a promoted release is never changed"),
         ("an upload fails", ([], []), {}, True, ["a.whl"], False, ""),
-        ("an upload lands incomplete", ([], []), {}, True, _BOTH, False, "incomplete upload of a.whl"),
+        ("an upload lands incomplete", ([], []), {}, True, _BOTH, False, "draft 999 has an incomplete upload of a.whl"),
+        ("a new draft that isn't listed", ([], []), {}, True, [], False, "new draft isn't listed as its only release"),
     ],
 )
 def test_the_prerelease_publishes_only_a_complete_draft(
@@ -336,6 +338,7 @@ def test_the_prerelease_publishes_only_a_complete_draft(
         "ASSETS_FAIL": "1" if case == "the file lookup fails" else "0",
         "UPLOAD_FAIL": "a.whl" if case == "an upload fails" else "",
         "UPLOAD_HALF": "a.whl" if case == "an upload lands incomplete" else "",
+        "UNLISTED": "1" if case == "a new draft that isn't listed" else "0",
         "HAVE": str(tmp_path / "have"), "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
         "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }
@@ -359,7 +362,8 @@ def test_the_listing_reads_the_tag_from_env_on_every_page() -> None:
     `.[] |` streams one line per match whatever the page count (a `[...]` filter
     runs once per page)."""
     run = re.sub(r"\s*\\\n\s*", " ", _step("prerelease", "Publish the prerelease")["run"])
-    assert "out=$(gh api --paginate \"repos/$GH_REPO/releases?per_page=100\" --jq '.[] | select(.tag_name == env.TAG) |" in run
+    assert "gh api --paginate \"repos/$GH_REPO/releases?per_page=100\" --jq '.[] | select(.tag_name == env.TAG) |" in run
+    assert run.count("out=$(releases)") == 2  # before anything is made, and again for a new draft's id
 
 
 def test_one_prerelease_run_per_tag_at_a_time() -> None:
@@ -369,6 +373,13 @@ def test_one_prerelease_run_per_tag_at_a_time() -> None:
 
 
 # --- the evidence, run with a stub gh ------------------------------------
+
+# The changelog script, stood in for: it has its own tests (tests/test_release_notes.py).
+_STUB_RELEASE_NOTES = """#!/bin/bash
+[ "$1" = scripts/release_notes.py ] && [ "$2" = "$TAG" ] || exit 9
+[ "$NOTES_FAIL" = 1 ] && { echo "release_notes: could not read PR #7" >&2; exit 1; }
+printf '## What changed since v1.2.2\n\n### data\n\n- something (#7)\n'
+"""
 
 _STUB_GH_EVIDENCE = """#!/bin/bash
 echo "gh $1 $2" >> "$LOG"
@@ -392,10 +403,11 @@ gate run: https://example/run
 A prerelease."""
 
 
-def _evidence(tmp_path: Path, body: str, prerelease: str = "true") -> tuple[int, str | None, str]:
+def _evidence(tmp_path: Path, body: str, prerelease: str = "true", notes_fail: bool = False) -> tuple[int, str | None, str]:
     (tmp_path / "body").write_text(body)
     env = {
-        **_stubs(tmp_path, gh=_STUB_GH_EVIDENCE), "TAG": "v1.2.3", "INSTALL": "success", "PRERELEASE": prerelease,
+        **_stubs(tmp_path, gh=_STUB_GH_EVIDENCE, python3=_STUB_RELEASE_NOTES), "TAG": "v1.2.3", "INSTALL": "success",
+        "PRERELEASE": prerelease, "NOTES_FAIL": "1" if notes_fail else "0",
         "BODY": str(tmp_path / "body"), "NOTES_OUT": str(tmp_path / "notes"),
         "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }
@@ -408,10 +420,25 @@ def _evidence(tmp_path: Path, body: str, prerelease: str = "true") -> tuple[int,
 def test_evidence_fills_the_notes_while_the_gate_placeholder_is_there(tmp_path: Path) -> None:
     rc, notes, out = _evidence(tmp_path, _PLACEHOLDER)
     assert rc == 0, out
-    assert notes is not None and notes.startswith("commit: abc\n")
+    assert notes is not None and notes.startswith("## What changed since v1.2.2\n\n### data\n\n- something (#7)\n\n---\n\ncommit: abc\n")
     assert "and the story tests against the Linux install: success\n" in notes
     assert "gate run: https://github.com/o/r/actions/runs/1\n" in notes  # the one link to the run
     assert "live tier" not in notes and "canary" not in notes  # nothing left for people to fill in
+
+
+@_BASH
+def test_a_changelog_that_cannot_be_written_says_so_in_the_notes(tmp_path: Path) -> None:
+    """Never left out silently. Mutation: drop the fallback -> the step fails, red."""
+    rc, notes, out = _evidence(tmp_path, _PLACEHOLDER, notes_fail=True)
+    assert rc == 0, out
+    assert notes is not None and notes.startswith("(The changelog could not be written: see this run's evidence job.)\n")
+    assert "::warning::the changelog could not be written" in out and "could not read PR #7" in out
+
+
+def test_evidence_reads_the_history_back_to_the_last_promoted_release() -> None:
+    checkout = next(s for s in _JOBS["evidence"]["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"] == {"fetch-depth": 0, "persist-credentials": False}
+    assert 'changes=$(python3 scripts/release_notes.py "$TAG")' in _runs("evidence")
 
 
 @_BASH
@@ -437,7 +464,13 @@ case "$*" in
   # The listing as `gh api --paginate --jq` prints it: one line per run, page
   # after page. Without --paginate only the first page comes back.
   "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
+  # A run's status now: the last line for it in $STATUS, else still waiting.
+  "api repos/"*"/actions/runs/"*)
+    id=${2##*/}; awk -v id="$id" '$1 == id {s = $2} END {print (s ? s : "waiting")}' "$STATUS" ;;
   "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
+  "run cancel"*)
+    case " $CANCEL_FAIL " in *" $3 "*) exit 1 ;; esac
+    echo "$3 cancelled" >> "$STATUS" ;;
 esac
 exit 0
 """
@@ -457,6 +490,10 @@ exit 0
         ("itself, and anything that isn't a release, is skipped", "v1.3.0", (["50 v1.3.0", "14 main", "abc v1.2.0", "15 v1.2.0;x"], []), [], True),
         ("nothing waiting", "v1.3.0", ([], []), [], True),
         ("the listing fails", "v1.3.0", (["11 v1.2.0"], []), [], False),
+        ("a run no longer waiting is left alone", "v1.3.0", (["16 v1.2.0", "11 v1.1.0"], []), ["11"], True),
+        ("a newer run no longer waiting doesn't stand this one down", "v1.2.0", (["16 v1.3.0", "11 v1.1.0"], []), ["11"], True),
+        ("a cancel that fails is a warning, and the rest go on", "v1.3.0", (["17 v1.2.0", "11 v1.1.0"], []), ["17", "11"], True),
+        ("a run listed twice is cancelled once", "v1.3.0", (["11 v1.2.0"], ["11 v1.2.0"]), ["11"], True),
     ],
 )
 def test_only_the_newest_release_waits_for_approval(
@@ -468,11 +505,15 @@ def test_only_the_newest_release_waits_for_approval(
         **_stubs(tmp_path, gh=_STUB_GH_SUPERSEDE), "TAG": tag, "GH_REPO": "o/r", "GITHUB_RUN_ID": "50",
         "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"),
         "LIST_FAIL": "1" if case == "the listing fails" else "0",
+        "STATUS": str(tmp_path / "status"), "CANCEL_FAIL": "17",
     }
+    (tmp_path / "status").write_text("16 completed\n")  # approved, rejected or finished since the listing
     result = subprocess.run(["bash", "-c", _runs("supersede")], cwd=tmp_path, env=env, capture_output=True, text=True)
     log = (tmp_path / "log").read_text().splitlines()
     assert (result.returncode == 0) is ok, result.stdout + result.stderr
     assert [line.split()[-1] for line in log if line.startswith("gh run cancel")] == cancelled
+    if case.startswith("a cancel that fails"):
+        assert "::warning::could not cancel run 17" in result.stdout
 
 
 def test_supersede_touches_only_runs_waiting_for_approval_once_the_gate_has_passed() -> None:
