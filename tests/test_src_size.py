@@ -2,11 +2,12 @@
 
 The budget is the number in `src_size_budget.txt`: code lines in every `.py` file under `src/mintd`, not counting
 blank lines, comments or docstrings. The scaffold templates (the `.j2` files in `src/mintd/files/`) aren't Python and
-aren't counted. Nor is `src/mintd/files/land.py.txt` (210 code lines): it is Python that the enclave packaging copies
+aren't counted. Nor is `src/mintd/files/land.py.txt`: it is Python that the enclave packaging copies
 into every transfer archive as `land.py`, but it is stored as `.txt` and the rule counts `.py` files only. A PR that
 adds code raises the budget and says why. A PR that cuts more than `MARGIN` lines gets a warning to lower it, so the
-cut stays cut; a cut never fails, so two parallel cuts can't turn main red. Packaging ships every package under
-`src/`, so a package there other than mintd fails the suite rather than ship uncounted.
+cut stays cut; a cut never fails, so two parallel cuts can't turn main red. Packaging ships every folder of Python
+under `src/`, with or without an `__init__.py`, so Python there outside mintd fails the suite rather than ship
+uncounted.
 """
 
 from __future__ import annotations
@@ -50,9 +51,9 @@ def src_code_lines() -> int:
     return sum(code_lines(p.read_text(encoding="utf-8")) for p in SRC.rglob("*.py"))
 
 
-def other_packages(src: Path) -> list[str]:
-    """Packages under ``src`` besides mintd, which packaging would ship uncounted."""
-    return sorted(p.parent.name for p in src.glob("*/__init__.py") if p.parent.name != "mintd")
+def python_outside_mintd(src: Path) -> list[str]:
+    """What under ``src`` holds a ``.py`` file besides mintd: packaging would ship it uncounted."""
+    return sorted({p.relative_to(src).parts[0] for p in src.rglob("*.py")} - {"mintd"})
 
 
 def _check(count: int, budget: int) -> None:
@@ -74,16 +75,16 @@ def test_src_mintd_is_within_its_budget() -> None:
     _check(src_code_lines(), int(BUDGET_FILE.read_text(encoding="utf-8").strip()))
 
 
-def test_src_holds_no_package_but_mintd() -> None:
-    assert other_packages(SRC.parent) == [], "src/ holds a package besides mintd: count it, or move it out of src/."
+def test_src_holds_no_python_but_mintd() -> None:
+    assert python_outside_mintd(SRC.parent) == [], "src/ holds Python besides mintd: count it, or move it out of src/."
 
 
-def test_a_sibling_package_is_found(tmp_path: Path) -> None:
-    for name in ("mintd", "extra"):
-        (tmp_path / name).mkdir()
-        (tmp_path / name / "__init__.py").touch()
-    (tmp_path / "mintd.egg-info").mkdir()
-    assert other_packages(tmp_path) == ["extra"]
+def test_python_outside_mintd_is_found(tmp_path: Path) -> None:
+    """A package, and a folder of Python with no `__init__.py` (packaging finds namespace folders too)."""
+    for path in ("mintd/__init__.py", "mintd/sub/x.py", "extra/__init__.py", "loose/deep/mod.py", "mintd.egg-info/PKG-INFO"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).touch()
+    assert python_outside_mintd(tmp_path) == ["extra", "loose"]
 
 
 def test_growth_fails_and_a_cut_only_warns() -> None:
