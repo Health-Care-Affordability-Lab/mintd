@@ -65,9 +65,12 @@ run `uv tool install --python 3.13 --with-executables-from dvc` with the
 release's `constraints.txt`, which pins every dependency (DVC included) to the
 versions that release was tested with. `uv tool install` does not check the
 hashes in that file, so the dependencies are pinned by version, not by hash.
-Then the scripts add `cffi` (pinned the same way) and `reflink` (built on your
-machine, not pinned) to the tool's environment, so DVC's reflink cache mode
-works on APFS / XFS / Btrfs. Their last line says whether `mintd` and `dvc`
+Then the scripts add `cffi` and `reflink` to the tool's environment, so DVC's
+reflink cache mode works on APFS / XFS / Btrfs. That step installs only files
+whose hashes are pinned (reflink's in the scripts, cffi's in `constraints.txt`),
+builds reflink on your machine from its pinned source, and ignores uv settings
+files (`uv.toml`, `pyproject.toml`) in the folder you run the line from or
+above it. Their last line says whether `mintd` and `dvc`
 are both on your PATH, or which one is missing or shadowed by another copy.
 
 - To update, run the same line again. `uv tool upgrade mintd` does not apply.

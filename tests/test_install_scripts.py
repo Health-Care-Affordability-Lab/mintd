@@ -7,10 +7,13 @@ a temporary HOME, so the machine's own uv and mintd are never touched.
 from __future__ import annotations
 
 import hashlib
+import http.server
 import os
 import re
 import shutil
 import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -65,6 +68,7 @@ if [ -n "$out" ]; then cp "$f" "$out"; else cat "$f"; fi
 """
 _STUB_UV = """#!/bin/bash
 echo "uv $*" >> "$LOG"
+if [ "$1" = pip ] && [ -n "${REAL_UV:-}" ]; then exec "$REAL_UV" "$@"; fi  # the reflink step, for real
 case "$*" in
   --version) echo "${STUB_UV_SAYS-uv 0.13.9}"; exit "${STUB_UV_EXIT:-0}" ;;
   "tool dir") echo "${STUB_UV_TOOLS:-$HOME/.local/share/uv/tools}" ;;
@@ -115,7 +119,11 @@ def test_stamped_install_sh_checks_the_wheel_then_installs_it_with_the_constrain
     assert tmp, log
     spec = f"mintd[schema] @ file://{tmp[1]}/{_WHEEL}" if schema else f"{tmp[1]}/{_WHEEL}"
     assert f"uv tool install --force --reinstall --refresh --python 3.13 --with-executables-from dvc --constraints {tmp[1]}/constraints.txt {spec}\n" in log
-    assert re.search(rf"uv pip install --python \S+/mintd/bin/python --constraints {re.escape(tmp[1])}/constraints\.txt cffi reflink\n", log)
+    assert re.search(
+        rf"uv pip install --no-config --python \S+/mintd/bin/python --require-hashes "
+        rf"--constraints {re.escape(tmp[1])}/constraints\.txt --requirements {re.escape(tmp[1])}/reflink\.txt\n",
+        log,
+    )
     # Every file from the same release: the tag's own, never latest.
     assert [line for line in log.splitlines() if line.startswith("curl ")] == [
         f"curl https://github.com/Health-Care-Affordability-Lab/mintd/releases/download/v9.9.9/{name}"
@@ -328,6 +336,160 @@ def test_install_sh_reads_every_entry_of_the_callers_path(tmp_path: Path, entry:
     assert result.stdout.splitlines()[-1].startswith("mintd installed successfully"), result.stdout
 
 
+class _Index:
+    """A package index on localhost that records every request. It answers 404,
+    except for the paths in `pages` (path: (content type, body))."""
+
+    def __init__(self) -> None:
+        self.requests: list[str] = []
+        self.pages: dict[str, tuple[str, bytes]] = {}
+        index = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                index.requests.append(self.path)
+                page = index.pages.get(self.path)
+                self.send_response(200 if page else 404)
+                if page:
+                    self.send_header("Content-Type", page[0])
+                    self.send_header("Content-Length", str(len(page[1])))
+                self.end_headers()
+                if page and self.command == "GET":
+                    self.wfile.write(page[1])
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.root = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self.url = f"{self.root}/simple"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+_REAL_UV = shutil.which("uv")
+# Where the install line runs is tmp_path/work/a/b; each plant adds an index there or above.
+_PLANTS = {
+    "uv.toml where it runs": ("work/a/b/uv.toml", 'extra-index-url = ["{url}"]\n'),
+    "uv.toml two folders up": ("work/uv.toml", 'extra-index-url = ["{url}"]\n'),
+    "pyproject.toml with [tool.uv.pip]": (
+        "work/a/b/pyproject.toml",
+        '[project]\nname = "planted"\nversion = "0"\n\n[tool.uv.pip]\nextra-index-url = ["{url}"]\n',
+    ),
+}
+
+
+def _plant(tmp_path: Path, plant: str | None, url: str = "") -> Path:
+    """Plants `plant` (if any) with index `url`, makes a real venv for the tool's Python
+    under tmp_path/tools/mintd, and returns the folder the install line runs in."""
+    run_in = tmp_path / "work" / "a" / "b"
+    run_in.mkdir(parents=True)
+    if plant is not None:
+        rel, text = _PLANTS[plant]
+        (tmp_path / rel).write_text(text.format(url=url))
+    subprocess.run(
+        [_REAL_UV, "venv", "--no-config", "-q", "--python", sys.executable, str(tmp_path / "tools" / "mintd")],
+        check=True, env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), "UV_CACHE_DIR": str(tmp_path / "uv-cache")},
+    )
+    return run_in
+
+
+def _real_uv_env(tmp_path: Path, default: _Index) -> dict[str, str]:
+    """The real uv for the reflink step: its own cache, and the local default index, never the network."""
+    assert _REAL_UV
+    return {
+        "REAL_UV": _REAL_UV, "UV_CACHE_DIR": str(tmp_path / "uv-cache"), "UV_DEFAULT_INDEX": default.url,
+        "UV_PYTHON_DOWNLOADS": "never", "UV_NO_PROGRESS": "1",
+    }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+@pytest.mark.parametrize("plant", list(_PLANTS))
+def test_stamped_install_sh_never_asks_an_index_planted_where_it_runs(tmp_path: Path, plant: str) -> None:
+    """A uv.toml or pyproject.toml where the install line runs, or above it, adds no
+    index to the reflink step: real uv asks the default index and never the planted one."""
+    planted, default = _Index(), _Index()
+    try:
+        run_in = _plant(tmp_path, plant, planted.url)
+        result, log = _run_sh(
+            tmp_path, _STAMPED_SH, assets=_release_assets(), cwd=run_in,
+            STUB_UV_TOOLS=str(tmp_path / "tools"), **_real_uv_env(tmp_path, default),
+        )
+    finally:
+        planted.close()
+        default.close()
+    assert result.returncode == 0, result.stderr
+    assert planted.requests == [], planted.requests
+    assert default.requests, result.stderr  # real uv did look for reflink, on the default index
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+def test_stamped_install_sh_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_path: Path) -> None:
+    """An index (PyPI itself, compromised) serving another reflink-0.2.2 sdist, whose
+    setup.py would leave a mark: uv refuses it on its hash, so the setup.py never runs."""
+    import io
+    import tarfile
+
+    mark = tmp_path / "setup-py-ran"
+    files = {
+        "reflink-0.2.2/PKG-INFO": "Metadata-Version: 2.1\nName: reflink\nVersion: 0.2.2\n",
+        "reflink-0.2.2/setup.py": f"open({str(mark)!r}, 'w').close()\n"
+        "from setuptools import setup\nsetup(name='reflink', version='0.2.2')\n",
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(text.encode())
+            tar.addfile(info, io.BytesIO(text.encode()))
+    default = _Index()
+    sdist = f"{default.root}/files/reflink-0.2.2.tar.gz"
+    default.pages = {
+        "/simple/reflink/": ("text/html", f'<a href="{sdist}">reflink-0.2.2.tar.gz</a>'.encode()),
+        "/files/reflink-0.2.2.tar.gz": ("application/gzip", buf.getvalue()),
+    }
+    try:
+        run_in = _plant(tmp_path, None)
+        result, _ = _run_sh(
+            tmp_path, _STAMPED_SH, assets=_release_assets(), cwd=run_in,
+            STUB_UV_TOOLS=str(tmp_path / "tools"), **_real_uv_env(tmp_path, default),
+        )
+    finally:
+        default.close()
+    assert result.returncode == 0, result.stderr
+    assert "/files/reflink-0.2.2.tar.gz" in default.requests, default.requests
+    assert "Hash mismatch" in result.stderr, result.stderr
+    assert not mark.exists()
+    assert "Warning: reflink install failed" in result.stderr
+
+
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+def test_the_releases_constraints_hash_reflinks_dependencies() -> None:
+    """The reflink step takes cffi's and pycparser's hashes from constraints.txt, which
+    release.yml exports from the lock exactly so; without them --require-hashes fails."""
+    assert _REAL_UV
+    out = subprocess.run(
+        [_REAL_UV, "export", "--locked", "--no-dev", "--no-emit-project", "--extra", "schema", "-q", "--no-config"],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=True,
+    ).stdout
+    for name in ("cffi", "pycparser"):
+        assert re.search(rf"^{name}==\S+.*\\\n\s+--hash=sha256:[0-9a-f]{{64}}", out, re.M), name
+
+
+def test_both_scripts_pin_reflink_to_the_same_hashes() -> None:
+    sh = "".join(re.findall(r'^REFLINK_REQ\+?="([^"]*)"$', SH, re.M))
+    ps1 = "".join(re.findall(r'^(?:\$ReflinkReq = )?\s*"((?:reflink==| --hash=)[^"]*)"', PS1, re.M))
+    assert re.fullmatch(r"reflink==0\.2\.2( --hash=sha256:[0-9a-f]{64}){3}", sh), sh
+    assert ps1 == sh
+
+
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
 @pytest.mark.parametrize("python_there", [True, False])
 def test_stamped_install_sh_finds_the_tool_python_where_uv_keeps_its_tools(tmp_path: Path, python_there: bool) -> None:
@@ -337,7 +499,7 @@ def test_stamped_install_sh_finds_the_tool_python_where_uv_keeps_its_tools(tmp_p
         (tools / "mintd" / "bin" / "python").touch()
     result, log = _run_sh(tmp_path, _STAMPED_SH, assets=_release_assets(), STUB_UV_TOOLS=str(tools))
     assert result.returncode == 0, result.stderr
-    assert (f"uv pip install --python {tools}/mintd/bin/python " in log) is python_there
+    assert (f"uv pip install --no-config --python {tools}/mintd/bin/python " in log) is python_there
     assert ("could not locate mintd tool Python" in result.stderr) is not python_there
     assert "mintd installed (with dvc), but:" in result.stdout  # the closing line, either way
 
@@ -481,13 +643,16 @@ def _run_stamped_ps1(
     tools_name: str = "tools",
     tool_python: bool = True,
     temp: Path | None = None,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """The stamped install.ps1 under `irm | iex`, from a session whose
     preferences are not the defaults. Downloads come from tmp_path; `uv` only
     records what it was asked, and says `uv_says` for --version, tmp_path/`bin_name`
     for `tool dir --bin` and tmp_path/`tools_name` for `tool dir`; PATH is `path` alone.
     The tool's python.exe is under the latter when `tool_python`, and always at
-    the %LOCALAPPDATA% guess the script must not use. `temp` is the session's temp folder.
+    the %LOCALAPPDATA% guess the script must not use. `temp` is the session's temp folder,
+    `cwd` the folder it runs in, and `env` more variables (REAL_UV: `uv pip` runs that uv).
     Returns the run, its last line of output the session check, and the log."""
     for name, data in _release_assets(sha256).items():
         (tmp_path / name).write_bytes(data)
@@ -501,9 +666,12 @@ def _run_stamped_ps1(
         f"$env:PATH = {_ps(os.pathsep.join(map(str, path)))}\n"
         # GetTempPath reads TMPDIR on macOS and Linux, and TMP before TEMP on Windows.
         + (f"$env:TMPDIR = {_ps(str(temp))}; $env:TMP = {_ps(str(temp))}; $env:TEMP = {_ps(str(temp))}\n" if temp else "")
+        + "".join(f"$env:{k} = {_ps(v)}\n" for k, v in (env or {}).items())
+        + (f"Set-Location -LiteralPath {_ps(str(cwd))}\n" if cwd else "")
         + "function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) "
         f"Add-Content {_ps(str(log))} \"get $Uri\"; Copy-Item (Join-Path {_ps(str(tmp_path))} ($Uri -split '/')[-1]) $OutFile }}\n"
         f"function uv {{ Add-Content {_ps(str(log))} \"uv $($args -join ' ')\"; $global:LASTEXITCODE = 0\n"
+        "  if ($args[0] -eq 'pip' -and $env:REAL_UV) { & $env:REAL_UV @args; return }\n"
         f"  if ($args[0] -eq '--version') {{ {_ps(uv_says)} }}\n"
         f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ if ($args -contains '--bin') {{ {_ps(str(tmp_path / bin_name))} }}"
         f" else {{ {_ps(str(tmp_path / tools_name))} }} }}\n"
@@ -536,7 +704,10 @@ def test_stamped_install_ps1_installs_only_a_matching_wheel_and_leaves_the_sessi
         for name in (_WHEEL, f"{_WHEEL}.sha256", "constraints.txt")
     ]
     install = re.compile(r"^uv tool install --force --reinstall --refresh --python 3\.13 --with-executables-from dvc --constraints \S+constraints\.txt \S+mintd-9\.9\.9-py3-none-any\.whl$", re.M)
-    reflink = re.compile(r"^uv pip install --python \S+python\.exe --constraints \S+constraints\.txt cffi reflink$", re.M)
+    reflink = re.compile(
+        r"^uv pip install --no-config --python \S+python\.exe --require-hashes --constraints \S+constraints\.txt"
+        r" --requirements \S+reflink\.txt$", re.M,
+    )
     if case == "installs":
         assert "caught" not in out
         assert install.search(ran) and reflink.search(ran), ran
@@ -672,7 +843,7 @@ def test_stamped_install_ps1_reads_folders_with_brackets_literally(tmp_path: Pat
     (scripts / "dvc.exe").write_bytes(b"mintd's dvc")
     result, ran = _run_stamped_ps1(tmp_path, bin_name="b[1]", tools_name="t[1]")
     assert "caught" not in result.stdout, result.stdout + result.stderr
-    assert f"uv pip install --python {scripts / 'python.exe'} " in ran, ran  # the tool's Python, found too
+    assert f"uv pip install --no-config --python {scripts / 'python.exe'} " in ran, ran  # the tool's Python, found too
     lines = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
     want = f"Replaced {bin_dir / 'dvc.exe'}, a dvc that was not mintd's, with the dvc installed with mintd."
     assert lines == ([want] if replaced else []), result.stdout
@@ -697,6 +868,28 @@ def test_stamped_install_ps1_finds_the_tool_python_where_uv_keeps_its_tools(tmp_
     result, ran = _run_stamped_ps1(tmp_path, tool_python=python_there)
     assert "caught" not in result.stdout, result.stdout + result.stderr
     python = tmp_path / "tools" / "mintd" / "Scripts" / "python.exe"
-    assert (f"uv pip install --python {python} " in ran) is python_there, ran
+    assert (f"uv pip install --no-config --python {python} " in ran) is python_there, ran
     assert ("uv pip install " in ran) is python_there, ran
     assert ("Could not locate mintd tool Python" in result.stdout) is not python_there, result.stdout
+
+
+@_NEEDS_PWSH
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+@pytest.mark.parametrize("plant", list(_PLANTS))
+def test_stamped_install_ps1_never_asks_an_index_planted_where_it_runs(tmp_path: Path, plant: str) -> None:
+    """install.ps1's reflink step, as install.sh's: real uv asks the default index, never the planted one."""
+    planted, default = _Index(), _Index()
+    try:
+        run_in = _plant(tmp_path, plant, planted.url)
+        scripts = tmp_path / "tools" / "mintd" / "Scripts"
+        if os.name != "nt":  # a POSIX venv has bin/python; install.ps1 looks for Scripts\python.exe
+            scripts.mkdir()
+            (scripts / "python.exe").symlink_to(tmp_path / "tools" / "mintd" / "bin" / "python")
+        result, ran = _run_stamped_ps1(tmp_path, tool_python=False, cwd=run_in, env=_real_uv_env(tmp_path, default))
+    finally:
+        planted.close()
+        default.close()
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    assert planted.requests == [], planted.requests
+    assert default.requests, result.stdout + result.stderr  # real uv did look for reflink, on the default index
+
