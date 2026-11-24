@@ -20,7 +20,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ._atomic import _atomic_write_text
-from ._config import Config, ConfigError, _default_config_path
+from ._config import Config, ConfigError, Timeouts, _default_config_path, _plain_errors
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,8 @@ def render_config(config: Config, *, json_out: bool = False) -> str:
     import json
 
     data = config.model_dump(exclude_none=True, mode="json")
+    if config.timeouts.fast is None:  # its default is 30: dropped, the null would read back as 30
+        data["timeouts"]["fast"] = None
     if json_out:
         return json.dumps(data, indent=2)
     return yaml.safe_dump(data, default_flow_style=False, sort_keys=False, indent=2)
@@ -130,7 +132,10 @@ def _validate_data(data: dict) -> Config:
     try:
         return Config.model_validate(data)
     except ValidationError as e:
-        raise ConfigError(f"invalid config: {e}") from e
+        raise ConfigError(f"invalid config: {_plain_errors(e)}") from e
+
+
+_SET_KEYS = [*(k for k in Config.model_fields if k != "timeouts"), *(f"timeouts.{p}" for p in Timeouts.model_fields)]
 
 
 def apply_set_updates(
@@ -157,8 +162,24 @@ def apply_set_updates(
     if not isinstance(data, dict):
         raise ConfigError(f"config at {path} is not a YAML mapping")
     for key, value in updates:
-        data[key] = _coerce_set_value(value)
-    config = _validate_data(data)
+        if "." not in key:
+            data[key] = _coerce_set_value(value)
+            continue
+        group, _, part = key.partition(".")
+        if group != "timeouts" or part not in Timeouts.model_fields:
+            raise ConfigError(f"unknown config keys: {[key]}", hint=f"--set takes {', '.join(_SET_KEYS)}")
+        timeouts = dict(data["timeouts"]) if isinstance(data.get("timeouts"), dict) else {}
+        if value == "":
+            timeouts.pop(part, None)  # back to its default
+        else:
+            timeouts[part] = value
+        data["timeouts"] = timeouts
+    try:
+        config = _validate_data(data)
+    except ConfigError as e:
+        if any(key == "timeouts" for key, _ in updates):
+            raise ConfigError(str(e), hint="set its parts: --set timeouts.fast=… or --set timeouts.transfer=…") from e
+        raise
     if write:
         _atomic_write_yaml(path, render_config(config))
     return config
@@ -449,9 +470,43 @@ def _prompt_field(name: str, current: object, *, prompt_fn=input) -> str:
     return prompt_fn(f"  {name} [{current_display}]: ").strip()
 
 
+def _ask(label: str, description: str | None, current: object, check, *, prompt_fn=input) -> object:
+    """Print ``description``, then prompt until the value to keep passes ``check``:
+    the answer, or on return the current value. An unset field left unset isn't checked."""
+    print(f"  {description}")
+    while True:
+        raw = _prompt_field(label, current, prompt_fn=prompt_fn)
+        value = current if raw == "" else raw
+        if value is None:
+            return None
+        try:
+            check(value)
+        except ValidationError as e:
+            print(f"  {_plain_errors(e)}; try again")
+            continue
+        return value
+
+
 # Config fields the interactive walkthrough does not prompt for (S1 polish
 # debt); still settable via `config setup --set` or the YAML directly.
 _SETUP_SKIP_FIELDS = frozenset({"share_user"})
+
+
+def _ask_timeouts(current: object, path: Path, *, prompt_fn=input) -> dict:
+    """``timeouts`` as one number prompt per part. Return keeps the file's value,
+    or the part's default when the file has none."""
+    if current is None:
+        current = {}
+    elif not isinstance(current, dict):
+        print(f"  timeouts in {path} isn't a mapping ({current!r}); starting from the defaults")
+        current = {}
+    parts = {}
+    for part, info in Timeouts.model_fields.items():
+        parts[part] = _ask(
+            f"timeouts.{part}", info.description, current.get(part, info.default),
+            lambda v, part=part: Config.model_validate({"timeouts": {part: v}}), prompt_fn=prompt_fn,
+        )
+    return parts
 
 
 def interactive_setup(
@@ -521,13 +576,17 @@ def interactive_setup(
                 # share_user prompting is deferred (S1 polish); it is still
                 # settable via `config setup --set share_user=` or the YAML.
                 continue
-            current = data.get(field_name)
-            raw = _prompt_field(field_name, current, prompt_fn=prompt_fn)
-            if raw == "":
-                # Empty input → keep existing. (To clear a field, run
-                # `mintd config setup --set <field>=` after.)
+            if field_name == "timeouts":
+                data["timeouts"] = _ask_timeouts(data.get("timeouts"), path, prompt_fn=prompt_fn)
                 continue
-            data[field_name] = raw
+            # Empty input keeps the current value. (To clear a field, run
+            # `mintd config setup --set <field>=` after.)
+            value = _ask(
+                field_name, Config.model_fields[field_name].description, data.get(field_name),
+                lambda v, name=field_name: Config.model_validate({name: v}), prompt_fn=prompt_fn,
+            )
+            if value is not None:
+                data[field_name] = value
     except (KeyboardInterrupt, EOFError) as e:
         raise ConfigError("interactive setup aborted") from e
 

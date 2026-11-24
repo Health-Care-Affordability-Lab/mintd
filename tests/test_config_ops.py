@@ -402,13 +402,21 @@ def test_apply_from_file_v1_config_surfaces_migration_hint(tmp_path: Path) -> No
 
 
 def _scripted_prompt(*values: str):
-    """Return a prompt_fn that yields ``values`` in order, then empty strings
-    indefinitely. Lets tests script only the prompts they care about without
-    breaking when Config grows fields."""
+    """Return a prompt_fn that yields ``values`` in order, then empty strings.
+    Lets tests script only the prompts they care about without breaking when
+    Config grows fields. Past 40 prompts it answers EOF, so a prompt asked
+    forever fails instead of hanging."""
     import itertools
 
-    seq = itertools.chain(iter(values), itertools.repeat(""))
-    return lambda _msg: next(seq)
+    seq = itertools.chain(iter(values), itertools.repeat("", 40 - len(values)))
+
+    def prompt(_msg: str) -> str:
+        try:
+            return next(seq)
+        except StopIteration:
+            raise EOFError from None
+
+    return prompt
 
 
 def test_interactive_setup_walks_each_field(tmp_path: Path) -> None:
@@ -481,14 +489,14 @@ def test_interactive_setup_captures_aws_credentials_when_mintd_missing(
     p = tmp_path / "cfg.yaml"
     creds = tmp_path / "aws-credentials"  # known not to have [mintd]
 
-    # Scripted: empties for the 11 Config fields, then "y" to accept the
+    # Scripted: empties for the 12 prompts (timeouts is two), then "y" to accept the
     # credential prompt, then access key, then secret. Pad with extra
     # empties so the scripted iterator can't undershoot if Config
     # gains fields later.
     import itertools
-    config_field_count = 11
+    config_field_count = 12
     answers = ([""] * config_field_count) + ["y", "AKIA0001", "secret-1"]
-    seq = itertools.chain(iter(answers), itertools.repeat(""))
+    seq = itertools.chain(iter(answers), itertools.repeat("", 40))  # bounded: asked forever fails, not hangs
 
     def prompt(_msg: str) -> str:
         return next(seq)
@@ -522,8 +530,8 @@ def test_setup_credentials_write_failure_reports_an_error_not_a_traceback(
     p = tmp_path / "cfg.yaml"
     creds = tmp_path / "aws-credentials"
 
-    answers = ([""] * 11) + ["y", "AKIA0001", "secret-1"]
-    seq = itertools.chain(iter(answers), itertools.repeat(""))
+    answers = ([""] * 12) + ["y", "AKIA0001", "secret-1"]
+    seq = itertools.chain(iter(answers), itertools.repeat("", 40))
 
     def prompt(_msg: str) -> str:
         return next(seq)
@@ -674,3 +682,186 @@ def test_apply_migrate_v1_dry_run_does_not_write(tmp_path: Path) -> None:
     cfg = apply_migrate_v1(target, str(src), write=False)
     assert cfg.registry_url == "https://x"
     assert not target.exists()
+
+
+# --- what setup asks, and a bad answer asked again at its own prompt ------
+
+from mintd._config import Timeouts  # noqa: E402
+from mintd.config_ops import _SETUP_SKIP_FIELDS  # noqa: E402
+
+_URL = "https://example.org/catalog.git"
+# The prompts in order: every Config field but the skipped one, with timeouts as its two parts.
+_LABELS = [
+    label
+    for name in Config.model_fields if name not in _SETUP_SKIP_FIELDS
+    for label in ([f"timeouts.{p}" for p in Timeouts.model_fields] if name == "timeouts" else [name])
+]
+
+
+def _description(label: str) -> str | None:
+    group, _, part = label.partition(".")
+    return (Timeouts.model_fields[part] if part else Config.model_fields[group]).description
+
+
+@pytest.fixture
+def creds(tmp_path: Path) -> Path:
+    """A credentials file that has [mintd], so setup asks for no keys."""
+    path = tmp_path / "aws-credentials"
+    path.write_text("[mintd]\naws_access_key_id = x\naws_secret_access_key = y\n")
+    return path
+
+
+def _recording_prompt(capsys: pytest.CaptureFixture[str], *answers: str, limit: int = 40):
+    """A prompt_fn giving ``answers``, then returns; past ``limit`` prompts it
+    answers EOF, so a prompt asked forever fails instead of hanging. ``seen``
+    holds (what was printed since the last prompt, the prompt)."""
+    import itertools
+
+    seq = itertools.chain(iter(answers), itertools.repeat(""))
+    seen: list[tuple[str, str]] = []
+
+    def prompt(msg: str) -> str:
+        if len(seen) >= limit:
+            raise EOFError
+        seen.append((capsys.readouterr().out, msg))
+        return next(seq)
+
+    return prompt, seen
+
+
+def _labels(seen: list[tuple[str, str]]) -> list[str]:
+    return [msg.split(" [", 1)[0].strip() for _, msg in seen]
+
+
+def test_every_prompted_field_says_what_it_is_and_whether_it_is_required() -> None:
+    """Mutation: drop a field's description, or one that says neither -> red."""
+    for label in _LABELS:
+        text = _description(label)
+        assert text and ("Required" in text or "Optional" in text), label
+
+
+def test_each_prompt_follows_its_fields_description_and_shows_no_mapping(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    p.write_text("timeouts:\n  fast: 45\n  transfer: 600\n")
+    prompt, seen = _recording_prompt(capsys)
+    interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert _labels(seen) == _LABELS
+    for (printed, _), label in zip(seen, _LABELS, strict=True):
+        assert printed.rstrip("\n").endswith(f"  {_description(label)}"), label
+    assert not any("{" in msg for _, msg in seen)
+    assert seen[2][1] == "  timeouts.fast [45]: " and seen[3][1] == "  timeouts.transfer [600]: "
+
+
+def test_a_bad_answer_is_asked_again_at_its_own_prompt_and_nothing_is_lost(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
+) -> None:
+    """Mutations: check only at the end, or keep the answer without asking
+    again -> red."""
+    p = tmp_path / "cfg.yaml"
+    prompt, seen = _recording_prompt(capsys, _URL, "", "abc", "60", "", "Example Author")
+    interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert _labels(seen)[:6] == ["registry_url", "cache_dir", "timeouts.fast", "timeouts.fast", "timeouts.transfer", "author"]
+    error = seen[3][0]
+    assert "timeouts.fast: Input should be a valid number" in error and "try again" in error
+    assert "errors.pydantic.dev" not in error
+    saved = Config.load(p)
+    assert (saved.registry_url, saved.timeouts.fast, saved.author) == (_URL, 60.0, "Example Author")
+
+
+@pytest.mark.parametrize(("text", "fast"), [(None, 30.0), ("timeouts:\n  fast: null\n", None)])
+def test_return_at_a_timeouts_part_keeps_the_files_value_or_its_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path, text: str | None, fast: float | None,
+) -> None:
+    """Mutation: pass "" for an unset part -> asked forever, red."""
+    p = tmp_path / "cfg.yaml"
+    if text:
+        p.write_text(text)
+    prompt, _ = _recording_prompt(capsys)
+    cfg = interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert cfg.timeouts.fast == fast and Config.load(p).timeouts.fast == fast  # and so on disk
+
+
+def test_a_bad_value_in_the_file_is_asked_again_at_its_prompt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
+) -> None:
+    """Mutation: keep a failing current value on return -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(f"registry_url: {_URL}\ntimeouts:\n  fast: oranges\nauthor: Example Author\n")
+    prompt, seen = _recording_prompt(capsys, "", "", "", "45")
+    cfg = interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert _labels(seen)[2:4] == ["timeouts.fast", "timeouts.fast"]
+    assert "timeouts.fast: Input should be a valid number" in seen[3][0]
+    assert (cfg.registry_url, cfg.timeouts.fast, cfg.author) == (_URL, 45.0, "Example Author")
+
+
+def test_a_timeouts_that_is_not_a_mapping_starts_from_the_defaults(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
+) -> None:
+    """Mutation: drop the notice -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("timeouts: 60\n")
+    prompt, seen = _recording_prompt(capsys)
+    cfg = interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert f"timeouts in {p} isn't a mapping (60); starting from the defaults" in seen[2][0]
+    assert (seen[2][1], seen[3][1]) == ("  timeouts.fast [30.0]: ", "  timeouts.transfer [(unset)]: ")
+    assert cfg.timeouts == Timeouts()
+
+
+def test_eof_at_a_second_ask_aborts_and_writes_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    prompt, _ = _recording_prompt(capsys, _URL, "", "abc", limit=3)
+    with pytest.raises(ConfigError, match="interactive setup aborted"):
+        interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert not p.exists()
+
+
+def test_set_takes_each_timeouts_part(tmp_path: Path) -> None:
+    """Mutation: drop the dotted-key mapping -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text("timeouts: 60\n")  # not a mapping: --set starts the parts afresh
+    apply_set_updates(p, [("timeouts.fast", "60")])
+    assert yaml.safe_load(p.read_text(encoding="utf-8"))["timeouts"] == {"fast": 60.0}
+    apply_set_updates(p, [("timeouts.transfer", "600")])
+    assert Config.load(p).timeouts == Timeouts(fast=60.0, transfer=600.0)
+    apply_set_updates(p, [("timeouts.fast", "")])  # cleared: back to its default
+    assert Config.load(p).timeouts == Timeouts(fast=30.0, transfer=600.0)
+
+
+def test_set_of_an_unknown_dotted_key_names_the_keys_it_takes(tmp_path: Path) -> None:
+    p = tmp_path / "cfg.yaml"
+    with pytest.raises(ConfigError, match=r"unknown config keys: \['timeouts.other'\]") as ei:
+        apply_set_updates(p, [("timeouts.other", "1")])
+    assert "timeouts.fast" in ei.value.hint and "registry_url" in ei.value.hint
+    assert not p.exists()
+
+
+def test_set_of_timeouts_alone_gets_the_plain_error_and_names_its_parts(tmp_path: Path) -> None:
+    """Mutation: _validate_data back to str(e) -> red."""
+    p = tmp_path / "cfg.yaml"
+    with pytest.raises(ConfigError) as ei:
+        apply_set_updates(p, [("timeouts", "600")])
+    assert "invalid config: timeouts: Input should be a valid dictionary" in str(ei.value)
+    assert "errors.pydantic.dev" not in str(ei.value)
+    assert "--set timeouts.fast=" in ei.value.hint
+
+
+def test_from_a_file_with_a_bad_value_gets_the_plain_error(tmp_path: Path) -> None:
+    source = tmp_path / "source.yaml"
+    source.write_text("timeouts:\n  fast: oranges\n")
+    with pytest.raises(ConfigError) as ei:
+        apply_from_file(tmp_path / "cfg.yaml", str(source))
+    assert "invalid config: timeouts.fast: Input should be a valid number" in str(ei.value)
+    assert "errors.pydantic.dev" not in str(ei.value)
+
+
+def test_a_bad_file_reads_the_same_for_every_command(tmp_path: Path) -> None:
+    p = tmp_path / "cfg.yaml"
+    p.write_text("timeouts:\n  fast: oranges\n")
+    with pytest.raises(ConfigError) as ei:
+        Config.load(p)
+    assert "timeouts.fast: Input should be a valid number" in str(ei.value)
+    assert "errors.pydantic.dev" not in str(ei.value)

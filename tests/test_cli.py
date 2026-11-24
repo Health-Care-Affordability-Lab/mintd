@@ -2794,6 +2794,17 @@ def test_cli_config_setup_set_missing_equals_exits_one(
     assert not p.exists()
 
 
+def test_cli_config_setup_set_timeouts_alone_says_how_to_set_its_parts(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "cfg.yaml"
+    assert cli.main(["config", "setup", "--path", str(p), "--set", "timeouts=600"]) == 1
+    err = capsys.readouterr().err
+    assert "timeouts: Input should be a valid dictionary" in err and "--set timeouts.fast=" in err
+    assert "errors.pydantic.dev" not in err
+    assert not p.exists()
+
+
 def test_cli_config_setup_from_stdin(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
