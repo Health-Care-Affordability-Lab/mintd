@@ -102,6 +102,10 @@ BANNED_TARGETS: dict[str, int] = {
 # `check._create_s3_client` 0 → 1: `check --remote` asks S3 through its own
 # client, and one fixture (`tests/test_check_remote_and_staged.py`, `s3`) hands
 # in the moto client, or a wrapper that rewrites or refuses HEAD, at that seam.
+# `_fast_sync_ops._create_s3_client` and `_producer_git_ops.subprocess.run` gain
+# a site each: tests/test_github_access.py's two tests of GitHub access together
+# with a pointer hash dvc never writes pull against moto, and serve a producer's
+# files as `git archive` would, at the boundaries every other such test fakes.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -112,13 +116,13 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._atomic.os.replace": 2,
     "mintd._aws_credentials.os.replace": 1,
-    "mintd._fast_sync_ops._create_s3_client": 6,
+    "mintd._fast_sync_ops._create_s3_client": 7,
     "mintd._push_verify._create_s3_client": 14,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     # The retry sleep and the boto3 guard live in mintd._s3: same sites, same totals.
     "mintd._s3.time.sleep": 9,
-    "mintd._producer_git_ops.subprocess.run": 6,
+    "mintd._producer_git_ops.subprocess.run": 7,
     "mintd._share_ops._create_s3_client": 2,
     "mintd.check._create_s3_client": 1,
     "mintd._templates._render.importlib.metadata.version": 1,
@@ -277,8 +281,8 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (212 sites / 50 targets), not
-    a hand-copied excerpt, and the scanner is re-run here to prove it.
+    """The literals above are the *whole* census, every site of every target,
+    not a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
     cannot be: narrowing the matcher (e.g. requiring the receiver to be
@@ -288,14 +292,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (212 → 211), or drop ``patch`` (212 → 182).
+    ``monkeypatch``-receiver calls, or drop ``patch``: either changes a target's
+    count, and the comparison below names it.
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 212
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 

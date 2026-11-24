@@ -57,7 +57,7 @@ from ._fast_sync_ops import (
     stage_wdir,
     wdir_map,
 )
-from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._registry_git_ops import GitOpError, RegistryGitOps, specific_hint
 from ._s3 import create_client as _create_s3_client  # the S3 boundary: tests stand a client in here
 from .catalog import CatalogClient, CatalogNotFound
 from .errors import unreachable_repo_hint
@@ -913,6 +913,7 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     import tempfile
 
     from ._atomic import write_tree
+    from ._dvc_invoke import dvc_root
     from ._dvc_state import dvc_cache_dir
     from ._fast_sync_ops import DvcFileEntry, dir_manifest_md5
     from ._pin_proof import publishable_scope
@@ -938,8 +939,8 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     top = next((d for d in (path, *path.parents) if (d / ".git").exists()), None)  # a worktree's .git is a file
     if top is None:
         return unchecked(f"{project_path} isn't in a git repository")
-    project = next((d for d in (path, *path.parents) if d.is_relative_to(top) and (d / ".dvc").is_dir()), None)
-    if project is None:
+    project = dvc_root(path, within=top)
+    if not (project / ".dvc").is_dir():
         pointers = sorted(p for status, p in git.staged_changes(top) if status != "D" and is_pointer(p))
         if not pointers:
             return []  # no DVC project and no pointer staged: nothing to check
@@ -1468,7 +1469,7 @@ def _consumer_findings_from_enclave_manifest(
                     f"cannot read the catalog to resolve producer URL for "
                     f"{ap.repo}: {_git_error_summary(e)}"
                 )
-                hint = (
+                hint = specific_hint(e) or (
                     "check your network and `registry_url` in "
                     "~/.config/mintd/config.yaml; if both are fine, delete the "
                     "local registry cache (~/.cache/mintd/registry by default) "

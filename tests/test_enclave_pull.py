@@ -331,6 +331,39 @@ def test_enclave_pull_wraps_dvc_error_as_enclave_pull_error(tmp_path):
     assert ei.value.repo == "repo-b"
 
 
+
+def test_an_unreachable_producer_keeps_its_own_hint(tmp_path):
+    """dvc import refused or unable to reach the producer: the enclave error
+    keeps that error's hint (set up gh, or check the network) rather than a
+    bare retry, which would be refused again.
+    Mutation: drop the DvcImportRepoUnreachable branch -> "retry: …", red."""
+    from mintd._dvc_ops import DvcImportRepoUnreachable
+    from mintd.enclave import EnclavePullError
+
+    cause = DvcImportRepoUnreachable("dvc import not run: …", "https://github.com/example-lab/demo")
+
+    class _RefusedDvcOps:
+        def init(self, *, cwd=None):
+            pass
+
+        def import_(self, repo_url, path, dest, cwd, rev, force, extra_args=None):
+            raise cause
+
+    m_path = tmp_path / "enclave_manifest.yaml"
+    EnclaveManifest(enclave_name="test", approved_products=[
+        ApprovedProduct(repo="repo-b", registry_entry="e", pin="1"),
+    ]).save(m_path)
+
+    def factory(url, pin):
+        class View:
+            def primary_or_raise(self): return "out"
+        return View()
+
+    with pytest.raises(EnclavePullError) as ei:
+        enclave_pull(_Client(), _RefusedDvcOps(), manifest_path=m_path, producer_view_factory=factory)
+    assert ei.value.hint == cause.hint and cause.hint
+    assert "retry: mintd enclave pull" not in ei.value.hint
+
 # Slice 47 — lazy `dvc init` so a fresh enclave (no `.dvc/`) pulls without a
 # manual `dvc init`.
 
