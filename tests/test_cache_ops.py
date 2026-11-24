@@ -257,7 +257,7 @@ def test_guard_trips_on_dvc_lock_stage_out_under_cache(tmp_path: Path) -> None:
         "    cmd: run\n"
         "    outs:\n"
         "    - path: cache/pipe\n"
-        "      md5: abc\n"
+        "      md5: abcabcabcabcabcabcabcabcabcabcab\n"
         "      cloud:\n"
         "        origin:\n"
         "          version_id: v1\n",
@@ -291,7 +291,7 @@ def test_guard_ignores_a_lock_stage_dvc_yaml_no_longer_declares(tmp_path: Path) 
         "    cmd: run\n"
         "    outs:\n"
         "    - path: cache/pipe\n"
-        "      md5: abc\n"
+        "      md5: abcabcabcabcabcabcabcabcabcabcab\n"
         "      cloud:\n"
         "        origin:\n"
         "          version_id: v1\n",
@@ -338,12 +338,12 @@ def test_orphan_lock_stage_out_is_not_dvc_tracked(tmp_path: Path) -> None:
         "    cmd: run\n"
         "    outs:\n"
         "    - path: data/clean.csv\n"
-        "      md5: 11111111111111111111111111111111\n"
+        "      md5: '11111111111111111111111111111111'\n"
         "  ingest:\n"
         "    cmd: run\n"
         "    outs:\n"
         "    - path: data/raw.csv\n"
-        "      md5: 22222222222222222222222222222222\n",
+        "      md5: '22222222222222222222222222222222'\n",
     )
     assert c.dvc_tracked_paths(tmp_path, "origin") == {"data/clean.csv"}
 
