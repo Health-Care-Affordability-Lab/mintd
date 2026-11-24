@@ -77,10 +77,10 @@ def test_scan_imports_walks_both_sources(tmp_path: Path) -> None:
 
 
 def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
-    # `.dvc` file: producer-xw, local_path "core_rows",
+    # `.dvc` file: demo-map, local_path "core_rows",
     # pin 4f7c2a1abcd1234567890abcdef0123456789abc.
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
     # dvc.lock stage referencing the same triple.
@@ -198,7 +198,7 @@ def test_a_null_or_absent_rev_lock_reads_as_an_empty_pin(
     Mutation: drop the `isinstance` guard in `_pin` -> this test raises.
     """
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         yaml.safe_dump(
             {
                 "outs": [{"path": "core_rows"}],
@@ -264,7 +264,7 @@ def test_an_unquoted_numeric_rev_lock_is_refused_not_guessed(
     assert yaml.safe_load(f"rev_lock: {written}")["rev_lock"] == yaml_reads_it_as
 
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         "outs:\n"
         "- path: core_rows\n"
         "deps:\n"

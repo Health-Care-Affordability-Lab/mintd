@@ -200,7 +200,7 @@ def test_cli_data_pull_storage_key_error_names_target_and_retry(
     _, dvc_ops = patched_clients
     dvc_ops.pull_raises = DvcStorageKeyError(
         "dvc pull failed (exit 255): storage key error on "
-        "'data/final/aha_ccn_xw/crosswalk_aha_pos.dta' (target data/final.dvc)"
+        "'data/final/region_lookup/lookup_table.dta' (target data/final.dvc)"
         " — plain dvc cannot serve this version-aware output",
         target="data/final.dvc",
         hint="retry just this target: mintd data pull data/final.dvc",

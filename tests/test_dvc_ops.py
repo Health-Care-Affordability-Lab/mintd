@@ -474,7 +474,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
             seen,
             stderr_lines=[
                 "ERROR: unexpected error - "
-                "('data', 'final', 'aha_ccn_xw', 'crosswalk_aha_pos.dta')"
+                "('data', 'final', 'region_lookup', 'lookup_table.dta')"
             ],
         ),
     )
@@ -484,7 +484,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
 
     err = exc_info.value
     assert err.target == "data/final.dvc"
-    assert "data/final/aha_ccn_xw/crosswalk_aha_pos.dta" in str(err)
+    assert "data/final/region_lookup/lookup_table.dta" in str(err)
     assert "data/final.dvc" in str(err)
     assert err.hint == "retry just this target: mintd data pull data/final.dvc"
 
