@@ -72,8 +72,8 @@ try {
     }
     $Whl = Join-Path $Tmp $Wheel
     $Constraints = Join-Path $Tmp "constraints.txt"
-    $Want = ((Get-Content "$Whl.sha256") -split '\s+')[0]
-    if ((Get-FileHash -Algorithm SHA256 $Whl).Hash -ne $Want) {   # -ne ignores case
+    $Want = ((Get-Content -LiteralPath "$Whl.sha256") -split '\s+')[0]
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Whl).Hash -ne $Want) {   # -ne ignores case
         throw "$Wheel does not match its SHA-256; nothing was installed."
     }
 
@@ -87,11 +87,18 @@ try {
     # --force below replaces a dvc already in uv's bin dir. One that isn't
     # mintd's own is named below. On Windows uv copies each executable from the
     # tool's Scripts folder into its bin dir, so mintd's own dvc.exe is a copy
-    # of mintd\Scripts\dvc.exe.
+    # of mintd\Scripts\dvc.exe. -LiteralPath: a folder name like 'b[1]' is not
+    # a wildcard. A dvc.exe that can't be read (locked by antivirus or another
+    # installer, or a folder in its place) counts as not mintd's: the compare
+    # must never stop the install.
+    $ToolsDir = "$(uv tool dir)".Trim()
     $OldDvc = Join-Path "$(uv tool dir --bin)".Trim() "dvc.exe"
-    $MintdDvc = Join-Path "$(uv tool dir)".Trim() "mintd\Scripts\dvc.exe"
-    $ReplacedDvc = (Test-Path $OldDvc) -and -not (
-        (Test-Path $MintdDvc) -and (Get-FileHash $OldDvc).Hash -eq (Get-FileHash $MintdDvc).Hash)
+    $MintdDvc = Join-Path $ToolsDir "mintd\Scripts\dvc.exe"
+    try {
+        $ReplacedDvc = (Test-Path -LiteralPath $OldDvc) -and -not (
+            (Test-Path -LiteralPath $MintdDvc) -and
+            (Get-FileHash -LiteralPath $OldDvc).Hash -eq (Get-FileHash -LiteralPath $MintdDvc).Hash)
+    } catch { $ReplacedDvc = $true }
 
     Write-Host "Installing mintd $MintdTag..."
     # Pin Python to the newest version CI tests, and put dvc on PATH beside
@@ -100,13 +107,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Failed to install mintd" }
     if ($ReplacedDvc) { Write-Host "Replaced $OldDvc, a dvc that was not mintd's, with the dvc installed with mintd." }
 
-    # Locate the tool's Python interpreter
-    $ToolPython = Join-Path $env:LOCALAPPDATA "uv\tools\mintd\Scripts\python.exe"
-    if (-not (Test-Path $ToolPython)) {
-        $ToolPython = Join-Path $env:USERPROFILE ".local\share\uv\tools\mintd\Scripts\python.exe"
-    }
-
-    if (Test-Path $ToolPython) {
+    # The tool's Python, where uv keeps its tools (UV_TOOL_DIR when set).
+    $ToolPython = Join-Path $ToolsDir "mintd\Scripts\python.exe"
+    if (Test-Path -LiteralPath $ToolPython) {
         Write-Host "Installing reflink support..."
         # With the release's constraints, so cffi is the version the release pins.
         uv pip install --python $ToolPython --constraints $Constraints cffi reflink
@@ -119,7 +122,7 @@ try {
         Write-Warning "Run 'mintd --version' to verify your installation."
     }
 } finally {
-    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- Post-install verification (non-fatal diagnostics) -----------------------
