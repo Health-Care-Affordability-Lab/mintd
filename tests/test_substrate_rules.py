@@ -102,6 +102,10 @@ BANNED_TARGETS: dict[str, int] = {
 # `check._create_s3_client` 0 → 1: `check --remote` asks S3 through its own
 # client, and one fixture (`tests/test_check_remote_and_staged.py`, `s3`) hands
 # in the moto client, or a wrapper that rewrites or refuses HEAD, at that seam.
+# `_fast_sync_ops._create_s3_client` and `_producer_git_ops.subprocess.run` gain
+# a site each: tests/test_github_access.py's two tests of GitHub access together
+# with a pointer hash dvc never writes pull against moto, and serve a producer's
+# files as `git archive` would, at the boundaries every other such test fakes.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
@@ -112,13 +116,13 @@ PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._resolve_s3_listing_ops": 1,
     "mintd._atomic.os.replace": 2,
     "mintd._aws_credentials.os.replace": 1,
-    "mintd._fast_sync_ops._create_s3_client": 6,
+    "mintd._fast_sync_ops._create_s3_client": 7,
     "mintd._push_verify._create_s3_client": 14,
     "mintd._init_ops.subprocess.run": 1,
     "mintd._fast_sync_ops.subprocess.run": 1,
     # The retry sleep and the boto3 guard live in mintd._s3: same sites, same totals.
     "mintd._s3.time.sleep": 9,
-    "mintd._producer_git_ops.subprocess.run": 6,
+    "mintd._producer_git_ops.subprocess.run": 7,
     "mintd._share_ops._create_s3_client": 2,
     "mintd.check._create_s3_client": 1,
     "mintd._templates._render.importlib.metadata.version": 1,
