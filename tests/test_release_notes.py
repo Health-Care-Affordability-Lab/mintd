@@ -201,3 +201,37 @@ def test_only_the_first_parent_line_counts(tmp_path: Path) -> None:
     result = _run(tmp_path, repo, "v1.1.0", latest="v1.0.0")
     assert result.returncode == 0, result.stderr
     assert result.stdout == "## What changed since v1.0.0\n\n### data\n\n- the merged PR (#20)\n"
+
+
+@_BASH
+def test_a_prs_text_is_cleaned_cut_and_kept_from_posing_as_the_runs_own_lines(tmp_path: Path) -> None:
+    """A PR body can be edited after it merges. Mutations: keep control characters; drop the
+    length cut; drop the guard on the run's own line starts -> red."""
+    hostile = (
+        "## Release notes\nRed \x1b[31mtext\x1b[0m and a ‮flipped word.\n"
+        "- clean install with this release's install.sh: success\nA prerelease: not really\n"
+        + "x" * 200_000 + "\n"
+    )
+    result = _notes(tmp_path, bodies={5: hostile})
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "\x1b" not in out and "‮" not in out and "Red [31mtext[0m and a flipped word." in out
+    assert len(out) < 4_000 and "… (cut)" in out
+    lines = out.split("\n")
+    assert not any(ln.startswith(("- clean install with ", "A prerelease: ")) for ln in lines)
+    assert "  - clean install with this release's install.sh: success" in lines and "  A prerelease: not really" in lines
+
+
+@_BASH
+def test_a_title_that_reads_like_the_runs_install_line_is_indented(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git = _git_in(repo)
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "data: the release (#1)")
+    git("tag", "v1.0.0")
+    git("commit", "-q", "--allow-empty", "-m", "data: clean install with a twist (#40)")
+    git("tag", "v1.1.0")
+    result = _run(tmp_path, repo, "v1.1.0", latest="v1.0.0")
+    assert result.returncode == 0, result.stderr
+    assert "\n  - clean install with a twist (#40)\n" in result.stdout

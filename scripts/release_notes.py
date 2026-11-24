@@ -12,6 +12,9 @@ a squash merge whose subject ends "(#N)", and a PR's title reads "<area>: <what>
   commits since the release it was cut from, under "Hotfix for vX.Y.Z".
 - A PR body may hold a "## Release notes" section, written by a person. Its text replaces the PR's line, and what
   it puts under "### Do this once" or "### Known limits" goes to those sections, at the top and the bottom.
+- A PR's text can be edited after it merges, so it is never trusted as is: control and format characters (an
+  escape, a right-to-left override) are dropped, each part is cut at a length, the whole section too, and a line
+  that starts like one the release run writes itself is indented, so the run never takes it for its own.
 
 Only the standard library, plus the git and gh the runner has.
 """
@@ -22,8 +25,15 @@ import os
 import re
 import subprocess  # noqa: TID251  (a release-time script, not mintd: it runs git and gh itself)
 import sys
+import unicodedata
 
 INTERNAL = ("tests", "stories", "ci", "lint")
+MAX_PART = 2_000  # characters of one PR's text, per part
+MAX_SECTION = 60_000  # characters of the whole section; GitHub refuses notes past 125,000
+# Lines the release run finds and rewrites in the notes (release.yml's evidence and promote).
+RUN_LINES = ("- clean install with ", "A prerelease: ")
+# data._unprintable's rule: a control, format, surrogate or separator character; here newline and tab stay.
+_UNPRINTABLE = ("Cc", "Cf", "Cs", "Zl", "Zp")
 HOISTED = ("Do this once", "Known limits")
 _SUBJECT = re.compile(r"^(?P<title>.+) \(#(?P<number>\d+)\)$")
 
@@ -85,8 +95,20 @@ def release_notes(body: str) -> dict[str, str]:
             current = line[4:].strip()
         elif current is not None:
             parts.setdefault(current, []).append(line)
-    texts = {name: "\n".join(lines).strip() for name, lines in parts.items()}
+    texts = {name: clean("\n".join(lines), MAX_PART).strip() for name, lines in parts.items()}
     return {name: text for name, text in texts.items() if text}
+
+
+def clean(text: str, limit: int) -> str:
+    """Text from a PR, safe in the notes: no control or format characters (newlines and tabs kept), at most
+    `limit` characters."""
+    text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in _UNPRINTABLE)
+    return text if len(text) <= limit else text[:limit].rstrip() + " … (cut)"
+
+
+def guard(section: str) -> str:
+    """`section` with every line that starts like one the release run rewrites indented two spaces."""
+    return "\n".join("  " + ln if ln.startswith(RUN_LINES) else ln for ln in section.split("\n"))
 
 
 def _cite(text: str, number: int | None) -> str:
@@ -102,7 +124,7 @@ def render(heading: str, entries: list[tuple[int | None, str, dict[str, str]]]) 
     groups: dict[str, list[str]] = {}
     internal: list[int] = []
     for number, title, notes in entries:
-        area, _, what = title.partition(": ")
+        area, _, what = clean(title, MAX_PART).partition(": ")
         if not what:
             area, what = "other", title
         for name in HOISTED:
@@ -143,7 +165,7 @@ def main(argv: list[str]) -> int:
     heading = f"## Hotfix for {re.sub(r'[.]post[0-9]+$', '', start)}" if hotfix else f"## What changed since {start}"
     entries = [(number, title, release_notes(pr_body(repo, number)) if number is not None else {})
                for number, title in merges(start, tag)]
-    sys.stdout.write(render(heading, entries) + "\n")
+    sys.stdout.write(guard(clean(render(heading, entries), MAX_SECTION)) + "\n")
     return 0
 
 

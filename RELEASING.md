@@ -40,9 +40,11 @@ git switch -c hotfix/vX.Y.Z vX.Y.Z   # fix, with a test that fails without it, a
 ```
 
 Then Actions → `release` → Run workflow on `hotfix/vX.Y.Z`: it makes vX.Y.Z.postN. Approve it as above, and
-land the fix on `main` in a normal PR. A line cut before releases ran on demand (v0.16.1 and older) first
-takes main's release workflow, in one commit before the fix: `git checkout origin/main --
-.github/workflows/release.yml scripts/ tests/test_release_workflow.py tests/test_release_notes.py
+land the fix on `main` in a normal PR. Only a hotfix for the latest release's line can become latest: when a
+newer release is latest, `promote` refuses after the approval, and the hotfix stays a prerelease, installed
+only by its tag. A line cut before releases ran on demand (v0.16.1 and older) first takes main's release
+workflow, in one commit before the fix: `git checkout origin/main -- .github/workflows/release.yml
+.github/workflows/test.yml scripts/ tests/test_release_workflow.py tests/test_release_notes.py
 tests/test_release_version.py RELEASING.md`, then `git rm .github/workflows/tag.yml tests/test_tag_workflow.py`.
 
 ## A failed run
@@ -66,7 +68,7 @@ Use "Re-run failed jobs" in the same run: it keeps the run's version. Once the r
 plus a patch or a minor; on `hotfix/vX.Y.Z`, the next `.postN`) and stops unless the commit comes after that
 line's latest tag and the tag is new. It reruns CI on that commit and builds the wheel once, telling
 setuptools-scm the version, since no tag exists yet. `scripts/stamp_install_scripts.py` writes the tag into
-both install scripts, the same stamper CI's install checks use. The files go to a draft aimed at that commit,
+both install scripts, the one stamper CI's install checks will use too. The files go to a draft aimed at that commit,
 which is published as a prerelease once every file is up; publishing makes the `v` tag, which is permanent,
 and the run checks it landed on that commit. It installs that release on Linux, macOS and Windows and runs
 the stories, writing the results, a link to the run and the changelog into the notes. `promote` refuses

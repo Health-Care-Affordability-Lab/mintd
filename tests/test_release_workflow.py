@@ -329,9 +329,13 @@ def test_stamping_stops_unless_each_script_has_exactly_one_placeholder(tmp_path:
 _STUB_GH_PUBLISH = """#!/bin/bash
 echo "gh $*" >> "$LOG"
 case "$*" in
-  # The tag's commit: none (a 404) until a publish makes the tag, unless $TAG_AT holds one.
+  # The tag's commit, as real gh answers: no tag yet (until a publish makes it, unless
+  # $TAG_AT holds one) prints the error's JSON on stdout and the status on stderr.
   "api repos/o/r/commits/refs/tags/"*)
-    [ -s "$TAG_AT" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }; cat "$TAG_AT" ;;
+    [ "$LOOKUP_FAIL" = 1 ] && { echo "error connecting to api.github.com" >&2; exit 1; }
+    [ -s "$TAG_AT" ] && { cat "$TAG_AT"; exit 0; }
+    echo '{"message":"No commit found for SHA: v1.2.3","status":"422"}'
+    echo "gh: No commit found for SHA: v1.2.3 (HTTP 422)" >&2; exit 1 ;;
   # The listing as `gh api --paginate --jq` prints it: one line per match, page
   # after page. Without --paginate only the first page comes back.
   "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
@@ -390,6 +394,8 @@ _COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
         ("the tag appears before the publish", ([_DRAFT], []), _COMPLETE, "def", False, [], False, "appeared since this run began"),
         # The tag is permanent once made: the run stops, and nothing after it runs.
         ("the tag lands on another commit", ([_DRAFT], []), _COMPLETE, "", False, [], True, "landed on def, not abc"),
+        # No answer is never "no tag": the step stops before publishing.
+        ("the tag lookup fails", ([_DRAFT], []), _COMPLETE, "", False, [], False, "couldn't read which commit v1.2.3 names"),
     ],
 )
 def test_the_prerelease_publishes_only_a_complete_draft(
@@ -420,6 +426,7 @@ def test_the_prerelease_publishes_only_a_complete_draft(
         "UPLOAD_HALF": "a.whl" if case == "an upload lands incomplete" else "",
         "UNLISTED": "1" if case == "a new draft that isn't listed" else "0",
         "LANDS_ON": "def" if case == "the tag lands on another commit" else "",
+        "LOOKUP_FAIL": "1" if case == "the tag lookup fails" else "0",
         "HAVE": str(tmp_path / "have"), "GITHUB_SERVER_URL": "https://github.com", "GITHUB_REPOSITORY": "o/r",
         "GITHUB_RUN_ID": "1", "GITHUB_SHA": "abc",
     }

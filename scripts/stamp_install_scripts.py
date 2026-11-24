@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Write a release's tag into its own install.sh and install.ps1: the one stamper.
 
-release.yml's build runs `python3 scripts/stamp_install_scripts.py vX.Y.Z --out dist` at the repository's root, and
-CI's install checks run the same script, so CI tests exactly what users get. Each script must hold its placeholder
+release.yml's build runs `python3 scripts/stamp_install_scripts.py vX.Y.Z --out dist` at the repository's root. CI's
+install checks, which come in a later change, will run the same script, so they test exactly what users get. Each script must hold its placeholder
 line exactly once (`MINTD_TAG=""`, `$MintdTag = ""`), or nothing is written: an unstamped copy would install the
 newest release instead of this one.
 
-`--releases URL` also rewrites the scripts' one releases URL line. Only CI passes it, to install from a local
-server; the release build never does.
+`--releases URL` also rewrites the scripts' one releases URL line, for those checks to install from a local
+server; the release build never passes it.
 """
 
 from __future__ import annotations
