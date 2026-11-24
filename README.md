@@ -122,8 +122,8 @@ mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 h
 ```
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
-`registry_url`, `storage_bucket_prefix`, `storage_endpoint`,
-`aws_profile_name`, and a `timeouts:` block:
+`registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
+`timeouts:` block:
 
 ```yaml
 timeouts:
@@ -136,6 +136,12 @@ timeouts:
 and is `null` — disabled — by default. Per-command, `--timeout 600` opts into a
 10-minute wall clock and `--timeout 0` disables it. `NO_COLOR` in the environment
 turns off all color.
+
+The AWS profile isn't a config key. mintd signs with the profile the remote's
+`profile` names in `.dvc/config` (or `.dvc/config.local`); else the one
+`AWS_DEFAULT_PROFILE` or `AWS_PROFILE` names; else `mintd`, when your shared
+credentials file (`~/.aws/credentials`, or `$AWS_SHARED_CREDENTIALS_FILE`) has a
+`[mintd]` section; else boto3's default credential chain.
 
 If you have a v1 mintd config kicking around:
 
@@ -151,7 +157,9 @@ mintd config setup --migrate-v1 ~/.config/mintd/config.yaml.v1
 mintd init data my-cleaned-survey
 cd data_my-cleaned-survey
 
-# Edit metadata.json (description, contact, data_products.outputs, …)
+# Edit metadata.json: `metadata.description`, `ownership.team` and
+# `ownership.maintainers`, then one `data_products.outputs[]` entry per output
+# and `data_products.primary` (see "What metadata.json needs" below).
 
 # Produce the outputs. The scaffold's pipeline owns data/final/: `dvc repro`
 # rebuilds it from data/raw/ and deletes anything placed there by hand, so
@@ -203,6 +211,37 @@ mintd registry register
 # patch after that; an explicit version lower than the current one is refused.
 mintd publish
 ```
+
+### What metadata.json needs
+
+You write the human fields: `metadata.description`, `metadata.tags`,
+`ownership.team`, `ownership.maintainers`, `access_control.teams`,
+`governance.classification`, `governance.contract_info`, `repository.mirror`
+and `status.state`. mintd writes the rest (`mintd init`, `mintd update metadata`,
+`mintd publish`), except `data_products`, which you fill in by hand: nothing
+derives it from DVC. A data product needs at least one output and a primary:
+
+```json
+{
+  "data_products": {
+    "primary": "data/final/",
+    "outputs": [
+      {"path": "data/final/", "description": "County income, one row per county and year", "primary": true}
+    ]
+  }
+}
+```
+
+- Each `data_products.outputs[]` entry needs `path`, `description` and
+  `primary` (true or false). Leave `last_published` out: `mintd publish`
+  writes it.
+- `data_products.primary` must equal one entry's `path` character for
+  character, so `data/final` doesn't match `data/final/`. It is what
+  `mintd data import <name>` brings, and a `data` product must have one.
+- `mintd check` errors on each declared path that DVC doesn't track, or that
+  was pushed without S3 version IDs.
+- mintd reads nothing from `outputs[].primary`, though it is required:
+  `data_products.primary` decides.
 
 ## Example: consume someone else's dataset
 

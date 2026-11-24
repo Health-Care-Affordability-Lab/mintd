@@ -117,6 +117,28 @@ def test_data_products_outputs_default_empty():
     assert m.data_products.primary is None
 
 
+@pytest.mark.parametrize("last_published, ok", [(None, True), ("", True), ("2026-11-24T00:00:00+00:00", True),
+                                                ("null", False), ("three", False)])
+def test_an_outputs_entry_may_leave_last_published_out(last_published, ok):
+    """`mintd publish` stamps it, so a producer writing the entry by hand
+    leaves it out; the catalog entry still carries it, as "". A null or a
+    non-string is still refused.
+
+    Mutation: drop the `= ""` default -> the omitted case is red."""
+    data = json.loads((FIXTURES / "metadata_v2_minimal.json").read_text(encoding="utf-8"))
+    entry = {"path": "data/final/", "description": "d", "primary": True}
+    if last_published is not None:
+        entry["last_published"] = {"null": None, "three": 3}.get(last_published, last_published)
+    data["data_products"] = {"primary": "data/final/", "outputs": [entry]}
+    if not ok:
+        with pytest.raises(ValidationError):
+            Metadata.model_validate(data)
+        return
+    m = Metadata.model_validate(data)
+    assert m.to_catalog_entry().model_dump(mode="json")["data_products"]["outputs"][0]["last_published"] == (
+        last_published or "")
+
+
 # ---------------------------------------------------------------------------
 # Extra fields, literal enforcement, datetime coercion, all project types
 # ---------------------------------------------------------------------------
