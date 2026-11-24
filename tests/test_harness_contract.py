@@ -1931,9 +1931,23 @@ def test_landed_files_expect_the_steps_dvc_lists_and_skip_the_rest(tmp_path: Pat
     files = {"data/m_x.csv": b"x", "data/m_y.csv": b"y", "data/r_one.csv": b"1"}
     _lock_project(tmp_path, MATRIX_AND_ROWS, {"mat@x": ["data/m_x.csv"], "mat@y": ["data/m_y.csv"],
                                               "rows@0": ["data/r_one.csv"], "rows@1": ["data/r_two.csv"]}, files)
-    assert assert_landed_match_pointers(tmp_path) == {k: md5(v) for k, v in files.items()}
+    skipped: list[str] = []
+    assert assert_landed_match_pointers(tmp_path, skipped) == {k: md5(v) for k, v in files.items()}
+    assert skipped == ["dvc.lock:rows@1"]
     (tmp_path / "data" / "m_y.csv").unlink()
     with pytest.raises(Mismatch, match=r"not expected: \['dvc.lock:rows@1'\]"):
+        assert_landed_match_pointers(tmp_path)
+
+
+def test_a_lock_key_dvc_lists_without_its_trailing_space_stops_the_check(tmp_path: Path) -> None:
+    """dvc 3.67.1 writes item `t ` into the lock as `fan@t ` and lists it as
+    `fan@t`, and `dvc pull` lands it; the check can't match the two, so it
+    says so. Mutation that turns it red: the trailing-whitespace guard gone
+    (the step is skipped as stale and the check passes without its file)."""
+    files = {"data/fan_t .csv": b"t", "data/fan_s.csv": b"s"}
+    fan = 'stages:\n  fan:\n    foreach: ["t ", "s"]\n    do:\n      cmd: "true"\n      outs:\n        - data/fan_${item}.csv\n'
+    _lock_project(tmp_path, fan, {"fan@t ": ["data/fan_t .csv"], "fan@s": ["data/fan_s.csv"]}, files)
+    with pytest.raises(CannotCheck, match=r"dvc lists step 'fan@t' without the trailing whitespace of lock key 'fan@t '"):
         assert_landed_match_pointers(tmp_path)
 
 

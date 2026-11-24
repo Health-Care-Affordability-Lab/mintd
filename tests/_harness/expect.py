@@ -113,7 +113,9 @@ def _outs(rels: Iterable[str], read: Reader, live: Live,
     A lock step dvc doesn't list (a stage deleted from `dvc.yaml`, a foreach
     item dropped from its list) is one `dvc pull` skips, so it is skipped and
     added to `skipped`. With no `dvc.yaml` beside a lock, dvc reads no step
-    from it. Raises `CannotCheck` rather than guess a step or a path."""
+    from it. Raises `CannotCheck` rather than guess a step or a path: dvc
+    writes a foreach item's trailing whitespace into the lock key (`fan@t `)
+    but drops it from `stage list`, so such a key can't be matched."""
     rels = sorted(rels)
     for rel in rels:
         if rel.endswith(".dvc"):
@@ -130,6 +132,9 @@ def _outs(rels: Iterable[str], read: Reader, live: Live,
             raise CannotCheck(f"{rel}: dvc lists steps its dvc.yaml doesn't define: {unknown}")
         for name, stage in (_load(read(rel)) or {}).get("stages", {}).items():
             if name not in listed:
+                if name != name.rstrip() and name.rstrip() in listed:
+                    raise CannotCheck(f"{rel}: dvc lists step {name.rstrip()!r} without the trailing whitespace "
+                                      f"of lock key {name!r}, so the check can't tell whether dvc pulls it")
                 if skipped is not None:
                     skipped.append(f"{rel}:{name}")
                 continue
@@ -175,16 +180,16 @@ def _on_disk(project: Path) -> tuple[list[str], Reader, Live]:
     return rels, read, lambda base: _stage_list(project / base)
 
 
-def assert_landed_match_pointers(project: Path) -> dict[str, str]:
+def assert_landed_match_pointers(project: Path, skipped: list[str] | None = None) -> dict[str, str]:
     """Every file each out in `project` names (`.dvc` pointers and cached
     `dvc.lock` outs of the steps dvc still lists) is on disk and hashes to its
     recorded md5, no other file sits in an out's folder, and at least one file
-    landed. Returns `{path under project: md5}`. On a difference it raises
-    `Mismatch`, whose `counts` names no file; when it can't tell what should
-    land, `CannotCheck`."""
+    landed. Returns `{path under project: md5}`, and adds the lock steps it
+    skipped to `skipped`. On a difference it raises `Mismatch`, whose `counts`
+    names no file; when it can't tell what should land, `CannotCheck`."""
     expected: dict[str, str] = {}
     landed: dict[str, str] = {}
-    skipped: list[str] = []
+    skipped = [] if skipped is None else skipped
     for rel, out in _outs(*_on_disk(project), skipped):
         root = project / rel
         expected.update(_files_of(project, root, out))

@@ -139,8 +139,10 @@ def test_a_stale_lock_entry_is_skipped_and_named(product, mintd, s3_server, tmp_
     warning = f"skipped dvc.lock entries for 1 stage(s) dvc.yaml no longer declares, as dvc pull does: {step}"
     assert " ".join(run.stderr.split()).count(warning) == 1, run.stderr
     built = (product.producer.work / still_lands).read_bytes()
-    assert assert_landed_match_pointers(dest) == {
+    skipped: list[str] = []
+    assert assert_landed_match_pointers(dest, skipped) == {
         **{k: md5(b) for k, b in product.published().items()}, still_lands: md5(built)}
+    assert skipped == [f"dvc.lock:{step}"]
 
 
 RENAMED = """stages:
