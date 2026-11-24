@@ -499,7 +499,8 @@ def _run_stamped_ps1(
     script = (
         f"$env:LOCALAPPDATA = {_ps(str(tmp_path / 'local'))}\n"
         f"$env:PATH = {_ps(os.pathsep.join(map(str, path)))}\n"
-        + (f"$env:TMPDIR = {_ps(str(temp))}; $env:TEMP = {_ps(str(temp))}\n" if temp else "")
+        # GetTempPath reads TMPDIR on macOS and Linux, and TMP before TEMP on Windows.
+        + (f"$env:TMPDIR = {_ps(str(temp))}; $env:TMP = {_ps(str(temp))}; $env:TEMP = {_ps(str(temp))}\n" if temp else "")
         + "function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) "
         f"Add-Content {_ps(str(log))} \"get $Uri\"; Copy-Item (Join-Path {_ps(str(tmp_path))} ($Uri -split '/')[-1]) $OutFile }}\n"
         f"function uv {{ Add-Content {_ps(str(log))} \"uv $($args -join ' ')\"; $global:LASTEXITCODE = 0\n"
