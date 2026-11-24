@@ -16,7 +16,11 @@ repo builder, not a git runner) and is deliberately not merged here.
 
 from __future__ import annotations
 
+import atexit
+import functools
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from tests._harness import HarnessError
@@ -28,9 +32,10 @@ from tests._harness import HarnessError
 #: `commit.gpgsign = true` in a developer's global config makes every commit
 #: here fail with `gpg failed to sign the data`; since five per-module copies
 #: merged into this one runner, that single setting would take out every
-#: harness-backed test at once. Turned off explicitly rather than by blanking
-#: the whole global config, which would also blank what
-#: `test_producer_commits_on_a_machine_with_no_git_identity` plants there.
+#: harness-backed test at once. `_git` blanks the global config by default,
+#: but keeps one a test plants on purpose
+#: (`test_producer_commits_on_a_machine_with_no_git_identity`), and the system
+#: config is never blanked, so gpgsign is still turned off here.
 IDENT: tuple[str, ...] = (
     "-c", "user.email=test@mintd",
     "-c", "user.name=test",
@@ -38,25 +43,46 @@ IDENT: tuple[str, ...] = (
 )
 
 
+@functools.cache
+def _nothing() -> str:
+    """An empty file, made once per process in the temp folder: git reads it as
+    no config and no ignore patterns. Not os.devnull, which is `nul` on
+    Windows, where git refuses it as an exclude file."""
+    fd, path = tempfile.mkstemp(prefix="mintd-harness-git-")
+    os.close(fd)
+    atexit.register(os.remove, path)
+    return path
+
+
 def _git(
     args: list[str],
     cwd: Path | None = None,
     *,
     ident: tuple[str, ...] = IDENT,
+    host: bool = False,
 ) -> str:
     """Run git, raise on non-zero, return stdout.
 
     Raises `HarnessError` with git's own stderr rather than
     `CalledProcessError`'s bare exit code: `capture_output=True` swallows the
     message, so a fixture failure otherwise reads as `returned non-zero exit
-    status 128` with no cause.
+    status 128` with no cause. `host=True` reads the developer's own checkout
+    as they see it: their global config and ignore file apply.
     """
+    # The developer's own git setup never reaches a fixture repo: no global
+    # config (a core.hooksPath, say), unless a test sets GIT_CONFIG_GLOBAL on
+    # purpose, and no ignore file, git's default ~/.config/git/ignore included,
+    # so what `git status` calls new never depends on the host.
+    env = dict(os.environ)
+    if not host:
+        env.setdefault("GIT_CONFIG_GLOBAL", _nothing())
     result = subprocess.run(
-        ["git", *ident, *args],
+        ["git", *([] if host else ["-c", f"core.excludesFile={_nothing()}"]), *ident, *args],
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         raise HarnessError(
