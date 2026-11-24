@@ -33,6 +33,10 @@ fresh venv, never in this tree, so no `__pycache__` here holds a mutant; and the
 `PYTHONDONTWRITEBYTECODE=1`, so they write none either. (A mutated file restored in place by a same-size write in
 the same second keeps its stale `.pyc`, which is why nothing here edits the tree.)
 
+No real storage: every pytest this runs gets `child_env()`, which drops `MINTD_STORY_BUCKET` and every AWS, boto and
+fsspec variable. A story that can write to the lab's test bucket by hand (story 11) then runs on the emulator, so an
+exported bucket name can't send each mutant build's uploads to real storage.
+
 The bar: at least 80% of the past-fix rows caught, and every data-loss row. The mutants' share is given with
 its 95% Wilson interval.
 """
@@ -67,6 +71,14 @@ PLUGIN = "tests.stories.run_recall"  # this module, loaded into each pytest run 
 MARK = "not slow and not xfail"
 SEED = 20261119
 MIN_FREE = 4 * 2**30
+
+
+def child_env(**extra: str) -> dict[str, str]:
+    """This process's environment for a child pytest, without what reaches real storage: the test bucket's name,
+    and every AWS, boto and fsspec setting (keys, key files, profiles). No bytecode, plus ``extra``."""
+    env = {k: v for k, v in os.environ.items()
+           if k != "MINTD_STORY_BUCKET" and not k.startswith(("AWS_", "BOTO_", "FSSPEC_"))}
+    return {**env, "PYTHONDONTWRITEBYTECODE": "1", **extra}
 
 
 class Row(NamedTuple):
@@ -321,7 +333,7 @@ def _run(rev: str, patch: str | None, stories: tuple[str, ...], *, strict: bool,
             ran = subprocess.run(
                 [sys.executable, "-m", "pytest", *named, "-q", "-p", "no:cacheprovider", "-p", PLUGIN,
                  f"--basetemp={root / 'regression'}", f"--junitxml={regression}"],
-                cwd=clone, env={**os.environ, "PYTHONPATH": str(clone / "src"), "PYTHONDONTWRITEBYTECODE": "1"},
+                cwd=clone, env=child_env(PYTHONPATH=str(clone / "src")),
                 capture_output=True, check=False,
             )
             why = unvalidated(regression, ran.returncode, named)
@@ -335,7 +347,7 @@ def _run(rev: str, patch: str | None, stories: tuple[str, ...], *, strict: bool,
             # A session of its own: a Ctrl-C here reaches only this runner, which then stops pytest itself
             # and waits for it, so its teardown is done before the folder is deleted.
             proc = subprocess.Popen(
-                argv, cwd=REPO, env={**os.environ, "MINTD_BIN": str(mintd), "PYTHONDONTWRITEBYTECODE": "1"},
+                argv, cwd=REPO, env=child_env(MINTD_BIN=str(mintd)),
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             try:
@@ -372,7 +384,7 @@ def not_green_at_head(named: tuple[str, ...]) -> str | None:
         ran = subprocess.run(
             [sys.executable, "-m", "pytest", *named, "-q", "-p", "no:cacheprovider", "-p", PLUGIN,
              f"--basetemp={Path(tmp) / 'pytest'}", f"--junitxml={junit}"],
-            cwd=REPO, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, check=False,
+            cwd=REPO, env=child_env(), capture_output=True, check=False,
         )
         got = classify(junit, ran.returncode, strict=True)
     return None if got.verdict == "green" else (
@@ -407,7 +419,7 @@ def preflight(rows: list[Row]) -> None:
         for story in row.stories or ("",):
             got = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", "-m", MARK,
                                   "-p", "no:cacheprovider", str(STORIES / story)],
-                                 cwd=REPO, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                                 cwd=REPO, env=child_env(),
                                  capture_output=True, text=True, check=False)
             if got.returncode:
                 raise SystemExit(f"{row.fix}: {story or 'the stories'} collect no test under -m {MARK!r}")

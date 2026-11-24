@@ -291,6 +291,32 @@ def test_a_run_past_its_wall_limit_stops_pytest_and_leaves_no_folder(tmp_path: P
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
+def test_a_build_s_stories_get_no_bucket_name_and_no_aws_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a bucket name, key files, a profile and boto/fsspec settings exported, the stories each build runs get
+    none of them, so a story that can write to real storage by hand stays on the emulator. Mutation that turns it
+    red: `_run`'s stories environment back to `{**os.environ, ...}`."""
+    fake = tmp_path / "mintd"
+    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    stub = tmp_path / "python"
+    stub.write_text(f"#!/bin/sh\nenv > {tmp_path / 'env'}\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    monkeypatch.setattr(rr, "build_mintd", lambda rev, root, patch=None: fake)
+    monkeypatch.setattr(rr.sys, "executable", str(stub))
+    planted = {"MINTD_STORY_BUCKET": "a-real-bucket", "AWS_SHARED_CREDENTIALS_FILE": "/home/op/.aws/key-file",
+               "AWS_CONFIG_FILE": "/home/op/.aws/key-config", "AWS_PROFILE": "op", "AWS_ACCESS_KEY_ID": "AKIAOP",
+               "BOTO_CONFIG": "/home/op/.boto", "FSSPEC_S3_KEY": "AKIAOP"}
+    for k, v in planted.items():
+        monkeypatch.setenv(k, v)
+
+    rr._run("HEAD", None, (), strict=True)
+
+    seen = dict(line.split("=", 1) for line in (tmp_path / "env").read_text(encoding="utf-8").splitlines() if "=" in line)
+    assert not planted.keys() & seen.keys(), sorted(planted.keys() & seen.keys())
+    assert not [k for k in seen if k.startswith(("AWS_", "BOTO_", "FSSPEC_"))]
+    assert seen["MINTD_BIN"] == str(fake) and seen["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
 def test_preflight_writes_no_bytecode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation that turns it red: preflight's collect-only run without PYTHONDONTWRITEBYTECODE."""
     seen: list[dict] = []
