@@ -130,9 +130,11 @@ and is `null` — disabled — by default. Per-command, `--timeout 600` opts int
 10-minute wall clock and `--timeout 0` disables it. `NO_COLOR` in the environment
 turns off all color.
 
-The AWS profile isn't a config key: mintd uses the profile `mintd` when your
-shared credentials file (`~/.aws/credentials`, or `$AWS_SHARED_CREDENTIALS_FILE`)
-has a `[mintd]` section, and boto3's default credential chain otherwise.
+The AWS profile isn't a config key. mintd signs with the profile the remote's
+`profile` names in `.dvc/config` (or `.dvc/config.local`); else the one
+`AWS_DEFAULT_PROFILE` or `AWS_PROFILE` names; else `mintd`, when your shared
+credentials file (`~/.aws/credentials`, or `$AWS_SHARED_CREDENTIALS_FILE`) has a
+`[mintd]` section; else boto3's default credential chain.
 
 If you have a v1 mintd config kicking around:
 
