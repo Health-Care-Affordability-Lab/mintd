@@ -291,6 +291,7 @@ def test_a_run_past_its_wall_limit_stops_pytest_and_leaves_no_folder(tmp_path: P
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a shebang fake")
 def test_a_build_s_stories_get_no_bucket_name_and_no_aws_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With a bucket name, key files, a profile and boto/fsspec settings exported, the stories each build runs get
     none of them, so a story that can write to real storage by hand stays on the emulator. Mutation that turns it
