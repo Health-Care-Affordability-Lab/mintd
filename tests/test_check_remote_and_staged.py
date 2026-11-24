@@ -1321,6 +1321,20 @@ def test_staged_in_a_nested_git_repo_stops_at_its_own_top_level(tmp_path: Path) 
     assert [f.kind for f in check_staged(proj)] == ["staged_drops_version_ids"]  # the outer one still refuses
 
 
+def test_dvc_root_stops_at_its_bound(tmp_path: Path) -> None:
+    """dvc_root walks up as dvc does, past any .git; with `within`, never above it.
+    Mutation: ignore `within` -> the outer project is found, red."""
+    from mintd._dvc_invoke import dvc_root
+
+    (tmp_path / ".dvc").mkdir()
+    inner = tmp_path / "repo" / "sub"
+    inner.mkdir(parents=True)
+    assert dvc_root(inner) == tmp_path
+    assert dvc_root(inner, within=tmp_path / "repo") == inner  # none within: `start`, as with no project at all
+    (tmp_path / "repo" / ".dvc").mkdir()
+    assert dvc_root(inner, within=tmp_path / "repo") == tmp_path / "repo"
+
+
 def test_staged_checks_the_nearest_dvc_project_up_from_the_path(tmp_path: Path) -> None:
     """A project inside another's folder, in the same git repository, is the
     one dvc runs in from below it, so it is the one checked.

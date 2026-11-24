@@ -48,10 +48,15 @@ def dvc_env() -> dict[str, str]:
     return env
 
 
-def dvc_root(start: Path) -> Path:
+def dvc_root(start: Path, *, within: Path | None = None) -> Path:
     """The nearest directory at or above ``start`` holding ``.dvc/``: the
     project dvc acts on from anywhere beneath it, found as dvc's own
     ``Repo.find_root`` finds it. Git's own walk stops at the nearest ``.git``
     instead, which inside a submodule or nested clone is a different
-    repository; dvc's doesn't. ``start`` when there is none."""
-    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
+    repository; dvc's doesn't. With ``within``, the walk never goes above it:
+    ``check --staged`` stops at the git top level, since a commit can't stage
+    files above it. ``start`` when there is none."""
+    return next(
+        (p for p in (start, *start.parents) if (within is None or p.is_relative_to(within)) and (p / ".dvc").is_dir()),
+        start,
+    )
