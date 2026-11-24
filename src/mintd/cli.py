@@ -170,7 +170,7 @@ def _release_notice(args: argparse.Namespace) -> None:
         where = ", in PowerShell" if os.name == "nt" else ""
         notice += f"\n  update{where}: {_install_line()}"
     if notice:  # a dev build gets no update line: the release would be older
-        args._reporter.info(notice, soft_wrap=True)
+        args._reporter.info(notice)  # every reporter line is soft-wrapped, so it copies whole
 
 
 class MetadataSchemaTooOld(MintdError):
