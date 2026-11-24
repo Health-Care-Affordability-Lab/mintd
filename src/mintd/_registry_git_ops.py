@@ -16,6 +16,8 @@ from __future__ import annotations
 import functools
 import json
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -352,7 +354,27 @@ def _git_uses_gh(cwd: Path | None, host: str = "github.com") -> bool:
         if scope and not _scope_covers(scope, host):
             continue
         helpers = [*helpers, value] if value else []
-    return any("gh auth git-credential" in helper for helper in helpers)
+    return any(_is_gh_helper(helper) for helper in helpers)
+
+
+def _is_gh_helper(helper: str) -> bool:
+    """Whether a ``credential.helper`` value runs gh's helper, read as git runs
+    it: a ``!`` value goes through ``sh``, so its words split as ``sh`` splits
+    them. The first word is gh at any path (``gh`` or ``gh.exe``, any case),
+    and the next two are ``auth git-credential``. That covers what
+    `gh auth setup-git` writes everywhere, a quoted path included:
+    ``!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential`` on
+    Windows, or a POSIX path with a space."""
+    if not helper.startswith("!"):
+        return False
+    try:
+        words = shlex.split(helper[1:], posix=True)
+    except ValueError:  # unbalanced quotes: sh can't run it either
+        return False
+    if len(words) < 3:
+        return False
+    name = re.split(r"[\\/]", words[0])[-1].lower()
+    return name in ("gh", "gh.exe") and words[1:3] == ["auth", "git-credential"]
 
 
 def github_access_hint(url: str, *, cwd: Path | None = None) -> str:

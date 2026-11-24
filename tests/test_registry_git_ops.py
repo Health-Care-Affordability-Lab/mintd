@@ -894,3 +894,48 @@ def test_each_test_reads_gh_afresh(_gh_state_cached_before_the_test: None) -> No
     assert _registry_git_ops._gh_state.cache_info().currsize == 0
     assert _registry_git_ops.producer_refusal.cache_info().currsize == 0
     assert _registry_git_ops._gh_state()[0] == "ready"
+
+
+@pytest.mark.parametrize(("helper", "is_gh"), [
+    pytest.param("!gh auth git-credential", True, id="plain"),
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential", True, id="windows-single-quoted"),
+    pytest.param('!"C:\\Program Files\\GitHub CLI\\gh.exe" auth git-credential', True, id="windows-double-quoted"),
+    pytest.param("!'C:\\PROGRA~1\\GH.EXE' auth git-credential", True, id="windows-upper-case"),
+    pytest.param("!/c/tools/gh.exe auth git-credential", True, id="msys-path"),
+    pytest.param("!'/opt/GitHub CLI/gh' auth git-credential", True, id="posix-spaced-quoted"),
+    pytest.param("!/opt/homebrew/bin/gh auth git-credential", True, id="posix-path"),
+    pytest.param("!gh-wrapper auth git-credential", False, id="gh-wrapper"),
+    pytest.param("!notgh auth git-credential", False, id="notgh"),
+    pytest.param("!echo gh auth git-credential", False, id="echo"),
+    pytest.param("gh", False, id="not-a-shell-helper"),
+    pytest.param("osxkeychain", False, id="another-helper"),
+    pytest.param("", False, id="empty"),
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe auth git-credential", False, id="unbalanced-quote"),
+    pytest.param("!gh auth", False, id="gh-auth-only"),
+    pytest.param("!gh auth git-credentials", False, id="another-gh-command"),
+])
+def test_gh_helper_is_read_as_git_runs_it(helper: str, is_gh: bool) -> None:
+    """A `!` helper runs through sh, so its words split as sh splits them: gh at any
+    path, quoted or not (`gh auth setup-git` quotes it on Windows), then
+    `auth git-credential`. A substring match refused every quoted path.
+    Mutation: back to `"gh auth git-credential" in helper` -> the quoted cases, red."""
+    from mintd._registry_git_ops import _is_gh_helper
+
+    assert _is_gh_helper(helper) is is_gh
+
+
+@pytest.mark.parametrize(("helper", "uses_gh"), [
+    pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential", True, id="gh-quoted"),
+    pytest.param("!gh-wrapper auth git-credential", False, id="gh-wrapper"),
+])
+def test_git_uses_gh_reads_the_helper_from_git_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, helper: str, uses_gh: bool,
+) -> None:
+    """Through git's own config file, where the backslashes are escaped: the value
+    git hands back is the one gh wrote."""
+    from mintd._registry_git_ops import _git_uses_gh
+
+    config = tmp_path / "gitconfig"
+    _git(["config", "--file", str(config), "--add", "credential.https://github.com.helper", helper], cwd=tmp_path)
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    assert _git_uses_gh(None) is uses_gh

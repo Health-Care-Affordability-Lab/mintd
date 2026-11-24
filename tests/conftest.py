@@ -8,6 +8,7 @@ GitHub.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import boto3
@@ -138,13 +139,19 @@ def _hermetic_gitconfig(tmp_path_factory: pytest.TempPathFactory) -> Path:
     setup-git` writes it, and a committer. Outside each test's tmp_path,
     which some tests list."""
     path = tmp_path_factory.mktemp("gh-hermetic") / "gitconfig"
-    # A committer of its own too: git tag -a needs one, and this file replaces
-    # the global config where a CI runner or a developer keeps theirs.
-    path.write_text(
-        '[credential "https://github.com"]\n\thelper = !gh auth git-credential\n'
-        '[credential "https://gist.github.com"]\n\thelper = !gh auth git-credential\n'
-        "[user]\n\tname = mintd tests\n\temail = tests@example.invalid\n"
-    )
+    # The helper as gh writes it on Windows: a quoted path with spaces and
+    # backslashes, so every job reads that form, not only the bare `gh`.
+    # Through `git config`, which escapes the backslashes in the file.
+    helper = "!'C:\\Program Files\\GitHub CLI\\gh.exe' auth git-credential"
+    for key, value in (
+        ("credential.https://github.com.helper", helper),
+        ("credential.https://gist.github.com.helper", helper),
+        # A committer of its own too: git tag -a needs one, and this file
+        # replaces the global config where a CI runner or a developer keeps theirs.
+        ("user.name", "mintd tests"),
+        ("user.email", "tests@example.invalid"),
+    ):
+        subprocess.run(["git", "config", "--file", str(path), "--add", key, value], check=True)
     return path
 
 
