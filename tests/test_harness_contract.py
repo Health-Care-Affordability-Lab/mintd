@@ -63,17 +63,17 @@ V2_MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 ALPHA_URL = "https://github.com/example-org/alpha"
 BETA_URL = "https://github.com/example-org/beta"
 #: `source_path` of the one product `enclave_manifest_v2_minimal.yaml` approves.
-APPROVED_PATH = "outputs/cms_based/"
+APPROVED_PATH = "outputs/core_rows/"
 
 
 def _catalog_pointing_at(url: str) -> InMemoryCatalogClient:
-    """A catalog whose `demo-xw` entry resolves to `url` — the manifest
+    """A catalog whose `demo-map` entry resolves to `url` — the manifest
     fixture approves that repo by name, so this is what makes the enclave arm
     reach a producer instead of a 404."""
     client = InMemoryCatalogClient()
     data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
+    data["project"]["name"] = "demo-map"
+    data["project"]["full_name"] = "data_demo-map"
     data["repository"]["github_url"] = url
     client.register(Metadata.model_validate(data))
     return client
@@ -1158,7 +1158,7 @@ def test_enclave_manifest_consumer_variant_loads(
     but nothing composed a *project* around it, so `check.py`'s enclave walker
     was reached by no fixture. This is the variant unit A (position 8) needs.
     """
-    # The manifest approves `outputs/cms_based/`. Under the md5 drift rule
+    # The manifest approves `outputs/core_rows/`. Under the md5 drift rule
     # the comparison reads the producer's own DVC pointer at pin and HEAD,
     # so the payload must really exist — `publish()` DVC-tracks bytes and
     # commits, which is exactly what moves the pointer.
@@ -1183,7 +1183,7 @@ def test_enclave_manifest_consumer_variant_loads(
     findings = check_project(proj, upgrades=True, client=client, producer_view_factory=at)
 
     consumer = [f for f in findings if f.section == "consumer"]
-    assert [f.field_path for f in consumer] == ["approved_products[demo-xw]"]
+    assert [f.field_path for f in consumer] == ["approved_products[demo-map]"]
     assert consumer[0].kind == "drift", consumer[0].message
     assert APPROVED_PATH in consumer[0].message
     assert "producer's HEAD differs from your pin" in consumer[0].message
