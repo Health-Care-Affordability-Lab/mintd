@@ -667,13 +667,15 @@ def test_every_function_that_spawns_dvc_passes_an_explicit_env() -> None:
 
     assert offenders == [], f"dvc spawned with an inherited env: {offenders}"
     # Guard the scanner itself: a matcher that finds nothing passes vacuously.
-    # 9 = eight in `_init_ops.py` / `_fast_sync_ops.py` + ONE in `_dvc_ops.py`.
+    # 10 = nine in `_init_ops.py` / `_fast_sync_ops.py` + ONE in `_dvc_ops.py`.
     # Was 16 until unit A collapsed that file's eight duplicated
-    # `run_streaming` blocks into `SubprocessDvcOps._spawn`. A FALLING count is
+    # `run_streaming` blocks into `SubprocessDvcOps._spawn`; then 9, until
+    # `InitOps.dvc_add` (init tracks a data product's data/raw) added one in
+    # `_init_ops.py`, beside `dvc_init` and with the same `env=`. A FALLING count is
     # not automatically fine -- it is how this invariant would rot silently, by
     # spawns moving somewhere the scanner does not look -- so the number is
     # pinned and every move has to be explained here, which is the point.
-    assert checked == 9, f"dvc spawn sites moved: {checked}"
+    assert checked == 10, f"dvc spawn sites moved: {checked}"
 
 
 # --- unit A: the `cwd` seam ------------------------------------------------
