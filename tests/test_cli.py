@@ -4756,16 +4756,18 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
     assert not (ns / "final.dvc").exists() and not (ns / "final").exists()
 
 
-def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+def test_data_import_all_refuses_before_any_output_lands_when_a_later_one_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--all`: the first output lands, then the second is refused before
-    anything is made for it (a file already sits at its pointer's path). The
-    failure rollback never touches the payload of the output that landed.
+    """`--all`: a file already sits at the second output's pointer path. Every
+    destination is checked before the first dvc call, so the import is refused
+    before the first output lands, rather than half done. (An output that
+    fails in dvc after an earlier one landed keeps that one:
+    `test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver`.)
 
-    Mutation: remove the destination whole on failure and keep the previous
-    output's rollback state -> `good/` is deleted.
+    Mutation: check each destination as its output is imported -> `good/` lands, red.
     """
+    monkeypatch.setenv("COLUMNS", "1000")  # the path is checked whole; a wrap can split one
     client, _dvc_ops = patched_clients
     sha = _undeliverable_producer(tmp_path, client)
     root = tmp_path / "imports"
@@ -4779,7 +4781,9 @@ def test_data_import_all_keeps_an_earlier_output_when_a_later_one_is_refused(
     err = " ".join(capsys.readouterr().err.split())
 
     assert rc != 0, err
-    assert (ns / "good" / "payload").is_file(), err
+    assert "final.dvc already exists" in err
+    assert not (ns / "good").exists() and not (ns / "good.dvc").exists(), err
+    assert (ns / "final.dvc").read_text() == "not a pointer\n"
 
 
 def _reachable_raises(root: str) -> set[str]:
