@@ -34,7 +34,9 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
 from .errors import MintdError
-from ._dvc_state import get_remote_config, parse_s3_url, require_default_remote, s3_key_for_out, workspace_path_for
+from ._dvc_state import (
+    get_remote_config, parse_s3_url, remote_key, require_default_remote, s3_key_for_out, workspace_path_for,
+)
 from ._s3 import ClientError, create_client as _create_s3_client, check_bucket_versioning, retry_transient
 from ._s3_listing_ops import (
     S3ListingError,
@@ -360,7 +362,7 @@ def resolve_repo_remote(project_path: Path, remote: str | None) -> RepoRemote:
     ``compute_storage_prefix``. Every failure is a typed, hinted ``CacheError``
     (no silent degradation — cache has no fallback lane)."""
     try:
-        remote_name = remote.lower() if remote else require_default_remote(project_path)  # as dvc looks names up
+        remote_name = remote_key(remote) if remote else require_default_remote(project_path)
         remote_cfg = get_remote_config(project_path, remote_name)
     except MintdError as exc:  # no default remote, or a config dvc can't read: dvc refuses too
         raise CacheError(str(exc), hint=exc.hint) from exc

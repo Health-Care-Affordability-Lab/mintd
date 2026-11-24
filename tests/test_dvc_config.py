@@ -388,3 +388,82 @@ def test_the_no_default_hint_offers_local_only_where_a_local_default_serves(tmp_
     with pytest.raises(MintdError) as raised:
         require_default_remote(tmp_path, local_ok=local_ok)
     assert raised.value.hint == hint
+
+
+# --- a remote's name, as dvc compares it ---------------------------------------------------
+
+
+def test_a_remote_named_in_mixed_case_is_one_remote_as_dvc_reads_it(real_dvc, tmp_path: Path, monkeypatch) -> None:
+    """dvc lowercases a remote's name when it reads a config, and looks a named remote up
+    lowercased, so `Storage` and `storage` are one remote. So does every lookup and
+    comparison here: the storage check, the readers, push's default-remote check, and the
+    storage check's repair, which dvc's own rename now clears.
+
+    Mutations: compare metadata's name as given -> a mismatch the hint can't clear, red;
+    look a name up as given -> KeyError and {}, red; compare push's --remote as given ->
+    "isn't the default remote", red."""
+    import json
+
+    from mintd import _push_verify
+    from mintd._storage_state import StorageState, inspect_storage, repair_hint
+
+    root = _project(real_dvc, tmp_path, f"[core]\n    remote = Storage\n{R.replace('storage', 'Storage')}"
+                                        "    url = s3://b/lab/p\n    version_aware = true\n")
+    assert _dvc_reads(real_dvc, root, "remote.STORAGE.url") == "s3://b/lab/p"  # dvc finds it in any case
+    meta = {"storage": {"bucket": "b", "prefix": "lab/p", "dvc": {"remote_name": "Storage"}}}
+    (root / "metadata.json").write_text(json.dumps(meta))
+    assert inspect_storage(root).state == StorageState.INITIALIZED
+    assert get_remote_config(root, "Storage")["url"] == merged_remote(root, "STORAGE")["url"] == "s3://b/lab/p"
+
+    class Reached(Exception):
+        pass
+
+    def reached(*_a, **_k):
+        raise Reached  # past the default-remote check, at the S3 client
+
+    monkeypatch.setattr(_push_verify, "_create_s3_client", reached)
+    with pytest.raises(Reached):
+        _push_verify.prepare(root, remote_arg="Storage", selection=None, aws_profile=None)
+
+    # The storage check's repair: dvc's rename writes the name as typed, and mintd reads it lowercased.
+    (root / ".dvc" / "config").write_text(f"[core]\n    remote = storage\n{R}    url = s3://b/lab/p\n")
+    meta["storage"]["dvc"]["remote_name"] = "Other"
+    (root / "metadata.json").write_text(json.dumps(meta))
+    inspection = inspect_storage(root)
+    assert inspection.state == StorageState.NAME_MISMATCH
+    assert "dvc remote rename storage Other" in (repair_hint(inspection) or "")
+    real_dvc(["remote", "rename", "storage", "Other"], cwd=root, check=True)
+    assert inspect_storage(root).state == StorageState.INITIALIZED
+
+
+@pytest.mark.parametrize("where", ["after-the-named-remote", "before-it"])
+def test_a_remote_section_with_no_name_is_read_past_as_main_read_it(real_dvc, tmp_path: Path, where: str) -> None:
+    """dvc stops on `[remote]` with no name (its schema wants a section per remote), and main's
+    readers read past it. So does this one, instead of letting it replace the named remotes.
+
+    Mutation: keep it as a section -> after the named remote, the readers lose it, red."""
+    from mintd._storage_state import inspect_storage
+
+    bare, named = "[remote]\n    url = s3://x/y\n", f"{R}    url = s3://b/p\n"
+    body = named + bare if where == "after-the-named-remote" else bare + named
+    root = _project(real_dvc, tmp_path, f"[core]\n    remote = storage\n{body}")
+    assert real_dvc(["status"], cwd=root).returncode != 0
+    assert get_remote_config(root, "storage") == merged_remote(root, "storage") == {"url": "s3://b/p"}
+    assert inspect_storage(root).dvc_remote_name == "storage"
+
+
+@pytest.mark.parametrize("level", ["config", "config.local"])
+def test_check_reports_a_config_dvc_cannot_read_and_carries_on(tmp_path: Path, level: str) -> None:
+    """Plain `mintd check` on a config dvc can't read: one finding naming the file, and every
+    other finding still made, where it stopped mid-run with a traceback.
+
+    Mutation: let the folder-list check's error escape -> check_project raises, red."""
+    from mintd.check import check_project
+    from tests._dvc_fixtures import stage_dvc_project
+
+    stage_dvc_project(tmp_path)
+    (tmp_path / ".dvc" / level).write_text("[core\n")
+    findings = check_project(tmp_path)
+    assert any(f.kind == "dvc_state_unreadable" and "can't read" in f.message and level in f.message
+               for f in findings)
+    assert any(f.kind == "data_products_output_untracked" for f in findings)  # the checks after it still ran

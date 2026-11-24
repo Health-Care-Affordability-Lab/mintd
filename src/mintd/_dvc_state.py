@@ -986,6 +986,15 @@ def classify_targets(project_path: Path, targets: list[str], remote_name: str) -
     return all_outs, fallback, hash_missing
 
 
+def remote_key(name: str) -> str:
+    """A DVC remote's name as dvc compares it: lowercased. dvc lowercases section names and
+    ``core.remote`` when it reads a config (``Config.load_file``, and the schema's ``Lower``),
+    and looks a named remote up as ``name.lower()`` (``dvc.fs.get_fs_config``), so
+    ``Storage`` and ``storage`` are one remote. Every lookup and comparison of a remote's
+    name goes through it."""
+    return name.lower()
+
+
 def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
     """A DVC config file's text, read the way dvc reads it (``dvc.config.Config.load_file``):
     configobj, which strips one pair of matching quotes and an unquoted inline ``#``
@@ -1017,11 +1026,13 @@ def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
             )
         named = re.fullmatch(r'\s*remote\s*"(.*)"\s*', name)
         if named:
-            conf["remote"][named.group(1)] = keys
+            conf["remote"][remote_key(named.group(1))] = keys
+        elif name.strip() == "remote":
+            continue  # a [remote] with no name: dvc's schema refuses it; main read past it, and so does this
         else:
             conf[name] = keys
     if isinstance(conf.get("core", {}).get("remote"), str):
-        conf["core"]["remote"] = conf["core"]["remote"].lower()  # dvc's schema lowercases it, as it does remote names
+        conf["core"]["remote"] = remote_key(conf["core"]["remote"])  # dvc's schema lowercases it too
     return conf
 
 
@@ -1086,9 +1097,9 @@ def parse_remote_config_text(text: str, remote_name: str | None) -> dict[str, st
         remote_name = default_remote_in(conf)
         if remote_name is None:
             raise KeyError("no default DVC remote: config sets no [core] remote")
-    if remote_name not in conf["remote"]:
+    if remote_key(remote_name) not in conf["remote"]:
         raise KeyError(f"remote {remote_name} not found in DVC config")
-    return dict(conf["remote"][remote_name])
+    return dict(conf["remote"][remote_key(remote_name)])
 
 
 def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
@@ -1105,8 +1116,8 @@ def get_remote_config(project_path: Path, remote_name: str) -> dict[str, str]:
     config_path = project_path / ".dvc" / "config"
     if not config_path.exists():
         raise FileNotFoundError(f"no .dvc/config at {config_path}")
-    committed = read_dvc_config(project_path, "repo")["remote"].get(remote_name)
-    local = read_dvc_config(project_path, "local")["remote"].get(remote_name)
+    committed = read_dvc_config(project_path, "repo")["remote"].get(remote_key(remote_name))
+    local = read_dvc_config(project_path, "local")["remote"].get(remote_key(remote_name))
     if committed is None and local is None:
         raise KeyError(f"remote {remote_name} not found in DVC config ({config_path})")
     if committed is None:
@@ -1123,8 +1134,8 @@ def merged_remote(root: Path, remote: str) -> dict[str, str]:
     landed, so it must look where dvc wrote; whether that is the location of record is a
     separate check (``data_ops._local_redirect``). Fast sync reads the committed view,
     :func:`get_remote_config`."""
-    merged = dict(read_dvc_config(root, "repo")["remote"].get(remote, {}))
-    merged.update(read_dvc_config(root, "local")["remote"].get(remote, {}))
+    merged = dict(read_dvc_config(root, "repo")["remote"].get(remote_key(remote), {}))
+    merged.update(read_dvc_config(root, "local")["remote"].get(remote_key(remote), {}))
     return merged
 
 

@@ -61,7 +61,7 @@ from ._dvc_state import (
 from ._registry_git_ops import GitOpError, RegistryGitOps, specific_hint
 from ._s3 import create_client as _create_s3_client  # the S3 boundary: tests stand a client in here
 from .catalog import CatalogClient, CatalogNotFound
-from .errors import unreachable_repo_hint
+from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
@@ -361,6 +361,13 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                 # A folder pointer's list read against the folder on disk:
                 # the only reference that shows a list cut at an entry, or
                 # recorded before files were added. Publish refuses it too.
+                try:
+                    unlisted = unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
+                                                remote=inspection.dvc_remote_name or "")
+                except MintdError as exc:  # .dvc/config or config.local dvc can't read: one finding, and go on
+                    unlisted = []
+                    findings.append(CheckFinding(severity="error", section="producer", kind="dvc_state_unreadable",
+                                                 message=str(exc), hint=exc.hint))
                 findings.extend(
                     CheckFinding(
                         severity="error",
@@ -370,8 +377,7 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                         kind="dvc_folder_unlisted",
                         hint=u.hint() + ", then re-run 'mintd check'.",
                     )
-                    for u in unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
-                                              remote=inspection.dvc_remote_name or "")
+                    for u in unlisted
                 )
                 try:
                     findings.extend(

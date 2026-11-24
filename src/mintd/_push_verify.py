@@ -28,7 +28,7 @@ from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
 from ._dvc_state import (
     default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files, read_dvc_config,
-    require_default_remote,
+    remote_key, require_default_remote,
 )
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
@@ -277,13 +277,15 @@ def prepare(
     """Refuse, plan and write the repair; None when the remote isn't
     version-aware (nothing there is pinned by version)."""
     default = default_remote_name(root)
-    name = remote_arg or default
+    name = remote_key(remote_arg) if remote_arg else default
     if name is None:
         return None
     versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r), r)]
     if not versioned:
         return None
-    if remote_arg is not None and remote_arg != default:
+    if name != default:
+        if default is None:
+            default_for_pins(root)  # raises dvc's "no default DVC remote" and its hint: pins are read through it
         raise PushRefused(
             f"--remote {remote_arg} isn't the default remote {default}. On a version-aware remote "
             "DVC records the versions it reads from the default remote, so the pins would point nowhere",

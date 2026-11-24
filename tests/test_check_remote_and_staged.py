@@ -473,6 +473,22 @@ def test_push_refuses_a_version_aware_dvc_reads_as_neither_true_nor_false(tmp_pa
     assert (str(exc.value), exc.value.hint) == (message, hint)
 
 
+def test_push_to_a_named_remote_with_no_default_names_the_missing_default(tmp_path: Path) -> None:
+    """`--remote storage` on a version-aware remote with no `core.remote`: pins are read back
+    through the default, so push stops with dvc's missing-default message and hint, not
+    "isn't the default remote None" with a hint that fails next.
+
+    Mutation: drop prepare's no-default branch -> the None message, red.
+    """
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    message, hint = _config_dvc_refuses(proj, "no-default-remote")
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg="storage", selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (message, hint)
+
+
 def test_remote_refuses_a_remote_with_its_own_keys(pushed) -> None:
     proj, *_ = pushed
     (proj / ".dvc" / "config.local").write_text(f'[remote "{REMOTE}"]\n    access_key_id = AKIA\n')

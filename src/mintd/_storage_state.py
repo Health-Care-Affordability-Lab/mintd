@@ -77,6 +77,8 @@ def inspect_storage(project_path: Path) -> StorageInspection:
     metadata_path = project_path / "metadata.json"
     dvc_config_path = project_path / ".dvc" / "config"
 
+    from ._dvc_state import remote_key
+
     meta_bucket, meta_prefix, meta_name, meta_block_present = _read_metadata_storage(metadata_path)
     dvc_name, dvc_url, dvc_version_aware = _read_dvc_config(dvc_config_path)
 
@@ -96,7 +98,7 @@ def inspect_storage(project_path: Path) -> StorageInspection:
         state = StorageState.PARTIAL_DVC_ONLY
     elif meta_bucket == "":
         state = StorageState.BUCKET_EMPTY
-    elif meta_name and dvc_name and meta_name != dvc_name:
+    elif meta_name and dvc_name and remote_key(meta_name) != remote_key(dvc_name):
         state = StorageState.NAME_MISMATCH
     elif n_meta and n_dvc and n_meta != n_dvc:
         state = StorageState.URL_MISMATCH
@@ -138,7 +140,7 @@ def repair_hint(inspection: StorageInspection) -> str | None:
         )
 
     if state == StorageState.PARTIAL_META_ONLY:
-        from ._dvc_state import read_dvc_config
+        from ._dvc_state import read_dvc_config, remote_key
         from .errors import MintdError
 
         name = inspection.metadata_remote_name or "<remote>"
@@ -146,7 +148,7 @@ def repair_hint(inspection: StorageInspection) -> str | None:
             remotes = read_dvc_config(inspection.dvc_config_path.parent.parent, "repo")["remote"]
         except MintdError as exc:  # `dvc remote add` would fail on it too
             return f"{exc}; {exc.hint}"
-        if name.lower() in remotes:
+        if remote_key(name) in remotes:
             return f".dvc/config has remote {name!r} but sets no default remote. Run: dvc remote default {name}"
         return (
             f"metadata.storage is configured but .dvc/config has no remote. "

@@ -42,6 +42,7 @@ from ._dvc_state import (
     outs_for_target,
     outs_materialized,
     partition_pipeline_outs,
+    remote_key,
     resolve_target_outs,
     skipped_targets,
 )
@@ -843,7 +844,7 @@ def data_pull(
             f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pulled; "
             "change the .gitignore, or drop this target"
         )
-    default_remote = remote.lower() if remote else _default_dvc_remote(project_path)  # dvc lowercases names too
+    default_remote = remote_key(remote) if remote else _default_dvc_remote(project_path)
     # "" names no remote: a pull of imports alone reads only their producers' buckets, and
     # dvc pull needs no remote of this project for them either. Anything else does (below).
     remote_name = default_remote or ""
@@ -1069,7 +1070,7 @@ def data_push(
     # ``.dvc`` paths with bare paths uploads only the last ``.dvc`` target's
     # outs at exit 0 (the ``index_from_targets`` leak ``_shape_groups``
     # documents), so the groups are never mixed.
-    remote = remote.lower() if remote else remote  # dvc lowercases remote names when it looks one up
+    remote = remote_key(remote) if remote else remote
     effective_remote = remote or require_default_remote(project_path)  # dvc push refuses with no default too
     groups: list[list[str] | None] = [None]
     selection: frozenset[str] | None = None
@@ -1313,7 +1314,7 @@ def commit_pushed_pointers(
     default = storage.dvc_remote_name
     if default is None:
         return left("no default DVC remote in .dvc/config")
-    if remote is not None and remote.lower() != default:
+    if remote is not None and remote_key(remote) != default:
         return left(f"pushed to --remote {remote}; importers pull from the default remote {default}")
     redirect = _local_redirect(root, default, named=remote is not None)
     if redirect is not None:
