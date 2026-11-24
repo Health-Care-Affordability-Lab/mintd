@@ -41,13 +41,13 @@ FIXTURES = Path(__file__).parent / "fixtures"
 MINIMAL = FIXTURES / "metadata_v2_minimal.json"
 STANDALONE_IMPORT = FIXTURES / "dvc_files" / "standalone_import.dvc"
 
-REPO_URL = "https://github.com/example-org/demo-xw"
+REPO_URL = "https://github.com/example-org/demo-map"
 PIN_SHA = "4f7c2a1abcd1234567890abcdef0123456789abc"  # matches fixture
 HEAD_SHA = "b" * 40
 
 
 def _stage_project(
-    tmp_path: Path, *, dvc_filename: str = "cms_based.dvc", namespace: str = "cms_based"
+    tmp_path: Path, *, dvc_filename: str = "core_rows.dvc", namespace: str = "core_rows"
 ) -> Path:
     """Lay out a project with metadata.json + one canonical .dvc import.
 
@@ -94,7 +94,7 @@ def _drift_finding(source: Path) -> CheckFinding:
         section="consumer",
         message=(
             "upgrade available: producer now publishes "
-            "'outputs/new.parquet' (you have 'cms_based')"
+            "'outputs/new.parquet' (you have 'core_rows')"
         ),
         source=source,
         kind="drift",
@@ -125,7 +125,7 @@ def test_bump_up_to_date_returns_none(tmp_path: Path) -> None:
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         check_findings=[_up_to_date_finding(dvc_path)],
     )
 
@@ -156,14 +156,14 @@ def test_a_failed_bump_leaves_the_payload_in_place(tmp_path: Path) -> None:
     fake.import_raises = DvcOpError("dvc import failed (exit 1): Failed to clone repo")
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     with pytest.raises(DvcOpError):
         bump_import(
             InMemoryCatalogClient(),
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
@@ -197,14 +197,14 @@ def test_an_interrupted_bump_leaves_the_payload_in_place(
     fake.import_raises = interrupt()
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     with pytest.raises(interrupt):
         bump_import(
             InMemoryCatalogClient(),
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
@@ -299,14 +299,14 @@ def test_a_bump_that_fails_midway_restores_over_the_partial_destination(
     (payload / "irreplaceable.csv").write_text("keep me\n", encoding="utf-8")
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     with pytest.raises(DvcOpError):
         bump_import(
             InMemoryCatalogClient(),
             _PartialThenFailDvcOps(shape),
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
@@ -360,14 +360,14 @@ def test_a_failed_bump_restores_a_payload_that_is_not_a_directory(
         payload.symlink_to(store)
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     with pytest.raises(DvcOpError):
         bump_import(
             InMemoryCatalogClient(),
             _PartialThenFailDvcOps("dir"),
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
@@ -438,14 +438,14 @@ def test_a_bump_refuses_a_stale_backup_instead_of_destroying_it(
     fake = _FakeDvcOps()
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     with pytest.raises(ImportDestinationExists) as excinfo:
         bump_import(
             InMemoryCatalogClient(),
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
@@ -484,13 +484,13 @@ def test_a_successful_bump_leaves_no_backup_beside_a_file_payload(
     payload.write_text("stale\n", encoding="utf-8")
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     result = bump_import(
         InMemoryCatalogClient(),
         _FakeDvcOps(),
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         producer_view_factory=factory,
         check_findings=[_drift_finding(dvc_path)],
     )
@@ -507,13 +507,13 @@ def test_bump_forwards_extra_dvc_args(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     bump_import(
         InMemoryCatalogClient(),
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         extra_dvc_args=["--verbose", "-j", "8"],
         producer_view_factory=factory,
         check_findings=[_drift_finding(dvc_path)],
@@ -532,13 +532,13 @@ def test_a_successful_bump_clears_the_backup(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     bump_import(
         InMemoryCatalogClient(),
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         producer_view_factory=factory,
         check_findings=[_drift_finding(dvc_path)],
     )
@@ -561,7 +561,7 @@ def test_bump_with_drift_rewrites_dvc_file(tmp_path: Path) -> None:
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         producer_view_factory=factory,
         check_findings=[_drift_finding(dvc_path)],
     )
@@ -573,7 +573,7 @@ def test_bump_with_drift_rewrites_dvc_file(tmp_path: Path) -> None:
     assert len(fake.calls) == 1
     call = fake.calls[0]
     # The recorded producer path, not HEAD's primary.
-    assert call.path == "outputs/cms_based/"
+    assert call.path == "outputs/core_rows/"
     assert call.rev == HEAD_SHA
     assert call.force is True
     assert call.repo_url == REPO_URL
@@ -593,7 +593,7 @@ def test_bump_name_not_imported_raises_import_not_found(tmp_path: Path) -> None:
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=[],
         )
     assert fake.calls == []
@@ -849,12 +849,12 @@ def test_bump_pin_missing_raises_bump_blocked(tmp_path: Path) -> None:
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=[finding],
         )
 
     assert ei.value.finding is finding
-    assert ei.value.name == "cms_based"
+    assert ei.value.name == "core_rows"
     assert fake.calls == []
 
 
@@ -875,7 +875,7 @@ def test_bump_unreachable_raises_bump_blocked(tmp_path: Path) -> None:
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=[finding],
         )
 
@@ -894,7 +894,7 @@ def test_bump_blocks_when_the_producer_head_is_unreachable(tmp_path: Path) -> No
     def factory(repo: str, pin: str):
         if pin == "":
             return ProducerError.unreachable(repo, "HEAD", "Could not resolve host")
-        return _view_with_primary("cms_based")
+        return _view_with_primary("core_rows")
 
     findings = check_project(tmp_path, upgrades=True, producer_view_factory=factory)
 
@@ -903,7 +903,7 @@ def test_bump_blocks_when_the_producer_head_is_unreachable(tmp_path: Path) -> No
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=findings,
         )
 
@@ -925,7 +925,7 @@ def _check_then_bump(
     dvc_path = _stage_project(tmp_path)
     if recorded_path is not None:
         text = dvc_path.read_text(encoding="utf-8")
-        dvc_path.write_text(text.replace("path: outputs/cms_based/", f"path: {recorded_path}"), encoding="utf-8")
+        dvc_path.write_text(text.replace("path: outputs/core_rows/", f"path: {recorded_path}"), encoding="utf-8")
     fetcher = StaticFetcher(
         {(REPO_URL, PIN_SHA): _producer_bytes(schema_version="1.0")}, head_store=head_store
     )
@@ -940,7 +940,7 @@ def _check_then_bump(
         InMemoryCatalogClient(),
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         producer_view_factory=partial(ProducerView.at_head, fetcher=fetcher, cache_dir=cache),
         check_findings=findings,
     )
@@ -973,7 +973,7 @@ def test_bump_moves_a_pin_whose_schema_is_too_old_to_a_head_that_reads(
     assert result.changed is True
     assert result.old_pin == PIN_SHA
     assert result.new_pin == HEAD_SHA
-    assert [(c.rev, c.path) for c in fake.calls] == [(HEAD_SHA, "outputs/cms_based/")]
+    assert [(c.rev, c.path) for c in fake.calls] == [(HEAD_SHA, "outputs/core_rows/")]
     # Read once, by bump, through the injected `at_head`; check never reads it.
     assert fetcher.head_calls == [REPO_URL]
 
@@ -982,8 +982,8 @@ def test_bump_moves_a_pin_whose_schema_is_too_old_to_a_head_that_reads(
     ("head", "kind", "hint"),
     [
         ("too-old", "schema_too_old", "ask the producer to update their metadata schema to 2.0"),
-        ("unreachable", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import cms_based --bump\n"),
-        ("invalid", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import cms_based --bump\n"),
+        ("unreachable", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import core_rows --bump\n"),
+        ("invalid", "drift_unknown", f"your pin {PIN_SHA[:7]} is intact; once the producer's HEAD is readable, re-run: mintd data import core_rows --bump\n"),
     ],
     ids=["head-too-old", "head-unreadable", "head-invalid"],
 )
@@ -1040,16 +1040,16 @@ def test_bump_retry_hint_names_the_path_it_was_given_shell_quoted(
     """
     fake = _FakeDvcOps()
     _, _, bump = _check_then_bump(
-        tmp_path, tmp_path_factory.mktemp("producer-cache"), fake, {}, recorded_path="outputs/cms based/"
+        tmp_path, tmp_path_factory.mktemp("producer-cache"), fake, {}, recorded_path="outputs/core rows/"
     )
 
     with pytest.raises(BumpBlocked) as ei:
-        bump(path="outputs/cms based/")
+        bump(path="outputs/core rows/")
 
     assert ei.value.finding.kind == "drift_unknown"
     assert fake.calls == []
     assert _render_bump_blocked(ei.value) == 2
-    assert "re-run: mintd data import cms_based --bump --path 'outputs/cms based/'\n" in capsys.readouterr().err
+    assert "re-run: mintd data import core_rows --bump --path 'outputs/core rows/'\n" in capsys.readouterr().err
 
 
 def test_bump_metadata_invalid_raises_bump_blocked(tmp_path: Path) -> None:
@@ -1069,7 +1069,7 @@ def test_bump_metadata_invalid_raises_bump_blocked(tmp_path: Path) -> None:
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=[finding],
         )
 
@@ -1085,7 +1085,7 @@ def test_bump_head_primary_removed_raises_primary_removed_at_head(
     dvc_path = _stage_project(tmp_path)
     dvc_path.write_text(
         dvc_path.read_text(encoding="utf-8").replace(
-            "  - path: outputs/cms_based/", '  - path: ""'
+            "  - path: outputs/core_rows/", '  - path: ""'
         ),
         encoding="utf-8",
     )
@@ -1100,12 +1100,12 @@ def test_bump_head_primary_removed_raises_primary_removed_at_head(
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             producer_view_factory=factory,
             check_findings=[_drift_finding(dvc_path)],
         )
 
-    assert ei.value.name == "cms_based"
+    assert ei.value.name == "core_rows"
     assert ei.value.repo == REPO_URL
     assert fake.calls == []
 
@@ -1131,7 +1131,7 @@ def test_bump_consumes_provided_check_findings_without_recomputing(
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         check_findings=[_up_to_date_finding(dvc_path)],
     )
 
@@ -1156,7 +1156,7 @@ def test_bump_default_uses_check_project_when_no_findings_passed(
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
     )
 
     assert result.changed is False
@@ -1186,14 +1186,14 @@ def test_bump_default_uses_producer_view_at_head(
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         check_findings=[_drift_finding(dvc_path)],
     )
 
     assert captured == [REPO_URL]
     assert fake.calls[0].rev == HEAD_SHA
     # D-C2: the import target is the RECORDED path, not HEAD's primary.
-    assert fake.calls[0].path == "outputs/cms_based/"
+    assert fake.calls[0].path == "outputs/core_rows/"
 
 
 # ---------------------------------------------------------------------------
@@ -1258,7 +1258,7 @@ def test_bump_missing_kind_raises_bump_blocked(tmp_path: Path) -> None:
             client,
             fake,
             project_path=tmp_path,
-            name="cms_based",
+            name="core_rows",
             check_findings=[finding],
         )
 
@@ -1281,13 +1281,13 @@ def test_bump_clears_the_existing_directory_before_reimport(
     client = InMemoryCatalogClient()
 
     def factory(repo: str) -> tuple[ProducerView, str]:
-        return _view_with_primary("outputs/cms_based/"), HEAD_SHA
+        return _view_with_primary("outputs/core_rows/"), HEAD_SHA
 
     produced = bump_import(
         client,
         fake,
         project_path=tmp_path,
-        name="cms_based",
+        name="core_rows",
         producer_view_factory=factory,
         check_findings=[_drift_finding(dvc_path)],
     )
