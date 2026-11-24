@@ -146,6 +146,7 @@ class RegistryGitOps(Protocol):
     def checkout_remote_branch(self, repo_dir: Path, branch: str) -> None: ...
     def index_entries(self, work_dir: Path, names: list[str]) -> dict[str, str]: ...
     def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]: ...
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]: ...
     def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None: ...
     def commit_all(self, repo_dir: Path, message: str) -> None: ...
     def push_branch(self, repo_dir: Path, branch: str) -> None: ...
@@ -339,6 +340,19 @@ class SubprocessRegistryGitOps:
         out = self._git(
             ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--",
              *(f":(literal){p}" for p in paths)],
+            cwd=work_dir,
+        )
+        return [name for name in out.split("\0") if name]
+
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        """Every entry git lists at or under ``paths``: tracked files and
+        untracked ones, ignored included. A symlink is one entry, and a
+        nested repository one ``dir/`` entry, since git doesn't look inside
+        either. Empty for no ``paths``, as `ignored_files`."""
+        if not paths:
+            return []
+        out = self._git(
+            ["ls-files", "-z", "--cached", "--others", "--", *(f":(literal){p}" for p in paths)],
             cwd=work_dir,
         )
         return [name for name in out.split("\0") if name]

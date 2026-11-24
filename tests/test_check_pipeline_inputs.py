@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -299,8 +300,10 @@ def test_a_url_input_is_left_to_dvc(tmp_path: Path) -> None:
 
 
 class _GitFails:
-    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]:
         raise GitOpError(["git", "ls-files"], "fatal: unable to read index")
+
+    ignored_files = listed_files
 
 
 def test_git_failing_is_named_not_silent(tmp_path: Path) -> None:
@@ -322,10 +325,137 @@ def test_a_project_outside_git_is_named_unchecked(tmp_path: Path) -> None:
 
 
 def test_ignored_files_with_no_paths_lists_nothing(tmp_path: Path) -> None:
-    """With no pathspec git would list every ignored file in the repo.
+    """With no pathspec git would list every file in the repo.
 
-    Mutation: drop the empty-paths guard -> red."""
+    Mutation: drop either method's empty-paths guard -> red."""
     proj = _project(tmp_path)
     _put(proj, "data/raw/county.csv")
-    assert SubprocessRegistryGitOps().ignored_files(proj, []) == []
-    assert SubprocessRegistryGitOps().ignored_files(proj, ["data/raw"]) == ["data/raw/county.csv"]
+    git = SubprocessRegistryGitOps()
+    assert git.ignored_files(proj, []) == [] and git.listed_files(proj, []) == []
+    assert git.ignored_files(proj, ["data/raw"]) == ["data/raw/county.csv"]
+    assert git.listed_files(proj, ["data/raw"]) == ["data/raw/.gitkeep", "data/raw/county.csv"]
+
+
+# Where the walk of a dep and git's list spell or see a file differently,
+# the file is matched on one spelling or named as unchecked: never passed.
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target.is_dir())
+    except OSError:
+        pytest.skip("no symlinks here")
+
+
+def test_a_dep_symlinked_outside_the_project_is_named(tmp_path: Path) -> None:
+    """DVC hashes through the link; git sees one entry, the link.
+
+    Mutation: read the dep where it is spelled, not where it resolves -> red."""
+    proj = _project(tmp_path)
+    (proj / "data" / "raw" / ".gitkeep").unlink()
+    (proj / "data" / "raw").rmdir()
+    elsewhere = tmp_path / "elsewhere"
+    _put(elsewhere, "big.csv")
+    _symlink_or_skip(proj / "data" / "raw", elsewhere)
+    assert _found(proj) == [("pipeline_input_untracked", "warning",
+                             "pipeline input 'data/raw' (dvc.yaml stage 'ingest') is a symlink to a path outside the "
+                             "project, so a fresh clone has it only if that path exists on its machine")]
+
+
+def test_a_dep_symlinked_inside_the_project_is_read_where_it_resolves(tmp_path: Path) -> None:
+    """Mutation: read the dep where it is spelled -> git sees only the link: red."""
+    proj = _project(tmp_path)
+    (proj / "data" / "raw" / ".gitkeep").unlink()
+    (proj / "data" / "raw").rmdir()
+    _put(proj, "store/.gitignore", "/raw/\n")
+    _put(proj, "store/raw/county.csv")
+    _symlink_or_skip(proj / "data" / "raw", proj / "store" / "raw")
+    assert [m for _, _, m in _found(proj)] == [
+        f"pipeline input 'data/raw' (dvc.yaml stage 'ingest') is {UNTRACKED}: store/raw/county.csv; "
+        "a fresh clone can't rerun the stage"]
+
+
+def test_a_symlinked_folder_inside_a_dep_is_named_unchecked(tmp_path: Path) -> None:
+    """The walk doesn't follow it; DVC does.
+
+    Mutation: drop the symlinked-folder finding -> red."""
+    proj = _project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    _put(elsewhere, "big.csv")
+    _symlink_or_skip(proj / "data" / "raw" / "sub", elsewhere)
+    found = _found(proj)
+    assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
+    assert "holds symlinked folders DVC reads through: data/raw/sub;" in found[0][2]
+
+
+class _GitSpellsNFC:
+    """git on macOS (`core.precomposeunicode`): names in NFC whatever the disk keeps."""
+
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        return [unicodedata.normalize("NFC", f) for f in SubprocessRegistryGitOps().listed_files(work_dir, paths)]
+
+    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        return [unicodedata.normalize("NFC", f) for f in SubprocessRegistryGitOps().ignored_files(work_dir, paths)]
+
+
+def test_a_decomposed_file_name_is_matched_to_gits(tmp_path: Path) -> None:
+    """Mutation: compare without NFC -> the file is unmatched: red."""
+    proj = _project(tmp_path)
+    _put(proj, "data/raw/" + unicodedata.normalize("NFD", "café.csv"))
+    assert [m for _, _, m in _found(proj, git_ops=_GitSpellsNFC())] == [
+        f"pipeline input 'data/raw' (dvc.yaml stage 'ingest') is {UNTRACKED}: data/raw/café.csv; "
+        "a fresh clone can't rerun the stage"]
+
+
+@pytest.mark.parametrize("repo", ["data/raw", "data/raw/inner"])
+def test_a_git_repository_in_a_dep_is_named_unchecked(tmp_path: Path, repo: str) -> None:
+    """git doesn't look inside another repository; DVC hashes its files.
+
+    Mutation: pass files git doesn't list -> red."""
+    proj = _project(tmp_path)
+    _put(proj, f"{repo}/county.csv")
+    _git(proj / repo, "init", "-q")
+    found = _found(proj)
+    assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
+    assert found[0][2].startswith("git doesn't list ")
+    assert f"{repo}/county.csv" in found[0][2] and f"; {repo} holds a git repository of its own," in found[0][2]
+
+
+def _case_insensitive(tmp_path: Path) -> bool:
+    (tmp_path / "probe").write_text("", encoding="utf-8")
+    return (tmp_path / "PROBE").exists()
+
+
+def test_a_dep_spelled_in_another_case_is_named_unchecked(tmp_path: Path) -> None:
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive file system: the dep is simply missing")
+    proj = _project(tmp_path, SCAFFOLD.replace("../data/raw/", "../data/RAW/"))
+    _put(proj, "data/raw/county.csv")
+    found = _found(proj)
+    assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
+    assert "git spells the folder or these names differently, e.g. in letter case" in found[0][2]
+
+
+def test_a_dep_on_the_whole_project_is_matched_to_gits_names(tmp_path: Path) -> None:
+    """`.` joined with `data/raw/county.csv` is `./data/...` until normalized.
+
+    Mutation: drop normpath from the shared spelling -> red."""
+    proj = _project(tmp_path, "stages:\n  s:\n    cmd: run\n    deps:\n    - .\n")
+    _put(proj, "data/raw/county.csv")
+    assert [m for _, _, m in _found(proj)] == [
+        f"pipeline input '.' (dvc.yaml stage 's') is {UNTRACKED}: data/raw/county.csv; "
+        "a fresh clone can't rerun the stage"]
+
+
+@pytest.mark.parametrize("text, who", [
+    ("- a\n- b\n", "sub/dvc.yaml isn't in the shape dvc writes (its stages are not a mapping)"),
+    ("stages:\n  s: [a]\n", "sub/dvc.yaml stage 's' isn't in the shape dvc writes"),
+    ("stages:\n  s:\n    foreach: [a]\n    do: 3\n", "sub/dvc.yaml stage 's' isn't in the shape dvc writes"),
+])
+def test_a_nested_pipeline_in_an_odd_shape_is_named(tmp_path: Path, text: str, who: str) -> None:
+    """Mutation: skip it silently -> red."""
+    proj = _project(tmp_path)
+    _put(proj, "sub/dvc.yaml", text)
+    found = _found(proj)
+    assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
+    assert found[0][2].startswith(who)

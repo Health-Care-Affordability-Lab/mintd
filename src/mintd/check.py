@@ -508,13 +508,18 @@ def _untracked_pipeline_inputs(
 
     A dep the pipeline writes (any stage's outs, metrics or plots) or a DVC
     out covers is fine; so are files git doesn't ignore (``git status``
-    lists them already). What it can't check gets a warning too: an
-    unreadable nested ``dvc.yaml`` or ``dvc.lock``, a templated dep, deps
-    that aren't a list of paths, and git failing. Only a URL dep is passed
-    over: DVC fetches it and records its checksum. Reads, never writes.
+    lists them already). A dep is read where it resolves, as git sees it,
+    and its files are matched to git's list in one spelling. What it can't
+    check gets a warning too: an unreadable or oddly shaped nested
+    ``dvc.yaml``, an unreadable nested ``dvc.lock``, a templated dep, deps
+    that aren't a list of paths, git failing, files git doesn't list (a
+    repository of their own, another letter case) and symlinked folders
+    inside a dep. Only a URL dep is passed over: DVC fetches it and records
+    its checksum. Reads, never writes.
     """
     import os
     import posixpath
+    import unicodedata
     from pathlib import PureWindowsPath
 
     from ._dvc_state import _dvcignore, _files_on_disk, _nested_pipeline_outs, _tracked
@@ -546,17 +551,19 @@ def _untracked_pipeline_inputs(
             warn("pipeline_input_unchecked", yaml_rel, f"could not read {yaml_rel} ({why}), so its stages' "
                  "inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
             continue
-        stages = doc.get("stages") if isinstance(doc, dict) else None
-        if doc is None or stages is None:
+        stages = doc.get("stages") if isinstance(doc, dict) else doc
+        if stages is None:
             continue  # declares no stages
         if not isinstance(stages, dict):
-            warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} isn't in the shape dvc writes (stages is not "
-                 "a mapping), so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+            warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} isn't in the shape dvc writes (its stages are "
+                 "not a mapping), so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
             continue
         wdirs = wdir_map(doc)
         for name, stage in stages.items():
             body = stage.get("do", stage) if isinstance(stage, dict) else None
             if not isinstance(body, dict):
+                warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} stage '{name}' isn't in the shape dvc "
+                     "writes, so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
                 continue
             wdir = wdirs.get(str(name), ".")
             for key in ("outs", "metrics", "plots"):
@@ -603,34 +610,76 @@ def _untracked_pipeline_inputs(
     def is_covered(rel: str) -> bool:
         return any(path_covers(c, rel) for c in covered)
 
-    candidates: dict[str, list[str]] = {}
-    for dep in inputs:
-        if is_covered(dep):
+    def norm(rel: str) -> str:
+        """One spelling for a path from the walk and from git: no ``./``, and
+        NFC, as git prints a name on macOS whatever form the disk keeps."""
+        return unicodedata.normalize("NFC", posixpath.normpath(rel))
+
+    # Each dep is read where it really is, which is what git sees: a
+    # symlinked folder through its target. Its files, in that spelling.
+    root_real = os.path.realpath(project_path)
+    candidates: dict[str, tuple[str, list[str]]] = {}
+    for dep, (yaml_rel, name) in inputs.items():
+        real = os.path.realpath(project_path / dep)
+        query = Path(os.path.relpath(real, root_real)).as_posix()
+        if is_covered(dep) or is_covered(query) or not os.path.exists(real):
+            continue  # covered, or missing: dvc repro names a missing dep
+        if query == ".." or query.startswith("../"):
+            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is a "
+                 "symlink to a path outside the project, so a fresh clone has it only if that path exists on its "
+                 "machine", "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                 + _RAW_INPUT_HINT.format(path="data/raw"))
             continue
-        if (project_path / dep).is_dir():
-            files = [f"{dep}/{f}" for f in _files_on_disk(project_path, dep)]
-        elif (project_path / dep).is_file():
-            parts = Path(dep).parts
-            dirs = [project_path, *(project_path.joinpath(*parts[:k]) for k in range(1, len(parts)))]
-            files = [] if _dvcignore(project_path, dirs).match_file(dep) else [dep]
+        if os.path.isdir(real):
+            files = [norm(posixpath.join(query, f)) for f in _files_on_disk(project_path, query)]
         else:
-            files = []  # missing: dvc repro names it
-        if files := [f for f in files if not is_covered(f)]:
-            candidates[dep] = files
+            parts = Path(query).parts
+            dirs = [project_path, *(project_path.joinpath(*parts[:k]) for k in range(1, len(parts)))]
+            files = [] if _dvcignore(project_path, dirs).match_file(query) else [norm(query)]
+        candidates[dep] = (query, [f for f in files if not is_covered(f)])
     if not candidates:
         return findings
+    git = git_ops or SubprocessRegistryGitOps()
+    queries = sorted({query for query, _ in candidates.values()})
     try:
-        ignored = set((git_ops or SubprocessRegistryGitOps()).ignored_files(project_path, list(candidates)))
+        listed = {norm(f) for f in git.listed_files(project_path, queries)}
+        ignored = {norm(f) for f in git.ignored_files(project_path, queries)}
     except GitOpError as exc:
         warn("pipeline_input_unchecked", None, f"could not ask git which pipeline inputs it ignores: "
              f"{_git_error_summary(exc)}", "make sure 'git status' works here, then re-run 'mintd check'.")
         return findings
-    for dep, files in candidates.items():
+
+    def repo_holding(rel: str, query: str) -> str | None:
+        """The folder at or under ``query`` holding ``rel`` in a git
+        repository of its own, which git doesn't look inside."""
+        d = posixpath.dirname(rel)
+        while d and path_covers(query, d):
+            if (project_path / d / ".git").exists():
+                return d
+            d = posixpath.dirname(d)
+        return None
+
+    for dep, (query, files) in candidates.items():
+        yaml_rel, name = inputs[dep]
+        where = f"{yaml_rel} stage '{name}'"
         if untracked := [f for f in files if f in ignored]:
-            yaml_rel, name = inputs[dep]
-            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is "
-                 f"tracked by neither git nor DVC: {abbreviate(untracked)}; a fresh clone can't rerun the stage",
+            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is tracked by neither git "
+                 f"nor DVC: {abbreviate(untracked)}; a fresh clone can't rerun the stage",
                  _RAW_INPUT_HINT.format(path=dep))
+        # What git's answer can't be matched against is named, never passed.
+        if unseen := [f for f in files if f not in listed]:
+            repos = sorted({r for f in unseen if (r := repo_holding(f, query))})
+            why = (f"{abbreviate(repos)} holds a git repository of its own" if repos
+                   else "git spells the folder or these names differently, e.g. in letter case")
+            warn("pipeline_input_unchecked", yaml_rel, f"git doesn't list {len(unseen)} file(s) DVC reads for "
+                 f"pipeline input {dep!r} ({where}): {abbreviate(unseen)}; {why}, so check can't tell whether they "
+                 "are tracked", "check by hand that git or DVC tracks them.")
+        links = sorted(f for f in listed if f != query and path_covers(query, f) and not is_covered(f)
+                       and (project_path / f).is_symlink() and (project_path / f).is_dir())
+        if links:
+            warn("pipeline_input_unchecked", yaml_rel, f"pipeline input {dep!r} ({where}) holds symlinked folders "
+                 f"DVC reads through: {abbreviate(links)}; check can't tell whether git or DVC tracks what they "
+                 "hold", "check by hand that git or DVC tracks what they point to.")
     return findings
 
 
