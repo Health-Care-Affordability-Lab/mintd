@@ -1,0 +1,17 @@
+recall: undoes a pointer cut right after `cloud:` makes push, pull and clone die with a traceback (found after the stories).
+fix: fa44b1a (#97); before the fix: ad69479.
+validated: with this patch on HEAD, tests/test_fast_sync.py::test_parse_dvc_outs_reads_a_cloud_key_cut_short_as_no_version_id goes red.
+
+diff --git a/src/mintd/_fast_sync_ops.py b/src/mintd/_fast_sync_ops.py
+index b7c89a8..b132a99 100644
+--- a/src/mintd/_fast_sync_ops.py
++++ b/src/mintd/_fast_sync_ops.py
+@@ -261,7 +261,7 @@ def _extract_version_id(out_dict: dict[str, Any]) -> str | None:
+     if out_dict.get("version_id") is not None:
+         return str(out_dict["version_id"])
+     cloud = out_dict.get("cloud")
+-    if isinstance(cloud, dict):  # null in a pointer cut short right after `cloud:`
++    if "cloud" in out_dict:  # recall: undoes #97
+         for cloud_info in cloud.values():
+             if isinstance(cloud_info, dict) and cloud_info.get("version_id") is not None:
+                 return str(cloud_info["version_id"])
