@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -60,6 +61,9 @@ def test_the_root_itself_counts_only_with_root_ok(root: Path, read: Read) -> Non
     here = "." if read == "recorded" else root
     assert inside(root, here, read=read) is None
     assert inside(root, here, read=read, root_ok=True) == "."
+    there = "a/.." if read == "recorded" else root / "a" / ".."  # the root, spelled another way
+    assert inside(root, there, read=read) is None
+    assert inside(root, there, read=read, root_ok=True) == "."
 
 
 @pytest.mark.parametrize("read", ["recorded", "lexical"])
@@ -138,9 +142,37 @@ def test_case_is_not_folded(root: Path) -> None:
 
 
 def test_rel_returns_the_path_or_raises(root: Path, tmp_path: Path) -> None:
+    """Mutations: drop the path from the message -> the match fails, red; make
+    `root_ok` default to False -> `rel(root, root)` raises, red."""
     assert rel(root, root / "a" / "b") == "a/b"
-    with pytest.raises(ValueError, match="is not inside"):
-        rel(root, tmp_path / "elsewhere")
+    assert rel(root, root) == "."  # a walk's start is the root itself
+    outside = tmp_path / "elsewhere"
+    with pytest.raises(ValueError, match=re.escape(f"{outside} is not inside {root}")):
+        rel(root, outside)
+
+
+@pytest.mark.parametrize("read", ["recorded", "lexical", "follow", "folder"])
+def test_a_path_holding_a_nul_is_outside_in_every_mode(root: Path, read: Read) -> None:
+    """`realpath` raises on a NUL, so `follow` used to; every mode reads it as outside.
+
+    Mutation: drop the NUL rule -> `follow` raises, red."""
+    path = "a\x00b" if read == "recorded" else root / "a\x00b"
+    assert inside(root, path, read=read) is None
+    if read == "recorded":
+        assert inside(root, "b", read=read, wdir="a\x00") is None
+
+
+@pytest.mark.parametrize("read", ["lexical", "follow", "folder"])
+def test_a_root_that_is_a_link_is_the_root_in_every_mode(root: Path, read: Read) -> None:
+    """`folder` named a linked root by the link and its target by the folder, and
+    said None for the root itself.
+
+    Mutation: drop the root-itself check -> `folder` gives None, red."""
+    linked = root.parent / "linked-proj"
+    _link(linked, root)
+    assert inside(linked, linked, read=read, root_ok=True) == "."
+    assert inside(linked, linked, read=read) is None
+    assert inside(linked, linked / "a", read=read) == "a"
 
 
 def test_wdir_is_for_recorded_paths_only(root: Path) -> None:

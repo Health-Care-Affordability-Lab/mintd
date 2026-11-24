@@ -50,7 +50,9 @@ def inside(
     any ``..`` segment in ``path`` as written refuses it, even one that would stay inside.
     ``wdir`` (``read="recorded"`` only): the recorded working folder ``path`` is relative
     to; both strings are tested as recorded paths before they are joined. A link loop
-    reads as outside."""
+    reads as outside, and so does a path holding a NUL."""
+    if "\x00" in str(path) or (wdir is not None and "\x00" in wdir):
+        return None
     if read == "recorded":
         return _recorded(str(path), root_ok=root_ok, dotdot=dotdot, wdir=wdir)
     if wdir is not None:
@@ -58,6 +60,8 @@ def inside(
     p = Path(path)
     if dotdot == "refuse" and ".." in p.parts:
         return None
+    if Path.cwd() / p == Path.cwd() / root:  # pathlib keeps `..`: `link/..` is not the root here
+        return "." if root_ok else None  # the root itself, however a link names it, in every mode
     there: str | None
     base: str | None
     if read == "lexical":
