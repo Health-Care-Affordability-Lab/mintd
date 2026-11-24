@@ -2054,27 +2054,40 @@ def test_a_story_writes_only_to_the_test_bucket(monkeypatch: pytest.MonkeyPatch)
     assert re.search(r"\.(delete_\w+|abort_multipart_upload|upload_file\w*)\(", story) is None
 
 
+def _bucket_name_in(text: str, digest=lambda s: hashlib.sha256(s.encode()).hexdigest()) -> bool:
+    """Whether `text` holds a word whose hash is `TEST_BUCKET_SHA256`. Each run of letters, digits, dots, hyphens and
+    underscores is split at its separators, and each stretch of whole pieces up to 63 characters (S3's longest
+    bucket name) is hashed, so the name is found alone, beside punctuation, in front of a host or inside a longer
+    word (`<name>-credentials`), in time linear in the text."""
+    for run in set(re.findall(r"[a-z0-9._-]+", text.lower())):
+        pieces = re.split(r"([._-])", run)  # words at even indexes, separators at odd
+        for i in range(0, len(pieces), 2):
+            stretch = ""
+            for j in range(i, len(pieces)):
+                stretch += pieces[j]
+                if len(stretch) > 63:
+                    break
+                if j % 2 == 0 and digest(stretch) == TEST_BUCKET_SHA256:
+                    return True
+    return False
+
+
 def test_the_test_bucket_s_name_is_only_a_hash_in_every_tracked_file() -> None:
-    """No file git tracks holds the test bucket's name, only its hash. Every run of letters, digits, dots, hyphens and
-    underscores is split at its separators, and every stretch of whole pieces is hashed, so the name is found alone,
-    beside punctuation, in front of a host or inside a longer word (`<name>-credentials`). Mutations that turn it
-    red: the name written into any tracked file, `pyproject.toml` and `.github/` included, in any of those forms."""
+    """No file git tracks holds the test bucket's name, only its hash (`_bucket_name_in`). Mutations that turn it
+    red: the name written into any tracked file, `pyproject.toml` and `.github/` included, alone, beside punctuation,
+    in front of a host or inside a longer word."""
     root = Path(__file__).parents[1]
-    names = _git(["ls-files", "-z"], cwd=root).split("\0")
-    found = set()
-    for name in filter(None, names):
-        path = root / name
-        if not path.is_file():
-            continue
-        text = path.read_bytes().decode("utf-8", errors="ignore").lower()
-        for run in set(re.findall(r"[a-z0-9._-]+", text)):
-            pieces = re.split(r"([._-])", run)  # words at even indexes, separators at odd
-            words = range(0, len(pieces), 2)
-            for i in words:
-                for j in words:
-                    if j >= i and hashlib.sha256("".join(pieces[i:j + 1]).encode()).hexdigest() == TEST_BUCKET_SHA256:
-                        found.add(name)
-    assert not found, sorted(found)
+    names = [n for n in _git(["ls-files", "-z"], cwd=root).split("\0") if n and (root / n).is_file()]
+    found = [n for n in names if _bucket_name_in((root / n).read_bytes().decode("utf-8", errors="ignore"))]
+    assert not found, found
+
+
+def test_the_name_check_hashes_no_stretch_longer_than_a_bucket_name() -> None:
+    """One long hyphenated token took minutes when every stretch was hashed. Mutation that turns it red: the
+    63-character cap dropped."""
+    hashed: list[int] = []
+    assert not _bucket_name_in("-".join(["ab"] * 300), digest=lambda s: hashed.append(len(s)) or "")
+    assert hashed and max(hashed) <= 63
 
 
 def test_the_test_bucket_takes_only_the_mintd_test_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2189,13 +2202,21 @@ def test_a_bucket_run_needs_a_key_refused_version_listing(s3_server) -> None:
 def test_a_failing_bucket_run_never_prints_the_bucket_s_name(tmp_path: Path, s3_server) -> None:
     """Story 11 pointed at a made-up test bucket on the emulator, which refuses version listing as the test key must,
     with a mintd that fails the way dvc does, naming `<bucket>/runs/...` on stdout and stderr. The whole `-rA` output
-    (the failure, its summary, captured output) shows `<test-bucket>` there and never the name. Mutation that turns
-    it red: the stories conftest's report redaction dropped."""
+    (the failure, its summary, captured output) shows `<test-bucket>` there and never the name. Mutations that turn
+    it red: the stories conftest's report redaction dropped, either of its two replaces dropped, or mintd's wide
+    COLUMNS dropped."""
     s3_server.client.create_bucket(Bucket=DEMO_BUCKET)
     fake = tmp_path / "mintd"
     fake.write_text(f"#!/bin/sh\necho pushing to s3://{DEMO_BUCKET}/runs/x\n"
-                    f"echo ERROR: failed to push data to the cloud - {DEMO_BUCKET}/runs/x: Access Denied >&2\nexit 1\n",
-                    encoding="utf-8")
+                    f"echo ERROR: failed to push data to the cloud - {DEMO_BUCKET}/runs/x: Access Denied >&2\n"
+                    "echo COLUMNS=$COLUMNS >&2\nexit 1\n", encoding="utf-8")
+    # mintd's output reaches the report only in the failure text; this prints the name outside it, on stdout,
+    # on stderr and to the log, as a story's own output would
+    (tmp_path / "story_loud.py").write_text(
+        "import logging, os, sys\nimport pytest\n\n@pytest.fixture(autouse=True)\ndef _loud():\n"
+        "    name = os.environ['MINTD_STORY_BUCKET']\n    print(f'loud stdout {name}/runs/y')\n"
+        "    print(f'loud stderr {name}/runs/y', file=sys.stderr)\n"
+        "    logging.getLogger('story').warning('loud log %s/runs/y', name)\n    yield\n", encoding="utf-8")
     fake.chmod(0o755)
     (tmp_path / "key").write_text("[mintd-test]\naws_access_key_id = AKIASTORYTEST\n"
                                   "aws_secret_access_key = story-test-secret\n", encoding="utf-8")
@@ -2208,11 +2229,14 @@ def test_a_failing_bucket_run_never_prints_the_bucket_s_name(tmp_path: Path, s3_
     got = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/stories/test_story_11_multipart.py", "-rA", "-k", "past_the_multipart",
          *_story_pin(tmp_path, DEMO_BUCKET, scheme=where.scheme, host=where.hostname, port=where.port),
-         "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
+         "-p", "story_loud", "-p", "no:cacheprovider", f"--basetemp={tmp_path / 'base'}"],
         cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, timeout=300,
     )
     out = got.stdout + got.stderr
-    assert got.returncode == 1 and "<test-bucket>/runs/x" in out, out[-4000:]
+    assert got.returncode == 1 and "<test-bucket>/runs/x" in out, out[-4000:]  # the failure text
+    for where in ("loud stdout", "loud stderr", "loud log"):  # the captured sections
+        assert f"{where} <test-bucket>/runs/y" in out, (where, out[-4000:])
+    assert "COLUMNS=1000" in out, out[-4000:]  # mintd gets a wide terminal, so Rich can't split the name
     assert DEMO_BUCKET not in out, out[-4000:]
 
 

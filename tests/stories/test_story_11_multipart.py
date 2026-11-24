@@ -27,6 +27,11 @@ Second case, the same bytes sent in other parts:
 Where it runs: on the emulator by default, and in CI. On the lab's test bucket
 only by hand:
 `MINTD_STORY_BUCKET=<the test bucket> AWS_SHARED_CREDENTIALS_FILE=~/.aws/mintd-test-credentials AWS_CONFIG_FILE=~/.aws/mintd-test-config uv run pytest tests/stories/test_story_11_multipart.py -rA`.
+The run's record is that `-rA` output, under pytest's default capture: the
+stories' report hook puts `<test-bucket>` where the bucket's name would be.
+Output that reaches the terminal outside the report isn't redacted: with `-s`
+or `--capture=tee-sys`, with `log_cli = true`, or in a warning. A by-hand run
+keeps the default capture.
 The key is checked the way the live tier checks its own; only that bucket is
 accepted (the harness holds the SHA-256 of its name, not the name); and the
 endpoint must be the bucket's service host alone, with no path and no bucket
@@ -155,7 +160,8 @@ def target(request, tmp_path, monkeypatch, mintd):
     # The fixture's emulator keys and region go; mintd's env inherits nothing, so the operator's certificates are
     # passed on by name (the one variable `lock_down` keeps).
     ca = {"AWS_CA_BUNDLE": _OPERATOR_ENV["AWS_CA_BUNDLE"]} if _OPERATOR_ENV.get("AWS_CA_BUNDLE") else {}
-    mintd.env = lock_down(mintd.env, creds, tmp_path) | ca
+    # Rich wraps at the terminal's width, mid-word too: a wide one keeps the bucket's name whole for the redaction
+    mintd.env = lock_down(mintd.env, creds, tmp_path) | ca | {"COLUMNS": "1000"}
     mintd.timeout = None  # a real upload takes as long as the link does; Ctrl-C still stops it
     client = boto3.Session(profile_name="mintd").client("s3", endpoint_url=endpoint)
     require_no_version_listing(client, bucket, prefix)  # before anything is written

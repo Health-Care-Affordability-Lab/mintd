@@ -232,7 +232,9 @@ def redact_bucket(report: Any, bucket: str | None) -> None:
     captured section (stdout, stderr, logs). A by-hand run's record is pasted
     into a PR, and the bucket can reach it from dvc's errors
     (`<bucket>/runs/...`), mintd's output, or a story's own print. This is the
-    one place the name is taken out, whatever printed it."""
+    one place the name is taken out, whatever printed it. Not redacted: output
+    that reaches the terminal outside the report (`-s`, `--capture=tee-sys`,
+    `log_cli = true`, a warning), so a by-hand run keeps the default capture."""
     if not bucket:
         return
     longrepr = report.longrepr
