@@ -334,6 +334,67 @@ def test_every_child_the_runner_starts_gets_no_bucket_name_and_no_aws_setting(
             assert env.get("PYTHONDONTWRITEBYTECODE") == "1", phase
 
 
+def test_every_shipped_patch_applies_to_this_checkout() -> None:
+    """A change to a line a recall patch touches makes the patch stop applying, and the run would abort in preflight.
+    CI runs this on the PR's merge with main, so a drifted patch goes red there. Mutation that turns it red: a
+    patch's context line out of step with `src`."""
+    stale = [p.name for p in sorted(rr.RECALL.glob("*.patch"))
+             if subprocess.run(["git", "apply", "--check", str(p)], cwd=rr.REPO, capture_output=True).returncode]
+    assert not stale, f"regenerate against HEAD: {stale}"
+
+
+def test_mintd_version_has_a_time_limit_and_a_home_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The build's `mintd --version` runs for at most 30 s, with HOME and mintd's config inside the run's own folder,
+    and one that doesn't exit in time is `no-start`. Mutations that turn it red: no timeout; the operator's HOME or
+    config folder; the TimeoutExpired not caught."""
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(argv: list[str], **kw: object) -> subprocess.CompletedProcess:
+        calls.append((argv, kw))
+        if "--version" in argv and len(calls) > 1:
+            raise subprocess.TimeoutExpired(argv, 30)
+        return subprocess.CompletedProcess(argv, 1, "", "")  # a failed --version: no stories run
+
+    monkeypatch.setattr(rr.subprocess, "run", run)
+    monkeypatch.setattr(rr, "build_mintd", lambda rev, root, patch=None: root / "mintd")
+    assert rr._run("HEAD", None, (), strict=True).verdict == "no-start"
+    (argv, kw), = calls
+    env = kw["env"]
+    assert argv[-1] == "--version" and kw["timeout"] == 30
+    home = Path(env["HOME"])
+    assert home.name == "home" and home.parent.name.startswith("mintd-recall-") and home != Path.home()
+    assert Path(env["MINTD_CONFIG_DIR"]).parent == home
+    got = rr._run("HEAD", None, (), strict=True)
+    assert got.verdict == "no-start" and "30 s" in got.detail["mintd"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups")
+def test_stop_rides_out_a_pytest_that_has_already_exited() -> None:
+    """pytest can exit just as the wall limit or a Ctrl-C comes, and its group is then gone. Mutation that turns it
+    red: `os.killpg` without the ProcessLookupError guard."""
+    done = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    done.wait()
+    rr._stop(done)  # no ProcessLookupError
+
+
+def test_a_row_filter_that_matches_nothing_stops_before_anything_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mutation that turns it red: the empty match left to build HEAD and run every story."""
+    monkeypatch.delenv("CI", raising=False)
+    monkeypatch.setattr(rr, "_unchanged", lambda head: None)
+    monkeypatch.setattr(rr, "build_mintd", lambda *a, **kw: pytest.fail("built for a filter that matched nothing"))
+    with pytest.raises(SystemExit, match="nothing to run"):
+        rr.main(["#no-such-fix"])
+
+
+def test_the_recall_line_counts_only_the_past_rows_that_errored() -> None:
+    """Rows found after the stories are reported apart, so one of theirs erroring isn't a past row's error.
+    Mutation that turns it red: counting every errored row."""
+    past = [r for r in rr.ROWS if not r.after]
+    after = next(r.fix for r in rr.ROWS if r.after)
+    line = rr.recall_line(past, set(), {past[0].fix, after})
+    assert "1 rows errored" in line, line
+
+
 def test_preflight_writes_no_bytecode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation that turns it red: preflight's collect-only run without PYTHONDONTWRITEBYTECODE."""
     seen: list[dict] = []

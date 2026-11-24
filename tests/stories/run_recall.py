@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import difflib
 import os
 import random
@@ -197,7 +198,8 @@ def recall_line(past: list[Row], caught: set[str], failed: set[str]) -> str:
     or one errored (an error is not a miss)."""
     if len(past) == sum(not r.after for r in ROWS) and not failed & {r.fix for r in past}:
         return score(past, caught)[0]
-    why = "a subset" if len(past) < sum(not r.after for r in ROWS) else f"{len(failed)} rows errored"
+    errored = len(failed & {r.fix for r in past})
+    why = "a subset" if len(past) < sum(not r.after for r in ROWS) else f"{errored} rows errored"
     return f"recall over the {len(past)} rows run: {sum(r.fix in caught for r in past)} caught ({why}: no bar verdict)"
 
 
@@ -325,7 +327,14 @@ def _run(rev: str, patch: str | None, stories: tuple[str, ...], *, strict: bool,
             mintd = build_mintd(rev, root / "build", diff)
         except (HarnessError, subprocess.CalledProcessError, OSError) as e:
             return Result("error", {"build": str(e).splitlines()[0] if str(e) else type(e).__name__})
-        if subprocess.run([str(mintd), "--version"], capture_output=True, check=False, env=child_env()).returncode:
+        home = root / "home"
+        home.mkdir()
+        try:  # HOME and mintd's config in this run's folder, so a mutant that reads either at import reads nothing real
+            started = subprocess.run([str(mintd), "--version"], capture_output=True, check=False, timeout=30,
+                                     env=child_env(HOME=str(home), MINTD_CONFIG_DIR=str(home / "config")))
+        except subprocess.TimeoutExpired:
+            return Result("no-start", {"mintd": "--version did not exit within 30 s"})
+        if started.returncode:
             return Result("no-start", {"mintd": "--version failed"})
         named = regression_tests(patch)[0] if patch is not None and strict else ()
         if named:
@@ -364,13 +373,15 @@ def _run(rev: str, patch: str | None, stories: tuple[str, ...], *, strict: bool,
 def _stop(proc: subprocess.Popen) -> None:
     """Ctrl-C to pytest's group, so its KeyboardInterrupt kills each mintd's group; then up to 60 s for its
     teardown, waited out through any further Ctrl-C, before a kill. pytest has exited when this returns."""
-    os.killpg(proc.pid, signal.SIGINT)
+    with contextlib.suppress(ProcessLookupError):  # pytest exited as the limit or the Ctrl-C came
+        os.killpg(proc.pid, signal.SIGINT)
     deadline = time.monotonic() + 60
     while proc.poll() is None:
         try:
             proc.wait(max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
         except KeyboardInterrupt:  # another Ctrl-C: keep waiting, so the folder outlives pytest
             continue
@@ -453,6 +464,8 @@ def main(argv: list[str] | None = None) -> int:
     head = _git(["rev-parse", "HEAD"], cwd=REPO).strip()
     _unchanged(head)
     rows = [] if args.mutants else [r for r in ROWS if not args.rows or any(s in r.fix for s in args.rows)]
+    if args.rows and not rows:
+        raise SystemExit(f"no recall row's fix matches {' '.join(args.rows)}: nothing to run")
     preflight(rows)
     started = time.monotonic()
     base = _run(head, None, (), strict=True)
