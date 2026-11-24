@@ -19,12 +19,12 @@ def test_fake_satisfies_protocol() -> None:
 
 def test_fake_records_call(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    dest = tmp_path / "cms_based"
+    dest = tmp_path / "core_rows"
 
     fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/demo-xw",
-        path="outputs/cms_based/",
+        repo_url="https://github.com/example-org/demo-map",
+        path="outputs/core_rows/",
         dest=dest,
         rev="abc123",
         force=True,
@@ -32,8 +32,8 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call.repo_url == "https://github.com/example-org/demo-xw"
-    assert call.path == "outputs/cms_based/"
+    assert call.repo_url == "https://github.com/example-org/demo-map"
+    assert call.path == "outputs/core_rows/"
     assert call.dest == dest
     assert call.rev == "abc123"
     assert call.force is True
@@ -41,22 +41,22 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
 def test_fake_writes_parseable_stub(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    dest = tmp_path / "cms_based"
+    dest = tmp_path / "core_rows"
 
     produced = fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/demo-xw",
-        path="outputs/cms_based/",
+        repo_url="https://github.com/example-org/demo-map",
+        path="outputs/core_rows/",
         dest=dest,
     )
 
-    assert produced == tmp_path / "cms_based.dvc"
+    assert produced == tmp_path / "core_rows.dvc"
     assert produced.exists()
 
     dep = DataDependency.from_dvc_file(produced)
-    assert dep.producer_repo == "https://github.com/example-org/demo-xw"
-    assert dep.output_path == "outputs/cms_based/"
-    assert dep.local_path == "cms_based"
+    assert dep.producer_repo == "https://github.com/example-org/demo-map"
+    assert dep.output_path == "outputs/core_rows/"
+    assert dep.local_path == "core_rows"
 
 
 def test_fake_handles_file_paths_with_suffix(tmp_path: Path) -> None:

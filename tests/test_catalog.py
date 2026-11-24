@@ -298,14 +298,14 @@ def _round(obj: Any) -> Any:
 
 
 def test_catalog_entry_name_property(client: CatalogClient) -> None:
-    client.register(_load_metadata(name="demo-xw"))
-    entry = client.fetch("demo-xw")
-    assert entry.name == "demo-xw"
+    client.register(_load_metadata(name="demo-map"))
+    entry = client.fetch("demo-map")
+    assert entry.name == "demo-map"
 
 
 def test_catalog_entry_project_type_property(client: CatalogClient) -> None:
-    client.register(_load_metadata(name="demo-xw"))
-    entry = client.fetch("demo-xw")
+    client.register(_load_metadata(name="demo-map"))
+    entry = client.fetch("demo-map")
     # Fixture default project.type is "data".
     assert entry.project_type == "data"
 
@@ -314,18 +314,18 @@ def test_catalog_entry_description_property(client: CatalogClient) -> None:
     def set_desc(d: dict[str, Any]) -> None:
         d["metadata"]["description"] = "a useful project"
 
-    client.register(_load_metadata(name="demo-xw", mutate=set_desc))
-    entry = client.fetch("demo-xw")
+    client.register(_load_metadata(name="demo-map", mutate=set_desc))
+    entry = client.fetch("demo-map")
     assert entry.description == "a useful project"
 
 
 def test_catalog_entry_repo_url_property(client: CatalogClient) -> None:
     def set_url(d: dict[str, Any]) -> None:
-        d["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
+        d["repository"]["github_url"] = "https://github.com/example-org/demo-map"
 
-    client.register(_load_metadata(name="demo-xw", mutate=set_url))
-    entry = client.fetch("demo-xw")
-    assert entry.repo_url == "https://github.com/example-org/demo-xw"
+    client.register(_load_metadata(name="demo-map", mutate=set_url))
+    entry = client.fetch("demo-map")
+    assert entry.repo_url == "https://github.com/example-org/demo-map"
 
 
 # ---------------------------------------------------------------------------

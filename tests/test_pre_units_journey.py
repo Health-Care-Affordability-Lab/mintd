@@ -167,9 +167,9 @@ def _seed_project(tmp_path: Path) -> Path:
 def _register_provider(registry_url: str, work_dir: Path) -> None:
     """Seed the one entry the staged enclave manifest approves."""
     data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
-    data["repository"]["github_url"] = "https://github.com/example-org/demo-xw"
+    data["project"]["name"] = "demo-map"
+    data["project"]["full_name"] = "data_demo-map"
+    data["repository"]["github_url"] = "https://github.com/example-org/demo-map"
     client = GitCatalogClient(
         registry_repo_url=registry_url,
         work_dir=work_dir,
@@ -1449,16 +1449,16 @@ def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
     the catalog entry, the pin and the dvc import are all real.
     """
     producer, consumer, _register = payload_journey
-    producer.publish({"outputs/cms_based": {"part.csv": b"enclave\n"}})
+    producer.publish({"outputs/core_rows": {"part.csv": b"enclave\n"}})
 
     # The catalog entry the manifest approves, pointed at the local producer.
     data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
+    data["project"]["name"] = "demo-map"
+    data["project"]["full_name"] = "data_demo-map"
     data["repository"]["github_url"] = producer.url
-    data["data_products"]["primary"] = "outputs/cms_based/"
+    data["data_products"]["primary"] = "outputs/core_rows/"
     data["data_products"]["outputs"] = [
-        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
+        {"path": "outputs/core_rows/", "description": "approved", "primary": True,
          "last_published": ""}
     ]
     GitCatalogClient(
@@ -1473,10 +1473,10 @@ def test_enclave_pull_lands_approved_bytes(payload_journey, capsys) -> None:
         "schema_version: '2.0'\n"
         "enclave_name: my_workspace\n"
         "approved_products:\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
+        "  - repo: demo-map\n"
+        "    registry_entry: catalog/data/demo-map.yaml\n"
         f"    pin: {producer.head_sha}\n"
-        "    source_path: outputs/cms_based/\n"
+        "    source_path: outputs/core_rows/\n"
         "downloaded: []\n"
         "transferred: []\n",
         encoding="utf-8",
@@ -1503,16 +1503,16 @@ def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> No
     import yaml as _yaml
 
     producer, consumer, _register = payload_journey
-    producer.publish({"outputs/cms_based": {"part.csv": b"v1\n"}})
+    producer.publish({"outputs/core_rows": {"part.csv": b"v1\n"}})
     pin = producer.head_sha
 
     data = json.loads(V2_MINIMAL.read_text(encoding="utf-8"))
-    data["project"]["name"] = "demo-xw"
-    data["project"]["full_name"] = "data_demo-xw"
+    data["project"]["name"] = "demo-map"
+    data["project"]["full_name"] = "data_demo-map"
     data["repository"]["github_url"] = producer.url
-    data["data_products"]["primary"] = "outputs/cms_based/"
+    data["data_products"]["primary"] = "outputs/core_rows/"
     data["data_products"]["outputs"] = [
-        {"path": "outputs/cms_based/", "description": "approved", "primary": True,
+        {"path": "outputs/core_rows/", "description": "approved", "primary": True,
          "last_published": ""}
     ]
     GitCatalogClient(
@@ -1530,12 +1530,12 @@ def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> No
         "schema_version: '2.0'\n"
         "enclave_name: my_workspace\n"
         "approved_products:\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
+        "  - repo: demo-map\n"
+        "    registry_entry: catalog/data/demo-map.yaml\n"
         f"    pin: {pin}\n"
-        "    source_path: outputs/cms_based/\n"
-        "  - repo: demo-xw\n"
-        "    registry_entry: catalog/data/demo-xw.yaml\n"
+        "    source_path: outputs/core_rows/\n"
+        "  - repo: demo-map\n"
+        "    registry_entry: catalog/data/demo-map.yaml\n"
         f"    pin: {pin}\n"  # inherited (D1) — predates outputs/extra/
         "    source_path: outputs/extra/\n"
         "downloaded: []\n"
@@ -1543,7 +1543,7 @@ def test_bare_enclave_bump_moves_an_inherited_pin(payload_journey, capsys) -> No
         encoding="utf-8",
     )
 
-    assert cli.main(["enclave", "bump", "demo-xw"]) == 0, _drain(capsys)
+    assert cli.main(["enclave", "bump", "demo-map"]) == 0, _drain(capsys)
 
     manifest = _yaml.safe_load(
         (consumer / "enclave_manifest.yaml").read_text(encoding="utf-8")
