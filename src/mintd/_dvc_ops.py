@@ -117,7 +117,7 @@ class DvcStorageKeyError(DvcOpError):
     """dvc crashed with dvc_data's opaque StorageKeyError tuple.
 
     Raw stderr looks like ``ERROR: unexpected error - ('data', 'final',
-    'aha_ccn_xw', 'crosswalk_aha_pos.dta')`` (exit 255): the tuple is the
+    'region_lookup', 'lookup_table.dta')`` (exit 255): the tuple is the
     path components of a workspace file dvc's checkout phase could not map
     to a cache entry — the rehash-on-pull pathology plain `dvc pull` hits
     on version-aware remotes (see the fallback-scope comments in
