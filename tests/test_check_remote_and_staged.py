@@ -523,6 +523,22 @@ def test_push_refuses_a_version_aware_dvc_reads_as_neither_true_nor_false(tmp_pa
     assert (str(exc.value), exc.value.hint) == (message, hint)
 
 
+def test_push_names_dvc_config_when_config_local_sets_only_another_key(tmp_path: Path) -> None:
+    """`yes` in .dvc/config, and a per-machine `profile` in .dvc/config.local for the
+    same remote: the refused value is still the committed one, so the fix is a commit.
+
+    Mutation: name config.local when its section sets any key -> the local hint, red.
+    """
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    message, hint = _config_dvc_refuses(proj, "yes")
+    (proj / ".dvc" / "config.local").write_text(f"['remote \"{REMOTE}\"']\n    profile = lab\n", encoding="utf-8")
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (message, hint)
+
+
 def test_push_names_config_local_when_the_value_dvc_refuses_is_there(tmp_path: Path) -> None:
     """`yes` in .dvc/config.local over `true` in .dvc/config: dvc refuses it on this
     machine only, so the fix is in config.local, and a commit wouldn't clear it.
