@@ -382,10 +382,14 @@ mintd cache push data/scratch/isochrones
 mintd cache push results/model.pkl scratch/notes.csv
 
 # See what's cached, then pull it back on another clone:
-mintd cache ls
+mintd cache ls                         # or one path: mintd cache ls data/scratch
 mintd cache pull                       # everything
-mintd cache pull --prefix data/scratch/    # just one subtree
+mintd cache pull data/scratch/areas_v2 results/model.pkl   # just these paths
 ```
+
+`cache pull` and `cache ls` take paths as `cache push` does: `data/scratch/area`
+is that file or folder, never `data/scratch/area.csv` or `data/scratch/areas_v2`.
+A path that matches nothing is an error. (`--prefix` was removed; pass the path.)
 
 A DVC-tracked path is refused (it belongs to `mintd data push`), as is
 anything under `.git/` or `.dvc/`. Pull reconstructs each file at its repo

@@ -1142,7 +1142,7 @@ def _seed_remote(s3, bucket: str, tmp_path: Path, files: dict[str, bytes], prefi
     return src
 
 
-def test_pull_prefix_scoped_lands_at_repo_paths(s3_versioned, tmp_path: Path) -> None:
+def test_pull_of_a_folder_path_lands_at_repo_paths(s3_versioned, tmp_path: Path) -> None:
     s3, bucket = s3_versioned
     _seed_remote(s3, bucket, tmp_path, {
         "iso/ct/a.bin": b"A" * 100,
@@ -1151,13 +1151,146 @@ def test_pull_prefix_scoped_lands_at_repo_paths(s3_versioned, tmp_path: Path) ->
     })
     dest = _project(tmp_path / "clone", bucket)
     summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
-                           prefix="iso/ct/", s3_client_factory=_factory(s3))
+                           paths=["iso/ct"], s3_client_factory=_factory(s3))
     assert summary.pulled == 2 and not summary.failed
+    assert summary.paths == ["iso/ct"]
     # Objects reconstruct at their repo-relative paths (not under cache/).
     assert (dest / "iso" / "ct" / "a.bin").read_bytes() == b"A" * 100
     assert (dest / "iso" / "ct" / "b.bin").exists()
-    # ma/ was outside the prefix — never fetched.
+    # ma/ was outside the path — never fetched.
     assert not (dest / "iso" / "ma").exists()
+
+
+SIBLINGS = {
+    "data/cache/area/a.bin": b"a" * 10,
+    "data/cache/area/sub/b.bin": b"b" * 11,
+    "data/cache/area.csv": b"c" * 12,
+    "data/cache/areas_v2/d.bin": b"d" * 13,
+}
+
+
+def _landed(root: Path) -> set[str]:
+    return {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and ".dvc" not in p.parts}
+
+
+@pytest.mark.parametrize("versioned", [True, False], ids=["versioned", "unversioned"])
+@pytest.mark.parametrize(("paths", "expected"), [
+    (["data/cache/area"], {"data/cache/area/a.bin", "data/cache/area/sub/b.bin"}),
+    (["data/cache/area/"], {"data/cache/area/a.bin", "data/cache/area/sub/b.bin"}),
+    (["data/cache/area.csv"], {"data/cache/area.csv"}),
+    (["data/cache/areas_v2"], {"data/cache/areas_v2/d.bin"}),
+    (["data/cache/area.csv", "data/cache/areas_v2"], {"data/cache/area.csv", "data/cache/areas_v2/d.bin"}),
+    (["data/cache/area", "data/cache/area/sub"], {"data/cache/area/a.bin", "data/cache/area/sub/b.bin"}),
+    ([], set(SIBLINGS)),
+], ids=["folder", "folder-slash", "file", "folder-whose-name-extends-another", "two-paths", "overlapping",
+        "no-path"])
+def test_pull_paths_select_that_file_or_folder_and_no_sibling(
+    s3_versioned, tmp_path: Path, versioned: bool, paths: list[str], expected: set[str]
+) -> None:
+    # `data/cache/area` is that folder: never `area.csv` or `areas_v2/`, which
+    # share its name's first letters. The same LIST and filter on a
+    # versioned and an unversioned bucket.
+    s3, bucket = s3_versioned
+    if not versioned:
+        bucket = "plain-bucket"
+        s3.create_bucket(Bucket=bucket)
+    _seed_remote(s3, bucket, tmp_path, SIBLINGS)
+    dest = _project(tmp_path / "clone", bucket)
+    summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                           paths=paths, s3_client_factory=_factory(s3))
+    assert not summary.failed
+    assert summary.pulled == len(expected)  # overlapping paths pull each object once
+    assert _landed(dest) == expected
+
+
+def test_pull_of_a_path_that_matches_nothing_downloads_nothing(s3_versioned, tmp_path: Path) -> None:
+    # `cache pull a nope` stops before any download, as push's empty argument does.
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {"a.bin": b"a" * 10})
+    dest = _project(tmp_path / "clone", bucket)
+    with pytest.raises(c.CacheError, match=r"nothing in the repo file cache \(S3\) at: nope"):
+        c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                     paths=["a.bin", "nope"], s3_client_factory=_factory(s3))
+    assert not (dest / "a.bin").exists()
+
+
+def test_a_folder_marker_alone_is_a_path_that_matches_nothing(s3_versioned, tmp_path: Path) -> None:
+    # An S3 console's zero-byte `mk/` key holds no file: `cache pull mk` is an
+    # error, not exit 0 with nothing pulled, and it stops a pull it is part of.
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {"real.bin": b"r" * 4})
+    s3.put_object(Bucket=bucket, Key="lab/proj/cache/mk/", Body=b"")
+    dest = _project(tmp_path / "clone", bucket)
+    for paths in (["mk"], ["real.bin", "mk"]):
+        with pytest.raises(c.CacheError, match=r"nothing in the repo file cache \(S3\) at: mk$"):
+            c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                         paths=paths, s3_client_factory=_factory(s3))
+    assert not (dest / "real.bin").exists()
+
+
+@pytest.mark.parametrize("paths", [[], ["data"]], ids=["no-path", "a-path"])
+def test_a_file_and_a_folder_of_the_same_name_fail_the_file_and_pull_the_rest(
+    s3_versioned, tmp_path: Path, paths: list[str]
+) -> None:
+    # S3 can hold `data/iso` and `data/iso/a.bin`; the disk can't. Each file that
+    # is also a folder is one failed ledger entry, at any depth and with or
+    # without a path, and everything else lands, so the outcome never depends
+    # on which download finishes first.
+    import hashlib
+
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {
+        "data/iso/a.bin": b"a" * 10, "data/deep/x/y.bin": b"y" * 5, "data/ok.bin": b"o" * 3,
+    })
+    body = b"planted"
+    for key in ("data/iso", "data/deep/x"):  # a pair near the top, and a deeper one
+        s3.put_object(Bucket=bucket, Key=f"lab/proj/cache/{key}", Body=body,
+                      Metadata={c.CACHE_SHA256_META_KEY: hashlib.sha256(body).hexdigest()})
+    dest = _project(tmp_path / "clone", bucket)
+    summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                           paths=paths, s3_client_factory=_factory(s3))
+    assert sorted(o.rel for o in summary.failed) == ["data/deep/x", "data/iso"]
+    for o in summary.failed:  # says what happens to the file, nothing about the folder's outcome
+        assert "both a file and a folder" in (o.reason or "") and "the file is not pulled" in (o.reason or "")
+        assert "were pulled" not in (o.reason or "") and "nothing was written" not in (o.hint or "")
+    assert summary.pulled == 3
+    assert _landed(dest) == {"data/iso/a.bin", "data/deep/x/y.bin", "data/ok.bin"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_cache_key_path_maps_as_push_does(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    (proj / "real_dir").mkdir(parents=True)
+    (proj / "linkdir").symlink_to("real_dir", target_is_directory=True)
+    (tmp_path / "outside").mkdir()
+    (proj / "outlink").symlink_to(tmp_path / "outside", target_is_directory=True)
+    assert c.cache_key_path(proj, "data/cache/iso/") == "data/cache/iso"
+    assert c.cache_key_path(proj, str(proj / "real_dir" / "f")) == "real_dir/f"
+    assert c.cache_key_path(proj, "linkdir/foo") == "real_dir/foo"  # through the link, as push resolves
+    assert c.cache_key_path(proj, "outlink/x") is None
+    assert c.cache_key_path(proj, "../x") is None
+    assert c.cache_key_path(proj, ".") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_a_symlink_argument_is_skipped_by_push_and_followed_by_pull(
+    s3_versioned, tmp_path: Path, capsys
+) -> None:
+    s3, bucket = s3_versioned
+    src = _seed_remote(s3, bucket, tmp_path, {"real/a.bin": b"a" * 10})
+    capsys.readouterr()
+    (src / "link").symlink_to("real", target_is_directory=True)
+    pushed = c.cache_push(project_path=src, paths=["link", "real"], config=_cfg(),
+                          reporter=Reporter(), s3_client_factory=_factory(s3))
+    assert pushed.skipped_symlink == 1 and pushed.uploaded == 0  # push: skipped, unchanged
+    assert "skipped symlink (not followed): link" in capsys.readouterr().err
+
+    dest = _project(tmp_path / "clone", bucket)
+    (dest / "link").symlink_to("real", target_is_directory=True)  # its target lands with the pull
+    pulled = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                          paths=["link"], s3_client_factory=_factory(s3))
+    assert pulled.paths == ["real"] and pulled.pulled == 1  # pull: the path only selects keys
+    assert (dest / "real" / "a.bin").read_bytes() == b"a" * 10
 
 
 def test_pull_skips_verified_local_files(s3_versioned, tmp_path: Path) -> None:
@@ -1181,10 +1314,16 @@ def test_pull_all_preamble_and_empty_listing_warn(s3_versioned, tmp_path: Path, 
     out = capsys.readouterr().err
     assert "pulling 2 file(s)" in out and "from the repo file cache (S3)" in out
 
-    # An empty prefix warns and returns an empty summary (handler exits 0).
+    # A path that matches nothing is now an error naming it (it was a warning
+    # and exit 0 under --prefix), as push's empty argument is.
     empty = _project(tmp_path / "empty_clone", bucket)
-    summary = c.cache_pull(project_path=empty, config=_cfg(), reporter=Reporter(),
-                           prefix="does/not/exist/", s3_client_factory=_factory(s3))
+    with pytest.raises(c.CacheError, match=r"nothing in the repo file cache \(S3\) at: does/not/exist"):
+        c.cache_pull(project_path=empty, config=_cfg(), reporter=Reporter(),
+                     paths=["does/not/exist"], s3_client_factory=_factory(s3))
+    # With no path, an empty cache still warns and returns an empty summary.
+    bare = _project(tmp_path / "bare_clone", bucket, prefix="lab/empty")
+    summary = c.cache_pull(project_path=bare, config=_cfg(), reporter=Reporter(),
+                           s3_client_factory=_factory(s3))
     assert summary.pulled == 0 and summary.unchanged == 0
     assert "nothing pulled" in capsys.readouterr().err
 
@@ -1567,13 +1706,18 @@ def test_enumerate_duplicate_same_dir_arg_not_flagged_empty(tmp_path: Path) -> N
     assert scan.empty_args == []
 
 
-@pytest.mark.parametrize("bad", ["../etc", "/abs", "a\\b"])
-def test_pull_bad_prefix_raises_value_error(s3_versioned, tmp_path: Path, bad: str) -> None:
-    s3, bucket = s3_versioned
+@pytest.mark.parametrize("bad", ["../etc", "/abs", "."])
+def test_pull_of_a_path_outside_the_project_is_refused_before_s3(s3_versioned, tmp_path: Path, bad: str) -> None:
+    _s3, bucket = s3_versioned
     dest = _project(tmp_path / "clone", bucket)
-    with pytest.raises(ValueError):
+
+    def no_s3(*_a, **_k):
+        raise AssertionError("S3 reached")
+
+    with pytest.raises(c.CacheError, match="mintd cache pull takes files or folders inside the project") as ei:
         c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
-                     prefix=bad, s3_client_factory=_factory(s3))
+                     paths=[bad], s3_client_factory=no_s3)
+    assert "share put" not in (ei.value.hint or "")  # pull downloads: no upload hint
 
 
 def test_pull_tampered_object_leaves_no_final_file(s3_versioned, tmp_path: Path) -> None:
@@ -1716,18 +1860,17 @@ def test_ls_returns_remainders_via_shared_listing(s3_versioned, tmp_path: Path) 
     s3, bucket = s3_versioned
     _seed_remote(s3, bucket, tmp_path, {"iso/a.bin": b"a" * 10, "b.bin": b"b" * 5})
     repo = resolve_repo_remote(_project(tmp_path / "clone", bucket), None)
-    result = c.list_cache_objects(
-        repo, sub_path=None, aws_profile_name=None, factory=_factory(s3)
-    )
+    result = c.list_cache_objects(repo, aws_profile_name=None, factory=_factory(s3))
     keys = sorted(o.key for o in result.objects if not o.is_dir)
     assert keys == ["b.bin", "iso/a.bin"]  # relative-remainder space, no prefix
 
 
-def test_ls_hint_prefix_actually_pulls_the_named_file(
+def test_ls_hint_path_actually_pulls_the_named_file(
     s3_versioned, tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    # The `cache ls` hint must name a PREFIX cache_pull can list under. A full
-    # file key + normalise's trailing '/' matches nothing; the dirname does.
+    # The `cache ls` hint names a file's path, and cache pull of that path lands it.
+    import shlex
+
     import argparse
     import json
 
@@ -1740,20 +1883,17 @@ def test_ls_hint_prefix_actually_pulls_the_named_file(
 
     args = argparse.Namespace(
         _reporter=Reporter(json_mode=True), path=clone, remote=None,
-        prefix=None, no_truncate=False,
+        paths=[], no_truncate=False,
     )
     assert cli._handle_cache_ls(args) == 0
     payload = json.loads(capsys.readouterr().out)
     hint = payload["hint"]
-    assert hint.startswith("mintd cache pull")
+    assert hint == "mintd cache pull iso/deep/a.bin"
 
-    # Execute the hint's --prefix through cache_pull; the named file must land.
-    prefix = None
-    if "--prefix" in hint:
-        prefix = hint.split("--prefix", 1)[1].strip()
+    # Execute the hint's path through cache_pull; the named file must land.
     summary = c.cache_pull(
         project_path=clone, config=_cfg(), reporter=Reporter(json_mode=True),
-        prefix=prefix, s3_client_factory=_factory(s3),
+        paths=shlex.split(hint)[3:], s3_client_factory=_factory(s3),
     )
     assert summary.pulled == 1
     assert (clone / "iso" / "deep" / "a.bin").read_bytes() == b"a" * 20
@@ -2136,7 +2276,7 @@ def test_pull_control_char_key_reason_reaches_stderr_escaped(
     monkeypatch.setattr(cli, "_resolve_cache_ops", lambda _cfg: _factory(s3))
 
     args = argparse.Namespace(
-        _reporter=Reporter(), path=clone, remote=None, prefix=None, jobs=8,
+        _reporter=Reporter(), path=clone, remote=None, paths=[], jobs=8,
         force=False,
     )
     rc = cli._handle_cache_pull(args)
