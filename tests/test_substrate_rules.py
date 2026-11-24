@@ -281,8 +281,8 @@ def test_no_composition_root_wrapper_is_patched_wholesale() -> None:
 
 
 def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
-    """The literals above are the *whole* census (212 sites / 50 targets), not
-    a hand-copied excerpt, and the scanner is re-run here to prove it.
+    """The literals above are the *whole* census, every site of every target,
+    not a hand-copied excerpt, and the scanner is re-run here to prove it.
 
     This is the guard that ``test_internal_monkeypatch_sites_do_not_grow``
     cannot be: narrowing the matcher (e.g. requiring the receiver to be
@@ -292,14 +292,14 @@ def test_the_checked_in_literal_matches_a_fresh_scan() -> None:
     all appear in this document set for the same quantity.
 
     Mutation that must redden this: restrict ``_scan_double_targets`` to
-    ``monkeypatch``-receiver calls (212 → 211), or drop ``patch`` (212 → 182).
+    ``monkeypatch``-receiver calls, or drop ``patch``: either changes a target's
+    count, and the comparison below names it.
     """
     assert set(BANNED_TARGETS) & set(PERMITTED_TARGETS) == set()
 
     scanned = _scan_double_targets()
 
     assert scanned == BANNED_TARGETS | PERMITTED_TARGETS
-    assert sum(scanned.values()) == 212
     assert all(_is_permitted(t) for t in PERMITTED_TARGETS)
 
 
