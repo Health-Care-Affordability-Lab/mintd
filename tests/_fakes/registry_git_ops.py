@@ -140,6 +140,10 @@ class _FakeRegistryGitOps:
         from mintd._registry_git_ops import SubprocessRegistryGitOps
         return SubprocessRegistryGitOps().index_entries(work_dir, names)
 
+    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().ignored_files(work_dir, paths)
+
     def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
         from mintd._registry_git_ops import SubprocessRegistryGitOps
         SubprocessRegistryGitOps().restore_index(work_dir, names, entries)

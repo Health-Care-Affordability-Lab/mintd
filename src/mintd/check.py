@@ -146,6 +146,8 @@ class CheckFinding:
         "data_products_output_missing_from_manifest",
         "dvc_state_unreadable",
         "dvc_lock_dep_unhashed",
+        "pipeline_input_untracked",
+        "pipeline_input_unchecked",
         "remote_pin_missing",
         "remote_pin_wrong_bytes",
         "remote_pin_unpinned",
@@ -197,7 +199,7 @@ def check_project(
     working tree and HEAD record is there (`_check_remote`): the declared
     outputs' publishable outs, or all of them with `all_outs`.
     """
-    findings = _producer_findings(path)
+    findings = _producer_findings(path, git_ops=git_ops)
     if remote:
         findings.extend(_check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile))
     try:
@@ -246,7 +248,7 @@ def consumer_walk_failure(findings: list[CheckFinding]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _producer_findings(project_path: Path) -> list[CheckFinding]:
+def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None) -> list[CheckFinding]:
     """Producer-section checks: everything derivable from metadata.json (storage
     drift also reads `.dvc/config`), plus — when `.dvc/` exists — whether its
     declared outputs are ones DVC can deliver, read from the project's own
@@ -353,6 +355,8 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
             )
             if not unreadable:
                 findings.extend(_unhashed_lock_deps(project_path))
+                findings.extend(_untracked_pipeline_inputs(
+                    project_path, pointers, inspection.dvc_remote_name or "", git_ops))
                 # A folder pointer's list read against the folder on disk:
                 # the only reference that shows a list cut at an entry, or
                 # recorded before files were added. Publish refuses it too.
@@ -484,6 +488,149 @@ def _unhashed_lock_deps(project_path: Path) -> list[CheckFinding]:
                             "re-dumped without the dep's tree",
                     hint=f"run dvc commit {stage}, or dvc repro {stage}",
                 ))
+    return findings
+
+
+_RAW_INPUT_HINT = (
+    "'mintd data add {path}' tracks it in DVC and the next 'mintd data push' uploads it; or have a stage write it, "
+    "like the scaffold's commented-out fetch stage. Whether raw files belong in lab storage (licence, size) is the "
+    "producer's call."
+)
+
+
+def _untracked_pipeline_inputs(
+    project_path: Path, pointers: list[str], remote_name: str, git_ops: RegistryGitOps | None,
+) -> list[CheckFinding]:
+    """A warning for each ``dvc.yaml`` dep that holds files git ignores and
+    DVC doesn't track: ``git status`` never lists them, ``dvc repro`` records
+    them only as inputs, and a fresh clone can't rerun the stage. The
+    scaffold's ``data/raw/`` is the common case.
+
+    A dep the pipeline writes (any stage's outs, metrics or plots) or a DVC
+    out covers is fine; so are files git doesn't ignore (``git status``
+    lists them already). What it can't check gets a warning too: an
+    unreadable nested ``dvc.yaml`` or ``dvc.lock``, a templated dep, deps
+    that aren't a list of paths, and git failing. Only a URL dep is passed
+    over: DVC fetches it and records its checksum. Reads, never writes.
+    """
+    import os
+    import posixpath
+    from pathlib import PureWindowsPath
+
+    from ._dvc_state import _dvcignore, _files_on_disk, _nested_pipeline_outs, _tracked
+    from ._push_verify import pushed_pipelines
+    from ._registry_git_ops import SubprocessRegistryGitOps
+
+    findings: list[CheckFinding] = []
+
+    def warn(kind: Literal["pipeline_input_untracked", "pipeline_input_unchecked"], rel: str | None,
+             message: str, hint: str) -> None:
+        findings.append(CheckFinding(severity="warning", section="producer", kind=kind, message=message,
+                                     source=project_path / rel if rel else None, hint=hint))
+
+    def resolve(base: str, wdir: str | None, path: str) -> str | None:
+        """``path`` relative to the project root; None when it lies outside."""
+        if wdir is None or any(posixpath.isabs(p) or PureWindowsPath(p).drive for p in (wdir, path)):
+            return None
+        rel = posixpath.normpath(posixpath.join(base, wdir, path))
+        return None if rel == ".." or rel.startswith("../") else rel
+
+    inputs: dict[str, tuple[str, str]] = {}  # dep -> (dvc.yaml, stage): the first stage that names it
+    covered: list[str] = []
+    for yaml_rel in pushed_pipelines(project_path):
+        base = posixpath.dirname(yaml_rel)
+        try:
+            doc = load12((project_path / yaml_rel).read_text(encoding="utf-8"))
+        except Exception as exc:  # unreadable, not UTF-8, not YAML: the root's is screened before this runs
+            why = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            warn("pipeline_input_unchecked", yaml_rel, f"could not read {yaml_rel} ({why}), so its stages' "
+                 "inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+            continue
+        stages = doc.get("stages") if isinstance(doc, dict) else None
+        if doc is None or stages is None:
+            continue  # declares no stages
+        if not isinstance(stages, dict):
+            warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} isn't in the shape dvc writes (stages is not "
+                 "a mapping), so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+            continue
+        wdirs = wdir_map(doc)
+        for name, stage in stages.items():
+            body = stage.get("do", stage) if isinstance(stage, dict) else None
+            if not isinstance(body, dict):
+                continue
+            wdir = wdirs.get(str(name), ".")
+            for key in ("outs", "metrics", "plots"):
+                entries = body.get(key)
+                for entry in entries if isinstance(entries, list) else []:
+                    for out in [entry] if isinstance(entry, str) else entry if isinstance(entry, dict) else []:
+                        if isinstance(out, str) and (rel := resolve(base, wdir, out)) is not None:
+                            covered.append(rel)
+            deps = body.get("deps")
+            if deps is None:
+                continue
+            where = f"{yaml_rel} stage '{name}'"
+            if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+                warn("pipeline_input_unchecked", yaml_rel, f"{where} lists deps check can't read "
+                     f"({repr(deps)[:60]}), so they aren't checked",
+                     "list each dep as a path, as dvc expects, then re-run 'mintd check'.")
+                continue
+            templated = [d for d in deps if "${" in d or "${" in str(body.get("wdir", ""))]
+            if templated:
+                warn("pipeline_input_unchecked", yaml_rel, f"{where} names inputs check can't resolve: "
+                     f"{abbreviate(templated)}", "check that git or DVC tracks what they resolve to.")
+            for dep in deps:
+                if "://" in dep or dep in templated:
+                    continue  # a URL: DVC fetches it and records its checksum in dvc.lock
+                rel = resolve(base, wdir, dep)
+                if rel is None:
+                    warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is outside the "
+                         "project, so a fresh clone has it only if that path exists on its machine",
+                         "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                         + _RAW_INPUT_HINT.format(path="data/raw"))
+                else:
+                    inputs.setdefault(rel, (yaml_rel, str(name)))
+    if not inputs:
+        return findings
+    try:
+        nested = _nested_pipeline_outs(project_path, remote_name)
+    except PointerCutShort as exc:  # the screen reads only the root dvc.lock
+        lock = Path(os.path.relpath(exc.pointer, project_path)).as_posix()
+        warn("pipeline_input_unchecked", lock, f"could not read {lock} ({exc.detail}), so pipeline inputs aren't "
+             "checked", "restore it from git, or rerun its stages (dvc repro), then re-run 'mintd check'.")
+        return findings
+    covered += _tracked(project_path, [*_all_dvc_outs(project_path, remote_name, pointers), *nested])
+
+    def is_covered(rel: str) -> bool:
+        return any(path_covers(c, rel) for c in covered)
+
+    candidates: dict[str, list[str]] = {}
+    for dep in inputs:
+        if is_covered(dep):
+            continue
+        if (project_path / dep).is_dir():
+            files = [f"{dep}/{f}" for f in _files_on_disk(project_path, dep)]
+        elif (project_path / dep).is_file():
+            parts = Path(dep).parts
+            dirs = [project_path, *(project_path.joinpath(*parts[:k]) for k in range(1, len(parts)))]
+            files = [] if _dvcignore(project_path, dirs).match_file(dep) else [dep]
+        else:
+            files = []  # missing: dvc repro names it
+        if files := [f for f in files if not is_covered(f)]:
+            candidates[dep] = files
+    if not candidates:
+        return findings
+    try:
+        ignored = set((git_ops or SubprocessRegistryGitOps()).ignored_files(project_path, list(candidates)))
+    except GitOpError as exc:
+        warn("pipeline_input_unchecked", None, f"could not ask git which pipeline inputs it ignores: "
+             f"{_git_error_summary(exc)}", "make sure 'git status' works here, then re-run 'mintd check'.")
+        return findings
+    for dep, files in candidates.items():
+        if untracked := [f for f in files if f in ignored]:
+            yaml_rel, name = inputs[dep]
+            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is "
+                 f"tracked by neither git nor DVC: {abbreviate(untracked)}; a fresh clone can't rerun the stage",
+                 _RAW_INPUT_HINT.format(path=dep))
     return findings
 
 
