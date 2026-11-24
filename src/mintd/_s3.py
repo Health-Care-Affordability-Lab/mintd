@@ -322,11 +322,13 @@ def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) ->
 def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -> tuple[Any, str]:
     """Load the credentials of :func:`profile_session`'s session, as boto3 would on its first S3 call,
     and say where they came from (botocore's name: ``env``, ``shared-credentials-file``, ``sso``, ...).
-    Only ``mintd config validate`` calls this. A ``MintdError`` when there are no credentials, when the
-    access key or secret is blank, or when loading fails; that message names only the exception's type,
-    so nothing from the failure (a key, a token, a credential_process's output) is ever printed.
-    Loading runs the whole chain: the instance metadata service (one try, a one-second timeout off
-    EC2), and any SSO, assume-role or credential_process fetch."""
+    :func:`create_client` calls this for every S3 command, and ``mintd config validate`` directly.
+    A ``MintdError`` when there are no credentials, when the access key or secret is blank, or when
+    loading fails; that message names only the exception's type, so nothing from the failure (a key,
+    a token, a credential_process's output) is ever printed. Loading runs the whole chain, including
+    any SSO, assume-role or credential_process fetch. With no credentials anywhere it ends at the
+    instance metadata service: two requests, one try each, a one-second timeout each (botocore's
+    defaults), so about two seconds off EC2, paid only on the way to "no AWS credentials"."""
     session = profile_session(remote_cfg, aws_profile_name)
     hint = (f"add a [mintd] section to {shared_credentials_path()} (mintd config setup offers to), "
             "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
@@ -351,9 +353,13 @@ def create_client(
 ) -> Any:
     """An S3 client for a DVC remote section (``endpointurl``/``endpoint``, ``region``,
     ``profile``), on ``session`` when given (one :func:`load_credentials` returned),
-    else on :func:`profile_session`'s."""
+    else on one whose credentials :func:`load_credentials` has just loaded. Every S3
+    command connects through here, so each stops before any work, with that one
+    message and hint, when there are no credentials, the access key or secret is
+    blank, the named profile is missing, or loading fails: the same checks
+    ``mintd config validate`` reports."""
     if session is None:
-        session = profile_session(remote_cfg, aws_profile_name)
+        session, _ = load_credentials(remote_cfg, aws_profile_name)
 
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:

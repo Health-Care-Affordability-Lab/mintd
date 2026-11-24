@@ -233,6 +233,39 @@ def test_data_pull_stops_on_a_missing_named_profile_and_never_falls_back_to_dvc(
     assert "dvc pull" not in err
 
 
+@pytest.mark.parametrize(("keys", "message"), [
+    pytest.param("", "error: no AWS credentials were found", id="none"),
+    pytest.param("[default]\naws_access_key_id = AKIABLANK\naws_secret_access_key =\n",
+                 "error: the AWS credentials from shared-credentials-file have an empty access key or secret", id="a-blank-secret"),
+])
+def test_every_s3_command_stops_before_any_work_without_usable_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], keys: str, message: str,
+) -> None:
+    """Every S3 client comes from create_client, which loads the credentials first: a pull
+    stops there, with config validate's message and hint, and never falls back to dvc.
+    Mutation: create_client back to profile_session alone -> red."""
+    from mintd import cli
+
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+                "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "credentials").write_text(keys)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")  # off EC2 the chain would wait 2 s there
+    project = tmp_path / "project"
+    (project / ".dvc").mkdir(parents=True)
+    (project / ".dvc" / "config").write_text("[core]\n    remote = origin\n['remote \"origin\"']\n    url = s3://bucket/p\n")
+    (project / "data.csv.dvc").write_text("outs:\n- md5: " + "a" * 32 + "\n  size: 1\n  path: data.csv\n")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    rc = cli.main(["data", "pull", "--path", str(project)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1, err
+    assert message in err and "hint: add a [mintd] section" in err and "AKIABLANK" not in err
+    assert "dvc pull" not in err
+
+
 def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With AWS_PROFILE naming a profile that exists, the profile step is ok and says which
     profile it checked and what named it."""
