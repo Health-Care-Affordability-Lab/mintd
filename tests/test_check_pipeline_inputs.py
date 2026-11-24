@@ -376,7 +376,9 @@ def test_a_dep_symlinked_inside_the_project_is_read_where_it_resolves(tmp_path: 
 
 
 def test_a_symlinked_folder_inside_a_dep_is_named_unchecked(tmp_path: Path) -> None:
-    """The walk doesn't follow it; DVC does.
+    """dvc hashes neither it nor what it holds (dvc 3.67: a symlinked dep is
+    hashed through, a symlinked folder inside one isn't), so what the stage
+    reads there goes unrecorded.
 
     Mutation: drop the symlinked-folder finding -> red."""
     proj = _project(tmp_path)
@@ -385,7 +387,7 @@ def test_a_symlinked_folder_inside_a_dep_is_named_unchecked(tmp_path: Path) -> N
     _symlink_or_skip(proj / "data" / "raw" / "sub", elsewhere)
     found = _found(proj)
     assert [(k, s) for k, s, _ in found] == [("pipeline_input_unchecked", "warning")]
-    assert "holds symlinked folders DVC reads through: data/raw/sub;" in found[0][2]
+    assert "holds symlinked folders, which DVC doesn't hash: data/raw/sub;" in found[0][2]
 
 
 class _GitSpellsNFC:

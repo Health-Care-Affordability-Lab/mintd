@@ -514,7 +514,7 @@ def _untracked_pipeline_inputs(
     ``dvc.yaml``, an unreadable nested ``dvc.lock``, a templated dep, deps
     that aren't a list of paths, git failing, files git doesn't list (a
     repository of their own, another letter case) and symlinked folders
-    inside a dep. Only a URL dep is passed over: DVC fetches it and records
+    inside a dep, which dvc doesn't hash. Only a URL dep is passed over: DVC fetches it and records
     its checksum. Reads, never writes.
     """
     import os
@@ -677,9 +677,12 @@ def _untracked_pipeline_inputs(
         links = sorted(f for f in listed if f != query and path_covers(query, f) and not is_covered(f)
                        and (project_path / f).is_symlink() and (project_path / f).is_dir())
         if links:
-            warn("pipeline_input_unchecked", yaml_rel, f"pipeline input {dep!r} ({where}) holds symlinked folders "
-                 f"DVC reads through: {abbreviate(links)}; check can't tell whether git or DVC tracks what they "
-                 "hold", "check by hand that git or DVC tracks what they point to.")
+            # dvc hashes a symlinked dep's target, but not a symlinked
+            # folder inside one: what the stage may read there goes unrecorded.
+            warn("pipeline_input_unchecked", yaml_rel, f"pipeline input {dep!r} ({where}) holds symlinked folders, "
+                 f"which DVC doesn't hash: {abbreviate(links)}; if the stage reads them, a fresh clone may not have "
+                 "what they hold", "list each as a dep of its own (DVC hashes a symlinked dep's target), or copy the "
+                 "folder in place of the link.")
     return findings
 
 
