@@ -792,7 +792,7 @@ To bring only a product's data into your project, use `mintd data import`.""",
     p_config_validate.add_argument("--path", type=Path, default=None)
     p_config_validate.add_argument(
         "--bucket", default=None,
-        help="S3 bucket to test head_bucket against (auto-discovery is slice-22+).",
+        help="the S3 bucket to check (default: the config's storage_bucket_prefix)",
     )
     p_config_validate.set_defaults(_handler=_handle_config_validate)
 

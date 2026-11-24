@@ -306,10 +306,15 @@ _UNNAME = {
 def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) -> Any:
     """A boto3 session for the profile :func:`resolve_profile` picks. A named profile
     that doesn't exist is a ``MintdError``, never a fallback to other credentials.
-    No credentials are loaded yet, so this checks the name and nothing else."""
+    No credentials are loaded yet, so this checks the name, and that the AWS config
+    file parses, and nothing else."""
+    from botocore.exceptions import ConfigParseError  # only reached with boto3 installed
+
     name, source = resolve_profile(remote_cfg, aws_profile_name)
     try:
         return boto3.Session(profile_name=name)
+    except ConfigParseError as exc:  # its text names the file, never what's in it
+        raise MintdError(f"could not read the AWS configuration: {exc}", hint="fix that file, or move it aside") from None
     except ProfileNotFound as exc:
         unname = _UNNAME.get(source, "run mintd config setup")
         raise MintdError(
@@ -327,11 +332,16 @@ def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -
     secret is blank. Loading runs the whole chain: the instance metadata service
     (one try, a one-second timeout off EC2), and any SSO, assume-role or
     credential_process fetch. No message carries a key, secret or token."""
-    from botocore.exceptions import CredentialRetrievalError  # only reached with boto3 installed
+    from botocore.exceptions import BotoCoreError, CredentialRetrievalError  # only reached with boto3 installed
 
     session = profile_session(remote_cfg, aws_profile_name)
+    try:  # botocore's session (boto3 keeps it private): whether this profile runs a program for its keys
+        process = bool(session._session.get_scoped_config().get("credential_process"))
+    except Exception:  # an unreadable config fails again, and is reported, when the credentials load
+        process = False
     hint = (f"add a [mintd] section to {shared_credentials_path()} (mintd config setup offers to), "
             "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+    process_hint = "run the profile's credential_process yourself to see what it says"
     try:
         creds = session.get_credentials()
         if creds is None:
@@ -341,24 +351,26 @@ def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -
         frozen = creds.get_frozen_credentials()
     except MintdError:
         raise
-    except CredentialRetrievalError as exc:
-        # Never str(exc): for a credential_process it carries the process's stderr, which may hold anything.
-        provider = exc.kwargs.get("provider", "credential")
-        raise MintdError(
-            f"AWS credentials could not be loaded: the {provider} provider failed",
-            hint="run the profile's credential_process yourself to see its output" if provider == "custom-process" else hint,
-        ) from None
-    except OSError as exc:
-        # botocore runs a credential_process without catching this: the program is missing or can't be
-        # run (on Windows, a script with a shebang). It never ran, so there is no output; the text names
-        # at most the program, never its arguments.
-        raise MintdError(
-            f"AWS credentials could not be loaded: the profile's credential_process couldn't start "
-            f"({type(exc).__name__}: {exc})",
-            hint="run the profile's credential_process yourself to see why",
-        ) from exc
-    except Exception as exc:  # partial keys, an expired SSO token, a malformed file: their messages name no secret
-        raise MintdError(f"AWS credentials could not be loaded ({type(exc).__name__}): {exc}", hint=hint) from exc
+    except Exception as exc:
+        # The one place that decides what a failed load may print. Only botocore's own text, an AWS
+        # service's error, or an OS error (which names a file, never its contents) is shown. Never a
+        # CredentialRetrievalError's: for a credential_process it carries the process's stderr. Nor any
+        # other library's: dateutil's error for a credential_process's Expiration quotes its stdout.
+        kind = type(exc).__name__
+        if isinstance(exc, CredentialRetrievalError):
+            provider = exc.kwargs.get("provider", "credential")
+            detail = f": the {provider} provider failed"
+            process = process or provider == "custom-process"
+        elif isinstance(exc, OSError) and process:  # botocore doesn't catch it when the program can't start
+            detail = f": the profile's credential_process couldn't start ({kind}: {exc})"
+        elif isinstance(exc, OSError):
+            detail = f": {exc.filename or 'a file they need'} couldn't be read ({kind}: {exc.strerror or exc})"
+            hint = "check that file, and the setting that names it (an AWS_*_FILE variable or the AWS config)"
+        elif isinstance(exc, (BotoCoreError, ClientError)):
+            detail = f" ({kind}): {exc}"
+        else:
+            detail = f" ({kind})"
+        raise MintdError(f"AWS credentials could not be loaded{detail}", hint=process_hint if process else hint) from None
     if not (frozen.access_key or "").strip() or not (frozen.secret_key or "").strip():
         raise MintdError(f"the AWS credentials from {method} have an empty access key or secret", hint=hint)
     return session, method

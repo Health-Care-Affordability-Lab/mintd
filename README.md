@@ -136,6 +136,8 @@ everything a push needs:
 - On AWS a wrong region is followed to the bucket's own, so it isn't
   caught, and with no bucket to check, neither is a wrong
   `storage_endpoint`.
+- With no bucket to check, ✓ on `aws_profile` means the keys loaded, not
+  that AWS accepts them: nothing has been asked of S3.
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
 `registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
