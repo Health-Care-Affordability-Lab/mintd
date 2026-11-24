@@ -437,9 +437,30 @@ def test_import_outside_a_project_stops_before_the_catalog_or_dvc(
     err = " ".join(capsys.readouterr().err.split())
     assert rc == 1
     assert dvc_ops.calls == []
-    assert f"not inside a mintd project (no .dvc/ at {tmp_path.resolve()})" in err
+    assert f"not inside a mintd project (no .dvc/ at {tmp_path.resolve()} or above)" in err
     assert f"mintd clone {argv[-1] if argv[-1] != '--bump' else 'demo-map'}" in err
     assert "mintd init" in err
+
+
+@pytest.mark.parametrize("argv", [["import", "demo-map"], ["data", "import", "demo-map", "--bump"]],
+                         ids=["import", "bump"])
+def test_import_from_a_folder_inside_a_project_still_runs_there(
+    capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch, argv: list[str],
+) -> None:
+    """Import and --bump run from any folder inside a project, as dvc does and
+    as they did before the project check: the .dvc/ may be above. An import
+    still lands under the folder it ran from."""
+    client, dvc_ops = patched_clients
+    _register_demo_map(client)
+    sub = Path.cwd() / "analysis"  # patched_clients runs from a project folder
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    rc = cli.main(argv)
+    assert "not inside a mintd project" not in capsys.readouterr().err
+    if argv[0] == "import":
+        assert rc == 0
+        (call,) = dvc_ops.calls
+        assert (Path.cwd() / call.cwd / call.dest).resolve().is_relative_to(sub.resolve() / "data" / "imports")
 
 
 def test_cli_data_import_threads_dvc_args(
@@ -1612,6 +1633,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     spelling: list[str],
 ) -> None:
     """`mintd clone` and `mintd data clone` hand the clone the same arguments."""
+    monkeypatch.chdir(tmp_path)  # clone runs anywhere; this test keeps it outside a project
     from mintd.data import CloneResult
 
     received: dict[str, object] = {}

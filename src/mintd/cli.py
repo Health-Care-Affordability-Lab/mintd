@@ -1462,14 +1462,19 @@ def _handle_share_get(args: argparse.Namespace) -> int:
     return 0
 
 
-def _require_project(project_path: Path, *, hint: str) -> Path:
+def _require_project(project_path: Path, *, hint: str, or_above: bool = False) -> Path:
     """Stop a verb that works on a project before it reads the catalog or runs
     dvc, when ``project_path`` isn't one: a mintd project has ``.dvc/`` at its
-    root. Shared by import, pull and the cache verbs; returns the resolved path."""
+    root. Pull and the cache verbs take their ``--path`` as that root. With
+    ``or_above`` (import, which runs anywhere in a project, as dvc does), the
+    project may be any folder above, found by ``dvc_root`` as dvc finds it.
+    Returns the project's root."""
     resolved = project_path.resolve()
-    if not (resolved / ".dvc").is_dir():
-        raise MintdError(f"not inside a mintd project (no .dvc/ at {resolved})", hint=hint)
-    return resolved
+    root = dvc_root(resolved) if or_above else resolved
+    if not (root / ".dvc").is_dir():
+        where = f"{resolved} or above" if or_above else str(resolved)
+        raise MintdError(f"not inside a mintd project (no .dvc/ at {where})", hint=hint)
+    return root
 
 
 def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any]:
@@ -2087,11 +2092,13 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         args._parser.error("--bump cannot be combined with --rev or --all")
     if args.bump and len(args.import_path) > 1:
         args._parser.error("--bump takes at most one --path")
-    # Import adds a product to the project it runs in (it has no --path), so
-    # outside one it stops here, before the catalog lookup or any dvc call.
+    # Import adds a product to the project it runs in, from any folder inside
+    # it (it has no --path), so outside one it stops here, before the catalog
+    # lookup or any dvc call. It still runs from ".", as before.
     _require_project(
         Path("."),
-        hint=f"mintd import adds a product to a project, and this folder isn't one. "
+        or_above=True,
+        hint=f"mintd import adds a product to a project, and this folder isn't in one. "
              f"To get the whole product: mintd clone {args.name}. To start a project: mintd init",
     )
 
