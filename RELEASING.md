@@ -21,8 +21,16 @@
   mismatch, nothing is installed.
 - Every dependency is pinned to the version in the release's `constraints.txt`. That file also holds
   their hashes, but `uv tool install` does not check hashes in a constraints file (uv 0.13.9, with
-  or without a cache), so dependencies are pinned by version, not by hash. reflink has no wheel for
-  Python 3.13 and is not in the lock, so it is built on the user's machine and not pinned.
+  or without a cache), so dependencies are pinned by version, not by hash.
+- The reflink step does check hashes: `uv pip install --require-hashes` takes reflink's from the
+  scripts (it is not in the lock) and cffi's and pycparser's from `constraints.txt`. reflink has
+  no wheel for Python 3.13, so its pinned sdist is built on the user's machine; the build's own
+  tools (setuptools) come from PyPI by version, unchecked. The step runs with `--no-config`, so a
+  `uv.toml` or `pyproject.toml` where the line runs, or above it, changes nothing. That also skips
+  the user's own uv settings file; uv's environment variables still apply.
+- To bump reflink, set `REFLINK_REQ` in `install.sh` and `$ReflinkReq` in `install.ps1` from
+  `uv pip compile --no-config --universal --python-version 3.13 --generate-hashes` on
+  `reflink==<version>`; a test checks the two match.
 - Checking the dependencies' hashes would mean installing with `uv pip sync --require-hashes` into
   a virtual environment the scripts manage themselves. That gives up what `uv tool` provides
   (`uv tool list`, `uv tool uninstall`, the `mintd` command on PATH), so the scripts would have to

@@ -43,6 +43,11 @@ $ErrorActionPreference = "Stop"
 # The uv to install when none is found, and the oldest accepted. Bump it
 # together with UV_VERSION in install.sh (see there).
 $UvVersion = "0.13.9"
+# reflink's pinned hashes; bump them together with REFLINK_REQ in install.sh.
+$ReflinkReq = "reflink==0.2.2" +
+    " --hash=sha256:8435c7153af4d6e66dc8acb48a9372c8ec6f978a09cdf7b57cd6656d969e343a" +
+    " --hash=sha256:882375ee7319275ae5f6a6a1287406365dac1e9643b91ad10e5187d3f84253bd" +
+    " --hash=sha256:be4787c6208faf7fc892390909cf01e34e650ea67c37bf345addefd597ed90e1"
 
 # Ensure uv is installed, and new enough for --with-executables-from below.
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
@@ -111,8 +116,11 @@ try {
     $ToolPython = Join-Path $ToolsDir "mintd\Scripts\python.exe"
     if (Test-Path -LiteralPath $ToolPython) {
         Write-Host "Installing reflink support..."
-        # With the release's constraints, so cffi is the version the release pins.
-        uv pip install --python $ToolPython --constraints $Constraints cffi reflink
+        # Only files whose hashes are pinned (see install.sh). --no-config: a
+        # uv.toml or pyproject.toml where this runs, or above, can't add an index.
+        $ReflinkTxt = Join-Path $Tmp "reflink.txt"
+        Set-Content -LiteralPath $ReflinkTxt -Value $ReflinkReq -Encoding ascii
+        uv pip install --no-config --python $ToolPython --require-hashes --constraints $Constraints --requirements $ReflinkTxt
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Could not install reflink. DVC will fall back to hardlink/symlink/copy."
             Write-Warning "Run 'mintd --version' to verify your installation."

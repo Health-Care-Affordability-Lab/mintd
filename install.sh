@@ -18,6 +18,15 @@ set -euo pipefail
 # install.ps1; tests/test_install_scripts.py checks the two match.
 UV_VERSION="0.13.9"
 
+# reflink isn't in uv.lock, so the hashes of its PyPI files (0.2.2's sdist and
+# two wheels) are pinned here; cffi and pycparser take theirs from the
+# release's constraints.txt. Bump it together with install.ps1; a test checks
+# the two match.
+REFLINK_REQ="reflink==0.2.2"
+REFLINK_REQ+=" --hash=sha256:8435c7153af4d6e66dc8acb48a9372c8ec6f978a09cdf7b57cd6656d969e343a"
+REFLINK_REQ+=" --hash=sha256:882375ee7319275ae5f6a6a1287406365dac1e9643b91ad10e5187d3f84253bd"
+REFLINK_REQ+=" --hash=sha256:be4787c6208faf7fc892390909cf01e34e650ea67c37bf345addefd597ed90e1"
+
 # True when version $1 is older than version $2.
 version_lt() {
     [[ "$1" != "$2" && "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$1" ]]
@@ -165,8 +174,12 @@ uv tool install --force --reinstall --refresh --python 3.13 --with-executables-f
 TOOL_PYTHON="${TOOLS_DIR}/mintd/bin/python"
 if [[ -f "$TOOL_PYTHON" ]]; then
     echo "Installing reflink support (halves DVC disk usage on APFS/XFS/Btrfs)..."
-    # With the release's constraints, so cffi is the version the release pins.
-    uv pip install --python "$TOOL_PYTHON" --constraints "$TMP/constraints.txt" cffi reflink || {
+    # Only files whose hashes are pinned: reflink's above, cffi's and pycparser's
+    # in the release's constraints. --no-config: a uv.toml or pyproject.toml in
+    # the folder this runs in, or a parent, can't add an index or a setting.
+    echo "$REFLINK_REQ" > "$TMP/reflink.txt"
+    uv pip install --no-config --python "$TOOL_PYTHON" --require-hashes \
+        --constraints "$TMP/constraints.txt" --requirements "$TMP/reflink.txt" || {
         echo "Warning: reflink install failed. DVC will fall back to hardlink/symlink/copy." >&2
     }
 else
