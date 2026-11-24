@@ -10,7 +10,9 @@ working tree may be cached EXCEPT one that is DVC-tracked (that belongs to
 is its full repo-relative path under the single lifecycle-tagged ``cache/``
 segment, so ``cache push data/scratch/x`` → ``<prefix>/cache/data/scratch/x``
 and ``cache pull`` restores it back to ``data/scratch/x`` — pull reconstructs
-files at their repo-relative paths, contained to the project root.
+files at their repo-relative paths, contained to the project root. ``cache pull``
+and ``cache ls`` take paths too, mapped to keys as push maps them: ``data/scratch``
+means that file or folder, never ``data/scratch2``.
 
 Boundary discipline (grep-auditable): this module contains ZERO
 ``upload_file`` / ``download_file`` / ``put_object`` calls — every byte moves
@@ -28,7 +30,7 @@ from __future__ import annotations
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
@@ -39,7 +41,6 @@ from ._s3 import ClientError, create_client as _create_s3_client, check_bucket_v
 from ._s3_listing_ops import (
     S3ListingError,
     S3ListingResult,
-    _normalise_sub_path,
     list_product_objects,
 )
 from ._share_ops import (
@@ -398,20 +399,18 @@ def _listing_factory(factory: Factory, remote_cfg: dict[str, str]) -> Factory:
 def list_cache_objects(
     remote: RepoRemote,
     *,
-    sub_path: str | None,
     aws_profile_name: str | None,
     factory: Factory,
 ) -> S3ListingResult:
-    """One paginated ``ListObjectsV2`` under ``<prefix>/cache[/<sub>]`` in
-    relative-remainder space. Serves ls, pull enumeration, and the push
-    size-precheck. May raise ``S3ListingError`` (bucket missing / access
-    denied) or ``ValueError`` (bad ``sub_path``) — the ls handler maps those to
-    hinted errors; ``push``/``pull`` map them via ``_list_or_cache_error``."""
+    """One paginated ``ListObjectsV2`` of the whole ``<prefix>/cache/``, keyed by
+    repo-relative path. Serves the push size-precheck and, through
+    ``select_cache_objects``, pull and ls. May raise ``S3ListingError`` (bucket
+    missing / access denied); ``_list_or_cache_error`` maps it."""
     return list_product_objects(
         bucket=remote.bucket,
         prefix=cache_list_prefix(remote.prefix),
         endpoint=remote.endpoint,
-        sub_path=sub_path,
+        sub_path=None,
         recursive=True,
         include_versions=False,
         aws_profile_name=aws_profile_name,
@@ -422,7 +421,6 @@ def list_cache_objects(
 def _list_or_cache_error(
     remote: RepoRemote,
     *,
-    sub_path: str | None,
     aws_profile_name: str | None,
     factory: Factory,
 ) -> S3ListingResult:
@@ -430,9 +428,7 @@ def _list_or_cache_error(
     ``CacheError`` so a missing/forbidden bucket on the push/pull LIST is a
     documented failure, never a traceback out of ``main()``."""
     try:
-        return list_cache_objects(
-            remote, sub_path=sub_path, aws_profile_name=aws_profile_name, factory=factory
-        )
+        return list_cache_objects(remote, aws_profile_name=aws_profile_name, factory=factory)
     except S3ListingError as exc:
         raise CacheError(
             f"could not list the repo file cache (S3): {exc}",
@@ -499,7 +495,7 @@ class CachePushSummary:
 @dataclass(frozen=True)
 class CachePullSummary:
     outcomes: list[TransferOutcome]
-    sub: str  # normalized --prefix (e.g. "isochrones/ct/" or "")
+    paths: list[str]  # the repo-relative paths asked for ([] = everything)
     elapsed_s: float
 
     def _count(self, status: OutcomeStatus) -> int:
@@ -551,7 +547,8 @@ def _resolve_arg(project_path: Path, arg: str) -> Path:
     screen ``is_symlink()`` on this path *before* calling ``.resolve()`` —
     resolving first follows a top-level symlink arg to its target, so
     ``is_symlink()`` reads False and the skip-and-warn posture is bypassed
-    (mirrors the in-walk handling on the un-resolved child path)."""
+    (mirrors the in-walk handling on the un-resolved child path). Pull and ls
+    resolve it directly (``cache_key_path``): there the path only selects keys."""
     p = Path(arg)
     return p if p.is_absolute() else project_path / p
 
@@ -582,6 +579,23 @@ class _PushScan:
         return [r.path for r in self.refused if r.reason == reason]
 
 
+def _repo_rel(project_root: Path, abs_path: Path) -> str | None:
+    """Repo-relative posix path iff ``abs_path`` is inside the project root
+    and not the root itself; else None (escaped the project)."""
+    try:
+        rel = abs_path.relative_to(project_root).as_posix()
+    except ValueError:
+        return None
+    return rel if rel != "." else None
+
+
+def cache_key_path(project_path: Path, arg: str) -> str | None:
+    """A typed path's key under ``cache/``, mapped as push maps it: joined onto
+    ``--path`` when relative, resolved, then made repo-relative. None outside the
+    project or at its root. The path needn't exist: pull is what creates it."""
+    return _repo_rel(project_path.resolve(), _resolve_arg(project_path, arg).resolve())
+
+
 def enumerate_push_items(
     project_path: Path, paths: list[str], tracked: set[str]
 ) -> _PushScan:
@@ -610,15 +624,6 @@ def enumerate_push_items(
             return p.relative_to(project_root).as_posix()
         except ValueError:
             return p.as_posix()
-
-    def _repo_rel(abs_path: Path) -> str | None:
-        """Repo-relative posix path iff ``abs_path`` is inside the project root
-        and not the root itself; else None (escaped the project)."""
-        try:
-            rel = abs_path.relative_to(project_root).as_posix()
-        except ValueError:
-            return None
-        return rel if rel != "." else None
 
     def _classify(rel: str) -> RefusalReason | None:
         """The refusal reason for a repo-relative path, or None if cacheable.
@@ -666,7 +671,7 @@ def enumerate_push_items(
             continue
         abs_path = raw.resolve()
         if abs_path.is_dir():
-            rel = _repo_rel(abs_path)
+            rel = _repo_rel(project_root, abs_path)
             if rel is None:
                 # The whole subtree escaped the project (or IS the project root —
                 # we refuse a bare project-root arg rather than sweep the tree).
@@ -718,7 +723,7 @@ def enumerate_push_items(
                 # If it produced refusals, those already speak; don't also flag it.
                 empty_args.append(arg)
         elif abs_path.is_file():
-            rel = _repo_rel(abs_path)
+            rel = _repo_rel(project_root, abs_path)
             if rel is None:
                 refused.append(_Refused(arg, "outside_project"))
             else:
@@ -932,7 +937,7 @@ def cache_push(
 
     s3 = factory(repo.remote_cfg, config.aws_profile_name, pool=jobs)
     listing = _list_or_cache_error(
-        repo, sub_path=None, aws_profile_name=config.aws_profile_name, factory=factory
+        repo, aws_profile_name=config.aws_profile_name, factory=factory
     )
     remote_by_remainder = {
         o.key: o.size
@@ -1108,19 +1113,67 @@ def _pull_one(
     return TransferOutcome(rel=rel, status="downloaded", bytes=n)
 
 
+def _in_path(key: str, obj_key: str) -> bool:
+    """``obj_key`` is the file ``key`` names, or lies in the folder it names."""
+    return obj_key == key or obj_key.startswith(key + "/")
+
+
+def select_cache_objects(
+    project_path: Path,
+    repo: RepoRemote,
+    paths: list[str],
+    *,
+    verb: Literal["pull", "ls"],
+    aws_profile_name: str | None,
+    factory: Factory,
+) -> tuple[list[str], S3ListingResult]:
+    """The repo keys ``paths`` name, and the listing narrowed to them (all of it
+    when ``paths`` is empty), for pull and ls. Each path maps to its key as push
+    maps it (``cache_key_path``), and the whole cache is listed once, as push
+    lists it. An object is kept when its key is a path's key (a file) or lies
+    under ``<key>/`` (a folder), so ``data/area`` never selects ``data/area.csv``
+    or ``data/areas_v2/``. A path outside the project (or the root itself), or
+    one that matches no file, stops the command before any download, in
+    ``verb``'s own words."""
+    keys = [cache_key_path(project_path, arg) for arg in paths]
+    outside = [arg for arg, key in zip(paths, keys, strict=True) if key is None]
+    if outside:
+        raise CacheError(
+            f"these path(s) are the project root or outside it — mintd cache {verb} takes "
+            f"files or folders inside the project: " + ", ".join(_display_safe(a) for a in outside),
+            hint=f"name files or folders inside the project, or none for all of the repo file "
+            f"cache (S3): mintd cache {verb}",
+        )
+    mapped = [k for k in keys if k is not None]  # all of them: none was outside
+    listing = _list_or_cache_error(repo, aws_profile_name=aws_profile_name, factory=factory)
+    if not paths:
+        return [], listing
+    # A folder marker (a zero-byte ``x/`` key an S3 console makes) holds no file.
+    files = [o.key for o in listing.objects if not o.is_dir and not o.key.endswith("/")]
+    empty = [arg for arg, key in zip(paths, mapped, strict=True) if not any(_in_path(key, f) for f in files)]
+    if empty:
+        raise CacheError(
+            "nothing in the repo file cache (S3) at: " + ", ".join(_display_safe(a) for a in empty),
+            hint="each path must name a file or folder in the repo file cache (S3) — see what is there: mintd cache ls",
+        )
+    selected = [o for o in listing.objects if any(_in_path(k, o.key) for k in mapped)]
+    return mapped, replace(listing, objects=selected)
+
+
 def cache_pull(
     *,
     project_path: Path,
     config: Config,
     reporter: Reporter,
-    prefix: str | None = None,
+    paths: list[str] | None = None,
     remote: str | None = None,
     jobs: int = 8,
     force: bool = False,
     s3_client_factory: Factory | None = None,
 ) -> CachePullSummary:
-    """Download objects under ``<prefix>/cache[/<k>]`` to their repo-relative
-    paths in the working tree, atomically and verified. The server-returned
+    """Download the objects ``paths`` select (``select_cache_objects``; all of
+    them with no paths) to their repo-relative paths in the working tree,
+    atomically and verified. The server-returned
     listing is untrusted: every remainder passes ``safe_cache_remainder``, a
     filesystem containment check against the PROJECT ROOT, and a ``.git/`` /
     ``.dvc/`` and DVC-tracked screen before any write. An object whose path
@@ -1131,9 +1184,10 @@ def cache_pull(
     guard_no_dvc_outs_under_cache(project_path, repo.remote_name)
     tracked = dvc_tracked_paths(project_path, repo.remote_name)
 
-    sub = _normalise_sub_path(prefix)  # "isochrones/ct/" or ""
-    listing = _list_or_cache_error(
-        repo, sub_path=prefix, aws_profile_name=config.aws_profile_name, factory=factory
+    paths = list(paths or [])
+    keys, listing = select_cache_objects(
+        project_path, repo, paths, verb="pull",
+        aws_profile_name=config.aws_profile_name, factory=factory,
     )
     objects = [
         o for o in listing.objects if not o.is_dir and not o.key.endswith("/")
@@ -1141,12 +1195,12 @@ def cache_pull(
     if not objects:
         reporter.warn(
             f"no objects in the repo file cache (S3) under "
-            f"{cache_list_prefix(repo.prefix)}/{sub} — nothing pulled "
+            f"{cache_list_prefix(repo.prefix)}/ — nothing pulled "
             f"(list with: mintd cache ls)"
         )
-        return CachePullSummary(outcomes=[], sub=sub, elapsed_s=0.0)
+        return CachePullSummary(outcomes=[], paths=keys, elapsed_s=0.0)
 
-    if not prefix:
+    if not paths:
         from .cli import _human_bytes
 
         total = sum(o.size for o in objects)
@@ -1156,10 +1210,15 @@ def cache_pull(
         )
 
     project_root = project_path.resolve()
+    # S3 can hold a file and a folder of the same name (``a/b`` and ``a/b/c``);
+    # the disk can't. The file fails as its own ledger entry, at any depth and
+    # whatever the paths, and the folder's files are pulled, so the outcome
+    # never depends on which download finishes first.
+    folders = {"/".join(o.key.split("/")[:i]) for o in objects for i in range(1, o.key.count("/") + 1)}
     safe: list[tuple[str, str, Path, str, int]] = []
     unsafe_outcomes: list[TransferOutcome] = []
     for o in objects:
-        remainder = sub + o.key  # the object's FULL repo-relative path
+        remainder = o.key  # the object's FULL repo-relative path
         full_key = f"{cache_list_prefix(repo.prefix)}/{remainder}"
         dest = project_path / remainder
         # Both rel and reason are echoed to stderr by _render_cache_pull; a
@@ -1190,13 +1249,16 @@ def cache_pull(
                 f"refused: {_display_safe(remainder)} is DVC-tracked — restore it "
                 f"with `mintd data pull`, not the cache"
             )
+        hint = "a corrupted or hostile namespace is an admin conversation — nothing was written"
+        if refusal is None and remainder in folders:
+            refusal = (
+                f"refused: {_display_safe(remainder)} is both a file and a folder in the "
+                f"repo file cache (S3) — the file is not pulled, so the folder's files can be"
+            )
+            hint = "a disk holds only one of the two: rename the file or the folder where it was pushed"
         if refusal is not None:
             unsafe_outcomes.append(
-                TransferOutcome(
-                    rel=_display_safe(remainder), status="failed", reason=refusal,
-                    hint="a corrupted or hostile namespace is an admin conversation "
-                    "— nothing was written",
-                )
+                TransferOutcome(rel=_display_safe(remainder), status="failed", reason=refusal, hint=hint)
             )
             continue
         safe.append((o.key, full_key, dest, remainder, o.size))
@@ -1238,7 +1300,7 @@ def cache_pull(
                 done += 1
                 advance.set_description(_pull_label(done, n_files))
     return CachePullSummary(
-        outcomes=outcomes, sub=sub, elapsed_s=time.monotonic() - start
+        outcomes=outcomes, paths=keys, elapsed_s=time.monotonic() - start
     )
 
 
