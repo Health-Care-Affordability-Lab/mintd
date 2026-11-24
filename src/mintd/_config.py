@@ -22,8 +22,8 @@ class ConfigError(MintdError):
 
 class Timeouts(BaseModel):
     model_config = ConfigDict(frozen=True)
-    fast: float | None = Field(default=30.0, description="Seconds to wait on a quick git or dvc call. Optional; default 30.")
-    transfer: float | None = Field(default=None, description="Seconds a push, pull or clone may run. Optional; unset means no limit.")
+    fast: float | None = Field(default=30.0, gt=0, allow_inf_nan=False, description="Seconds to wait on a quick git or dvc call. Optional; default 30.")
+    transfer: float | None = Field(default=None, gt=0, allow_inf_nan=False, description="Seconds a push, pull or clone may run. Optional; unset means no limit.")
 
 
 class Config(BaseModel):

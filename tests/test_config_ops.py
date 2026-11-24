@@ -783,17 +783,67 @@ def test_return_at_a_timeouts_part_keeps_the_files_value_or_its_default(
     assert cfg.timeouts.fast == fast and Config.load(p).timeouts.fast == fast  # and so on disk
 
 
-def test_a_bad_value_in_the_file_is_asked_again_at_its_prompt(
+@pytest.mark.parametrize(("text", "cleared"), [
+    pytest.param("timeouts:\n  fast: oranges\n", lambda c: c.timeouts.fast == 30.0, id="fast-back-to-its-default"),
+    pytest.param("timeouts:\n  transfer: oranges\n", lambda c: c.timeouts.transfer is None, id="transfer-unset"),
+    pytest.param("organization: [1, 2]\n", lambda c: c.organization is None, id="a-top-level-field"),
+])
+def test_return_clears_a_value_in_the_file_that_is_not_valid(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path, text: str, cleared,
+) -> None:
+    """As the banner says, an empty answer clears an optional field: here, one whose
+    value can't be kept. Mutation: keep it, or ask again forever -> red."""
+    p = tmp_path / "cfg.yaml"
+    p.write_text(f"registry_url: {_URL}\nauthor: Example Author\n{text}")
+    prompt, seen = _recording_prompt(capsys)
+    cfg = interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
+    assert cleared(cfg) and cleared(Config.load(p))
+    assert (cfg.registry_url, cfg.author) == (_URL, "Example Author")
+    assert len(seen) == len(_LABELS) and any("; cleared" in printed for printed, _ in seen)
+
+
+def test_a_bad_value_in_the_file_is_replaced_by_a_typed_answer(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path,
 ) -> None:
-    """Mutation: keep a failing current value on return -> red."""
     p = tmp_path / "cfg.yaml"
-    p.write_text(f"registry_url: {_URL}\ntimeouts:\n  fast: oranges\nauthor: Example Author\n")
-    prompt, seen = _recording_prompt(capsys, "", "", "", "45")
-    cfg = interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds)
-    assert _labels(seen)[2:4] == ["timeouts.fast", "timeouts.fast"]
-    assert "timeouts.fast: Input should be a valid number" in seen[3][0]
-    assert (cfg.registry_url, cfg.timeouts.fast, cfg.author) == (_URL, 45.0, "Example Author")
+    p.write_text(f"registry_url: {_URL}\ntimeouts:\n  fast: oranges\n")
+    prompt, _ = _recording_prompt(capsys, "", "", "45")
+    assert interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds).timeouts.fast == 45.0
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "nan", "inf"])
+def test_a_timeout_must_be_a_finite_number_above_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], creds: Path, bad: str,
+) -> None:
+    """At the prompt, through --set, and in a file. Mutation: drop the bounds -> red."""
+    p = tmp_path / "cfg.yaml"
+    prompt, seen = _recording_prompt(capsys, "", "", bad, "60")
+    assert interactive_setup(p, prompt_fn=prompt, aws_credentials_path=creds).timeouts.fast == 60.0
+    assert _labels(seen)[2:4] == ["timeouts.fast", "timeouts.fast"] and "try again" in seen[3][0]
+    with pytest.raises(ConfigError, match=r"invalid config: timeouts\.transfer: Input should be"):
+        apply_set_updates(p, [("timeouts.transfer", bad)])
+    p.write_text(f"timeouts:\n  fast: {bad}\n")
+    with pytest.raises(ConfigError, match=r"timeouts\.fast: Input should be"):
+        Config.load(p)
+
+
+def test_an_endless_bad_answer_gives_up_and_writes_nothing(tmp_path: Path, creds: Path) -> None:
+    """`yes | mintd config setup`: "y" can't be a timeout. Mutation: ask forever -> red
+    (the source answers EOF after 50, which would also abort, after 48 asks)."""
+    p = tmp_path / "cfg.yaml"
+    asked: list[str] = []
+
+    def yes(msg: str) -> str:
+        asked.append(msg)
+        if len(asked) > 50:
+            raise EOFError
+        return "y"
+
+    with pytest.raises(ConfigError, match="interactive setup aborted") as ei:
+        interactive_setup(p, prompt_fn=yes, aws_credentials_path=creds)
+    assert [m.split(" [")[0].strip() for m in asked] == ["registry_url", "cache_dir"] + ["timeouts.fast"] * 5
+    assert "timeouts.fast" in ei.value.hint
+    assert not p.exists()
 
 
 def test_a_timeouts_that_is_not_a_mapping_starts_from_the_defaults(

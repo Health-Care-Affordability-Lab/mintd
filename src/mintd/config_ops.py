@@ -470,11 +470,17 @@ def _prompt_field(name: str, current: object, *, prompt_fn=input) -> str:
     return prompt_fn(f"  {name} [{current_display}]: ").strip()
 
 
+_CLEARED = object()  # what _ask returns when return clears a current value that doesn't validate
+_TRIES = 5  # bad answers in a row at one prompt before setup gives up (`yes | mintd config setup`)
+
+
 def _ask(label: str, description: str | None, current: object, check, *, prompt_fn=input) -> object:
-    """Print ``description``, then prompt until the value to keep passes ``check``:
-    the answer, or on return the current value. An unset field left unset isn't checked."""
+    """Print ``description``, then prompt until the answer passes ``check``. Return
+    keeps the current value, or clears it (``_CLEARED``) when it doesn't pass, as the
+    banner says. An unset field left unset isn't checked. Aborts after ``_TRIES`` bad
+    answers in a row."""
     print(f"  {description}")
-    while True:
+    for _ in range(_TRIES):
         raw = _prompt_field(label, current, prompt_fn=prompt_fn)
         value = current if raw == "" else raw
         if value is None:
@@ -482,9 +488,13 @@ def _ask(label: str, description: str | None, current: object, check, *, prompt_
         try:
             check(value)
         except ValidationError as e:
+            if raw == "":
+                print(f"  {_plain_errors(e)}; cleared")
+                return _CLEARED
             print(f"  {_plain_errors(e)}; try again")
             continue
         return value
+    raise ConfigError("interactive setup aborted", hint=f"{_TRIES} answers in a row at {label} weren't valid")
 
 
 # Config fields the interactive walkthrough does not prompt for (S1 polish
@@ -502,10 +512,12 @@ def _ask_timeouts(current: object, path: Path, *, prompt_fn=input) -> dict:
         current = {}
     parts = {}
     for part, info in Timeouts.model_fields.items():
-        parts[part] = _ask(
+        value = _ask(
             f"timeouts.{part}", info.description, current.get(part, info.default),
             lambda v, part=part: Config.model_validate({"timeouts": {part: v}}), prompt_fn=prompt_fn,
         )
+        if value is not _CLEARED:  # cleared: left out, so it takes its default
+            parts[part] = value
     return parts
 
 
@@ -585,7 +597,9 @@ def interactive_setup(
                 field_name, Config.model_fields[field_name].description, data.get(field_name),
                 lambda v, name=field_name: Config.model_validate({name: v}), prompt_fn=prompt_fn,
             )
-            if value is not None:
+            if value is None or value is _CLEARED:
+                data.pop(field_name, None)
+            else:
                 data[field_name] = value
     except (KeyboardInterrupt, EOFError) as e:
         raise ConfigError("interactive setup aborted") from e
