@@ -17,6 +17,11 @@ from moto import mock_aws
 
 from tests._harness.git import _git
 
+# No test asks github.com for the newest release: `mintd --version`, bare
+# `mintd` and every mintd a test starts skip the lookup. Set for the whole
+# session, so child processes inherit it. The lookup's own tests unset it.
+os.environ["MINTD_NO_UPDATE_CHECK"] = "1"
+
 # Fixtures live beside the builders they wrap; importing them here is what
 # registers them suite-wide. `pytest_plugins` is not an option — pytest
 # rejects it in a non-rootdir conftest.

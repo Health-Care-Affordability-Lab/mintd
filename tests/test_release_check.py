@@ -58,7 +58,7 @@ class _GitHub(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def github(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+def server(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     monkeypatch.setenv("no_proxy", "*")  # a developer's proxy must not see these
     monkeypatch.setenv("NO_PROXY", "*")
     server = ThreadingHTTPServer(("127.0.0.1", 0), _GitHub)
@@ -68,6 +68,18 @@ def github(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     yield f"http://127.0.0.1:{server.server_port}"
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture
+def lookup_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lookup turned on: the suite turns it off (conftest), and a CI runner sets CI."""
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+
+
+@pytest.fixture
+def github(server: str, lookup_on: None) -> str:
+    return server
 
 
 def _cache(tmp_path: Path, text: str, age: float = 0.0) -> None:
@@ -119,7 +131,7 @@ def test_offline_is_unknown_and_kept_for_the_day(github: str, tmp_path: Path) ->
 
 
 @pytest.mark.parametrize("garbled", [b"not a version\n1.0.0\n", b"0.1\xff\n1.0.0\n", ("9" * 5000 + ".0.0\n1.0.0\n").encode()])
-def test_a_garbled_cache_is_unknown(tmp_path: Path, garbled: bytes) -> None:
+def test_a_garbled_cache_is_unknown(lookup_on: None, tmp_path: Path, garbled: bytes) -> None:
     (tmp_path / "newest-release").write_bytes(garbled)
     assert newest_release(tmp_path, "1.0.0", "http://127.0.0.1:9/unused", timeout=0.3) is None
 
@@ -160,6 +172,26 @@ def test_the_lookup_thread_ends_when_a_server_says_nothing(github: str, tmp_path
     while any(t.name == f"mintd-release-check {url}" for t in threading.enumerate()):
         assert time.monotonic() < deadline, "the lookup thread outlived its socket timeout"
         time.sleep(0.05)
+
+
+@pytest.mark.parametrize(("name", "value"), [("MINTD_NO_UPDATE_CHECK", "1"), ("CI", "true")])
+def test_the_variable_or_a_ci_run_turns_the_lookup_off(
+    github: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    """No request and no answer, not even a fresh one from the cache.
+    Mutation: drop either half of the check -> red."""
+    monkeypatch.setenv(name, value)
+    _cache(tmp_path, "1.2.3\n1.0.0\n")
+    assert newest_release(tmp_path, "1.0.0", f"{github}/releases/latest") is None
+    assert _GitHub.requests == []
+
+
+def test_the_suite_never_looks_up_a_release(server: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """conftest turns the lookup off for every test, even off CI.
+    Mutation: drop that line from conftest -> red."""
+    monkeypatch.delenv("CI", raising=False)
+    assert newest_release(tmp_path, "1.0.0", f"{server}/releases/latest") is None
+    assert _GitHub.requests == [], "a test reached the release lookup: conftest must set MINTD_NO_UPDATE_CHECK=1"
 
 
 @pytest.mark.parametrize(

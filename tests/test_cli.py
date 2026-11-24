@@ -1080,6 +1080,8 @@ def release_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cache.mkdir()
     (cfg / "config.yaml").write_text(f"cache_dir: {cache}\n")
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(cfg))
+    monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)  # the suite turns the lookup off
+    monkeypatch.delenv("CI", raising=False)
 
     def seed(version: str) -> Path:
         # Looked up today for the version mintd reports now (patchable per test).

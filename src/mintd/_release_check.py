@@ -11,6 +11,8 @@ this install is behind it, or newer than it.
 - Silent when anything fails. The lookup gets 2 seconds in all, DNS included:
   the socket timeout doesn't cover name lookup, so it runs on a daemon thread
   that is abandoned at the deadline.
+- Off when MINTD_NO_UPDATE_CHECK=1, or when CI is set (any non-empty value,
+  as GitHub Actions and most CI services set it): no request, no notice.
 - At most one lookup a day per install: the answer, or the failure, is kept
   in a file in the cache folder with the version it was looked up for, so an
   upgrade asks again at once. A cache folder that can't be written means no
@@ -73,7 +75,9 @@ def is_release(version: str) -> bool:
 
 
 def newest_release(cache_dir: Path, installed: str, url: str = LATEST_URL, timeout: float = 2.0) -> str | None:
-    """The newest promoted release, e.g. "0.12.0", or None when unknown."""
+    """The newest promoted release, e.g. "0.12.0", or None when unknown or turned off."""
+    if os.environ.get("MINTD_NO_UPDATE_CHECK") == "1" or os.environ.get("CI"):
+        return None
     cache = cache_dir / "newest-release"  # "<newest>\n<the install it was looked up for>\n"
     with contextlib.suppress(OSError, ValueError):  # ValueError: bytes that aren't UTF-8
         if 0 <= time.time() - cache.stat().st_mtime < _DAY:  # a future date is stale too
