@@ -112,7 +112,8 @@ class DataProductOutput(BaseModel):
     path: Annotated[str, Owner.PIPELINE]
     description: Annotated[str, Owner.PIPELINE]
     primary: Annotated[bool, Owner.PIPELINE]
-    last_published: Annotated[str, Owner.PIPELINE]
+    # `mintd publish` stamps it, so an entry written by hand may leave it out.
+    last_published: Annotated[str, Owner.PIPELINE] = ""
 
 
 class DataProducts(BaseModel):

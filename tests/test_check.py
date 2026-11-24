@@ -869,6 +869,42 @@ def test_check_emits_primary_mismatch_when_primary_not_in_outputs(tmp_path: Path
     assert "data/other/" in dp[0].hint
 
 
+def test_the_missing_primary_hint_shows_an_entry_when_there_is_none(tmp_path: Path):
+    """A fresh scaffold has no outputs, so "one of your outputs[] paths"
+    points at nothing: the hint shows a whole entry to copy instead.
+
+    Mutation: revert the hint branch -> red."""
+    def _clear(d):
+        d["data_products"] = {"primary": None, "outputs": []}
+    _write_metadata(tmp_path, _clear)
+    [dp] = [f for f in check_project(tmp_path) if f.kind == "data_products_primary_missing"]
+    example = dp.hint.split("for example ", 1)[1].split(", and set", 1)[0]
+    DataProductOutput.model_validate(json.loads(example))
+    assert "set data_products.primary to its path" in dp.hint
+
+
+def test_the_mismatch_hint_shows_an_entry_when_there_is_none(tmp_path: Path):
+    """Mutation: revert the hint branch -> red."""
+    def _clear(d):
+        d["data_products"] = {"primary": "data/final/", "outputs": []}
+    _write_metadata(tmp_path, _clear)
+    [dp] = [f for f in check_project(tmp_path) if f.kind == "data_products_primary_mismatch"]
+    assert dp.hint.startswith("available outputs: (none); add an entry to data_products.outputs[] whose path is "
+                              "'data/final/', for example ")
+    example = json.loads(dp.hint.split("for example ", 1)[1].rstrip("."))
+    assert DataProductOutput.model_validate(example).path == "data/final/"
+
+
+def test_with_outputs_present_the_hints_are_unchanged(tmp_path: Path):
+    def _set(d):
+        d["data_products"] = {"primary": None, "outputs": [
+            {"path": "data/other/", "description": "", "primary": False, "last_published": ""}]}
+    _write_metadata(tmp_path, _set)
+    [dp] = [f for f in check_project(tmp_path) if f.kind == "data_products_primary_missing"]
+    assert dp.hint == ("set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). "
+                       "Consumers can't import this product without it.")
+
+
 def test_check_no_data_products_finding_when_primary_matches_output(tmp_path: Path):
     """Fixture defaults to publish-valid (slice 32); confirm zero findings."""
     _write_metadata(tmp_path, None)
