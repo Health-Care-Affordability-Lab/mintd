@@ -1691,3 +1691,25 @@ def test_paths_under_a_symlinked_home_are_named_relative_to_where_the_project_is
     proj = tmp_path / "home" / "proj"
     produced = import_product(client, _FakeDvcOps(), "demo_xw", cwd=proj, dest_root=proj / "data" / "imports")
     assert produced == [Path("data/imports/data_demo_xw/outputs/cms_based.dvc")]
+
+
+def test_another_producers_import_is_named_relative_to_the_imports_working_folder(tmp_path: Path) -> None:
+    """The pointer an earlier import of another producer left is named against
+    the `cwd` the import was given, as every other path it reports is.
+    Mutation: name it against `Path('.')` in `_require_owner` -> the process's
+    own folder, where this pointer isn't, gives an absolute path, red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    import_product(client, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+
+    def moved(d: dict[str, Any]) -> None:
+        d["data_products"]["primary"] = "outputs/cms_based/"
+        d["repository"]["github_url"] = "https://github.com/example-org/someone_else"
+
+    elsewhere = InMemoryCatalogClient()  # the same name, now pointing at another producer
+    _register(elsewhere, mutate=moved)
+    with pytest.raises(UnknownProductPath) as refused:
+        import_product(elsewhere, _FakeDvcOps(), "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    assert str(refused.value).startswith(
+        "data_demo_xw/outputs/cms_based.dvc imports https://github.com/example-org/demo_xw, not "
+    ), str(refused.value)
