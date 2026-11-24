@@ -485,7 +485,10 @@ def test_rebuild_exits_1_when_no_entry_could_be_read(tmp_path: Path) -> None:
 
 
 def test_a_linked_metadata_json_holds_the_entry(tmp_path: Path) -> None:
-    """A link could point out of the checkout: it isn't followed.
+    """A link could point out of the checkout: it isn't followed. Where git
+    checks links out as plain files (Windows' default, `core.symlinks`
+    false), the clone holds a file naming the target instead, which doesn't
+    validate: held either way, and the linked file's fields never arrive.
 
     Mutation: drop the link refusal -> the linked file's fields arrive."""
     outside = tmp_path / "outside.json"
@@ -502,7 +505,9 @@ def test_a_linked_metadata_json_holds_the_entry(tmp_path: Path) -> None:
 
     [result] = _rebuild(tmp_path / "registry")
 
-    assert result.verdict == "held" and result.why == "metadata.json is a link, which a rebuild doesn't follow"
+    assert result.verdict == "held"
+    assert result.why in ("metadata.json is a link, which a rebuild doesn't follow",
+                          "metadata.json doesn't validate (1 error(s)); run mintd check in its repository")
     assert _read(path)["metadata"]["description"] != "from outside"
 
 
