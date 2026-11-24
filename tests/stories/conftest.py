@@ -3,7 +3,7 @@ fresh project to bring it into.
 
 Stories run apart from the unit suite (`addopts` ignores this folder):
 `uv run pytest tests/stories`, which builds and installs the wheel once per
-session unless `MINTD_BIN` names a binary. `MINTD_STORY_BUCKET=cooper-mintd-test`
+session unless `MINTD_BIN` names a binary. `MINTD_STORY_BUCKET=<the test bucket>`
 points story 11, and only story 11, at the lab's test bucket; every other story
 stays on `s3_server`. Emulator runs keep pytest's default tracebacks.
 """

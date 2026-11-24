@@ -26,9 +26,11 @@ Second case, the same bytes sent in other parts:
 
 Where it runs: on the emulator by default, and in CI. On the lab's test bucket
 only by hand:
-`MINTD_STORY_BUCKET=cooper-mintd-test AWS_SHARED_CREDENTIALS_FILE=~/.aws/mintd-test-credentials AWS_CONFIG_FILE=~/.aws/mintd-test-config uv run pytest tests/stories/test_story_11_multipart.py -rA`.
-The key is checked the way the live tier checks its own, only that bucket is
-accepted, and the endpoint may name no path. The key must be refused
+`MINTD_STORY_BUCKET=<the test bucket> AWS_SHARED_CREDENTIALS_FILE=~/.aws/mintd-test-credentials AWS_CONFIG_FILE=~/.aws/mintd-test-config uv run pytest tests/stories/test_story_11_multipart.py -rA`.
+The key is checked the way the live tier checks its own; only that bucket is
+accepted (the harness holds the SHA-256 of its name, not the name); and the
+endpoint must be the bucket's service host alone, with no path and no bucket
+label in front. The key must be refused
 ListObjectVersions, checked before anything is written: with a key that may
 list versions, mintd's push in the second case would delete the object it
 uploads again, a delete marker on the versioned bucket. Every write goes under

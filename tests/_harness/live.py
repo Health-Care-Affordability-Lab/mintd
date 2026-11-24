@@ -10,9 +10,11 @@ from __future__ import annotations
 import configparser
 import contextlib
 import dataclasses
+import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -31,8 +33,17 @@ READ_ONLY = (
 )
 #: The profile of the lab's read-only key, in the files AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE name.
 READONLY_PROFILE = "mintd-live-readonly"
-#: Story 11's opt-in to the lab's test bucket, the one bucket a story may write to, and its key's profile.
-BUCKET_VAR, TEST_BUCKET, TEST_PROFILE = "MINTD_STORY_BUCKET", "cooper-mintd-test", "mintd-test"
+#: Story 11's opt-in variable, which names the lab's test bucket at run time, and that bucket's key's profile.
+BUCKET_VAR, TEST_PROFILE = "MINTD_STORY_BUCKET", "mintd-test"
+#: The SHA-256 of the test bucket's name: the one bucket a story may write to. The operator names it in
+#: MINTD_STORY_BUCKET, and any other name is refused. The hash keeps the name out of casual reading of this public
+#: repo. It doesn't keep the name from someone who guesses it: checking a guess takes one hash.
+TEST_BUCKET_SHA256 = "328fdfb5a7427fc030248d85272bfd45528013dc716282d7bb53a273b3f95e92"
+#: The test bucket's endpoint: Wasabi's service host, or its regional form, over https. botocore addresses a custom
+#: endpoint path-style, so a host with a bucket label in front (`other.s3.wasabisys.com`) would send every request,
+#: writes included, to that other bucket. Only the bare service host is accepted.
+TEST_ENDPOINT_SCHEME = "https"
+TEST_ENDPOINT_HOST = re.compile(r"s3(\.[a-z]{2}-[a-z]+-[0-9]+)?\.wasabisys\.com")
 #: Classifications whose paths, md5s, bytes and times a report may show.
 DETAILED = frozenset({"public", "labonly"})
 #: The file the live tier leaves in its --basetemp, so a later run knows the folder is its own.
@@ -171,18 +182,21 @@ def readonly_credentials(operator_env: Mapping[str, str], dest: Path, profile: s
 
 def story_bucket(named: str | None) -> str | None:
     """The bucket story 11 writes to: None for the emulator, else only the lab's
-    test bucket. Takes the variable's value, so no environment sits in its frame."""
+    test bucket, the name whose SHA-256 is `TEST_BUCKET_SHA256`. Takes the
+    variable's value, so no environment sits in its frame."""
     if not named:
         return None
-    if named != TEST_BUCKET:
-        raise HarnessError(f"{BUCKET_VAR}={named!r}: a story writes only to {TEST_BUCKET}")
+    if hashlib.sha256(named.encode("utf-8")).hexdigest() != TEST_BUCKET_SHA256:
+        raise HarnessError(f"{BUCKET_VAR}={named!r} isn't the lab's test bucket, the one bucket a story writes to")
     return named
 
 
 def profile_endpoint(credentials: Path) -> str:
     """The `endpoint_url` of the `[profile mintd]` copy beside `credentials`, a
-    file the harness wrote: refused when missing, so no request can fall back to
-    AWS's own endpoint."""
+    file the harness wrote. Refused when missing, so no request can fall back to
+    AWS's own endpoint; and unless it is the test bucket's endpoint host alone
+    (`TEST_ENDPOINT_SCHEME`, `TEST_ENDPOINT_HOST`), so no request can land in
+    another bucket, whether named by a path or by a label in front of the host."""
     config = configparser.ConfigParser(interpolation=None)
     config.read(credentials.with_name("config"), encoding="utf-8")
     endpoint = config.get("profile mintd", "endpoint_url", fallback="").strip()
@@ -192,7 +206,12 @@ def profile_endpoint(credentials: Path) -> str:
     parts = urlsplit(endpoint)
     if parts.path.strip("/") or parts.query or parts.fragment:  # path-style requests would go to the bucket it names
         raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE has a path: requests would land "
-                           f"in the bucket it names, not {TEST_BUCKET}; name the endpoint's host alone")
+                           "in the bucket it names, not the test bucket; name the endpoint's host alone")
+    if (parts.scheme != TEST_ENDPOINT_SCHEME or parts.username is not None or parts.password is not None
+            or TEST_ENDPOINT_HOST.fullmatch(parts.hostname or "") is None):
+        raise HarnessError(f"[profile {TEST_PROFILE}]'s endpoint_url in AWS_CONFIG_FILE isn't the test bucket's "
+                           f"endpoint ({TEST_ENDPOINT_SCHEME}://{TEST_ENDPOINT_HOST.pattern}): a bucket label in front "
+                           "of the host, or another host, would send the story's writes to another bucket")
     return endpoint
 
 
