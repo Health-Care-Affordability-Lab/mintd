@@ -371,10 +371,10 @@ def _is_gh_helper(helper: str) -> bool:
         words = shlex.split(helper[1:], posix=True)
     except ValueError:  # unbalanced quotes: sh can't run it either
         return False
-    if len(words) < 3:
+    if len(words) != 3:  # gh writes exactly three; a word after them is another command sh would run
         return False
     name = re.split(r"[\\/]", words[0])[-1].lower()
-    return name in ("gh", "gh.exe") and words[1:3] == ["auth", "git-credential"]
+    return name in ("gh", "gh.exe") and words[1:] == ["auth", "git-credential"]
 
 
 def github_access_hint(url: str, *, cwd: Path | None = None) -> str:

@@ -913,6 +913,12 @@ def test_each_test_reads_gh_afresh(_gh_state_cached_before_the_test: None) -> No
     pytest.param("!'C:\\Program Files\\GitHub CLI\\gh.exe auth git-credential", False, id="unbalanced-quote"),
     pytest.param("!gh auth", False, id="gh-auth-only"),
     pytest.param("!gh auth git-credentials", False, id="another-gh-command"),
+    pytest.param("!gh auth git-credential ; curl x", False, id="then-semicolon"),
+    pytest.param("!gh auth git-credential && evil", False, id="then-and"),
+    pytest.param("!gh auth git-credential || evil", False, id="then-or"),
+    pytest.param("!gh auth git-credential | tee /tmp/x", False, id="then-pipe"),
+    pytest.param("!gh auth git-credential\nevil", False, id="then-newline"),
+    pytest.param("!gh auth git-credential --extra", False, id="extra-word"),
 ])
 def test_gh_helper_is_read_as_git_runs_it(helper: str, is_gh: bool) -> None:
     """A `!` helper runs through sh, so its words split as sh splits them: gh at any
