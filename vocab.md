@@ -295,7 +295,7 @@ Why: `get` stays zero-identity because the author is already in the ref. `share_
 
 ### Repo file cache (S3) (`mintd cache push|pull|ls`) ([src/mintd/_cache_ops.py](src/mintd/_cache_ops.py))
 
-Mirrors untracked working-tree files to `s3://<bucket>/<prefix>/cache/<repo-relative-path>`, with bucket and prefix read from the project's DVC remote in `.dvc/config`, never recomputed. `push` refuses DVC-tracked paths, anything under `.git/` or `.dvc/`, and paths outside the project. `pull [--prefix]` restores objects to their repo paths, never overwrites a DVC-tracked out, and skips a local file with different content unless `--force`. Both refuse to run if any DVC out's S3 key falls under `cache/`.
+Mirrors untracked working-tree files to `s3://<bucket>/<prefix>/cache/<repo-relative-path>`, with bucket and prefix read from the project's DVC remote in `.dvc/config`, never recomputed. `push` refuses DVC-tracked paths, anything under `.git/` or `.dvc/`, and paths outside the project. `pull [PATH …]` restores objects to their repo paths (`ls [PATH …]` lists them; a path means that file or folder, mapped as push maps it), never overwrites a DVC-tracked out, and skips a local file with different content unless `--force`. Both refuse to run if any DVC out's S3 key falls under `cache/`.
 
 **Skip-compare** (`decide_push` / `decide_pull`): push skips a file only when the remote object exists, its size matches, and its `mintd-sha256` user metadata equals the local SHA256; a missing object, size difference, missing metadata (e.g. uploaded with `aws s3 cp`) or mismatch all upload. Pull skips only when a local file has the same size and SHA256.
 
