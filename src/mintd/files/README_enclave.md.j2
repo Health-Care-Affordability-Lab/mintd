@@ -31,7 +31,7 @@ producer has moved on.
 
 ```bash
 mintd enclave package
-# Creates transfers/transfer-YYYY-MM-DD-NNNNNN.zip
+# Creates transfers/transfer-YYYY-MM-DD-NNNNNN-XXXXXXXX.zip
 ```
 
 Each approved version is imported into `data/imports/` as `mintd data import`
@@ -47,8 +47,8 @@ Copy the zip into this folder, then run the two commands for your system from
 here. On Linux:
 
 ```bash
-unzip -n transfer-YYYY-MM-DD-NNNNNN.zip
-md5sum -c transfers/transfer-YYYY-MM-DD-NNNNNN/MD5SUMS
+unzip -n transfer-YYYY-MM-DD-NNNNNN-XXXXXXXX.zip
+md5sum -c transfers/transfer-YYYY-MM-DD-NNNNNN-XXXXXXXX/MD5SUMS
 ```
 
 `unzip -n` never overwrites a file already in place. The check prints one line

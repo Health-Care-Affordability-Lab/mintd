@@ -273,9 +273,11 @@ mintd enclave package     # import the approved versions, bundle the new ones
 ```
 
 `package` imports each approved version into `data/imports/` as `mintd data
-import --rev <pin>` would. It writes `transfers/transfer-YYYY-MM-DD-NNNNNN.zip`,
-checking every file against the MD5 its import records, and appends a
-`packaged` row to `transferred` in the manifest. The zip's paths mirror the
+import --rev <pin>` would. It writes
+`transfers/transfer-YYYY-MM-DD-NNNNNN-XXXXXXXX.zip` (a sequence number, then a
+random part, so two clones packaging on one day get different ids), checking
+every file against the MD5 its import records, and appends a `packaged` row to
+`transferred` in the manifest. The zip's paths mirror the
 enclave folder:
 
 ```
@@ -295,8 +297,8 @@ re-ship a lost one with `mintd enclave package --resend`.
 Inside the enclave, copy the zip into the enclave folder and, on Linux:
 
 ```bash
-unzip -n transfer-2026-07-28-000001.zip
-md5sum -c transfers/transfer-2026-07-28-000001/MD5SUMS
+unzip -n transfer-2026-07-28-000001-3f9c2a7e.zip
+md5sum -c transfers/transfer-2026-07-28-000001-3f9c2a7e/MD5SUMS
 ```
 
 `unzip -n` never overwrites a file already in place, so a new version lands

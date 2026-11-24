@@ -41,6 +41,7 @@ from mintd.enclave import (
     _append_rows,
     _records,
     _member,
+    _next_transfer_id,
     _check_against_producer,
     _hold,
     _Version,
@@ -211,7 +212,9 @@ def test_what_has_crossed_is_skipped_and_resend_bundles_it_again(world) -> None:
     again, skipped = _package(world, resend=True)
 
     assert skipped == []
-    assert (first.stem.endswith("-000000"), again.stem.endswith("-000001")) == (True, True)
+    assert [re.fullmatch(r"transfer-\d{4}-\d\d-\d\d-(\d{6})-[0-9a-f]{8}", p.stem)[1] for p in (first, again)] == [
+        "000000", "000001",
+    ]
     assert [r["transfer_id"] for r in _rows(world)] == [first.stem, again.stem]
 
 
@@ -477,6 +480,59 @@ def test_the_readme_commands_unzip_and_check_this_bundle(world, tmp_path: Path, 
     failed = _lines(bad, ": FAILED")
     assert len(failed) == 1 and "b.csv" in failed[0], bad.stdout + bad.stderr
     assert len(_lines(bad, ": OK")) == len(FOLDER) - 1
+
+
+def test_two_logs_packaging_on_one_day_each_check_their_own_bundle(world, tmp_path: Path) -> None:
+    """Two clones whose `transferred` logs are not shared yet both number
+    from 000000 on the same day. Unzipped one after the other, `unzip -n`
+    keeps the first bundle's `transfers/<id>/` in place, so had they shared an
+    id the second check would re-check the first bundle and pass with the
+    second bundle's file damaged or gone."""
+    pin2 = world.producer.publish({"data/final": {**FOLDER, "a.csv": b"alpha v2\n"}}, message="v2")
+    _approve(world, world.pin1)
+    first, _ = enclave_package(world.client, world.ops, manifest_path=world.manifest, output_dir=tmp_path / "clone1")
+    _approve(world, pin2)  # the other clone's log: nothing transferred yet
+    second, _ = enclave_package(world.client, world.ops, manifest_path=world.manifest, output_dir=tmp_path / "clone2")
+    inside = tmp_path / "inside"
+    inside.mkdir()
+    checks = []
+    for archive in (first, second):
+        shutil.copy(archive, inside / archive.name)
+        unzip, check = bundle_steps(zipfile.ZipFile(archive).read(f"transfers/{archive.stem}/README.md").decode(), SYSTEM)
+        assert _step(unzip, inside).returncode == 0
+        checks.append(check)
+    damaged = inside / "data" / "demo" / f"{VERSION_DATE}_{pin2[:7]}" / "data" / "final" / "a.csv"
+    os.chmod(damaged, damaged.stat().st_mode | stat.S_IWUSR)
+    damaged.write_bytes(b"alpha v3\n")
+
+    bad = _step(checks[1], inside)
+    assert bad.returncode != 0, bad.stdout + bad.stderr
+    failed = _lines(bad, ": FAILED")
+    assert len(failed) == 1 and f"{pin2[:7]}/data/final/a.csv" in failed[0], bad.stdout + bad.stderr
+    damaged.unlink()
+    assert _step(checks[1], inside).returncode != 0, "a missing file is not a pass"
+    ok = _step(checks[0], inside)
+    assert ok.returncode == 0 and len(_lines(ok, ": OK")) == len(FOLDER), ok.stdout + ok.stderr
+
+
+def test_the_sequence_number_counts_every_row_from_today_with_or_without_a_suffix() -> None:
+    """Rows from before the random suffix still count. A transfer_id read
+    from the log that is not a sequence number is skipped, not a crash."""
+    d = "2026-11-23"
+    rows = [
+        {"transfer_id": f"transfer-{d}-000000"},
+        {"transfer_id": f"transfer-{d}-000001-0a1b2c3d"},
+        {"transfer_id": f"transfer-{d}-000002x"},
+        {"transfer_id": f"transfer-{d}-²"},
+        {"transfer_id": f"transfer-{d}-"},
+        {"transfer_id": "transfer-2026-11-22-000002-0a1b2c3d"},
+        {"transfer_id": 7},
+        {"transfer_id": None},
+        {},
+    ]
+    tid = _next_transfer_id(SimpleNamespace(transferred=rows), d)  # type: ignore[arg-type]
+    assert re.fullmatch(rf"transfer-{d}-000002-[0-9a-f]{{8}}", tid), tid
+    assert tid != _next_transfer_id(SimpleNamespace(transferred=rows), d), "each bundle draws its own suffix"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("flags, source_path", [([], None), (["--json"], "data/final/a.csv")],

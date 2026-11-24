@@ -40,6 +40,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import secrets
 import stat
 import time
 from typing import TYPE_CHECKING, Any
@@ -627,17 +628,19 @@ def _append_rows(manifest_path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _next_transfer_id(manifest: EnclaveManifest, today_iso: str) -> str:
-    """`transfer-YYYY-MM-DD-NNNNNN`, the lowest sequence number unused today."""
-    prefix = f"transfer-{today_iso}-"
+    """`transfer-YYYY-MM-DD-NNNNNN-<8 hex>`: the lowest sequence number this
+    log has not used today, then a random suffix. Two clones, or two logs not
+    yet shared, number alike; `unzip -n` keeps the first bundle's
+    `transfers/<id>/` in place, so a shared id would check the wrong bundle."""
     used = set()
     for r in manifest.transferred:
-        tid = str(r.get("transfer_id", ""))
-        if tid.startswith(prefix) and tid[len(prefix):].isdigit():
-            used.add(int(tid[len(prefix):]))
+        m = re.match(rf"transfer-{today_iso}-([0-9]+)(?:-|$)", str(r.get("transfer_id", "")))
+        if m:
+            used.add(int(m[1]))
     seq = 0
     while seq in used:
         seq += 1
-    return f"{prefix}{seq:06d}"
+    return f"transfer-{today_iso}-{seq:06d}-{secrets.token_hex(4)}"
 
 
 # Each check fails, not passes, when MD5SUMS cannot be read: the macOS loop
