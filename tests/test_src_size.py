@@ -2,8 +2,11 @@
 
 The budget is the number in `src_size_budget.txt`: code lines in every `.py` file under `src/mintd`, not counting
 blank lines, comments or docstrings. The scaffold templates (the `.j2` files in `src/mintd/files/`) aren't Python and
-aren't counted. A PR that adds code raises the budget and says why. A PR that cuts more than `MARGIN` lines gets a
-warning to lower it, so the cut stays cut; a cut never fails, so two parallel cuts can't turn main red.
+aren't counted. Nor is `src/mintd/files/land.py.txt` (210 code lines): it is Python that the enclave packaging copies
+into every transfer archive as `land.py`, but it is stored as `.txt` and the rule counts `.py` files only. A PR that
+adds code raises the budget and says why. A PR that cuts more than `MARGIN` lines gets a warning to lower it, so the
+cut stays cut; a cut never fails, so two parallel cuts can't turn main red. Packaging ships every package under
+`src/`, so a package there other than mintd fails the suite rather than ship uncounted.
 """
 
 from __future__ import annotations
@@ -47,7 +50,13 @@ def src_code_lines() -> int:
     return sum(code_lines(p.read_text(encoding="utf-8")) for p in SRC.rglob("*.py"))
 
 
+def other_packages(src: Path) -> list[str]:
+    """Packages under ``src`` besides mintd, which packaging would ship uncounted."""
+    return sorted(p.parent.name for p in src.glob("*/__init__.py") if p.parent.name != "mintd")
+
+
 def _check(count: int, budget: int) -> None:
+    assert count > 0, "src/mintd has no code lines: the tree moved, or the counter found no .py files there."
     assert count <= budget, (
         f"src/mintd has {count} code lines, {count - budget} over its budget of {budget}. "
         f"If the growth is worth it, set tests/{BUDGET_FILE.name} to {count} "
@@ -65,7 +74,21 @@ def test_src_mintd_is_within_its_budget() -> None:
     _check(src_code_lines(), int(BUDGET_FILE.read_text(encoding="utf-8").strip()))
 
 
+def test_src_holds_no_package_but_mintd() -> None:
+    assert other_packages(SRC.parent) == [], "src/ holds a package besides mintd: count it, or move it out of src/."
+
+
+def test_a_sibling_package_is_found(tmp_path: Path) -> None:
+    for name in ("mintd", "extra"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "__init__.py").touch()
+    (tmp_path / "mintd.egg-info").mkdir()
+    assert other_packages(tmp_path) == ["extra"]
+
+
 def test_growth_fails_and_a_cut_only_warns() -> None:
+    with pytest.raises(AssertionError, match="no code lines"):
+        _check(0, 1000)
     with pytest.raises(AssertionError, match="say in the PR why"):
         _check(1001, 1000)
     with pytest.warns(UserWarning, match="Lower tests/src_size_budget.txt to 1000"):
