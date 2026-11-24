@@ -291,31 +291,47 @@ def test_a_run_past_its_wall_limit_stops_pytest_and_leaves_no_folder(tmp_path: P
     assert list((tmp_path / "tmp").iterdir()) == []
 
 
-@pytest.mark.skipif(os.name == "nt", reason="a shebang fake")
-def test_a_build_s_stories_get_no_bucket_name_and_no_aws_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """With a bucket name, key files, a profile and boto/fsspec settings exported, the stories each build runs get
-    none of them, so a story that can write to real storage by hand stays on the emulator. Mutation that turns it
-    red: `_run`'s stories environment back to `{**os.environ, ...}`."""
-    fake = tmp_path / "mintd"
-    fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    fake.chmod(0o755)
-    stub = tmp_path / "python"
-    stub.write_text(f"#!/bin/sh\nenv > {tmp_path / 'env'}\nexit 0\n", encoding="utf-8")
-    stub.chmod(0o755)
-    monkeypatch.setattr(rr, "build_mintd", lambda rev, root, patch=None: fake)
-    monkeypatch.setattr(rr.sys, "executable", str(stub))
+def test_every_child_the_runner_starts_gets_no_bucket_name_and_no_aws_setting(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a bucket name, key files, a profile and boto/fsspec settings exported, no process the runner starts gets
+    any of them: the build's `mintd --version`, the fix's tests in the build's clone, each build's stories, the fix's
+    tests at HEAD, and preflight's collect-only run. A spy on `subprocess.run` and `Popen` records each one's
+    environment, phase by phase. Mutations that turn it red: any of the five given `os.environ`, or no `env=`."""
     planted = {"MINTD_STORY_BUCKET": "a-real-bucket", "AWS_SHARED_CREDENTIALS_FILE": "/home/op/.aws/key-file",
                "AWS_CONFIG_FILE": "/home/op/.aws/key-config", "AWS_PROFILE": "op", "AWS_ACCESS_KEY_ID": "AKIAOP",
                "BOTO_CONFIG": "/home/op/.boto", "FSSPEC_S3_KEY": "AKIAOP"}
     for k, v in planted.items():
         monkeypatch.setenv(k, v)
+    envs: list[dict | None] = []
 
-    rr._run("HEAD", None, (), strict=True)
+    class Popen:
+        def __init__(self, argv: list[str], **kw: object) -> None:
+            envs.append(kw.get("env"))  # type: ignore[arg-type]
 
-    seen = dict(line.split("=", 1) for line in (tmp_path / "env").read_text(encoding="utf-8").splitlines() if "=" in line)
-    assert not planted.keys() & seen.keys(), sorted(planted.keys() & seen.keys())
-    assert not [k for k in seen if k.startswith(("AWS_", "BOTO_", "FSSPEC_"))]
-    assert seen["MINTD_BIN"] == str(fake) and seen["PYTHONDONTWRITEBYTECODE"] == "1"
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+    monkeypatch.setattr(rr.subprocess, "run", lambda argv, **kw: envs.append(kw.get("env"))
+                        or rr.subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(rr.subprocess, "Popen", Popen)
+    monkeypatch.setattr(rr, "build_mintd", lambda rev, root, patch=None: tmp_path / "mintd")
+    monkeypatch.setattr(rr, "_git", lambda args, cwd=None, host=False: "")
+    patch = "validated: with this patch on HEAD, tests/test_x.py::test_fix goes red.\n"
+    phases = {
+        "--version, then the stories": lambda: rr._run("HEAD", None, (), strict=True),
+        "--version, then the fix's tests in the clone": lambda: rr._run("HEAD", patch, (), strict=True),
+        "the fix's tests at HEAD": lambda: rr.not_green_at_head(("tests/test_x.py::test_fix",)),
+        "preflight's collect-only run": lambda: rr.preflight([rr.ROWS[2]]),
+    }
+    for phase, run in phases.items():
+        envs.clear()
+        run()
+        assert envs, phase
+        for env in envs:
+            assert env is not None, f"{phase}: a child inherits the whole environment"
+            assert not planted.keys() & env.keys(), (phase, sorted(planted.keys() & env.keys()))
+            assert not [k for k in env if k.startswith(("AWS_", "BOTO_", "FSSPEC_"))], phase
+            assert env.get("PYTHONDONTWRITEBYTECODE") == "1", phase
 
 
 def test_preflight_writes_no_bytecode(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,9 +33,10 @@ fresh venv, never in this tree, so no `__pycache__` here holds a mutant; and the
 `PYTHONDONTWRITEBYTECODE=1`, so they write none either. (A mutated file restored in place by a same-size write in
 the same second keeps its stale `.pyc`, which is why nothing here edits the tree.)
 
-No real storage: every pytest this runs gets `child_env()`, which drops `MINTD_STORY_BUCKET` and every AWS, boto and
-fsspec variable. A story that can write to the lab's test bucket by hand (story 11) then runs on the emulator, so an
-exported bucket name can't send each mutant build's uploads to real storage.
+No real storage: every process this starts gets `child_env()`, which drops `MINTD_STORY_BUCKET` and every AWS, boto
+and fsspec variable. The guard is there for any story that reads `MINTD_STORY_BUCKET` to write to a real bucket by
+hand: under the runner it stays on the emulator, so an exported bucket name can't send a mutant build's uploads to
+real storage.
 
 The bar: at least 80% of the past-fix rows caught, and every data-loss row. The mutants' share is given with
 its 95% Wilson interval.
@@ -324,7 +325,7 @@ def _run(rev: str, patch: str | None, stories: tuple[str, ...], *, strict: bool,
             mintd = build_mintd(rev, root / "build", diff)
         except (HarnessError, subprocess.CalledProcessError, OSError) as e:
             return Result("error", {"build": str(e).splitlines()[0] if str(e) else type(e).__name__})
-        if subprocess.run([str(mintd), "--version"], capture_output=True, check=False).returncode:
+        if subprocess.run([str(mintd), "--version"], capture_output=True, check=False, env=child_env()).returncode:
             return Result("no-start", {"mintd": "--version failed"})
         named = regression_tests(patch)[0] if patch is not None and strict else ()
         if named:
