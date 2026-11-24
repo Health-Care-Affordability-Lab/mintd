@@ -1,0 +1,17 @@
+recall: undoes a push of a foreach group by name prints a check mark over 0 files (found by review inside #70).
+fix: 9f80d90 (inside #70); before the fix: 2246710 (#70's pre-review commit).
+validated: with this patch on HEAD, tests/test_data_push.py::test_check_a_foreach_group_target_checks_and_keeps_every_instance goes red.
+
+diff --git a/src/mintd/_push_verify.py b/src/mintd/_push_verify.py
+index 6fac971..4ac62f9 100644
+--- a/src/mintd/_push_verify.py
++++ b/src/mintd/_push_verify.py
+@@ -137,7 +137,7 @@ def _in_selection(entry: Entry | Out, selection: frozenset[str] | None) -> bool:
+         return True
+     if entry.pointer == "dvc.lock":
+         # `dvc push dvc.yaml:fan` pushes every `fan@*` of a foreach/matrix group.
+-        return bool({f"dvc.yaml:{entry.stage}", f"dvc.yaml:{(entry.stage or '').split('@', 1)[0]}"} & selection)
++        return f"dvc.yaml:{entry.stage}" in selection  # recall: undoes the review fix
+     return entry.pointer in selection
+ 
+ 

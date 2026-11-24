@@ -29,7 +29,6 @@ Boundaries:
 
 from __future__ import annotations
 
-import configparser
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,24 +37,30 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from . import imports
-from ._fast_sync_ops import (
+from ._dvc_state import (
     _DEFAULT_DVC_CACHE_REL,
-    _default_remote_name_from_config,
     _extract_version_id_from_file_entry,
     DvcFileEntry,
+    PointerCutShort,
     cache_path_for,
-    ensure_dir_manifest,
+    default_remote_in,
+    default_remote_name,
+    hash_in_dvc_shape,
     is_cached,
     outs_for_target,
     outs_materialized,
     parse_remote_config_text,
     parse_s3_url,
     read_cached_dir_manifest,
+    read_dvc_config_text,
+)
+from ._fast_sync_ops import (
+    ensure_dir_manifest,
     fetch_to_cache,
 )
 from ._s3 import _DRIFT_404_CODES, ClientError, available, create_client as _create_s3_client
 from ._producer_git_ops import FetchError, GitArchiveFetcher
-from .errors import MintdError, unreachable_repo_hint
+from .errors import MintdError, strip_userinfo, unreachable_repo_hint
 
 if TYPE_CHECKING:
     from ._console import Reporter
@@ -95,12 +100,9 @@ class _Producer:
 
 def _consumer_remote_name(project_path: Path) -> str:
     """Best-effort default DVC remote name for the consumer project."""
-    cfg = project_path / ".dvc" / "config"
     try:
-        cp = configparser.ConfigParser()
-        cp.read(cfg)
-        return _default_remote_name_from_config(cp) or "origin"
-    except Exception:
+        return default_remote_name(project_path) or "origin"
+    except MintdError:
         return "origin"
 
 
@@ -155,21 +157,20 @@ def _resolve_producer(
         return None, RescueResult(ok=False, reason=reason, hint=hint)
 
     config_text = config_bytes.decode("utf-8", errors="replace")
-    cp = configparser.ConfigParser()
     try:
-        cp.read_string(config_text)
-    except configparser.Error as exc:
+        producer_conf = read_dvc_config_text(config_text, "the producer's .dvc/config")
+    except MintdError as exc:
         return None, RescueResult(
             ok=False,
             reason=f"could not parse the producer's .dvc/config ({exc})",
             hint="ask the producer to check their .dvc/config",
         )
-    remote_name = _default_remote_name_from_config(cp)
+    remote_name = default_remote_in(producer_conf)
     if remote_name is None:
         return None, RescueResult(
             ok=False,
             reason=(
-                f"the producer's .dvc/config ({dep.producer_repo}) has no single "
+                f"the producer's .dvc/config ({dep.producer_repo}) sets no "
                 f"default remote"
             ),
             hint="ask the producer to set a [core] remote in .dvc/config",
@@ -222,7 +223,8 @@ def _entries_from_producer_pointer(
     Tries ``<output_path>.dvc``, then ``dvc.lock`` on PATH_MISSING. Reads the
     matching out's ``files:`` list (md5/relpath/size, and version_id when the
     pinned rev recorded one). Best-effort: any fetch/parse failure returns
-    ``None`` so the caller falls through to the locally-cached manifest."""
+    ``None`` so the caller falls through to the locally-cached manifest. A
+    hash dvc never writes is ``PointerCutShort``, naming the producer's file."""
     output_path = dep.output_path
     for candidate in (f"{output_path}.dvc", "dvc.lock"):
         try:
@@ -234,6 +236,11 @@ def _entries_from_producer_pointer(
         except yaml.YAMLError:
             continue
         entries = _match_out_files(data, output_path, producer.remote_name)
+        bad = next((e.md5 for e in entries or [] if e.md5 and not hash_in_dvc_shape(e.md5)), None)
+        if bad is not None:  # an empty one is the caller's "missing a file hash"
+            # no credentials from the URL in the error itself, so no log line or traceback carries them
+            raise PointerCutShort(f"{candidate} in {strip_userinfo(dep.producer_repo)} at {dep.contract_pin[:7]}",
+                                  f"a hash in it is not in the shape dvc writes: {bad!r}")
         if entries is not None:
             return entries
     return None
@@ -470,6 +477,8 @@ def rescue_import_pull(
                 ),
                 hint=f"check access to the producer's bucket for {dep.producer_repo}",
             )
+        except PointerCutShort:
+            raise  # a hash that would name a path outside the cache: the user's to fix
         except Exception as exc:
             return RescueResult(
                 ok=False,

@@ -19,12 +19,12 @@ def test_fake_satisfies_protocol() -> None:
 
 def test_fake_records_call(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    dest = tmp_path / "cms_based"
+    dest = tmp_path / "core_rows"
 
     fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/demo-xw",
-        path="outputs/cms_based/",
+        repo_url="https://github.com/example-org/demo-map",
+        path="outputs/core_rows/",
         dest=dest,
         rev="abc123",
         force=True,
@@ -32,8 +32,8 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
     assert len(fake.calls) == 1
     call = fake.calls[0]
-    assert call.repo_url == "https://github.com/example-org/demo-xw"
-    assert call.path == "outputs/cms_based/"
+    assert call.repo_url == "https://github.com/example-org/demo-map"
+    assert call.path == "outputs/core_rows/"
     assert call.dest == dest
     assert call.rev == "abc123"
     assert call.force is True
@@ -41,22 +41,22 @@ def test_fake_records_call(tmp_path: Path) -> None:
 
 def test_fake_writes_parseable_stub(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
-    dest = tmp_path / "cms_based"
+    dest = tmp_path / "core_rows"
 
     produced = fake.import_(
         cwd=tmp_path,
-        repo_url="https://github.com/example-org/demo-xw",
-        path="outputs/cms_based/",
+        repo_url="https://github.com/example-org/demo-map",
+        path="outputs/core_rows/",
         dest=dest,
     )
 
-    assert produced == tmp_path / "cms_based.dvc"
+    assert produced == tmp_path / "core_rows.dvc"
     assert produced.exists()
 
     dep = DataDependency.from_dvc_file(produced)
-    assert dep.producer_repo == "https://github.com/example-org/demo-xw"
-    assert dep.output_path == "outputs/cms_based/"
-    assert dep.local_path == "cms_based"
+    assert dep.producer_repo == "https://github.com/example-org/demo-map"
+    assert dep.output_path == "outputs/core_rows/"
+    assert dep.local_path == "core_rows"
 
 
 def test_fake_handles_file_paths_with_suffix(tmp_path: Path) -> None:
@@ -474,7 +474,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
             seen,
             stderr_lines=[
                 "ERROR: unexpected error - "
-                "('data', 'final', 'aha_ccn_xw', 'crosswalk_aha_pos.dta')"
+                "('data', 'final', 'region_lookup', 'lookup_table.dta')"
             ],
         ),
     )
@@ -484,7 +484,7 @@ def test_subprocess_pull_translates_storage_key_tuple(
 
     err = exc_info.value
     assert err.target == "data/final.dvc"
-    assert "data/final/aha_ccn_xw/crosswalk_aha_pos.dta" in str(err)
+    assert "data/final/region_lookup/lookup_table.dta" in str(err)
     assert "data/final.dvc" in str(err)
     assert err.hint == "retry just this target: mintd data pull data/final.dvc"
 
@@ -1087,6 +1087,25 @@ def test_import_with_files_missing_from_storage_says_the_producer_must_fix_it(tm
         "that is the producer's to fix: send them this error, then re-run the import"
     )
     assert "data/final/a.csv" in str(ei.value)
+
+
+def test_an_import_that_finds_dvcs_lock_held_says_it_wrote_nothing(tmp_path: Path) -> None:
+    """dvc stops before writing anything (checked with dvc 3.67.1), as it does
+    for no repo, no path and an unreachable producer, so a failed import names
+    nothing it finds at the destination as its own. Mutation: drop the lock
+    match -> a plain DvcOpError, which may have written, red."""
+    from mintd._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcRepoLocked
+
+    locked = (
+        "ERROR: Unable to acquire lock. Most likely another DVC process is running or was terminated abruptly.\n"
+    )
+    with pytest.raises(DvcRepoLocked) as ei:
+        _CannedStderrDvcOps(locked).import_(
+            repo_url="https://example.org/repo", path="data/final/", dest=tmp_path / "d", cwd=tmp_path,
+        )
+    assert ei.value.wrote_nothing and "Unable to acquire lock" in str(ei.value)
+    assert all(e.wrote_nothing for e in (DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError))
+    assert not DvcOpError.wrote_nothing
 
 
 def test_any_other_import_failure_keeps_no_hint_of_its_own(tmp_path: Path) -> None:

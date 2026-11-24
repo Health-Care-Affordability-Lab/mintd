@@ -14,7 +14,8 @@ from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import DvcFileEntry
+from mintd._fast_sync_ops import ensure_dir_manifest
 from tests._dvc_fixtures import (
     MD5,
     S3HoldsWhatThePointersSay,
@@ -22,7 +23,7 @@ from tests._dvc_fixtures import (
     stage_undeliverable_primary,
     write_pointer,
 )
-from tests._enclave_fixtures import client_with_demo_xw, stage_enclave_manifest
+from tests._enclave_fixtures import client_with_demo_map, stage_enclave_manifest
 from tests._fakes.dvc_ops import _FakeDvcOps
 from tests._fakes.registry_git_ops import _FakeRegistryGitOps
 
@@ -34,6 +35,10 @@ class _FakeCatalogClient:
     def __init__(self, entries: dict | None = None) -> None:
         self._entries = entries or {}
         self.updated: list = []
+        self.push_access_checks = 0
+
+    def require_push_access(self):
+        self.push_access_checks += 1
 
     def update(self, metadata, *, dry_run=False, reporter=None):
         self.updated.append(metadata)
@@ -128,6 +133,7 @@ def test_publish_calls_catalog_update_last(tmp_path):
     order = []
     
     class _OrderedClient:
+        def require_push_access(self): order.append("access")
         def update(self, meta, *, dry_run=False, reporter=None): order.append("update")
     
     dvc.push = lambda *a, **k: order.append("push")
@@ -140,7 +146,8 @@ def test_publish_calls_catalog_update_last(tmp_path):
         git_ops=git,
     )
     
-    assert order == ["push", "tag", "update"]
+    # The registry's push access is checked before anything is written.
+    assert order == ["access", "push", "tag", "update"]
 
 def test_publish_refuses_decreasing_version(tmp_path):
     proj = _seed_project(tmp_path)
@@ -418,6 +425,49 @@ def test_prepare_publish_stamps_timestamps_on_outputs_and_status(tmp_path):
         assert o.last_published == pinned.isoformat()
 
 
+def test_publish_refuses_an_origin_gh_cannot_reach_before_writing_anything(tmp_path, monkeypatch):
+    """Step 5 pushes to origin. Where origin will be pushed to -- here an SSH
+    pushurl beside a local fetch URL -- is refused before publish's first
+    side effect: no metadata.json write, dvc push, commit, tag or catalog
+    update. Publish asks through its own git_ops; this one asks for real."""
+    from mintd._registry_git_ops import SSH_TO_HTTPS, GitHubAccessMissing, SubprocessRegistryGitOps
+
+    class _RealCheck(_FakeRegistryGitOps):
+        def require_github_access(self, work_dir, remote="origin", *, push=False):
+            SubprocessRegistryGitOps().require_github_access(work_dir, remote, push=push)
+
+    proj = _seed_project(tmp_path)
+    subprocess.run(["git", "config", "remote.origin.pushurl", "git@github.com:example-lab/proj.git"], cwd=proj, check=True)
+    before = (proj / "metadata.json").read_bytes()
+    commits, tags = _commit_count(proj), _origin_tags(proj)
+    client, dvc, git = _FakeCatalogClient(), _FakeDvcOps(), _RealCheck()
+    with pytest.raises(GitHubAccessMissing) as raised:
+        publish_project(project_path=proj, client=client, dvc_ops=dvc, git_ops=git, version="0.1.1")
+    assert SSH_TO_HTTPS in (raised.value.hint or "")
+    assert (proj / "metadata.json").read_bytes() == before
+    assert (_commit_count(proj), _origin_tags(proj)) == (commits, tags)
+    assert dvc.push_calls == []
+    assert git.tag_calls == [] and git.push_with_tags_calls == []
+    assert client.updated == []
+
+
+def test_publish_asks_for_push_access_to_origin_and_the_registry_first(tmp_path):
+    client, git = _FakeCatalogClient(), _FakeRegistryGitOps()
+    proj = _seed_project(tmp_path)
+    prepare_publish(project_path=proj, version="0.1.1", dry_run=True, client=client, git_ops=git)
+    assert git.access_checks == [(proj, "origin", True)]
+    assert client.push_access_checks == 1
+
+
+def test_the_registry_is_checked_where_update_will_push_it(tmp_path):
+    from mintd.catalog import GitCatalogClient
+
+    git = _FakeRegistryGitOps()
+    client = GitCatalogClient(registry_repo_url="https://github.com/example-lab/registry", work_dir=tmp_path / "reg", git_ops=git)
+    client.require_push_access()
+    assert git.access_checks == [(tmp_path / "reg", "origin", True)]
+
+
 def test_prepare_publish_one_canonical_timestamp(tmp_path):
     """All outputs share the same byte-identical stamp string — one canonical
     `now()` per publish, not one per output."""
@@ -582,6 +632,63 @@ class _FailingCatalogClient(_FakeCatalogClient):
         raise self._exc
 
 
+def _refused():
+    from mintd._registry_git_ops import GitHubAccessMissing
+
+    return GitHubAccessMissing("git@github.com:example-lab/registry", hint="THE GH FIX")
+
+
+def _turned_away():
+    # What `_git` raises when GitHub refuses the active account: the account hint attached.
+    return GitOpError(["git", "push"], "fatal: unable to access 'https://github.com/example-lab/x/': 403", hint="THE GH FIX")
+
+
+_GH_FAILURES = [pytest.param(_refused, id="refused-before-git"), pytest.param(_turned_away, id="github-turned-git-away")]
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_catalog_read_keeps_its_own_hint(tmp_path, failure):
+    """Not the catalog read's "delete the registry cache" advice, which a
+    refused clone repeats forever."""
+
+    class _FailedRead(_FakeCatalogClient):
+        def fetch(self, name):
+            raise failure()
+
+    with pytest.raises(PublishError) as raised:
+        prepare_publish(
+            project_path=_seed_project(tmp_path), version="0.1.1", dry_run=True,
+            client=_FailedRead(), git_ops=_FakeRegistryGitOps(),
+        )
+    assert raised.value.recovery_hint == "THE GH FIX"
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_push_to_origin_keeps_its_own_hint(tmp_path, failure):
+    class _FailedPush(_FakeRegistryGitOps):
+        def push_with_tags(self, work_dir):
+            raise failure()
+
+    with pytest.raises(ProjectPushFailed) as raised:
+        publish_project(
+            project_path=_seed_project(tmp_path), client=_FakeCatalogClient(),
+            dvc_ops=_FakeDvcOps(), git_ops=_FailedPush(),
+        )
+    hint = raised.value.recovery_hint or ""
+    assert hint.startswith("THE GH FIX") and "git tag -d v0.1.1" in hint
+
+
+@pytest.mark.parametrize("failure", _GH_FAILURES)
+def test_a_gh_failed_catalog_update_keeps_its_own_hint(tmp_path, failure):
+    with pytest.raises(CatalogUpdateFailed) as raised:
+        publish_project(
+            project_path=_seed_project(tmp_path), client=_FailingCatalogClient(failure()),
+            dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps(),
+        )
+    hint = raised.value.recovery_hint or ""
+    assert "THE GH FIX" in hint and "mintd publish 0.1.1" in hint
+
+
 @pytest.mark.parametrize("exc", [
     RegistryBranchExists(["git", "push"], "! [rejected] update/x (fetch first)", "update/x"),
     PRConflictError(branch="update/x", existing_pr=42),
@@ -700,7 +807,7 @@ def test_prepare_publish_passes_the_catalog_client_to_check(tmp_path, monkeypatc
         project_path=proj,
         version="0.1.1",
         dry_run=True,
-        client=client_with_demo_xw(),
+        client=client_with_demo_map(),
         git_ops=_FakeRegistryGitOps(),
     )
 
@@ -714,7 +821,7 @@ def test_publish_full_flow_with_enclave_manifest_reaches_the_tag(tmp_path, monke
 
     monkeypatch.setattr("mintd.publish.check_project", real_check_project)
     proj = _seed_enclave_consumer(tmp_path)
-    client = client_with_demo_xw()
+    client = client_with_demo_map()
     # Step 5 updates this project's own catalog entry; register it first.
     client.register(Metadata.from_json_file(proj / "metadata.json"))
 
@@ -1494,7 +1601,7 @@ def _publish_on_moto(tmp_path: Path, s3, *, cloud: dict | None, cache: bool) -> 
 
     import yaml
 
-    from mintd._fast_sync_ops import cache_path_for
+    from mintd._dvc_state import cache_path_for
 
     proj = _seed_project(tmp_path)
     stage_dvc_project(proj)
@@ -1657,7 +1764,15 @@ def test_publish_rolls_metadata_back_even_when_a_pointer_cant_be_put_back(tmp_pa
     assert lock.read_bytes() == locked
 
 
-def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):
+@pytest.mark.parametrize(("local", "refusal"), [
+    pytest.param('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n', "config.local overrides storage's endpointurl",
+                 id="a-location-override"),
+    pytest.param("[core\n", "can't read .*config.local", id="a-config-local-dvc-cannot-read"),
+])
+def test_publish_refuses_a_location_config_local_redirects_before_any_push(
+    tmp_path, s3_versioned, monkeypatch, local, refusal,
+):
+    """Mutation that must redden the second case: check config.local outside the rollback again."""
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
     s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
@@ -1665,10 +1780,11 @@ def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_p
     (proj / ".dvc" / ".gitignore").write_text("/config.local\n")  # as `dvc init` writes it
     subprocess.run(["git", "add", ".dvc/.gitignore"], cwd=proj, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "ignore config.local"], cwd=proj, check=True)
-    (proj / ".dvc" / "config.local").write_text('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n')
+    (proj / ".dvc" / "config.local").write_text(local)
     dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
-    with pytest.raises(DvcPushFailed, match="config.local overrides storage's endpointurl"):
+    with pytest.raises(DvcPushFailed, match=refusal) as excinfo:
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc, git_ops=git)
+    assert "rolled back" in excinfo.value.recovery_hint
     assert dvc.push_calls == [] and git.tag_calls == []
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
 

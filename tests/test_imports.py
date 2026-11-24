@@ -19,10 +19,10 @@ def test_from_dvc_file_parses_standalone_import() -> None:
     dep = DataDependency.from_dvc_file(FIXTURES / "standalone_import.dvc")
 
     assert dep.kind == "dvc_file"
-    assert dep.producer_repo == "https://github.com/example-org/demo-xw"
+    assert dep.producer_repo == "https://github.com/example-org/demo-map"
     assert dep.contract_pin == "4f7c2a1abcd1234567890abcdef0123456789abc"
-    assert dep.output_path == "outputs/cms_based/"
-    assert dep.local_path == "cms_based"
+    assert dep.output_path == "outputs/core_rows/"
+    assert dep.local_path == "core_rows"
     assert dep.artifact_md5 == "e8f3a2b1c4d5e6f7a8b9c0d1e2f3a4b5"
     assert dep.stage_name is None
 
@@ -77,10 +77,10 @@ def test_scan_imports_walks_both_sources(tmp_path: Path) -> None:
 
 
 def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
-    # `.dvc` file: producer-xw, local_path "cms_based",
+    # `.dvc` file: demo-map, local_path "core_rows",
     # pin 4f7c2a1abcd1234567890abcdef0123456789abc.
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         (FIXTURES / "standalone_import.dvc").read_text(encoding="utf-8"),
     )
     # dvc.lock stage referencing the same triple.
@@ -91,9 +91,9 @@ def test_scan_imports_dedup_dvc_file_wins(tmp_path: Path) -> None:
         "  ingest:\n"
         "    cmd: true\n"
         "    deps:\n"
-        "      - path: cms_based\n"
+        "      - path: core_rows\n"
         "        repo:\n"
-        "          url: https://github.com/example-org/demo-xw\n"
+        "          url: https://github.com/example-org/demo-map\n"
         "          rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc\n",
     )
 
@@ -160,12 +160,12 @@ def test_two_imports_sharing_a_basename_are_both_kept(tmp_path: Path) -> None:
             "deps:\n"
             f"  - path: {producer_path}\n"
             "    repo:\n"
-            "      url: https://github.com/example-org/demo-xw\n"
+            "      url: https://github.com/example-org/demo-map\n"
             "      rev: main\n"
             "      rev_lock: 4f7c2a1abcd1234567890abcdef0123456789abc\n"
         )
 
-    ns = tmp_path / "data" / "imports" / "data_demo_xw"
+    ns = tmp_path / "data" / "imports" / "data_demo_map"
     _write(ns / "data" / "final.dvc", _import_dvc("data/final/"))
     _write(ns / "archive" / "final.dvc", _import_dvc("archive/final/"))
 
@@ -178,8 +178,8 @@ def test_two_imports_sharing_a_basename_are_both_kept(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "repo_block",
     [
-        {"url": "https://github.com/example-org/demo-xw", "rev_lock": None},
-        {"url": "https://github.com/example-org/demo-xw"},
+        {"url": "https://github.com/example-org/demo-map", "rev_lock": None},
+        {"url": "https://github.com/example-org/demo-map"},
     ],
     ids=["null", "absent"],
 )
@@ -198,11 +198,11 @@ def test_a_null_or_absent_rev_lock_reads_as_an_empty_pin(
     Mutation: drop the `isinstance` guard in `_pin` -> this test raises.
     """
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         yaml.safe_dump(
             {
-                "outs": [{"path": "cms_based"}],
-                "deps": [{"path": "outputs/cms_based/", "repo": repo_block}],
+                "outs": [{"path": "core_rows"}],
+                "deps": [{"path": "outputs/core_rows/", "repo": repo_block}],
             }
         ),
     )
@@ -264,13 +264,13 @@ def test_an_unquoted_numeric_rev_lock_is_refused_not_guessed(
     assert yaml.safe_load(f"rev_lock: {written}")["rev_lock"] == yaml_reads_it_as
 
     _write(
-        tmp_path / "data" / "imports" / "cms.dvc",
+        tmp_path / "data" / "imports" / "core_rows.dvc",
         "outs:\n"
-        "- path: cms_based\n"
+        "- path: core_rows\n"
         "deps:\n"
-        "- path: outputs/cms_based/\n"
+        "- path: outputs/core_rows/\n"
         "  repo:\n"
-        "    url: https://github.com/example-org/demo-xw\n"
+        "    url: https://github.com/example-org/demo-map\n"
         f"    rev_lock: {written}\n",
     )
     _write(
@@ -282,7 +282,7 @@ def test_an_unquoted_numeric_rev_lock_is_refused_not_guessed(
         "    deps:\n"
         "    - path: staging/\n"
         "      repo:\n"
-        "        url: https://github.com/example-org/demo-xw\n"
+        "        url: https://github.com/example-org/demo-map\n"
         f"        rev_lock: {written}\n",
     )
 

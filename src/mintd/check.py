@@ -42,11 +42,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
-# `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
+# `_dvc_state` imports no mintd module but the leaf `errors`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
-from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers, unlisted_on_disk
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._pin_proof import unlisted_on_disk
 from ._push_verify import pushed_lockfiles
-from ._fast_sync_ops import (
+from ._dvc_state import (
     PointerCutShort,
     check_dvc_file,
     check_lock,
@@ -57,10 +58,10 @@ from ._fast_sync_ops import (
     stage_wdir,
     wdir_map,
 )
-from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._registry_git_ops import GitOpError, RegistryGitOps, specific_hint
 from ._s3 import create_client as _create_s3_client  # the S3 boundary: tests stand a client in here
 from .catalog import CatalogClient, CatalogNotFound
-from .errors import unreachable_repo_hint
+from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
@@ -146,6 +147,8 @@ class CheckFinding:
         "data_products_output_missing_from_manifest",
         "dvc_state_unreadable",
         "dvc_lock_dep_unhashed",
+        "pipeline_input_untracked",
+        "pipeline_input_unchecked",
         "remote_pin_missing",
         "remote_pin_wrong_bytes",
         "remote_pin_unpinned",
@@ -197,7 +200,7 @@ def check_project(
     working tree and HEAD record is there (`_check_remote`): the declared
     outputs' publishable outs, or all of them with `all_outs`.
     """
-    findings = _producer_findings(path)
+    findings = _producer_findings(path, git_ops=git_ops)
     if remote:
         findings.extend(_check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile))
     try:
@@ -246,7 +249,7 @@ def consumer_walk_failure(findings: list[CheckFinding]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _producer_findings(project_path: Path) -> list[CheckFinding]:
+def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None) -> list[CheckFinding]:
     """Producer-section checks: everything derivable from metadata.json (storage
     drift also reads `.dvc/config`), plus — when `.dvc/` exists — whether its
     declared outputs are ones DVC can deliver, read from the project's own
@@ -353,9 +356,18 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
             )
             if not unreadable:
                 findings.extend(_unhashed_lock_deps(project_path))
+                findings.extend(_untracked_pipeline_inputs(
+                    project_path, pointers, inspection.dvc_remote_name or "", git_ops))
                 # A folder pointer's list read against the folder on disk:
                 # the only reference that shows a list cut at an entry, or
                 # recorded before files were added. Publish refuses it too.
+                try:
+                    unlisted = unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
+                                                remote=inspection.dvc_remote_name or "")
+                except MintdError as exc:  # .dvc/config or config.local dvc can't read: one finding, and go on
+                    unlisted = []
+                    findings.append(CheckFinding(severity="error", section="producer", kind="dvc_state_unreadable",
+                                                 message=str(exc), hint=exc.hint))
                 findings.extend(
                     CheckFinding(
                         severity="error",
@@ -365,8 +377,7 @@ def _producer_findings(project_path: Path) -> list[CheckFinding]:
                         kind="dvc_folder_unlisted",
                         hint=u.hint() + ", then re-run 'mintd check'.",
                     )
-                    for u in unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
-                                              remote=inspection.dvc_remote_name or "")
+                    for u in unlisted
                 )
                 try:
                     findings.extend(
@@ -420,6 +431,12 @@ def _check_repository_identity(meta: Metadata, metadata_path: Path) -> list[Chec
     ]
 
 
+def _example_output(path: str) -> str:
+    """One complete ``data_products.outputs[]`` entry, for a hint shown when
+    there is none to copy."""
+    return json.dumps({"path": path, "description": "…", "primary": True}, ensure_ascii=False)
+
+
 def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[CheckFinding]:
     findings: list[CheckFinding] = []
     primary = meta.data_products.primary
@@ -427,7 +444,11 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
         # A declared primary must be valid regardless of project type.
         output_paths = [o.path for o in meta.data_products.outputs]
         if primary not in output_paths:
-            hint = f"available outputs: {', '.join(output_paths) or '(none)'}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
+            hint = (
+                f"available outputs: {', '.join(output_paths)}; either add an outputs[] entry whose path == {primary!r}, or change primary to one of the listed paths."
+                if output_paths
+                else f"available outputs: (none); add an entry to data_products.outputs[] whose path is {primary!r}, for example {_example_output(primary)}."
+            )
             findings.append(
                 CheckFinding(
                     severity="error",
@@ -449,7 +470,11 @@ def _check_data_products_primary(meta: Metadata, metadata_path: Path) -> list[Ch
                 field_path="data_products.primary",
                 source=metadata_path,
                 kind="data_products_primary_missing",
-                hint="set data_products.primary to one of your outputs[] paths (e.g. 'data/final/'). Consumers can't import this product without it.",
+                hint=(
+                    "set data_products.primary to one of your outputs[] paths (e.g. 'data/final/')."
+                    if meta.data_products.outputs
+                    else f"add an entry to data_products.outputs[], for example {_example_output('data/final/')}, and set data_products.primary to its path."
+                ) + " Consumers can't import this product without it.",
             )
         )
     return findings
@@ -484,6 +509,201 @@ def _unhashed_lock_deps(project_path: Path) -> list[CheckFinding]:
                             "re-dumped without the dep's tree",
                     hint=f"run dvc commit {stage}, or dvc repro {stage}",
                 ))
+    return findings
+
+
+_RAW_INPUT_HINT = (
+    "'mintd data add {path}' tracks it in DVC and the next 'mintd data push' uploads it; or have a stage write it, "
+    "like the scaffold's commented-out fetch stage. Whether raw files belong in lab storage (licence, size) is the "
+    "producer's call."
+)
+
+
+def _untracked_pipeline_inputs(
+    project_path: Path, pointers: list[str], remote_name: str, git_ops: RegistryGitOps | None,
+) -> list[CheckFinding]:
+    """A warning for each ``dvc.yaml`` dep that holds files git ignores and
+    DVC doesn't track: ``git status`` never lists them, ``dvc repro`` records
+    them only as inputs, and a fresh clone can't rerun the stage. The
+    scaffold's ``data/raw/`` is the common case.
+
+    A dep the pipeline writes (any stage's outs, metrics or plots) or a DVC
+    out covers is fine; so are files git doesn't ignore (``git status``
+    lists them already). A dep is read where it resolves, as git sees it,
+    and its files are matched to git's list in one spelling. What it can't
+    check gets a warning too: an unreadable or oddly shaped nested
+    ``dvc.yaml``, an unreadable nested ``dvc.lock``, a templated dep, deps
+    that aren't a list of paths, git failing, files git doesn't list (a
+    repository of their own, another letter case) and symlinked folders
+    inside a dep, which dvc doesn't hash. Only a URL dep is passed over: DVC fetches it and records
+    its checksum. Reads, never writes.
+    """
+    import os
+    import posixpath
+    import unicodedata
+    from pathlib import PureWindowsPath
+
+    from ._dvc_state import _dvcignore, _files_on_disk, _nested_pipeline_outs, _tracked
+    from ._push_verify import pushed_pipelines
+    from ._registry_git_ops import SubprocessRegistryGitOps
+
+    findings: list[CheckFinding] = []
+
+    def warn(kind: Literal["pipeline_input_untracked", "pipeline_input_unchecked"], rel: str | None,
+             message: str, hint: str) -> None:
+        findings.append(CheckFinding(severity="warning", section="producer", kind=kind, message=message,
+                                     source=project_path / rel if rel else None, hint=hint))
+
+    def resolve(base: str, wdir: str | None, path: str) -> str | None:
+        """``path`` relative to the project root; None when it lies outside."""
+        if wdir is None or any(posixpath.isabs(p) or PureWindowsPath(p).drive for p in (wdir, path)):
+            return None
+        rel = posixpath.normpath(posixpath.join(base, wdir, path))
+        return None if rel == ".." or rel.startswith("../") else rel
+
+    inputs: dict[str, tuple[str, str]] = {}  # dep -> (dvc.yaml, stage): the first stage that names it
+    covered: list[str] = []
+    for yaml_rel in pushed_pipelines(project_path):
+        base = posixpath.dirname(yaml_rel)
+        try:
+            doc = load12((project_path / yaml_rel).read_text(encoding="utf-8"))
+        except Exception as exc:  # unreadable, not UTF-8, not YAML: the root's is screened before this runs
+            why = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
+            warn("pipeline_input_unchecked", yaml_rel, f"could not read {yaml_rel} ({why}), so its stages' "
+                 "inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+            continue
+        stages = doc.get("stages") if isinstance(doc, dict) else doc
+        if stages is None:
+            continue  # declares no stages
+        if not isinstance(stages, dict):
+            warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} isn't in the shape dvc writes (its stages are "
+                 "not a mapping), so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+            continue
+        wdirs = wdir_map(doc)
+        for name, stage in stages.items():
+            body = stage.get("do", stage) if isinstance(stage, dict) else None
+            if not isinstance(body, dict):
+                warn("pipeline_input_unchecked", yaml_rel, f"{yaml_rel} stage '{name}' isn't in the shape dvc "
+                     "writes, so its inputs aren't checked", "fix the file by hand, then re-run 'mintd check'.")
+                continue
+            wdir = wdirs.get(str(name), ".")
+            for key in ("outs", "metrics", "plots"):
+                entries = body.get(key)
+                for entry in entries if isinstance(entries, list) else []:
+                    for out in [entry] if isinstance(entry, str) else entry if isinstance(entry, dict) else []:
+                        if isinstance(out, str) and (rel := resolve(base, wdir, out)) is not None:
+                            covered.append(rel)
+            deps = body.get("deps")
+            if deps is None:
+                continue
+            where = f"{yaml_rel} stage '{name}'"
+            if not isinstance(deps, list) or not all(isinstance(d, str) for d in deps):
+                warn("pipeline_input_unchecked", yaml_rel, f"{where} lists deps check can't read "
+                     f"({repr(deps)[:60]}), so they aren't checked",
+                     "list each dep as a path, as dvc expects, then re-run 'mintd check'.")
+                continue
+            templated = [d for d in deps if "${" in d or "${" in str(body.get("wdir", ""))]
+            if templated:
+                warn("pipeline_input_unchecked", yaml_rel, f"{where} names inputs check can't resolve: "
+                     f"{abbreviate(templated)}", "check that git or DVC tracks what they resolve to.")
+            for dep in deps:
+                if "://" in dep or dep in templated:
+                    continue  # a URL: DVC fetches it and records its checksum in dvc.lock
+                rel = resolve(base, wdir, dep)
+                if rel is None:
+                    warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is outside the "
+                         "project, so a fresh clone has it only if that path exists on its machine",
+                         "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                         + _RAW_INPUT_HINT.format(path="data/raw"))
+                else:
+                    inputs.setdefault(rel, (yaml_rel, str(name)))
+    if not inputs:
+        return findings
+    try:
+        nested = _nested_pipeline_outs(project_path, remote_name)
+    except PointerCutShort as exc:  # the screen reads only the root dvc.lock
+        lock = Path(os.path.relpath(exc.pointer, project_path)).as_posix()
+        warn("pipeline_input_unchecked", lock, f"could not read {lock} ({exc.detail}), so pipeline inputs aren't "
+             "checked", "restore it from git, or rerun its stages (dvc repro), then re-run 'mintd check'.")
+        return findings
+    covered += _tracked(project_path, [*_all_dvc_outs(project_path, remote_name, pointers), *nested])
+
+    def is_covered(rel: str) -> bool:
+        return any(path_covers(c, rel) for c in covered)
+
+    def norm(rel: str) -> str:
+        """One spelling for a path from the walk and from git: no ``./``, and
+        NFC, as git prints a name on macOS whatever form the disk keeps."""
+        return unicodedata.normalize("NFC", posixpath.normpath(rel))
+
+    # Each dep is read where it really is, which is what git sees: a
+    # symlinked folder through its target. Its files, in that spelling.
+    root_real = os.path.realpath(project_path)
+    candidates: dict[str, tuple[str, list[str]]] = {}
+    for dep, (yaml_rel, name) in inputs.items():
+        real = os.path.realpath(project_path / dep)
+        query = Path(os.path.relpath(real, root_real)).as_posix()
+        if is_covered(dep) or is_covered(query) or not os.path.exists(real):
+            continue  # covered, or missing: dvc repro names a missing dep
+        if query == ".." or query.startswith("../"):
+            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is a "
+                 "symlink to a path outside the project, so a fresh clone has it only if that path exists on its "
+                 "machine", "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                 + _RAW_INPUT_HINT.format(path="data/raw"))
+            continue
+        if os.path.isdir(real):
+            files = [norm(posixpath.join(query, f)) for f in _files_on_disk(project_path, query)]
+        else:
+            parts = Path(query).parts
+            dirs = [project_path, *(project_path.joinpath(*parts[:k]) for k in range(1, len(parts)))]
+            files = [] if _dvcignore(project_path, dirs).match_file(query) else [norm(query)]
+        candidates[dep] = (query, [f for f in files if not is_covered(f)])
+    if not candidates:
+        return findings
+    git = git_ops or SubprocessRegistryGitOps()
+    queries = sorted({query for query, _ in candidates.values()})
+    try:
+        listed = {norm(f) for f in git.listed_files(project_path, queries)}
+        ignored = {norm(f) for f in git.ignored_files(project_path, queries)}
+    except GitOpError as exc:
+        warn("pipeline_input_unchecked", None, f"could not ask git which pipeline inputs it ignores: "
+             f"{_git_error_summary(exc)}", "make sure 'git status' works here, then re-run 'mintd check'.")
+        return findings
+
+    def repo_holding(rel: str, query: str) -> str | None:
+        """The folder at or under ``query`` holding ``rel`` in a git
+        repository of its own, which git doesn't look inside."""
+        d = posixpath.dirname(rel)
+        while d and path_covers(query, d):
+            if (project_path / d / ".git").exists():
+                return d
+            d = posixpath.dirname(d)
+        return None
+
+    for dep, (query, files) in candidates.items():
+        yaml_rel, name = inputs[dep]
+        where = f"{yaml_rel} stage '{name}'"
+        if untracked := [f for f in files if f in ignored]:
+            warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is tracked by neither git "
+                 f"nor DVC: {abbreviate(untracked)}; a fresh clone can't rerun the stage",
+                 _RAW_INPUT_HINT.format(path=dep))
+        # What git's answer can't be matched against is named, never passed.
+        if unseen := [f for f in files if f not in listed]:
+            repos = sorted({r for f in unseen if (r := repo_holding(f, query))})
+            why = (f"{abbreviate(repos)} holds a git repository of its own" if repos
+                   else "git spells the folder or these names differently, e.g. in letter case")
+            warn("pipeline_input_unchecked", yaml_rel, f"git doesn't list {len(unseen)} file(s) DVC reads for "
+                 f"pipeline input {dep!r} ({where}): {abbreviate(unseen)}; {why}, so check can't tell whether they "
+                 "are tracked", "check by hand that git or DVC tracks them.")
+        links = sorted(f for f in listed if f != query and path_covers(query, f) and not is_covered(f)
+                       and (project_path / f).is_symlink() and (project_path / f).is_dir())
+        if links:
+            # dvc hashes a symlinked dep's target, but not a symlinked
+            # folder inside one: what the stage may read there goes unrecorded.
+            warn("pipeline_input_unchecked", yaml_rel, f"pipeline input {dep!r} ({where}) holds symlinked folders, "
+                 f"which DVC doesn't hash: {abbreviate(links)}; if the stage reads them, a fresh clone may not have "
+                 "what they hold", "list each as a dep of its own (DVC hashes a symlinked dep's target), or copy the "
+                 "folder in place of the link.")
     return findings
 
 
@@ -539,8 +759,8 @@ def _check_remote(
     from ._pin_proof import CacheHashes, prove_pins, publishable_scope
     from ._push_verify import (
         PushRefused,
+        default_for_pins,
         in_subrepo,
-        merged_default_remote,
         pinned_remote,
         pushed_dvc_files,
         pushed_lockfiles,
@@ -549,17 +769,18 @@ def _check_remote(
     from ._s3 import S3AccessDenied, resolve_profile
     from .errors import MintdError
 
-    name = merged_default_remote(project_path)
     pointers = pushed_dvc_files(project_path)
     try:
+        name = default_for_pins(project_path)
         remote = pinned_remote(project_path, name, project_path, pointers) if name else None
     except PushRefused as exc:  # push refuses it too
         return [CheckFinding(severity="error", section="producer", kind="remote_unreadable",
                              message=str(exc), hint=exc.hint)]
     if remote is None:
+        why = "the default remote isn't a version-aware S3 remote" if name else "the project has no DVC remote"
         return [CheckFinding(
             severity="info", section="producer", kind="remote_not_checked",
-            message="the default remote isn't a version-aware S3 remote, so nothing is pinned by version to check",
+            message=f"{why}, so nothing is pinned by version to check",
         )]
     git = git_ops or SubprocessRegistryGitOps()
     declared_outs = _declared_outputs(project_path)
@@ -666,7 +887,7 @@ def _remote_hint(project_path: Path, pointer: str, label: str, severity: str) ->
     """At HEAD only, the working tree is right and importers read the pushed
     commit; a pointer gone from the working tree, or one ``.gitignore``
     excludes, is no longer push's."""
-    from ._fast_sync_ops import gitignored_pointers
+    from ._dvc_state import gitignored_pointers
 
     if label != "at HEAD" or severity != "error":
         return "mintd data push re-attaches or re-uploads them"
@@ -714,10 +935,10 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     import tempfile
 
     from ._atomic import write_tree
-    from ._dvc_state import dvc_cache_dir
-    from ._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from ._dvc_invoke import dvc_root
+    from ._dvc_state import DvcFileEntry, dir_manifest_md5, dvc_cache_dir
     from ._pin_proof import publishable_scope
-    from ._push_verify import PushRefused, in_subrepo, merged_default_remote, pinned_remote
+    from ._push_verify import PushRefused, default_for_pins, in_subrepo, pinned_remote
     from ._registry_git_ops import SubprocessRegistryGitOps
 
     hint = "run mintd check --staged in the DVC project's folder, or pass it as the path"
@@ -739,8 +960,8 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     top = next((d for d in (path, *path.parents) if (d / ".git").exists()), None)  # a worktree's .git is a file
     if top is None:
         return unchecked(f"{project_path} isn't in a git repository")
-    project = next((d for d in (path, *path.parents) if d.is_relative_to(top) and (d / ".dvc").is_dir()), None)
-    if project is None:
+    project = dvc_root(path, within=top)
+    if not (project / ".dvc").is_dir():
         pointers = sorted(p for status, p in git.staged_changes(top) if status != "D" and is_pointer(p))
         if not pointers:
             return []  # no DVC project and no pointer staged: nothing to check
@@ -756,7 +977,10 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     # is: they are pinned on that project's own.
     other = sorted(rel for status, rel in changes if status != "D" and in_subrepo(project_path, rel))
     findings = unchecked(f"the commit stages pointers in another DVC project ({abbreviate(other)})") if other else []
-    name = merged_default_remote(project_path)
+    try:
+        name = default_for_pins(project_path)
+    except PushRefused as exc:  # push refuses it too
+        return [*findings, *unchecked(str(exc), hint=exc.hint)]
     if name is None:
         return findings  # no remote to pin to
     ours = [(status, rel) for status, rel in changes if not in_subrepo(project_path, rel)]
@@ -1269,7 +1493,7 @@ def _consumer_findings_from_enclave_manifest(
                     f"cannot read the catalog to resolve producer URL for "
                     f"{ap.repo}: {_git_error_summary(e)}"
                 )
-                hint = (
+                hint = specific_hint(e) or (
                     "check your network and `registry_url` in "
                     "~/.config/mintd/config.yaml; if both are fine, delete the "
                     "local registry cache (~/.cache/mintd/registry by default) "

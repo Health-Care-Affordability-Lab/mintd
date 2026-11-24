@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 import os
-import posixpath
 import shlex
 import sys
 import time
@@ -45,8 +44,10 @@ from ._registry_git_ops import (
     GitOpError,
     PRConflictError,
     RegistryBranchExists,
+    specific_hint,
 )
-from ._fast_sync_ops import FastSyncOps, gitignored_pointers
+from ._dvc_invoke import dvc_root
+from ._fast_sync_ops import FastSyncOps
 from . import _s3
 from ._s3 import S3AccessDenied
 from .errors import MintdError, strip_userinfo, unreachable_repo_hint
@@ -59,7 +60,7 @@ from .catalog import (
     CatalogNotFound,
     GitCatalogClient,
 )
-from ._dvc_state import abbreviate
+from ._dvc_state import abbreviate, gitignored_pointers
 from .check import CheckFinding, check_project
 from .data import (
     BumpBlocked,
@@ -98,8 +99,8 @@ from ._cache_ops import (
     CachePushSummary,
     cache_pull,
     cache_push,
-    list_cache_objects,
     resolve_repo_remote,
+    select_cache_objects,
 )
 from .enclave import (
     EnclaveManifest,
@@ -126,6 +127,49 @@ from .publish import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RELEASES = "https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download"
+
+
+def _install_line(*, with_schema: bool = False, windows: bool = os.name == "nt") -> str:
+    """The one line that installs, or updates to, the newest promoted release.
+
+    README.md shows exactly these lines (tests/test_docs.py checks it).
+    """
+    if windows:
+        if with_schema:
+            return f"& ([scriptblock]::Create((irm {_RELEASES}/install.ps1))) -WithSchema"
+        return f"irm {_RELEASES}/install.ps1 | iex"
+    return f"curl -fsSL {_RELEASES}/install.sh | bash" + (" -s -- --with-schema" if with_schema else "")
+
+
+def _reinstall_hint(*, windows: bool = os.name == "nt") -> str:
+    """The [schema] hint. On Windows it says the line is for PowerShell, not cmd."""
+    where = ", in PowerShell" if windows else ""
+    return f"reinstall mintd with the [schema] extra{where}: {_install_line(with_schema=True, windows=windows)}"
+
+
+def _release_notice(args: argparse.Namespace) -> None:
+    """On stderr, when a newer release is out or this one was withdrawn.
+
+    Never under --json or -q, and never an error: `mintd --version` must work
+    with a broken config and offline. stdout stays exactly `mintd <version>`.
+    """
+    # No stderr (`2>&-`): rich would fall back to stdout, which must stay one line.
+    if args.json_out or args.quiet or sys.stderr is None:
+        return
+    from ._release_check import is_release, newest_release, release_notice
+
+    try:
+        cache_dir = Config.load().resolved_cache_dir()
+    except (ConfigError, OSError):
+        return
+    notice = release_notice(__version__, newest_release(cache_dir, __version__))
+    if notice and is_release(__version__):
+        where = ", in PowerShell" if os.name == "nt" else ""
+        notice += f"\n  update{where}: {_install_line()}"
+    if notice:  # a dev build gets no update line: the release would be older
+        args._reporter.info(notice)  # every reporter line is soft-wrapped, so it copies whole
 
 
 class MetadataSchemaTooOld(MintdError):
@@ -214,15 +258,38 @@ class _MintdArgumentParser(argparse.ArgumentParser):
         sys.exit(64)
 
 
+class _Removed(argparse.Action):
+    """A flag a release removed. Typing it says where its job went, with the
+    value given, and exits 64 while parsing, before any handler, so no code can
+    read the value. The next removal is one ``add_argument(..., action=_Removed)``."""
+
+    def __init__(self, option_strings: list[str], dest: str, *, instead: str, **_kw: Any) -> None:
+        super().__init__(option_strings, dest, nargs="?", default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+        self.instead = instead
+
+    def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace,
+                 values: Any, option_string: str | None = None) -> NoReturn:
+        shown = shlex.quote(neutralize_control_chars(values)) if values else "<path>"
+        parser.exit(64, f"{option_string} was removed; {self.instead.format(value=shown)}\n")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     args._reporter = _build_reporter(args)
-    args._reporter.install_log_bridge()
+    if args.show_version:
+        print(f"mintd {__version__}")
+        _release_notice(args)
+        return 0
     handler = getattr(args, "_handler", None)
     if handler is None:
         parser.print_help()
+        if args.command is None:  # bare `mintd`, not `mintd data`
+            _release_notice(args)
         return 0
+    # Only where the finally below removes it: a bridge left installed keeps
+    # writing to whatever stderr it captured.
+    args._reporter.install_log_bridge()
     try:
         return handler(args)
     except KeyboardInterrupt:
@@ -330,9 +397,10 @@ def _add_cache_parser(subs: Any) -> None:
         "pull", help="Download objects from the repo file cache (S3) to their repo paths"
     )
     p_cache_pull.add_argument(
-        "--prefix", default=None,
-        help="Limit to objects under cache/<prefix> (e.g. data/scratch/)",
+        "paths", nargs="*",
+        help="Files or folders to pull, by their path in the project (default: all of the repo file cache (S3))",
     )
+    p_cache_pull.add_argument("--prefix", action=_Removed, instead="pass the path: mintd cache pull {value}")
     p_cache_pull.add_argument("--remote", help="DVC remote name (default: the project's)")
     p_cache_pull.add_argument("--jobs", type=int, default=8, help="Download parallelism (default: 8)")
     p_cache_pull.add_argument(
@@ -348,9 +416,10 @@ def _add_cache_parser(subs: Any) -> None:
         "ls", help="List objects in the repo file cache (S3)"
     )
     p_cache_ls.add_argument(
-        "--prefix", default=None,
-        help="Limit to objects under cache/<prefix> (e.g. isochrones/ct/)",
+        "paths", nargs="*",
+        help="Files or folders to list, by their path in the project (default: all of the repo file cache (S3))",
     )
+    p_cache_ls.add_argument("--prefix", action=_Removed, instead="pass the path: mintd cache ls {value}")
     p_cache_ls.add_argument("--remote", help="DVC remote name (default: the project's)")
     p_cache_ls.add_argument("--no-truncate", dest="no_truncate", action="store_true",
                             help="Render every row (default: truncate past 50 files)")
@@ -359,85 +428,42 @@ def _add_cache_parser(subs: Any) -> None:
     p_cache_ls.set_defaults(_handler=_handle_cache_ls)
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = _MintdArgumentParser(
-        prog="mintd",
-        description="mintd: Lightweight data product framework for research labs",
-    )
-    _add_global_output_flags(parser)
-    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    subs = parser.add_subparsers(dest="command")
+#: What each form of `import` and `clone` brings, shown in their --help and
+#: checked word for word against README's "Command | Brings" tables.
+_IMPORT_BRINGS = [
+    ("<name>", ["the primary output"]),
+    ("<name> --path <path>", ["only that dataset or folder, declared", "as an output or not (repeatable)"]),
+    ("<name> --all", ["every output in the product's", "data_products.outputs; a tracked",
+                      "folder no output declares is left out"]),
+]
+_CLONE_BRINGS = [
+    ("<name>", ["a full git clone of the producer's repo,", "with every DVC-tracked output pulled"]),
+    ("<name> --primary", ["the same clone, with only the primary", "output pulled; --path pulls only declared",
+                          "outputs"]),
+]
 
-    p_init = subs.add_parser("init", help="Create a new mintd project")
-    p_init.add_argument(
-        "project_type",
-        metavar="type",
-        choices=["data", "code", "project", "enclave"],
-    )
-    p_init.add_argument("name")
-    p_init.add_argument(
-        "--path",
-        type=Path,
-        default=Path("."),
-        help="Parent directory in which to create the project (default: cwd).",
-    )
-    p_init.add_argument(
-        "--use-current-repo",
-        action="store_true",
-        help=(
-            "Scaffold into --path directly instead of into a new subdir "
-            "(named data_<name>, prj_<name>, enclave_<name>, or the bare "
-            "name for code repos)."
-        ),
-    )
-    p_init.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "Overwrite existing files that collide with the scaffold. Without "
-            "this, init refuses and names every colliding file."
-        ),
-    )
-    p_init.add_argument(
-        "--lang",
-        choices=["python", "r", "stata"],
-        default="python",
-        help="Primary programming language for scaffold (ignored for enclave type).",
-    )
-    p_init.set_defaults(_handler=_handle_init)
 
-    p_check = subs.add_parser("check", help="Validate a mintd project")
-    p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
-    p_check.add_argument("--upgrades", action="store_true")
-    remote_or_staged = p_check.add_mutually_exclusive_group()
-    remote_or_staged.add_argument(
-        "--remote", action="store_true",
-        help="also ask S3 whether every pinned file version the working tree and HEAD record is there",
-    )
-    remote_or_staged.add_argument(
-        "--staged", action="store_true",
-        help="only check the staged .dvc and dvc.lock files for version IDs dropped from unchanged files",
-    )
-    p_check.add_argument(
-        "--all", action="store_true", dest="all_outs",
-        help="with --remote, check every output dvc pushes, not only the declared ones",
-    )
-    p_check.set_defaults(_handler=_handle_check)
+def _brings_epilog(prefix: str, verb: str, rows: list[tuple[str, list[str]]], width: int, other: str) -> str:
+    """The "what each form brings" table for `<prefix><verb> --help`, aligned at
+    ``width`` whichever spelling it is shown under."""
+    lines = ["what each form brings:"]
+    for form, brings in rows:
+        lines.append(f"  {prefix}{verb} {form}".ljust(width) + brings[0])
+        lines.extend(" " * width + more for more in brings[1:])
+    return "\n".join(lines) + "\n\n" + other.format(prefix=prefix)
 
-    p_data = subs.add_parser("data", help="Data commands")
-    p_data_sub = p_data.add_subparsers(dest="data_command")
-    p_import = p_data_sub.add_parser(
-        "import", help="Import a producer's data product",
+
+def _add_import_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`import` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_import = subs.add_parser(
+        "import",
+        help="Bring a product's primary output into this project, pinned (--path, --all for more)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data import <name>                the primary output
-  mintd data import <name> --path <path>  only that dataset or folder, declared
-                                          as an output or not (repeatable)
-  mintd data import <name> --all          every output in the product's
-                                          data_products.outputs; a tracked
-                                          folder no output declares is left out
-
-To get the producer's whole project, code and data, use `mintd data clone`.""",
+        epilog=_brings_epilog(
+            prefix, "import", _IMPORT_BRINGS, 42,
+            "To get the producer's whole project, code and data, use `{prefix}clone`.",
+        ),
     )
     p_import.add_argument(
         "name",
@@ -482,36 +508,20 @@ To get the producer's whole project, code and data, use `mintd data clone`.""",
              "(repeatable; ignored on fast-sync code paths).",
     )
     p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+    return p_import
 
-    p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
-    p_pull.add_argument(
-        "targets", nargs="*",
-        help="Limit pull to these tracked files/directories, .dvc files or "
-             "stage names (default: pull everything tracked)",
-    )
-    p_pull.add_argument("--remote")
-    p_pull.add_argument("--jobs", type=int)
-    p_pull.add_argument("--path", type=Path, default=Path("."))
-    p_pull.add_argument(
-        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
-        help="Append an arg to the underlying `dvc` invocation. "
-             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
-             "(repeatable; ignored on fast-sync code paths).",
-    )
-    p_pull.set_defaults(_handler=_handle_data_pull)
 
-    p_clone = p_data_sub.add_parser(
+def _add_clone_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`clone` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_clone = subs.add_parser(
         "clone",
-        help="Clone a published data product (registry lookup + git clone + dvc pull)",
+        help="Get a product's whole project in its own folder, with every tracked output pulled",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data clone <name>            a full git clone of the producer's repo,
-                                     with every DVC-tracked output pulled
-  mintd data clone <name> --primary  the same clone, with only the primary
-                                     output pulled; --path pulls only declared
-                                     outputs
-
-To bring only a product's data into your project, use `mintd data import`.""",
+        epilog=_brings_epilog(
+            prefix, "clone", _CLONE_BRINGS, 37,
+            "To bring only a product's data into your project, use `{prefix}import`.",
+        ),
     )
     p_clone.add_argument("name", help="Registered data product name")
     p_clone.add_argument(
@@ -540,6 +550,102 @@ To bring only a product's data into your project, use `mintd data import`.""",
              "(repeatable; ignored on fast-sync code paths).",
     )
     p_clone.set_defaults(_handler=_handle_data_clone)
+    return p_clone
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _MintdArgumentParser(
+        prog="mintd",
+        description="mintd: Lightweight data product framework for research labs",
+    )
+    _add_global_output_flags(parser)
+    # Not dest="version": publish's positional `version` shares the namespace.
+    parser.add_argument("--version", dest="show_version", action="store_true",
+                        help="show mintd's version, and say on stderr when a newer release is out")
+    subs = parser.add_subparsers(dest="command")
+
+    p_init = subs.add_parser("init", help="Create a new mintd project")
+    p_init.add_argument(
+        "project_type",
+        metavar="type",
+        choices=["data", "code", "project", "enclave"],
+    )
+    p_init.add_argument("name")
+    p_init.add_argument(
+        "--path",
+        type=Path,
+        default=Path("."),
+        help="Parent directory in which to create the project (default: cwd).",
+    )
+    p_init.add_argument(
+        "--use-current-repo",
+        action="store_true",
+        help=(
+            "Scaffold into --path directly instead of into a new subdir "
+            "(named data_<name>, prj_<name>, enclave_<name>, or the bare "
+            "name for code repos)."
+        ),
+    )
+    p_init.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Overwrite existing files that collide with the scaffold. Without "
+            "this, init refuses and names every colliding file."
+        ),
+    )
+    p_init.add_argument(
+        "--lang",
+        choices=["python", "r", "stata"],
+        default="python",
+        help="Primary programming language for scaffold (ignored for enclave type).",
+    )
+    p_init.set_defaults(_handler=_handle_init)
+
+    # The front door: the same entries as `data import` and `data clone`.
+    _add_import_parser(subs, "mintd ")
+    _add_clone_parser(subs, "mintd ")
+
+    p_check = subs.add_parser("check", help="Validate a mintd project")
+    p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
+    p_check.add_argument("--upgrades", action="store_true")
+    remote_or_staged = p_check.add_mutually_exclusive_group()
+    remote_or_staged.add_argument(
+        "--remote", action="store_true",
+        help="also ask S3 whether every pinned file version the working tree and HEAD record is there",
+    )
+    remote_or_staged.add_argument(
+        "--staged", action="store_true",
+        help="only check the staged .dvc and dvc.lock files for version IDs dropped from unchanged files",
+    )
+    p_check.add_argument(
+        "--all", action="store_true", dest="all_outs",
+        help="with --remote, check every output dvc pushes, not only the declared ones",
+    )
+    p_check.set_defaults(_handler=_handle_check)
+
+    p_data = subs.add_parser("data", help="Data commands")
+    p_data_sub = p_data.add_subparsers(dest="data_command")
+    _add_import_parser(p_data_sub, "mintd data ")
+
+    p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
+    p_pull.add_argument(
+        "targets", nargs="*",
+        help="Limit pull to these tracked files/directories, .dvc files or "
+             "stage names (default: pull everything tracked)",
+    )
+    p_pull.add_argument("--remote")
+    p_pull.add_argument("--jobs", type=int)
+    p_pull.add_argument("--path", type=Path, default=Path("."))
+    p_pull.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
+    p_pull.set_defaults(_handler=_handle_data_pull)
+
+    _add_clone_parser(p_data_sub, "mintd data ")
 
     p_push = p_data_sub.add_parser(
         "push", help="Upload DVC data, check every pinned S3 version, then commit and push the .dvc / dvc.lock files it rewrote",
@@ -1047,7 +1153,7 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
             reporter.error(
                 f"pull incomplete: {summary.error_count} target(s) failed, "
                 f"{summary.targets_pulled} file(s) pulled",
-                hint="each failed target has a retry command in the errors above",
+                hint="each failed target's error above says what to do next",
             )
         return 1
     if summary.total_bytes:
@@ -1068,14 +1174,6 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     return 0
 
 
-def _dvc_root(start: Path) -> Path:
-    """The nearest directory at or above ``start`` holding ``.dvc/``: the
-    project `dvc push` pushes from anywhere beneath it. Git's own walk stops at
-    the nearest ``.git`` instead, which inside a submodule or nested clone is
-    a different repository. ``start`` when there is none."""
-    return next((p for p in (start, *start.parents) if (p / ".dvc").is_dir()), start)
-
-
 def _skipped_line(skipped: list[str]) -> str:
     """The warning naming every pointer DVC skips because of .gitignore."""
     it = "it" if len(skipped) == 1 else "them"
@@ -1088,7 +1186,7 @@ def _handle_data_push(args: argparse.Namespace) -> int:
     dvc_ops = _resolve_dvc_ops(config, reporter)
     # dvc runs from the project it finds by walking up to `.dvc/`; targets are
     # read relative to where the user typed them.
-    root = _dvc_root(Path.cwd())
+    root = dvc_root(Path.cwd())
     try:
         with reporter.status("Pushing data to DVC..."):
             summary = data_push(
@@ -1451,18 +1549,16 @@ def _render_cache_push(summary: CachePushSummary, reporter: Reporter) -> int:
 
 def _handle_cache_pull(args: argparse.Namespace) -> int:
     reporter, project_path, config, factory = _cache_project_preflight(args)
-    # bad --prefix via _normalise_sub_path
-    with _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2):
-        summary = cache_pull(
-            project_path=project_path,
-            config=config,
-            reporter=reporter,
-            prefix=args.prefix,
-            remote=args.remote,
-            jobs=args.jobs,
-            force=args.force,
-            s3_client_factory=factory,
-        )
+    summary = cache_pull(
+        project_path=project_path,
+        config=config,
+        reporter=reporter,
+        paths=args.paths,
+        remote=args.remote,
+        jobs=args.jobs,
+        force=args.force,
+        s3_client_factory=factory,
+    )
     return _render_cache_pull(summary, reporter)
 
 
@@ -1481,7 +1577,7 @@ def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
                 "skipped_existing": len(skipped),
                 "failed": len(failed),
                 "bytes": summary.pulled_bytes,
-                "prefix": summary.sub,
+                "paths": summary.paths,
                 "elapsed_s": round(summary.elapsed_s, 2),
             }
         )
@@ -1513,32 +1609,19 @@ def _render_cache_pull(summary: CachePullSummary, reporter: Reporter) -> int:
 def _handle_cache_ls(args: argparse.Namespace) -> int:
     reporter, project_path, config, factory = _cache_project_preflight(args)
     repo = resolve_repo_remote(project_path, args.remote)
-    with (
-        _hint(ValueError, "drop '..', a leading '/', or '\\' from --prefix", exit_code=2),
-        _hint(BucketNotFound, "check the project's remote url in .dvc/config"),
-        reporter.status("Listing the repo file cache (S3)..."),
-    ):
-        result = list_cache_objects(
-            repo,
-            sub_path=args.prefix,
-            aws_profile_name=config.aws_profile_name,
-            factory=factory,
+    with reporter.status("Listing the repo file cache (S3)..."):
+        _keys, result = select_cache_objects(
+            project_path, repo, args.paths, verb="ls",
+            aws_profile_name=config.aws_profile_name, factory=factory,
         )
 
     payload = _data_ls_payload("cache", result, include_versions=False)
-    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. The
-    # hint must name a PREFIX that cache_pull can actually list under: --prefix
-    # is normalised with a trailing '/', so a full file key (`iso/a.bin`) becomes
-    # `iso/a.bin/` and matches nothing. Point at the file's containing directory
-    # instead (keys are relative to sub_path, so prepend it).
+    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. Keys
+    # are full repo paths and cache pull takes a file's path, so name the file,
+    # quoted so a path with a space pastes as one.
     first_file = next((o for o in result.objects if not o.is_dir), None)
     if first_file is not None:
-        sub = result.truncated_to_prefix or ""
-        sub = sub.strip("/") + "/" if sub.strip("/") else ""
-        target = (sub + posixpath.dirname(first_file.key)).strip("/")
-        payload["hint"] = (
-            f"mintd cache pull --prefix {target}/" if target else "mintd cache pull"
-        )
+        payload["hint"] = f"mintd cache pull {shlex.quote(first_file.key)}"
     no_truncate = getattr(args, "no_truncate", False)
     reporter.result(
         payload,
@@ -1562,6 +1645,7 @@ def _handle_data_add(args: argparse.Namespace) -> int:
 def _handle_data_schema_generate(args: argparse.Namespace) -> int:
     from .schema_ops import (
         ColumnNamesLookLikeData,
+        SchemaExtraNotInstalled,
         find_project_root,
         generate_schema_file,
     )
@@ -1577,6 +1661,7 @@ def _handle_data_schema_generate(args: argparse.Namespace) -> int:
         _hint((ValueError, RuntimeError), "check file format support (.dta, .csv, .json, .parquet) and integrity"),
         _hint(ColumnNamesLookLikeData),  # a ValueError, but it names its own fix
         _hint(FileNotFoundError, f"add supported data files under {data_dir} or pass --data-dir"),
+        _hint(SchemaExtraNotInstalled, _reinstall_hint()),
         reporter.status("Generating schema..."),
     ):
         generate_schema_file(
@@ -1877,8 +1962,8 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             reporter.error(
                 f"cloned {args.name} → {dest.name}/ but pull incomplete: "
                 f"{clone_result.pull_error_count} target(s) failed",
-                hint="each failed target has a retry command in the errors "
-                     f"above; run them inside {dest.name}/",
+                hint="each failed target's error above says what to do next; "
+                     f"run any retry command it gives inside {dest.name}/",
             )
         return 1
     if reporter.json_mode:
@@ -2224,7 +2309,8 @@ def _handle_enclave_bump(args: argparse.Namespace) -> int:
             # than as a BumpBlocked finding.
             _hint(
                 (ProducerError, ValueError),
-                "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
+                lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+                or "check the producer's catalog entry (repo URL/pin) and that it's reachable at HEAD",
             ),
             # A pydantic ValidationError is a ValueError: inside the clause
             # above, so it keeps this hint. The manifest is human-editable.
@@ -2253,7 +2339,11 @@ def _handle_enclave_add(args: argparse.Namespace) -> int:
     config = Config.load()
     client = _resolve_catalog_client(config)
     with (
-        _hint((ProducerError, ValueError), "check the repo/pin arguments"),
+        _hint(
+            (ProducerError, ValueError),
+            lambda e: (_producer_unreachable(e) if isinstance(e, ProducerError) else None)
+            or "check the repo/pin arguments",
+        ),
         # `--path` is not a flag on this parser; following the old hint exited
         # 64 with `unrecognized arguments`.
         _hint(MissingPrimaryDataProduct, "pass --source-path <output> or --all"),
@@ -2594,7 +2684,7 @@ def _handle_registry_update(args: argparse.Namespace) -> int:
         except (GitOpError, GhAuthError, GhNotInstalled) as exc:
             raise MintdError(
                 f"could not update the registry entry for {metadata.project.name!r}: {exc}",
-                hint=(
+                hint=specific_hint(exc) or (
                     "check `gh auth status` and network access to the registry, then rerun "
                     "`mintd registry update` — nothing in this project changed"
                 ),

@@ -123,6 +123,32 @@ def _uv(*args: str) -> None:
         subprocess.run(["uv", *args], check=True)
 
 
+def build_mintd(rev: str, root: Path, patch: Path | None = None) -> Path:
+    """mintd built from `rev` of this repo, with `patch` applied when given,
+    under `root`: the wheel, installed with exactly that commit's locked
+    dependencies into a throwaway venv. Returns its `mintd`. The clone is
+    `--shared`, so any commit in this repo's object store builds, reachable or
+    not; a patch that does not apply raises HarnessError with git's message."""
+    root.mkdir(parents=True, exist_ok=True)
+    src, venv, locked = root / "src", root / "venv", root / "locked.txt"
+    # Built in the checkout, setuptools writes build/ and src/mintd.egg-info/
+    # there, and a stale build/lib ships modules HEAD has deleted.
+    _git(["clone", "-q", "--shared", "--no-checkout", str(REPO), str(src)])
+    _git(["checkout", "-q", "--detach", rev], cwd=src)
+    if patch is not None:
+        _git(["apply", str(patch)], cwd=src)
+    subprocess.run(
+        ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "-q", "-o", str(locked)],
+        cwd=src, check=True,
+    )
+    # The lock pins setuptools for the build too; setuptools-scm is not in it.
+    _uv("build", "--wheel", "-q", "--build-constraints", str(locked), "-o", str(root), str(src))
+    subprocess.run(["uv", "venv", "-q", "--python", sys.executable, str(venv)], check=True)
+    (wheel,) = root.glob("*.whl")
+    _uv("pip", "install", "-q", "--no-deps", "--python", str(venv), "-r", str(locked), str(wheel))
+    return venv / "bin" / "mintd"
+
+
 @pytest.fixture(scope="session")
 def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
     given = os.environ.get("MINTD_BIN")
@@ -140,22 +166,7 @@ def mintd_bin(tmp_path_factory: pytest.TempPathFactory) -> Path:
             "the stories build mintd from HEAD, which lacks these changes:\n"
             f"{dirty}commit them, or set MINTD_BIN to a mintd built with them"
         )
-    root = tmp_path_factory.mktemp("mintd-bin")
-    src, venv, locked = root / "src", root / "venv", root / "locked.txt"
-    # Built in the checkout, setuptools writes build/ and src/mintd.egg-info/
-    # there, and a stale build/lib ships modules HEAD has deleted.
-    _git(["clone", "-q", "--shared", "--no-checkout", str(REPO), str(src)])
-    _git(["checkout", "-q", "--detach", _git(["rev-parse", "HEAD"], cwd=REPO).strip()], cwd=src)
-    subprocess.run(
-        ["uv", "export", "--frozen", "--no-dev", "--no-emit-project", "--no-hashes", "-q", "-o", str(locked)],
-        cwd=src, check=True,
-    )
-    # The lock pins setuptools for the build too; setuptools-scm is not in it.
-    _uv("build", "--wheel", "-q", "--build-constraints", str(locked), "-o", str(root), str(src))
-    subprocess.run(["uv", "venv", "-q", "--python", sys.executable, str(venv)], check=True)
-    (wheel,) = root.glob("*.whl")
-    _uv("pip", "install", "-q", "--no-deps", "--python", str(venv), "-r", str(locked), str(wheel))
-    return venv / "bin" / "mintd"
+    return build_mintd(_git(["rev-parse", "HEAD"], cwd=REPO).strip(), tmp_path_factory.mktemp("mintd-bin"))
 
 
 @pytest.fixture
@@ -182,6 +193,7 @@ def mintd(mintd_bin: Path, tmp_path: Path) -> Mintd:
         "DVC_SYSTEM_CONFIG_DIR": str(home / "dvc-system"),
         "DVC_SITE_CACHE_DIR": str(home / "dvc-site"),
         "DVC_NO_ANALYTICS": "1",
+        "MINTD_NO_UPDATE_CHECK": "1",  # no story asks github.com for the newest release
     }
     (home / "mintd").mkdir()
     return Mintd(mintd_bin, env, home / "mintd" / "config.yaml")

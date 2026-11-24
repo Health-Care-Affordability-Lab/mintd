@@ -161,8 +161,8 @@ def migrate_v1_to_v2(v1_data: dict) -> tuple[dict, MigrationReport]:
     # data_products: default to empty when absent. When present, normalize:
     # - `primary` may be a list in some v1 files (multiple "primary" entries);
     #   coerce to the first string element (rest are reachable via outputs).
-    # - each `outputs[]` entry's `last_published` is required in v2 but absent
-    #   in most v1 files; default to "".
+    # - each `outputs[]` entry's `last_published` is absent in most v1 files;
+    #   default it to "" (v2 would too) so the report names the default.
     if v1_data.get("data_products") is None:
         # Handle both "absent" and "data_products: null" cases.
         out["data_products"] = {"primary": None, "outputs": []}
@@ -181,7 +181,8 @@ def migrate_v1_to_v2(v1_data: dict) -> tuple[dict, MigrationReport]:
             entry = dict(raw)
             # Use `.get(...) is None` rather than `not in` so explicit-null
             # values from messy v1 files get the same default treatment as
-            # absent keys (v2's DataProductOutput rejects `None` for both).
+            # absent keys (v2's DataProductOutput rejects `None` for both, and
+            # requires `primary`).
             if entry.get("last_published") is None:
                 entry["last_published"] = ""
                 any_defaulted_last_pub = True

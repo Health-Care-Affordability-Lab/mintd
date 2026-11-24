@@ -28,6 +28,7 @@ from ._registry_git_ops import (
     PRConflictError,
     RegistryBranchExists,
     RegistryGitOps,
+    specific_hint,
 )
 from .catalog import CatalogClient, CatalogNotFound, FieldChange, _dict_diff, _diff_entries
 from .check import _git_error_summary, check_project
@@ -157,7 +158,10 @@ def prepare_publish(
         )
     
     commit = git_ops.current_commit(project_path)
-    
+    # Step 5 pushes to origin: check GitHub access to it now, not after
+    # `dvc push`, the bump commit and the tag.
+    git_ops.require_github_access(project_path, "origin", push=True)
+
     new_metadata = current.model_copy(deep=True)
     new_metadata.mint.version = new_version
     published_at = now or datetime.now(timezone.utc)
@@ -193,7 +197,7 @@ def prepare_publish(
         raise PublishError(
             f"cannot read the catalog entry for {current.project.name}: "
             f"{_git_error_summary(exc)}",
-            recovery_hint=(
+            recovery_hint=specific_hint(exc) or (
                 "check your network and `registry_url` in "
                 "~/.config/mintd/config.yaml; if both are fine, delete the "
                 "local registry cache (~/.cache/mintd/registry by default) "
@@ -205,6 +209,8 @@ def prepare_publish(
             project_path, git_ops, current.project.name, current.mint.version, new_version,
             existing._nested("status", "last_published_version"), local_diff,
         )
+    # Step 6 pushes the registry: check that too before anything is written.
+    client.require_push_access()
 
     return PublishPreview(
         project_name=current.project.name,
@@ -278,15 +284,14 @@ def _apply_publish(
     from ._storage_state import inspect_storage
     from .data_ops import _local_redirect
 
-    default = inspect_storage(project_path).dvc_remote_name
-    redirect = _local_redirect(project_path, default, named=False) if default else None
-    if redirect is not None:
-        _atomic_write_json(metadata_path, original_metadata_json)
-        raise DvcPushFailed(redirect, recovery_hint=f"{rolled_back} Remove the override, then rerun `mintd publish`.")
     try:
+        default = inspect_storage(project_path).dvc_remote_name
+        redirect = _local_redirect(project_path, default, named=False) if default else None
+        if redirect is not None:
+            raise PushRefused(redirect, hint="Remove the override, then rerun `mintd publish`.")
         prepared = prepare(project_path, remote_arg=None, selection=None, aws_profile=aws_profile,
                            memo_path=memo_path)
-    except (PushRefused, S3AccessDenied) as exc:
+    except (PushRefused, S3AccessDenied, MintdError) as exc:  # MintdError: a config.local dvc can't read
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
             str(exc), recovery_hint=f"{rolled_back} {getattr(exc, 'hint', None) or ''}".strip(),
@@ -460,7 +465,8 @@ def _apply_publish(
             pushed=True,
             tagged=True,
             recovery_hint=(
-                f"DVC artifacts are pushed and tag {tag_name} exists locally, but the "
+                (f"{specific_hint(exc)}.\n" if specific_hint(exc) else "")
+                + f"DVC artifacts are pushed and tag {tag_name} exists locally, but the "
                 "push sends the bump commit and the tag together or not at all, so "
                 "origin has neither and the catalog was left alone — nothing "
                 "advertises the new version yet.\n"
@@ -497,6 +503,8 @@ def _apply_publish(
                 f"The registry branch {exc.branch} already has commits mintd does not "
                 "have; ask a registry admin to merge or delete it, then retry.\n"
             )
+        elif specific_hint(exc):
+            branch_line = f"{specific_hint(exc)}.\n"
         elif isinstance(exc, PRConflictError):
             branch_line = (
                 f"The entry was pushed to {exc.branch}, but a pull request is already "

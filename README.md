@@ -44,69 +44,82 @@ See [`vocab.md`](vocab.md) for the long version.
 
 ### One-liner (recommended)
 
-Prerequisite: an SSH key on your GitHub account that has access to this
-repo (`ssh -T git@github.com` should greet you).
-
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.sh | bash
+curl -fsSL https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Health-Care-Affordability-Lab/mintd/main/install.ps1 | iex
+irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1 | iex
 ```
 
-Both scripts install `uv` if missing, run `uv tool install --python 3.13
-git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git`
-(isolated venv on the newest Python CI tests, `mintd` on PATH), then layer `cffi + reflink` into the
-tool venv so DVC's reflink cache mode works on APFS / XFS / Btrfs. Pin
-to a branch with `bash -s -- --branch <name>` or `-Branch <name>`.
+These install the newest release the maintainer has promoted, with `dvc`:
+there is no separate DVC install. Both scripts install `uv` 0.13.9 if it is
+missing, and stop if your `uv` is older or doesn't report its version, naming
+the command that upgrades it.
+They download the release's wheel, check it against the release's SHA-256, and
+run `uv tool install --python 3.13 --with-executables-from dvc` with the
+release's `constraints.txt`, which pins every dependency (DVC included) to the
+versions that release was tested with. `uv tool install` does not check the
+hashes in that file, so the dependencies are pinned by version, not by hash.
+Then the scripts add `cffi` and `reflink` to the tool's environment, so DVC's
+reflink cache mode works on APFS / XFS / Btrfs. That step installs only files
+whose hashes are pinned (reflink's in the scripts, cffi's in `constraints.txt`),
+builds reflink on your machine from its pinned source, and ignores uv settings
+files (`uv.toml`, `pyproject.toml`) in the folder you run the line from or
+above it. Their last line says whether `mintd` and `dvc`
+are both on your PATH, or which one is missing or shadowed by another copy,
+and whether reflink was refused because a download didn't match its hash.
 
-
-### Manual install
-
-```bash
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh    # macOS / Linux
-# irm https://astral.sh/uv/install.ps1 | iex       # Windows
-
-uv tool install --python 3.13 git+ssh://git@github.com/Health-Care-Affordability-Lab/mintd.git
-```
-
-Or `pipx install git+…` / `pip install --user git+…` if you prefer.
-(`pip install --user` needs the user-scripts dir on PATH — on Windows
-that's `%APPDATA%\Python\Python3XX\Scripts`.)
-
-Optionally add reflink support, which the one-liner does for you:
-
-```bash
-uv pip install --python ~/.local/share/uv/tools/mintd/bin/python cffi reflink
-```
-
-You'll also need **DVC** with the S3 backend, since `mintd` shells out to
-it for every data operation:
-
-```bash
-pip install 'dvc[s3]'
-# or: brew install dvc / winget install iterative.dvc
-```
+- To update, run the same line again. `uv tool upgrade mintd` does not apply.
+- For the `[schema]` extra, add `-s -- --with-schema` after `bash`, or on
+  Windows run
+  `& ([scriptblock]::Create((irm https://github.com/Health-Care-Affordability-Lab/mintd/releases/latest/download/install.ps1))) -WithSchema`.
+- For a given release, use `releases/download/vX.Y.Z/` in place of
+  `releases/latest/download/`.
 
 Verify:
 
 ```bash
 mintd --version
+dvc --version
 mintd --help
 ```
+
+`mintd --version` and bare `mintd` also say, on stderr, when a newer release
+is out, or that this version was withdrawn, with the line that updates. They
+look it up at most once a day, give up after 2 seconds, and say nothing
+offline or under `--json` or `-q`. `MINTD_NO_UPDATE_CHECK=1` turns the lookup
+off, and so does a CI run (any value in `CI`).
 
 > Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them
 > under WSL2, Git Bash, or MSYS2 — there are no `.ps1` siblings yet.
 
 ## First-time setup
 
-Point `mintd` at your lab's registry and your S3 storage:
+mintd reaches GitHub through [gh](https://cli.github.com) only. Log in, and let git
+use gh for GitHub:
+
+```bash
+gh auth login
+gh auth setup-git
+```
+
+If your clones use SSH (`git@github.com:` or `ssh://git@github.com/`), point them at
+https once, so git goes through gh too:
+
+```bash
+git config --global --add url."https://github.com/".insteadOf git@github.com:
+git config --global --add url."https://github.com/".insteadOf ssh://git@github.com/
+```
+
+When GitHub refuses access, mintd names the repo's org and your active gh account,
+and the account to switch to with `gh auth switch -u <account>`.
+
+Then point `mintd` at your lab's registry and your S3 storage:
 
 ```bash
 mintd config setup            # interactive walkthrough
@@ -115,8 +128,8 @@ mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 h
 ```
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
-`registry_url`, `storage_bucket_prefix`, `storage_endpoint`,
-`aws_profile_name`, and a `timeouts:` block:
+`registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
+`timeouts:` block:
 
 ```yaml
 timeouts:
@@ -129,6 +142,12 @@ timeouts:
 and is `null` — disabled — by default. Per-command, `--timeout 600` opts into a
 10-minute wall clock and `--timeout 0` disables it. `NO_COLOR` in the environment
 turns off all color.
+
+The AWS profile isn't a config key. mintd signs with the profile the remote's
+`profile` names in `.dvc/config` (or `.dvc/config.local`); else the one
+`AWS_DEFAULT_PROFILE` or `AWS_PROFILE` names; else `mintd`, when your shared
+credentials file (`~/.aws/credentials`, or `$AWS_SHARED_CREDENTIALS_FILE`) has a
+`[mintd]` section; else boto3's default credential chain.
 
 If you have a v1 mintd config kicking around:
 
@@ -144,12 +163,18 @@ mintd config setup --migrate-v1 ~/.config/mintd/config.yaml.v1
 mintd init data my-cleaned-survey
 cd data_my-cleaned-survey
 
-# Edit metadata.json (description, contact, data_products.outputs, …)
+# Edit metadata.json: `metadata.description`, `ownership.team` and
+# `ownership.maintainers`, then one `data_products.outputs[]` entry per output
+# and `data_products.primary` (see "What metadata.json needs" below).
 
 # Produce the outputs. The scaffold's pipeline owns data/final/: `dvc repro`
 # rebuilds it from data/raw/ and deletes anything placed there by hand, so
 # keep source files in data/raw/:
 dvc repro
+# Nothing uploads data/raw/ on its own: git ignores it, and `dvc repro`
+# records it as an input without caching it, so a teammate's clone can't
+# rerun the pipeline. `mintd data add data/raw` tracks it if it should be
+# shared; `mintd check` warns while a pipeline input is tracked by neither.
 
 # Commit the project; `mintd data push` pushes it. Data belongs in DVC, not
 # git: the scaffold's .gitignore covers data/, and any data file git status
@@ -193,27 +218,59 @@ mintd registry register
 mintd publish
 ```
 
+### What metadata.json needs
+
+You write the human fields: `metadata.description`, `metadata.tags`,
+`ownership.team`, `ownership.maintainers`, `access_control.teams`,
+`governance.classification`, `governance.contract_info`, `repository.mirror`
+and `status.state`. mintd writes the rest (`mintd init`, `mintd update metadata`,
+`mintd publish`), except `data_products`, which you fill in by hand: nothing
+derives it from DVC. A data product needs at least one output and a primary:
+
+```json
+{
+  "data_products": {
+    "primary": "data/final/",
+    "outputs": [
+      {"path": "data/final/", "description": "County income, one row per county and year", "primary": true}
+    ]
+  }
+}
+```
+
+- Each `data_products.outputs[]` entry needs `path`, `description` and
+  `primary` (true or false). Leave `last_published` out: `mintd publish`
+  writes it.
+- `data_products.primary` must equal one entry's `path` character for
+  character, so `data/final` doesn't match `data/final/`. It is what
+  `mintd data import <name>` brings, and a `data` product must have one.
+- `mintd check` errors on each declared path that DVC doesn't track, or that
+  was pushed without S3 version IDs.
+- mintd reads nothing from `outputs[].primary`, though it is required:
+  `data_products.primary` decides.
+
 ## Example: consume someone else's dataset
 
-Two commands, for two jobs.
+Two commands, for two jobs. (`mintd data import` and `mintd data clone` are the
+same commands, with the same flags, and keep working.)
 
-**Bring a product's data into your project** with `mintd data import`. The data
+**Bring a product's data into your project** with `mintd import`. The data
 lands under `data/imports/<full_name>/`, beside a `.dvc` file that pins the
 producer commit it came from (`--rev`; default: the producer's HEAD).
 
 | Command | Brings |
 |---|---|
-| `mintd data import <name>` | the primary output |
-| `mintd data import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
-| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
+| `mintd import <name>` | the primary output |
+| `mintd import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
+| `mintd import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
 
 **Get a product's whole project, code and data, to read or work on** with
-`mintd data clone`. A data product's clone lands in `./data_<name>/`.
+`mintd clone`. A data product's clone lands in `./data_<name>/`.
 
 | Command | Brings |
 |---|---|
-| `mintd data clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
-| `mintd data clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
+| `mintd clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
+| `mintd clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
 
 ```bash
 # See what's published in the lab catalog:
@@ -224,22 +281,22 @@ mintd data list
 mintd data ls my-cleaned-survey
 
 # Clone the whole producer repo + pull every tracked output:
-mintd data clone my-cleaned-survey
+mintd clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
-mintd data clone my-cleaned-survey --rev v0.1.0 --primary
+mintd clone my-cleaned-survey --rev v0.1.0 --primary
 # or: only specific declared outputs (repeatable; an unknown path lists the
 # valid outputs):
-mintd data clone my-cleaned-survey --path data/final/survey.parquet
+mintd clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import one or more outputs
 # (--path is repeatable) and record the pin in this repo's .dvc files:
-mintd data import my-cleaned-survey --path data/final/survey.parquet
+mintd import my-cleaned-survey --path data/final/survey.parquet
 
 # Later, check whether anything you depend on has moved:
 mintd check --upgrades
 # And bump a pin when you're ready — same name, same --path selector
 # (--path picks the row once you have imported more than one output):
-mintd data import my-cleaned-survey --bump --path data/final/survey.parquet
+mintd import my-cleaned-survey --bump --path data/final/survey.parquet
 ```
 
 ## Example: enclave workflow
@@ -326,10 +383,14 @@ mintd cache push data/scratch/isochrones
 mintd cache push results/model.pkl scratch/notes.csv
 
 # See what's cached, then pull it back on another clone:
-mintd cache ls
+mintd cache ls                         # or one path: mintd cache ls data/scratch
 mintd cache pull                       # everything
-mintd cache pull --prefix data/scratch/    # just one subtree
+mintd cache pull data/scratch/areas_v2 results/model.pkl   # just these paths
 ```
+
+`cache pull` and `cache ls` take paths as `cache push` does: `data/scratch/area`
+is that file or folder, never `data/scratch/area.csv` or `data/scratch/areas_v2`.
+A path that matches nothing is an error. (`--prefix` was removed; pass the path.)
 
 A DVC-tracked path is refused (it belongs to `mintd data push`), as is
 anything under `.git/` or `.dvc/`. Pull reconstructs each file at its repo
@@ -356,6 +417,8 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
+mintd import   NAME [--path P…] [--all] [--rev R] Bring a product's primary output into this project, pinned
+mintd clone    NAME [--primary | --path P…]       Get a product's whole project in its own folder
 mintd check    [path] [--upgrades] [--remote [--all] | --staged]
                                                   Validate metadata, output delivery + (optionally) pins;
                                                   --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
@@ -389,7 +452,7 @@ key, and arrays are always present, possibly empty, never null.
   each has `name`, `project_type`, `description` (str or null).
 - `data list --imported` — array of entries; each has `local_path`,
   `producer_repo`, `contract_pin`, `output_path`.
-- `data clone` — object: `dest` (absolute), `primary` (str or null),
+- `clone` / `data clone` — object: `dest` (absolute), `primary` (str or null),
   `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
   `remote_bucket` (str or null).
 

@@ -1,0 +1,17 @@
+recall: undoes a failed import leaves the folders it made.
+fix: c1ab728 (#65); before the fix: 71741d7.
+validated: with this patch on HEAD, tests/test_pre_units_journey.py::test_import_whose_transfer_fails_leaves_no_folders goes red.
+
+diff --git a/src/mintd/data.py b/src/mintd/data.py
+index c781a17..218a12e 100644
+--- a/src/mintd/data.py
++++ b/src/mintd/data.py
+@@ -398,7 +398,7 @@ def import_product(
+         # Windows `rmdir` removes the link itself.
+         if new_dest is not None and not wrote_nothing and not new_dest.is_symlink():
+             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
+-        _remove_empty_dirs(created_dirs)
++        pass  # recall: undoes #65
+         if new_dest is not None and not wrote_nothing and not _pointer_at(target_dvc) and (new_dest.is_file() or new_dest.is_dir()):
+             # Not there before this import, and a re-run refuses it: say what is
+             # there and how to clear it, as an "if": a file another run put

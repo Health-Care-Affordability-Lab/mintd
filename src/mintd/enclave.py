@@ -32,7 +32,7 @@ from .data import (
 )
 from .check import CheckFinding, _resolve_approved_product_url, consumer_walk_failure
 from .producer import MissingPrimaryDataProduct, ProducerView
-from ._dvc_ops import DvcImportPathNotFound, DvcNotInRepoError, DvcOpError, DvcOps
+from ._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcOpError, DvcOps
 from .errors import MintdError
 
 if TYPE_CHECKING:
@@ -91,6 +91,10 @@ class EnclavePullError(DvcOpError):
             )
         elif isinstance(cause, DvcImportPathNotFound):
             self.hint = f"check {repo}'s pin/repo, then retry: mintd enclave pull {repo}"
+        elif isinstance(cause, DvcImportRepoUnreachable):
+            # Its own hint says what to fix first (GitHub access through gh, or the
+            # network); a bare retry would only be refused again.
+            self.hint = cause.hint
         else:
             self.hint = f"retry: mintd enclave pull {repo}"
 

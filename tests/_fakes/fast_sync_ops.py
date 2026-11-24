@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import NamedTuple
 
-from mintd._fast_sync_ops import DvcOut
+from mintd._dvc_state import DvcOut
 from mintd.model import FastPullResult
 
 

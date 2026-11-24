@@ -4,7 +4,7 @@ Covers the ✓-line grammar, ``--json`` single-object stdout (with the ``failed`
 key), exit codes (1 runtime / 2 boto3-missing), the not-inside-a-project and
 collision-guard failure paths (``error: … / hint: …``, no traceback), the
 hostile-key refusal, and the ``ls`` render through the shared data-ls renderer
-with the ``mintd cache pull --prefix`` hint.
+with the ``mintd cache pull <file>`` hint, and the removed ``--prefix``.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def _use_factory(monkeypatch: pytest.MonkeyPatch, client) -> None:
 def _project(tmp_path: Path, bucket: str, prefix: str = "lab/proj") -> Path:
     proj = tmp_path / "proj"
     (proj / ".dvc").mkdir(parents=True)
-    (proj / ".dvc" / "config").write_text(f'[remote "origin"]\n    url = s3://{bucket}/{prefix}\n')
+    (proj / ".dvc" / "config").write_text(f'[core]\n    remote = origin\n[remote "origin"]\n    url = s3://{bucket}/{prefix}\n')
     return proj
 
 
@@ -213,7 +213,7 @@ def test_cache_pull_happy_line_and_hint(
         _seed(client, bucket, tmp_path, {"iso/ct/a.bin": b"A" * 100}, monkeypatch)
         capsys.readouterr()
         clone = _project(tmp_path / "cloneroot", bucket)
-        rc = cli.main(["cache", "pull", "--prefix", "iso/ct/", "--path", str(clone)])
+        rc = cli.main(["cache", "pull", "iso/ct", "--path", str(clone)])
         err = _norm(capsys.readouterr().err)
         assert rc == 0
         assert "✓ pulled 1 file(s) from the repo file cache (S3)" in err
@@ -328,6 +328,7 @@ def test_cache_pull_json_has_failed_key(
         assert payload["pulled"] == 1
         assert payload["failed"] == 0
         assert "bytes" in payload
+        assert payload["paths"] == [] and "prefix" not in payload  # --prefix is gone
 
 
 def test_cache_pull_skip_existing_then_force(
@@ -372,11 +373,9 @@ def test_cache_ls_renders_with_cache_pull_hint(
         out = capsys.readouterr().out
         assert rc == 0
         assert "s3://test-bucket/lab/proj/cache/" in out
-        # The hint names the file's containing DIRECTORY (a listable prefix,
-        # trailing '/'), never the full file key (which normalise's trailing
-        # '/' turns into a no-op prefix that matches nothing).
-        assert "mintd cache pull --prefix iso/" in out
-        assert "--prefix iso/a.bin" not in out
+        # The hint names the file by its path, which cache pull takes.
+        assert "mintd cache pull iso/a.bin" in out
+        assert "--prefix" not in out
         # No ✓-line for a listing.
         assert "✓" not in out
 
@@ -422,3 +421,127 @@ def test_cache_ls_json(
         assert rc == 0
         assert payload["name"] == "cache"
         assert any(o["key"] == "b.bin" for o in payload["objects"])
+
+
+# ---------------------------------------------------------------------------
+# paths, and the removed --prefix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("verb, known_flag", [("pull", "--force"), ("ls", "--no-truncate")])
+@pytest.mark.parametrize("tail, shown", [
+    (["--prefix", "data/cache/x"], "data/cache/x"),
+    (["--prefix=data/cache/x"], "data/cache/x"),
+    (["--prefix"], "<path>"),
+    (["--prefix", "KNOWN"], "<path>"),
+    (["--prefix", "my dir/"], "'my dir/'"),
+], ids=["space", "equals", "bare", "then-a-flag", "quoted"])
+def test_a_typed_prefix_says_where_it_went_and_exits_64(
+    monkeypatch: pytest.MonkeyPatch, capsys, verb: str, known_flag: str, tail: list[str], shown: str,
+) -> None:
+    monkeypatch.setattr(cli, "_resolve_cache_ops", lambda _cfg: pytest.fail("S3 reached"))
+    tail = [known_flag if a == "KNOWN" else a for a in tail]
+    for argv in (["cache", verb, *tail], ["--json", "cache", verb, *tail]):  # a global flag in front too
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 64
+        err = capsys.readouterr().err.strip().splitlines()
+        assert err == [f"--prefix was removed; pass the path: mintd cache {verb} {shown}"]
+
+
+@pytest.mark.parametrize("verb", ["pull", "ls"])
+def test_an_unknown_flag_still_gets_argparses_error(capsys, verb: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["cache", verb, "--unknown"])
+    assert exc.value.code == 64
+    assert "unrecognized arguments: --unknown" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("verb", ["pull", "ls"])
+def test_paths_parse_and_prefix_is_never_in_the_namespace(verb: str) -> None:
+    parser = cli._build_parser()
+    assert parser.parse_args(["cache", verb, "--", "--prefix"]).paths == ["--prefix"]  # a literal path
+    ns = parser.parse_args(["cache", verb, "a", "b"])
+    assert ns.paths == ["a", "b"] and not hasattr(ns, "prefix")
+
+
+@pytest.mark.parametrize("verb", ["push", "pull", "ls"])
+@pytest.mark.parametrize("where", ["outside", "root"])
+def test_a_path_outside_the_project_is_refused_in_the_verbs_own_words(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, verb: str, where: str
+) -> None:
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        proj = _project(tmp_path, bucket)
+        (tmp_path / "elsewhere").write_bytes(b"x")
+        _use_factory(monkeypatch, client)
+        _load_config(monkeypatch, Config())
+        arg = str(tmp_path / "elsewhere") if where == "outside" else "."
+        rc = cli.main(["cache", verb, arg, "--path", str(proj)])
+        err = _norm(capsys.readouterr().err)
+        assert rc == 1
+        assert "traceback" not in err.lower()
+        if verb == "push":  # push's words, unchanged
+            assert ("outside the project root" if where == "outside" else "entire project root") in err
+        else:  # pull and ls say what they do, and never hint an upload
+            assert f"mintd cache {verb} takes files or folders inside the project" in err
+            assert "share put" not in err and "to cache" not in err
+
+
+def test_cache_ls_of_a_path_lists_that_folder_with_full_keys(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        _seed(client, bucket, tmp_path, {"iso/a.bin": b"a" * 3, "iso.csv": b"c" * 4, "isox/b.bin": b"b"}, monkeypatch)
+        capsys.readouterr()
+        clone = _project(tmp_path / "cloneroot", bucket)
+        rc = cli.main(["--json", "cache", "ls", "iso", "--path", str(clone)])
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert rc == 0
+        assert payload["prefix"] == "lab/proj/cache/"
+        assert [o["key"] for o in payload["objects"]] == ["iso/a.bin"]
+        assert payload["hint"] == "mintd cache pull iso/a.bin"
+
+
+def test_cache_ls_of_a_path_that_matches_nothing_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        _seed(client, bucket, tmp_path, {"a.bin": b"a"}, monkeypatch)
+        capsys.readouterr()
+        clone = _project(tmp_path / "cloneroot", bucket)
+        rc = cli.main(["cache", "ls", "nope", "--path", str(clone)])
+        err = _norm(capsys.readouterr().err)
+        assert rc == 1
+        assert "nothing in the repo file cache (S3) at: nope" in err
+
+
+def test_cache_ls_hint_quotes_a_path_with_a_space(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        _seed(client, bucket, tmp_path, {"sp ace/f.bin": b"f"}, monkeypatch)
+        capsys.readouterr()
+        clone = _project(tmp_path / "cloneroot", bucket)
+        rc = cli.main(["--json", "cache", "ls", "--path", str(clone)])
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert rc == 0
+        assert payload["hint"] == "mintd cache pull 'sp ace/f.bin'"  # pastes as one path
+
+
+def test_cache_ls_lists_a_file_and_a_folder_of_the_same_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+) -> None:
+    with mock_aws():
+        client, bucket = _versioned_bucket()
+        _seed(client, bucket, tmp_path, {"iso/a.bin": b"a"}, monkeypatch)
+        client.put_object(Bucket=bucket, Key="lab/proj/cache/iso", Body=b"f")
+        capsys.readouterr()
+        clone = _project(tmp_path / "cloneroot", bucket)
+        rc = cli.main(["--json", "cache", "ls", "iso", "--path", str(clone)])
+        payload = json.loads(capsys.readouterr().out.strip())
+        assert rc == 0
+        assert sorted(o["key"] for o in payload["objects"]) == ["iso", "iso/a.bin"]

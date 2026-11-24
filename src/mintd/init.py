@@ -92,20 +92,11 @@ def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:
 
 
 def _https_remote(raw: str) -> str:
-    """A git remote URL in the form the ``github_url`` field wants.
+    """A git remote URL in the form the ``github_url`` field wants: the shared
+    ``https_remote``. Only ever *suggested* to a human, who confirms it."""
+    from ._registry_git_ops import https_remote
 
-    ``git@github.com:org/repo.git`` -> ``https://github.com/org/repo``. A
-    trailing ``.git`` always comes off; beyond that, anything not in the
-    scp-like form keeps its shape -- a bare path, an ``ssh://`` URL, a
-    non-GitHub host. This value is only ever *suggested* to a human who then
-    confirms it, so reporting an unrecognized remote close to verbatim beats
-    guessing at an https equivalent it may not have.
-    """
-    url = raw.strip()
-    if url.startswith("git@") and ":" in url:
-        host, _, path = url[len("git@"):].partition(":")
-        url = f"https://{host}/{path}"
-    return url.removesuffix(".git")
+    return https_remote(raw)
 
 
 def _prompt_classification(

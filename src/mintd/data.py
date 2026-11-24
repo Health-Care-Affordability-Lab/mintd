@@ -18,6 +18,7 @@ import os
 import shlex
 import shutil
 import tempfile
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
@@ -25,16 +26,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
-from ._dvc_ops import DvcOps
-from ._dvc_state import delivery, outs_matching, path_covers
-from ._fast_sync_ops import FastSyncOps, normalize_target
-from ._registry_git_ops import GitOpError, RegistryGitOps
+from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
+from ._dvc_state import (
+    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+)
+from ._fast_sync_ops import FastSyncOps
+from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
-from .data_ops import _default_dvc_remote, data_pull
-from .errors import MintdError
+from .data_ops import data_pull
+from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
 from .producer import (
@@ -98,8 +101,9 @@ class CloneResult:
 
 
 class ImportDestinationExists(MintdError):
-    """A `.dvc` file already exists at the destination. The consumer resolves
-    by passing `force=True` or removing the file first."""
+    """A `.dvc` file already exists at the destination (resolved by passing
+    `force=True` or removing it), or a folder no pointer records does (resolved
+    only by moving or removing it: dvc would import into it, a level down)."""
 
 
 class StaleBackupExists(ImportDestinationExists):
@@ -239,7 +243,13 @@ def import_product(
     # the same `dest_root/final/` without the namespace). Falls back to
     # the catalog name if full_name is missing on the entry.
     namespace = _import_namespace(dumped, name)
-    nested_root = dest_root / namespace
+    # Where the OS reaches it, once, here: a `..` after a folder that is
+    # missing or a link (`--dest-root foo/..`) otherwise reaches the index,
+    # the refusals and the note unresolved, where `foo/..` reads as nothing.
+    # Every path the import returns or prints is this one too, named by
+    # `_where`: relative to `cwd` inside it (`data/imports/...` for the
+    # default), absolute outside it.
+    nested_root = _physical(dest_root) / namespace
 
     # Status feedback (slice 38a). Multi-output imports relabel the spinner
     # per output. We use the spinner (not the determinate progress bar)
@@ -255,6 +265,14 @@ def import_product(
         else nullcontext()
     )
 
+    # Every output's destination is checked before the first dvc call, so a
+    # refusal at one output of `--all` (or of several `--path`s) leaves no
+    # half-done import behind.
+    index = _imports_index(nested_root, name=name)
+    destinations = [
+        _import_destination(p, nested_root=nested_root, index=index, name=name, repo_url=repo_url, force=force, cwd=cwd)
+        for p in paths
+    ]
     produced: list[Path] = []
     # What the output being imported made, for the `except` below: its
     # destination if that did not exist yet, and the folders above it that did
@@ -268,48 +286,7 @@ def import_product(
                     reporter.update_status(
                         f"Importing {Path(p.rstrip('/')).name} ({i}/{len(paths)})..."
                     )
-                # Mirror the producer's own path under the namespace (D-A). The
-                # basename-only form collided two outputs sharing a leaf name
-                # (`data/final/` + `archive/final/`) on one dest under `--all`.
-                dest = nested_root / Path(p.rstrip("/"))
-                # `p` is producer-controlled and unnormalized (catalog
-                # `outputs[].path` / `primary`, or an unchecked `--path`): `..`
-                # escapes the project, and pathlib drops the left operand
-                # entirely for an absolute path — where `shutil.rmtree` below
-                # would then delete. Anchor on `nested_root`, the TIGHTER base:
-                # `dest_root` alone lets `../<other-product>/data/final/` through,
-                # landing on ANOTHER product's `.dvc`.
-                if not dest.resolve().is_relative_to(nested_root.resolve()):
-                    raise UnknownProductPath(
-                        f"{name!r} resolves output {p!r} to {dest}, outside the "
-                        f"import root {nested_root}; refusing to import or delete "
-                        f"outside it"
-                    )
-                target_dvc = dest.parent / (dest.name + ".dvc")
-
-                # Idempotence is keyed on the producer path this import RECORDS,
-                # not where the pointer sits: checking `target_dvc` alone missed
-                # pre-layout-change imports, so a re-import wrote a SECOND pointer
-                # and a second copy of the payload, after which every `--bump`
-                # died on `AmbiguousImport`. Same lookup `--bump` uses.
-                existing = _imports_index(nested_root, name=name).get(p.rstrip("/"))
-                if existing is not None:
-                    _require_owner(existing, repo_url, name=name)
-                    if not force:
-                        raise ImportDestinationExists(
-                            f"{existing} already imports {p!r} of {name!r}; "
-                            f"pass force=True to re-import it, or remove that file"
-                        )
-                    # Rewrite the pointer that exists rather than adding a sibling
-                    # beside it: the layout change deliberately moves nothing on
-                    # disk (the plan keeps `full_name` as the folder), so a forced
-                    # re-import of a legacy import stays where it is.
-                    target_dvc = existing
-                    dest = existing.with_suffix("")
-                elif target_dvc.exists() and not force:
-                    raise ImportDestinationExists(
-                        f"{target_dvc} already exists; pass force=True or remove it"
-                    )
+                dest, target_dvc = destinations[i - 1]
                 # `dvc import` requires the destination's parent directory to
                 # already exist; it doesn't auto-create it. Create here so a
                 # fresh consumer project (no `data/imports/<namespace>/` yet)
@@ -359,6 +336,18 @@ def import_product(
                         force=force,
                         extra_args=extra_dvc_args,
                     )
+                    # The pointer where it belongs, or dvc imported into a folder
+                    # that appeared since the check above, a level down: never a
+                    # success, whatever landed.
+                    if not target_dvc.is_file():
+                        new_dest = None  # someone else's folder: no "this import left" note below
+                        nested = dest / (Path(p.rstrip("/")).name + ".dvc")
+                        raise ImportDestinationExists(
+                            f"dvc wrote no pointer at {_shown(target_dvc, cwd)}: a folder appeared at "
+                            f"{_shown(dest, cwd)} while it ran, and the import went into it, a level down",
+                            hint=f"move {_shown(dest, cwd)} aside, with what dvc wrote into it "
+                                 f"({_shown(nested, cwd)} and its data), then import again",
+                        )
                     # The import twin of `clone_and_pull_product`'s `missing`
                     # check. A file, not `outs_materialized`: on an unpinned
                     # `.dir` out dvc writes the empty-directory hash beside an
@@ -392,9 +381,9 @@ def import_product(
                                             f".gitignore in {dest.parent}: {git_exc.stderr.strip()}"
                                         )
                             raise
-                    produced.append(written)
+                    produced.append(Path(_where(written, cwd)))
                     new_dest, created_dirs = None, []
-    except BaseException:
+    except BaseException as exc:
         # The failing output's empty folders, after its own rollback above.
         # Folders only: a file is never deleted here, whoever wrote it (a
         # complete payload whose autostage `git add` failed, a partial
@@ -402,9 +391,36 @@ def import_product(
         # anywhere after the mkdir (Ctrl-C during the index snapshot included)
         # is covered. dvc builds a new destination's folder tree before it
         # fetches, so that tree is walked first, deepest folders first.
-        if new_dest is not None:
+        # What is at the destination is not this import's when dvc stopped
+        # before writing anything (another dvc held its lock, no repo, no such
+        # path), or when a pointer is there by now (another run's finished import).
+        wrote_nothing = isinstance(exc, DvcOpError) and exc.wrote_nothing
+        # Not when dvc wrote nothing, for that reason, and not through a link at
+        # the destination: the folder it points to is not this import's, and on
+        # Windows `rmdir` removes the link itself.
+        if new_dest is not None and not wrote_nothing and not new_dest.is_symlink():
             created_dirs = [Path(d) for d, _, _ in os.walk(new_dest, topdown=False)] + created_dirs
         _remove_empty_dirs(created_dirs)
+        if new_dest is not None and not wrote_nothing and not _pointer_at(target_dvc) and (new_dest.is_file() or new_dest.is_dir()):
+            # Not there before this import, and a re-run refuses it: say what is
+            # there and how to clear it, as an "if": a file another run put
+            # there with no pointer can't be told apart. In the message, so the
+            # error's own hint (or the CLI's) stays.
+            where = _shown(new_dest, cwd)  # where dvc wrote, which `foo/..` names only resolved
+            kind = "link" if new_dest.is_symlink() else "folder" if new_dest.is_dir() else "file"
+            if kind == "folder":
+                left = _first_files(new_dest)
+                there = f"the folder {where} now holds {_named(left, cwd) if left else 'folders but no files'}"
+            else:  # a link's folder is not listed: `rm` removes the link, not what it holds
+                there = f"the {kind} {where} is now there"
+            step = _if_left("this import", new_dest, cwd, kind)
+            if isinstance(exc, DvcImportStorageMissing):
+                exc.args = (f"{exc}; {there}", *exc.args[1:])
+                exc.clear_first(f"clear the {kind} ({step})")  # in order: tell the producer, clear, re-run
+            elif isinstance(exc, MintdError):
+                exc.args = (f"{exc}; {there}; before re-running, {step}", *exc.args[1:])
+            elif reporter is not None:
+                reporter.warn(f"{there}; before re-running, {step}")
         if produced and reporter is not None:
             # EARLIER outputs are not rolled back — the failing one is, by
             # `_payload_backup`. Say what landed, so the user is not left
@@ -446,10 +462,14 @@ def _require_deliverable(
         try:
             GitArchiveFetcher().checkout_at(repo_url, pin, tree)
         except FetchError as exc:
+            access = (
+                unreachable_repo_hint(repo_url) if exc.reason is FetchError.Reason.UNREACHABLE
+                else f"check git access to {repo_url}"
+            )
             raise UndeliverableImport(
                 f"nothing was imported for {path!r} of {name!r} @ {pin[:7]}, and the "
                 f"producer's DVC state there could not be read to say why: {exc.detail or exc.reason}",
-                f"check git access to {repo_url}, then {retry}",
+                f"{access}, then {retry}",
             ) from exc
         storage = inspect_storage(tree)
         verdict = delivery(
@@ -727,7 +747,7 @@ def _resolve_targets_in_clone(
     Raises `UnknownProductPath` for a path that reaches no out, naming what
     the clone really tracks; the caller removes the clone.
     """
-    remote_name = _default_dvc_remote(dest) or "origin"
+    remote_name = default_remote_name(dest) or ""  # outs match by path; data_pull refuses where a remote is needed
     resolved: set[str] = set()
     unverified: list[str] = []
     # Re-enumerates the clone once per selector (documented on
@@ -783,6 +803,8 @@ def _clone_failure(exc: GitOpError, *, repo_url: str, rev: str | None, dest: Pat
     """A failed `git clone`, sorted the way every other producer read is: a
     branch, tag or SHA the reachable repo lacks is a missing pin; anything
     else is an unreachable producer."""
+    if isinstance(exc, GitHubAccessMissing):  # refused before git ran: nothing was cloned
+        return ProducerError.unreachable(repo_url, rev or "HEAD", str(exc))
     detail = f"clone to {dest} failed; partial clone left in place: {exc}"
     if _classify_stderr(exc.stderr) is FetchError.Reason.PIN_MISSING:
         return ProducerError.pin_missing(repo_url, rev or "HEAD", detail)
@@ -989,9 +1011,8 @@ def clone_and_pull_product(
         resolved_rev = None
     remote_bucket: str | None = None
     try:
-        from ._fast_sync_ops import get_remote_config, parse_s3_url
-        remote_name = _default_dvc_remote(resolved_dest) or "origin"
-        url = get_remote_config(resolved_dest, remote_name).get("url", "")
+        from ._dvc_state import get_remote_config, parse_s3_url
+        url = get_remote_config(resolved_dest, require_default_remote(resolved_dest, local_ok=True)).get("url", "")
         remote_bucket, _ = parse_s3_url(url)
     except Exception:
         remote_bucket = None
@@ -1017,6 +1038,185 @@ def _remove_payload(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
     else:
         path.unlink(missing_ok=True)
+
+
+def _import_destination(
+    p: str, *, nested_root: Path, index: dict[str, Path], name: str, repo_url: str, force: bool, cwd: Path,
+) -> tuple[Path, Path]:
+    """Where output ``p`` lands, ``(dest, its pointer)``, or the refusal that
+    stops the import. ``index`` is ``_imports_index`` of ``nested_root``."""
+    # Mirror the producer's own path under the namespace (D-A). The
+    # basename-only form collided two outputs sharing a leaf name
+    # (`data/final/` + `archive/final/`) on one dest under `--all`.
+    # Where the OS reaches it, as `nested_root` is: `p` can hold a `..` too.
+    dest = _physical(nested_root / Path(p.rstrip("/")))
+    # `p` is producer-controlled and unnormalized (catalog
+    # `outputs[].path` / `primary`, or an unchecked `--path`): `..`
+    # escapes the project, and pathlib drops the left operand
+    # entirely for an absolute path — where `import_product`'s forced
+    # clear would then delete. Anchor on `nested_root`, the TIGHTER base:
+    # `dest_root` alone lets `../<other-product>/data/final/` through,
+    # landing on ANOTHER product's `.dvc`.
+    if not dest.resolve().is_relative_to(nested_root.resolve()):
+        raise UnknownProductPath(
+            f"{name!r} resolves output {p!r} to {_shown(dest, cwd)}, outside the "
+            f"import root {_shown(nested_root, cwd)}; refusing to import or delete "
+            f"outside it"
+        )
+    target_dvc = dest.parent / (dest.name + ".dvc")
+
+    # Idempotence is keyed on the producer path this import RECORDS,
+    # not where the pointer sits: checking `target_dvc` alone missed
+    # pre-layout-change imports, so a re-import wrote a SECOND pointer
+    # and a second copy of the payload, after which every `--bump`
+    # died on `AmbiguousImport`. Same lookup `--bump` uses.
+    existing = index.get(p.rstrip("/"))
+    if existing is not None:
+        _require_owner(existing, repo_url, name=name, cwd=cwd)
+        if not force:
+            raise ImportDestinationExists(
+                f"{_shown(existing, cwd)} already imports {p!r} of {name!r}; "
+                f"pass --force to re-import it, or remove that pointer and what it imported"
+            )
+        # Rewrite the pointer that exists rather than adding a sibling
+        # beside it: the layout change deliberately moves nothing on
+        # disk (the plan keeps `full_name` as the folder), so a forced
+        # re-import of a legacy import stays where it is.
+        target_dvc = existing
+        dest = existing.with_suffix("")
+    elif _pointer_at(target_dvc) and not force:
+        raise ImportDestinationExists(
+            f"{_shown(target_dvc, cwd)} already exists; pass --force or remove it"
+        )
+    elif (dest.is_symlink() or dest.resolve().exists()) and not _pointer_at(target_dvc):
+        # Something no pointer records is in the way: dvc imports INTO a
+        # folder, a level down, and the landed check counts what it held
+        # (exit 0, data nested); `--force` replaces a file. With or without
+        # `force`, which never clears what no pointer records. Resolved:
+        # `foo/..` reads as absent while `foo` is missing.
+        here = dest.resolve()
+        holds = [q for q in index.values() if q.resolve().is_relative_to(here)]
+        within = [q for q in index.values() if here.is_relative_to(q.resolve().with_suffix(""))]
+        why, hint = _occupied(dest, cwd, holds=holds, within=within)
+        raise ImportDestinationExists(why, hint=hint)
+    return dest, target_dvc
+
+
+def _pointer_at(target_dvc: Path) -> bool:
+    """Whether a pointer is at ``target_dvc``, for the refusals and for the
+    failed import's note alike. Resolved: ``foo/../x.dvc`` does not exist while
+    ``foo`` is missing (before an import makes it, and after a failed one
+    removes it again), even when ``x.dvc`` does. ``realpath``, which unlike
+    ``Path.resolve`` never raises on a link loop (Python 3.11 and 3.12)."""
+    return os.path.exists(os.path.realpath(target_dvc))
+
+
+def _physical(p: Path) -> Path:
+    """``p`` where the OS reaches it, as the checks resolve it: its folder with
+    links and ``..`` resolved, since ``link/..`` is the folder above where
+    ``link`` points, not the folder ``link`` is in, and its own name kept, so a
+    link there is named as the link."""
+    p = Path.cwd() / p  # absolute, its `..` kept
+    if p.name in ("", ".."):
+        return Path(os.path.realpath(p))
+    return Path(os.path.realpath(p.parent)) / p.name
+
+
+def _where(p: Path, cwd: Path) -> str:
+    """``p`` where the OS reaches it (``_physical``): relative to the project
+    inside it, and absolute outside it, where a ``..`` would climb out from
+    where the project really is. Spelled as the file system spells it; a
+    message prints ``_shown``."""
+    q, top = _physical(p), Path(os.path.realpath(cwd))
+    return (q.relative_to(top) if q.is_relative_to(top) else q).as_posix()
+
+
+def _unprintable(c: str) -> bool:
+    """A character a terminal acts on or can't print: a control (an escape, a
+    newline), a format character (a right-to-left override), a lone surrogate
+    (a name's undecodable byte) or a line or paragraph separator."""
+    return unicodedata.category(c) in ("Cc", "Cf", "Cs", "Zl", "Zp")
+
+
+def _shown(p: Path, cwd: Path) -> str:
+    """``p`` as a message names it (``_where``), each unprintable character
+    escaped where it stands (``\\x1b``), so a name can neither repaint the
+    terminal nor split a line."""
+    return "".join(c.encode("unicode_escape").decode("ascii") if _unprintable(c) else c for c in _where(p, cwd))
+
+
+def _command(words: list[str], p: Path, cwd: Path) -> str:
+    """``words`` and then ``p``, as a command to paste; none for a name with an
+    unprintable character, whose escaped form would name another path."""
+    where = _where(p, cwd)
+    if any(_unprintable(c) for c in where):
+        return "remove it by hand (its name has a character mintd won't print)"
+    return shlex.join([*words, where])
+
+
+_NAMED = 8  # files a message names; walking stops once there is one more
+
+
+def _first_files(folder: Path) -> list[Path]:
+    """The first ``_NAMED + 1`` files under ``folder``, in name order, folder
+    by folder: enough to name and to say there are more, without walking or
+    sorting the whole tree."""
+    found: list[Path] = []
+    for root, dirs, files in os.walk(folder):
+        dirs.sort()
+        for f in sorted(files):
+            found.append(Path(root) / f)
+            if len(found) > _NAMED:
+                return found
+    return found
+
+
+def _named(paths: list[Path], cwd: Path) -> str:
+    return ", ".join(_shown(p, cwd) for p in paths[:_NAMED]) + (" and more" if len(paths) > _NAMED else "")
+
+
+def _if_left(who: str, path: Path, cwd: Path, kind: str) -> str:
+    """How to clear the folder, file or link (``kind``) at ``path`` if ``who``
+    left it, and otherwise: what another run or the user put there can't be
+    told apart. One wording for a failed import's note and the refusal of its
+    re-run."""
+    rm = ["rm", "-r", "--"] if kind == "folder" else ["rm", "--"]
+    return f"if this is a {kind} {who} left, not yours: {_command(rm, path, cwd)}; otherwise move that {kind}"
+
+
+def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -> tuple[str, str]:
+    """The refusal, message and hint, for something at ``dest`` that no pointer
+    at its own place records: what is there and what to do about it. ``holds``
+    are this product's import pointers inside it, ``within`` those whose
+    folder it is in."""
+    where = _shown(dest, cwd)
+    nothing = "nothing was imported there"
+    pointers = "import somewhere else with --dest-root, or remove those imports first"
+    if holds:
+        return f"{where} already holds imports ({_named(sorted(holds), cwd)}); {nothing}", pointers
+    if within:
+        return f"{where} is inside an earlier import ({_named(sorted(within), cwd)}); {nothing}", pointers
+    folder = _physical(dest)
+    if folder.is_symlink() or not folder.is_dir():
+        # A link is not listed, even to a folder: `rm` removes the link only.
+        effect = "write where it points" if folder.is_symlink() else "replace it"
+        return (
+            f"{where} is already a {'link' if folder.is_symlink() else 'file'} and no pointer records it, "
+            f"so the import would {effect}; {nothing}",
+            "move or remove it, or import somewhere else with --dest-root",
+        )
+    down = f"so dvc would import into it, a level down; {nothing}"
+    if next(folder.iterdir(), None) is None:
+        return (f"{where} is already a folder, an empty one, {down}",
+                f"it is empty and safe to remove: {_command(['rmdir', '--'], dest, cwd)}")
+    # Not empty, so not known safe to remove, whatever it holds: `_first_files`
+    # lists no file for a link to a folder.
+    files = _first_files(folder)
+    held = _named(files, cwd) if files else "folders but no files"
+    return (
+        f"{where} is already a folder and no pointer records it (it holds {held}), {down}",
+        f"{_if_left('an earlier mintd data import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
+    )
 
 
 def _missing_dirs(path: Path) -> list[Path]:
@@ -1351,7 +1551,7 @@ def _namespace_by_scan(imports_root: Path, name: str) -> str:
     return matches[0] if matches else name
 
 
-def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
+def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str, cwd: Path) -> None:
     """Refuse a pointer found under this product's namespace that records a
     DIFFERENT producer.
 
@@ -1362,16 +1562,20 @@ def _require_owner(dvc_path: Path, repo_url: str | None, *, name: str) -> None:
     another product's `.dvc`, whose payload the force path `shutil.rmtree`s
     and whose pointer the import rewrites — exit 0, "✓ imported".
 
-    Compares recorded URL strings, so no case or unicode normalization is
-    needed. `repo_url is None` skips the check: the bump reader has no
-    catalog entry to compare against for a de-listed product.
+    Compares the URLs' https forms (``https_remote``): an import through a
+    ``git@github.com:`` catalog entry records the https URL git used, and is
+    the same producer. No case or unicode normalization is needed.
+    `repo_url is None` skips the check: the bump reader has no catalog entry
+    to compare against for a de-listed product.
     """
+    from ._registry_git_ops import https_remote
+
     if repo_url is None:
         return
     owner = DataDependency.from_dvc_file(dvc_path).producer_repo
-    if owner != repo_url:
+    if https_remote(owner) != https_remote(repo_url):
         raise UnknownProductPath(
-            f"{dvc_path} imports {owner}, not {repo_url}; refusing to "
+            f"{_shown(dvc_path, cwd)} imports {owner}, not {repo_url}; refusing to "
             f"overwrite another product's import as {name!r} — if that "
             f"producer's repo moved, delete the file and re-import"
         )
@@ -1431,7 +1635,7 @@ def _resolve_import_source(
         )
     # The bump arm has no containment check, so this is its only guard
     # against acting on another product's pointer.
-    _require_owner(resolved, owner, name=name)
+    _require_owner(resolved, owner, name=name, cwd=project_path)
     return resolved
 
 

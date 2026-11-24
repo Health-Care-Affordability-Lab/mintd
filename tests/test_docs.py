@@ -11,7 +11,7 @@ import argparse
 import re
 from pathlib import Path
 
-from mintd.cli import _build_parser
+from mintd.cli import _build_parser, _install_line
 
 REPO = Path(__file__).resolve().parent.parent
 DOCS = [REPO / "README.md", REPO / "vocab.md", REPO / "RELEASING.md"]
@@ -108,6 +108,18 @@ def test_vocab_headings_name_code_that_exists() -> None:
     assert not missing, "vocab.md headings name code that is not in src/: " + ", ".join(missing)
 
 
+def test_readme_gives_the_release_install_lines() -> None:
+    """README shows exactly the lines mintd itself prints, and no line that
+    installs from a branch instead of a promoted release."""
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert _install_line(windows=False) in readme
+    assert _install_line(windows=True) in readme
+    for path in (REPO / "README.md", REPO / "install.sh", REPO / "install.ps1"):
+        text = path.read_text(encoding="utf-8")
+        assert "raw.githubusercontent.com" not in text, path.name
+        assert "git+ssh" not in text and "git+https" not in text, path.name
+
+
 def _subparser(*path: str) -> argparse.ArgumentParser:
     parser: argparse.ArgumentParser = _build_parser()
     for name in path:
@@ -117,20 +129,41 @@ def _subparser(*path: str) -> argparse.ArgumentParser:
 
 
 def test_import_and_clone_help_say_what_each_form_brings_as_the_readme_does() -> None:
-    """`data import --help` and `data clone --help` carry README's "Command |
-    Brings" rows word for word, and no others, so the two can't drift apart.
+    """`import --help` and `clone --help`, and their `data` twins', carry README's
+    "Command | Brings" rows word for word, and no others, so they can't drift apart.
 
     Mutation: change a word in one README "Brings" cell, or add a row to one
     help table only -> red."""
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     for verb in ("import", "clone"):
-        rows = re.findall(rf"^\| `(mintd data {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
+        rows = re.findall(rf"^\| `(mintd {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
         assert len(rows) >= 2, verb
-        documented = {" ".join(f"{command} {brings.replace('`', '')}".split()) for command, brings in rows}
-        epilog = _subparser("data", verb).epilog or ""
-        # The table is the epilog's first paragraph; each row starts at "  mintd data".
-        table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
-        shown = {" ".join(row.split()) for row in re.split(rf"\s(?=mintd data {verb}\b)", " " + table) if row.strip()}
-        assert shown == documented, verb
-        # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
-        assert max(map(len, epilog.splitlines())) <= 80, verb
+        for group in ((), ("data",)):
+            spelled = " ".join(("mintd", *group, verb))
+            documented = {
+                " ".join(f"{command.replace(f'mintd {verb}', spelled, 1)} {brings.replace('`', '')}".split())
+                for command, brings in rows
+            }
+            epilog = _subparser(*group, verb).epilog or ""
+            # The table is the epilog's first paragraph; each row starts at the command.
+            table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
+            shown = {" ".join(row.split()) for row in re.split(rf"\s(?={spelled}\b)", " " + table) if row.strip()}
+            assert shown == documented, spelled
+            # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
+            assert max(map(len, epilog.splitlines())) <= 80, spelled
+
+
+def test_docs_send_github_access_through_gh_not_ssh() -> None:
+    """gh is the one supported way to reach GitHub: no doc tells anyone to set
+    up an SSH key or run `ssh -T`, and README gives the switch, both SSH forms
+    included."""
+    from mintd._registry_git_ops import SSH_TO_HTTPS
+
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert "gh auth login" in readme and "gh auth setup-git" in readme
+    for line in SSH_TO_HTTPS.split(" ; "):
+        assert line in readme, line
+    docs = [*DOCS, *(REPO / "src" / "mintd" / "files").glob("README*.md.j2")]
+    for path in docs:
+        text = path.read_text(encoding="utf-8").lower()
+        assert "ssh -t" not in text and "ssh key" not in text and "ssh-keygen" not in text, path.name

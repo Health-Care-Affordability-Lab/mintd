@@ -1,0 +1,17 @@
+recall: undoes a folder pointer cut between entries, or listing fewer files than its folder, pushes as a smaller folder (found after the stories).
+fix: acdaf8d (#111); before the fix: a6193a6.
+validated: with this patch on HEAD, tests/test_push_journey.py::test_a_folder_pointer_shorter_than_its_folder_stops_the_push_before_upload goes red.
+
+diff --git a/src/mintd/data_ops.py b/src/mintd/data_ops.py
+index 376851f..f6382df 100644
+--- a/src/mintd/data_ops.py
++++ b/src/mintd/data_ops.py
+@@ -1146,7 +1146,7 @@ def data_push(
+     # A folder pointer lists no count, so one cut at the end of an entry, or
+     # recorded before files were added, reads as a smaller folder; DVC would
+     # push the shorter list at exit 0 while the rest sits on disk.
+-    unlisted = unlisted_on_disk(project_path, scope, remote=effective_remote)
++    unlisted = []  # recall: undoes #111
+     if unlisted:
+         raise PushRefused(
+             "nothing was written or pushed: " + "; ".join(u.message() for u in unlisted),

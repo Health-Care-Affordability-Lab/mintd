@@ -130,6 +130,8 @@ def _classify_stderr(stderr: str) -> FetchError.Reason | None:
             "unable to access",
             "timed out",
             "Connection refused",
+            "Repository not found",  # GitHub, when the account can't see the repo
+            "could not read Username",  # no credential came
         )
     ):
         return FetchError.Reason.UNREACHABLE
@@ -306,8 +308,15 @@ def _run(
     """The single subprocess chokepoint for this module.
 
     Translates FileNotFoundError and TimeoutExpired into typed FetchError so
-    callers never see raw subprocess exceptions.
+    callers never see raw subprocess exceptions. Every producer git call
+    reaches ``repo``, so GitHub access through gh is checked here first.
     """
+    from ._registry_git_ops import GitHubAccessMissing, require_github_access  # imports this module lazily too
+
+    try:
+        require_github_access(repo)
+    except GitHubAccessMissing as e:  # this seam's own error, so its callers handle it
+        raise FetchError.unreachable(repo, pin, detail=str(e)) from e
     try:
         return subprocess.run(
             argv,

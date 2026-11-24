@@ -47,6 +47,7 @@ here so nobody has to guess how narrow.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -135,7 +136,7 @@ def test_add_on_a_directory_writes_a_dir_pointer(ops, workspace: Path) -> None:
 
     The suffix is the only dir marker in a `.dvc` file — there is no
     `is_dir` YAML field — and production dispatches on exactly it
-    (`_fast_sync_ops` sets `is_dir=md5.endswith(".dir")`). A fake that
+    (`_dvc_state` sets `is_dir=md5.endswith(".dir")`). A fake that
     writes a plain md5 for a directory add is not laxer, it is
     WRONG-SHAPED: every downstream reader sees a file where the caller
     added a directory. `nfiles` counts FILES, recursively — the nested
@@ -566,3 +567,45 @@ def test_pull_rejects_cleanly_when_a_pipeline_file_is_the_wrong_shape(
     # about declared outs next to a malformed file).
     with pytest.raises(DvcOpError):
         ops.pull(targets=["data/nothing.csv"], cwd=workspace)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_an_import_through_a_dest_root_linked_outside_the_project_is_refused(
+    ops, workspace: Path, tmp_path: Path
+) -> None:
+    """mintd names a `--dest-root` by where the OS reaches it, so a link to a
+    folder outside the dvc project sends the import there, and dvc's own
+    refusal ("Cached output(s) outside of DVC project") is the only guard
+    left against writing outside the project. Real dvc only: the fake
+    doesn't model it. mintd exits non-zero, and nothing is left on either
+    side of the link. If a dvc upgrade stops refusing, this goes red.
+    Mutation: drop the cleanup of the folders mintd made before dvc ran
+    (`_remove_empty_dirs`) -> they stay outside the project, red."""
+    if isinstance(ops, _FakeDvcOps):
+        pytest.skip("only real dvc refuses an output outside its project")
+    import json as _json
+
+    from mintd.catalog import InMemoryCatalogClient
+    from mintd.data import import_product
+    from mintd.model import Metadata
+    from tests._harness.producer import build_local_producer
+
+    producer = build_local_producer(tmp_path / "prod")
+    producer.publish({"data/final": {"a.csv": b"v1\n"}})
+    data = _json.loads((producer.work / "metadata.json").read_text(encoding="utf-8"))
+    data["repository"]["github_url"] = producer.url
+    client = InMemoryCatalogClient()
+    client.register(Metadata.model_validate(data))
+    name = data["project"]["name"]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "imports").symlink_to(outside, target_is_directory=True)
+    before = sorted(p.relative_to(workspace) for p in workspace.rglob("*") if ".dvc" not in p.parts[len(workspace.parts):])
+
+    with pytest.raises(DvcOpError, match="outside of DVC project"):
+        import_product(client, ops, name, cwd=workspace, dest_root=workspace / "imports")
+
+    assert list(outside.iterdir()) == []
+    after = sorted(p.relative_to(workspace) for p in workspace.rglob("*") if ".dvc" not in p.parts[len(workspace.parts):])
+    assert after == before

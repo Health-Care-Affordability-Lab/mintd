@@ -76,6 +76,7 @@ class _FakeRegistryGitOps:
     push_with_tags_calls: list[Path] = field(default_factory=list)
     force_dirty: bool = False
     current_commit_value: str = "abcdef0"
+    access_checks: list[tuple[Path, str, bool]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # git (real)
@@ -98,6 +99,9 @@ class _FakeRegistryGitOps:
 
     def fetch(self, repo_dir: Path) -> None:
         self._git(["fetch", "origin"], cwd=repo_dir)
+
+    def require_github_access(self, work_dir: Path, remote: str = "origin", *, push: bool = False) -> None:
+        self.access_checks.append((Path(work_dir), remote, push))
 
     def reset_hard(self, repo_dir: Path, ref: str) -> None:
         self.reset_hard_calls.append(ResetHardCall(repo_dir, ref))
@@ -139,6 +143,14 @@ class _FakeRegistryGitOps:
         # import lane routes on the typed `GitOpError` (a non-repo skips).
         from mintd._registry_git_ops import SubprocessRegistryGitOps
         return SubprocessRegistryGitOps().index_entries(work_dir, names)
+
+    def ignored_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().ignored_files(work_dir, paths)
+
+    def listed_files(self, work_dir: Path, paths: list[str]) -> list[str]:
+        from mintd._registry_git_ops import SubprocessRegistryGitOps
+        return SubprocessRegistryGitOps().listed_files(work_dir, paths)
 
     def restore_index(self, work_dir: Path, names: list[str], entries: dict[str, str]) -> None:
         from mintd._registry_git_ops import SubprocessRegistryGitOps

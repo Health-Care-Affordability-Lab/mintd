@@ -12,9 +12,9 @@ from mintd.data import BumpBlocked, ImportNotFound, PrimaryRemovedAtHead
 from mintd.enclave import ApprovedProduct, EnclaveManifest, TransferredItem, enclave_bump
 from mintd.model import Metadata
 from mintd.producer import ProducerView
-from tests._enclave_fixtures import MINIMAL_METADATA, client_with_demo_xw, stage_enclave_manifest
+from tests._enclave_fixtures import MINIMAL_METADATA, client_with_demo_map, stage_enclave_manifest
 
-REPO_URL = "https://github.com/example-org/demo-xw"
+REPO_URL = "https://github.com/example-org/demo-map"
 PIN_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 
@@ -22,7 +22,7 @@ HEAD_SHA = "b" * 40
 FULL_METADATA = {
     "schema_version": "2.0",
     "mint": {"version": "1.0", "commit_hash": "x"},
-    "project": {"type": "data", "name": "demo-xw", "full_name": "Demo XW", "created_at": "2026-05-14T00:00:00", "created_by": "user"},
+    "project": {"type": "data", "name": "demo-map", "full_name": "Demo Map", "created_at": "2026-05-14T00:00:00", "created_by": "user"},
     "metadata": {"description": "desc", "tags": ["topic:x"]},
     "ownership": {"team": "t", "maintainers": ["u"]},
     "access_control": {"teams": [{"name": "t", "permission": "read"}]},
@@ -43,7 +43,7 @@ class InMemoryCatalogClient(CatalogClient):
 def _make_manifest(tmp_path: Path, **kwargs) -> Path:
     m = EnclaveManifest(
         enclave_name="test",
-        approved_products=[ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA)],
+        approved_products=[ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA)],
         **kwargs
     )
     p = tmp_path / "enclave_manifest.yaml"
@@ -53,23 +53,23 @@ def _make_manifest(tmp_path: Path, **kwargs) -> Path:
 def test_bump_up_to_date_returns_none(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     
-    finding = CheckFinding(severity="info", section="consumer", message="up to date", source=p, field_path="approved_products[demo-xw]", kind="up_to_date")
-    result = enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+    finding = CheckFinding(severity="info", section="consumer", message="up to date", source=p, field_path="approved_products[demo-map]", kind="up_to_date")
+    result = enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
     assert result is None
 
 def test_bump_with_drift_rewrites_manifest(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     
     def factory(url):
-        view = ProducerView(repo="demo-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        view = ProducerView(repo="demo-map", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-xw]", kind="drift")
-    enclave_bump(client, manifest_path=p, name="demo-xw", producer_view_factory=factory, check_findings=[finding])
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-map]", kind="drift")
+    enclave_bump(client, manifest_path=p, name="demo-map", producer_view_factory=factory, check_findings=[finding])
 
     assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
 
@@ -82,21 +82,21 @@ def test_bump_name_not_imported_raises_import_not_found(tmp_path):
 def test_bump_pin_missing_raises_bump_blocked(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    finding = CheckFinding(severity="error", section="consumer", message="producer pin missing: ...", source=p, field_path="approved_products[demo-xw]", kind="pin_missing")
+    finding = CheckFinding(severity="error", section="consumer", message="producer pin missing: ...", source=p, field_path="approved_products[demo-map]", kind="pin_missing")
     with pytest.raises(BumpBlocked):
-        enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
 
 def test_bump_unreachable_raises_bump_blocked(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    finding = CheckFinding(severity="warning", section="consumer", message="producer unreachable: ...", source=p, field_path="approved_products[demo-xw]", kind="unreachable")
+    finding = CheckFinding(severity="warning", section="consumer", message="producer unreachable: ...", source=p, field_path="approved_products[demo-map]", kind="unreachable")
     with pytest.raises(BumpBlocked):
-        enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
 
 def test_bump_head_primary_removed_raises_primary_removed_at_head(tmp_path):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     
     broken_meta = FULL_METADATA.copy()
     broken_meta["data_products"] = {}
@@ -105,23 +105,23 @@ def test_bump_head_primary_removed_raises_primary_removed_at_head(tmp_path):
         view = ProducerView(repo="p", pin=HEAD_SHA, metadata=Metadata.model_validate(broken_meta))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-xw]", kind="drift")
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-map]", kind="drift")
     with pytest.raises(PrimaryRemovedAtHead):
-        enclave_bump(client, manifest_path=p, name="demo-xw", producer_view_factory=broken_factory, check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", producer_view_factory=broken_factory, check_findings=[finding])
 
 def test_bump_writes_pin_through_append_only_save(tmp_path):
     p = _make_manifest(tmp_path, transferred=[
         TransferredItem(repo="p", contract_pin="c", artifact_pin="a", transfer_date=date(2026, 5, 14), transfer_id="t1", local_path="lp")
     ])
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     
     def factory(url):
-        view = ProducerView(repo="demo-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        view = ProducerView(repo="demo-map", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, HEAD_SHA
         
-    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-xw]", kind="drift")
-    enclave_bump(client, manifest_path=p, name="demo-xw", producer_view_factory=factory, check_findings=[finding])
+    finding = CheckFinding(severity="warning", section="consumer", message="upgrade available: ...", source=p, field_path="approved_products[demo-map]", kind="drift")
+    enclave_bump(client, manifest_path=p, name="demo-map", producer_view_factory=factory, check_findings=[finding])
 
     m = EnclaveManifest.load(p)
     assert m.approved_products[0].pin == HEAD_SHA
@@ -137,11 +137,11 @@ def test_bump_schema_too_old_raises_bump_blocked(tmp_path):
         section="consumer",
         message=f"producer at pin {PIN_SHA[:7]} uses schema_version 1.5 (expected 2.0)",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         kind="schema_too_old",
     )
     with pytest.raises(BumpBlocked) as ei:
-        enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
     assert ei.value.finding is finding
 
 
@@ -153,11 +153,11 @@ def test_bump_metadata_invalid_raises_bump_blocked(tmp_path):
         section="consumer",
         message=f"producer metadata invalid at pin {PIN_SHA[:7]}: validation error",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         kind="metadata_invalid",
     )
     with pytest.raises(BumpBlocked) as ei:
-        enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
     assert ei.value.finding is finding
 
 
@@ -177,11 +177,11 @@ def test_bump_consumes_provided_check_findings_without_recomputing(
         section="consumer",
         message="up to date",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         kind="up_to_date",
     )
     result = enclave_bump(
-        client, manifest_path=p, name="demo-xw", check_findings=[finding]
+        client, manifest_path=p, name="demo-map", check_findings=[finding]
     )
     assert result is None
 
@@ -198,7 +198,7 @@ def test_bump_default_uses_check_project_when_no_findings_passed(
         section="consumer",
         message="up to date",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         kind="up_to_date",
     )
 
@@ -208,7 +208,7 @@ def test_bump_default_uses_check_project_when_no_findings_passed(
 
     monkeypatch.setattr("mintd.check.check_project", recorder)
 
-    result = enclave_bump(client, manifest_path=p, name="demo-xw")
+    result = enclave_bump(client, manifest_path=p, name="demo-map")
 
     assert result is None
     assert len(calls) == 1
@@ -220,7 +220,7 @@ def test_bump_default_uses_producer_view_at_head(tmp_path, monkeypatch):
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
     client.register(
-        "demo-xw",
+        "demo-map",
         CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}),
     )
     captured: list[str] = []
@@ -236,10 +236,10 @@ def test_bump_default_uses_producer_view_at_head(tmp_path, monkeypatch):
         section="consumer",
         message="upgrade available: producer now publishes 'X'",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         kind="drift",
     )
-    enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+    enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
 
     assert captured == [REPO_URL]
     assert EnclaveManifest.load(p).approved_products[0].pin == HEAD_SHA
@@ -253,15 +253,15 @@ def test_bump_force_repins_to_head_skipping_finding_gate(tmp_path, monkeypatch):
     """`--force` bypasses check_project entirely and repins to HEAD."""
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
 
     def factory(url):
-        view = ProducerView(repo="demo-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        view = ProducerView(repo="demo-map", pin=HEAD_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, HEAD_SHA
 
     result = enclave_bump(
-        client, manifest_path=p, name="demo-xw", force=True, producer_view_factory=factory
+        client, manifest_path=p, name="demo-map", force=True, producer_view_factory=factory
     )
 
     assert result == p
@@ -272,16 +272,16 @@ def test_bump_force_already_at_head_is_noop(tmp_path, monkeypatch):
     """When the pin already equals HEAD, `--force` is a no-op (returns None)."""
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
 
     def factory(url):
         # HEAD == the manifest's current pin (PIN_SHA).
-        view = ProducerView(repo="demo-xw", pin=PIN_SHA, metadata=Metadata.model_validate(FULL_METADATA))
+        view = ProducerView(repo="demo-map", pin=PIN_SHA, metadata=Metadata.model_validate(FULL_METADATA))
         return view, PIN_SHA
 
     result = enclave_bump(
-        client, manifest_path=p, name="demo-xw", force=True, producer_view_factory=factory
+        client, manifest_path=p, name="demo-map", force=True, producer_view_factory=factory
     )
 
     assert result is None
@@ -292,7 +292,7 @@ def test_bump_force_primary_removed_raises(tmp_path, monkeypatch):
     """`--force` still validates the primary at HEAD."""
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
 
     broken_meta = FULL_METADATA.copy()
@@ -304,7 +304,7 @@ def test_bump_force_primary_removed_raises(tmp_path, monkeypatch):
 
     with pytest.raises(PrimaryRemovedAtHead):
         enclave_bump(
-            client, manifest_path=p, name="demo-xw", force=True, producer_view_factory=broken_factory
+            client, manifest_path=p, name="demo-map", force=True, producer_view_factory=broken_factory
         )
 
 
@@ -314,7 +314,7 @@ def test_bump_force_validates_primary_even_when_already_at_head(tmp_path, monkey
     PrimaryRemovedAtHead rather than silently no-op'ing."""
     p = _make_manifest(tmp_path)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
 
     broken_meta = FULL_METADATA.copy()
@@ -327,7 +327,7 @@ def test_bump_force_validates_primary_even_when_already_at_head(tmp_path, monkey
 
     with pytest.raises(PrimaryRemovedAtHead):
         enclave_bump(
-            client, manifest_path=p, name="demo-xw", force=True, producer_view_factory=broken_factory
+            client, manifest_path=p, name="demo-map", force=True, producer_view_factory=broken_factory
         )
 
 
@@ -338,24 +338,24 @@ def test_bump_force_source_path_subscription_skips_primary_validation(tmp_path, 
     m = EnclaveManifest(
         enclave_name="test",
         approved_products=[
-            ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA, source_path="data/custom/")
+            ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA, source_path="data/custom/")
         ],
     )
     p = tmp_path / "enclave_manifest.yaml"
     m.save(p)
     client = InMemoryCatalogClient()
-    client.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    client.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     monkeypatch.setattr("mintd.check.check_project", _must_not_call_check_project)
 
     primary_less = FULL_METADATA.copy()
     primary_less["data_products"] = {}
 
     def factory(url):
-        view = ProducerView(repo="demo-xw", pin=HEAD_SHA, metadata=Metadata.model_validate(primary_less))
+        view = ProducerView(repo="demo-map", pin=HEAD_SHA, metadata=Metadata.model_validate(primary_less))
         return view, HEAD_SHA
 
     result = enclave_bump(
-        client, manifest_path=p, name="demo-xw", force=True, producer_view_factory=factory
+        client, manifest_path=p, name="demo-map", force=True, producer_view_factory=factory
     )
 
     assert result == p
@@ -373,12 +373,12 @@ def test_enclave_bump_missing_kind_raises_bump_blocked(tmp_path):
         section="consumer",
         message="upgrade available: ...",
         source=p,
-        field_path="approved_products[demo-xw]",
+        field_path="approved_products[demo-map]",
         # kind deliberately omitted (default None)
     )
 
     with pytest.raises(BumpBlocked) as ei:
-        enclave_bump(client, manifest_path=p, name="demo-xw", check_findings=[finding])
+        enclave_bump(client, manifest_path=p, name="demo-map", check_findings=[finding])
 
     assert ei.value.finding is finding
 
@@ -386,7 +386,7 @@ def test_enclave_bump_missing_kind_raises_bump_blocked(tmp_path):
 # --- P5: one producer, many subscriptions (issue33) -------------------------
 
 NO_PRIMARY_METADATA = {**FULL_METADATA, "data_products": {"primary": None}}
-FIELD_PATH = "approved_products[demo-xw]"
+FIELD_PATH = "approved_products[demo-map]"
 
 
 def _two_row_manifest(tmp_path: Path, rows) -> Path:
@@ -397,14 +397,14 @@ def _two_row_manifest(tmp_path: Path, rows) -> Path:
 
 def _client() -> InMemoryCatalogClient:
     c = InMemoryCatalogClient()
-    c.register("demo-xw", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
+    c.register("demo-map", CatalogEntry.model_validate({"repository": {"github_url": REPO_URL}}))
     return c
 
 
 def _head_factory(metadata=FULL_METADATA, sha=HEAD_SHA):
     def factory(url):
         return ProducerView(
-            repo="demo-xw", pin=sha, metadata=Metadata.model_validate(metadata)
+            repo="demo-map", pin=sha, metadata=Metadata.model_validate(metadata)
         ), sha
     return factory
 
@@ -414,13 +414,13 @@ def test_bump_validates_primary_when_primary_row_is_not_first(tmp_path):
     on whichever row happens to be first would let a bump silently repin a
     primary subscription to a HEAD that has no primary — decided by add order."""
     p = _two_row_manifest(tmp_path, [
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA),
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA),
     ])
 
     with pytest.raises(PrimaryRemovedAtHead):
-        enclave_bump(_client(), manifest_path=p, name="demo-xw", force=True,
+        enclave_bump(_client(), manifest_path=p, name="demo-map", force=True,
                      producer_view_factory=_head_factory(NO_PRIMARY_METADATA))
 
     assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [PIN_SHA, PIN_SHA]
@@ -430,13 +430,13 @@ def test_bump_force_moves_a_row_left_behind_at_an_older_pin(tmp_path):
     """The force no-op check is `all(...)`, not `rows[0].pin ==`: a manifest
     whose rows disagree must converge rather than strand rows 2+."""
     p = _two_row_manifest(tmp_path, [
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=HEAD_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=HEAD_SHA,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/b"),
     ])
 
-    enclave_bump(_client(), manifest_path=p, name="demo-xw", force=True,
+    enclave_bump(_client(), manifest_path=p, name="demo-map", force=True,
                  producer_view_factory=_head_factory())
 
     assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [HEAD_SHA, HEAD_SHA]
@@ -449,9 +449,9 @@ def test_bump_is_not_decided_by_finding_order(tmp_path, kinds):
     pin. Reading only the first match made this WRITE verb depend on YAML row
     order: one order bumped, the other printed 'up to date' and exited 0."""
     p = _two_row_manifest(tmp_path, [
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/b"),
     ])
     findings = [
@@ -460,7 +460,7 @@ def test_bump_is_not_decided_by_finding_order(tmp_path, kinds):
         for k in kinds
     ]
 
-    result = enclave_bump(_client(), manifest_path=p, name="demo-xw",
+    result = enclave_bump(_client(), manifest_path=p, name="demo-map",
                           producer_view_factory=_head_factory(), check_findings=findings)
 
     assert result == p
@@ -471,9 +471,9 @@ def test_bump_blocked_row_blocks_the_whole_repo(tmp_path):
     """Precedence: any blocked row blocks the repo. D1 means one pin, so a
     partial bump is not a thing — drift on a sibling must not override it."""
     p = _two_row_manifest(tmp_path, [
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/a"),
-        ApprovedProduct(repo="demo-xw", registry_entry="cat", pin=PIN_SHA,
+        ApprovedProduct(repo="demo-map", registry_entry="cat", pin=PIN_SHA,
                         source_path="data/final/b"),
     ])
     findings = [
@@ -484,7 +484,7 @@ def test_bump_blocked_row_blocks_the_whole_repo(tmp_path):
     ]
 
     with pytest.raises(BumpBlocked):
-        enclave_bump(_client(), manifest_path=p, name="demo-xw",
+        enclave_bump(_client(), manifest_path=p, name="demo-map",
                      producer_view_factory=_head_factory(), check_findings=findings)
 
     assert [ap.pin for ap in EnclaveManifest.load(p).approved_products] == [PIN_SHA, PIN_SHA]
@@ -507,7 +507,7 @@ def test_enclave_bump_names_an_unreadable_dvc_lock_instead_of_a_missing_repo(tmp
     )
 
     with pytest.raises(ImportNotFound) as excinfo:
-        enclave_bump(client_with_demo_xw(), manifest_path=manifest, name="demo-xw")
+        enclave_bump(client_with_demo_map(), manifest_path=manifest, name="demo-map")
 
     assert "dvc.lock" in str(excinfo.value)
     assert "no consumer finding" not in str(excinfo.value)

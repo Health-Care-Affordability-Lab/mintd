@@ -308,6 +308,43 @@ def test_raises_schema_extra_not_installed_when_pandas_missing(
         generate_schema_file(tmp_path, tmp_path / "schema.json", recursive=True)
 
 
+def test_cli_hint_for_the_missing_extra_is_the_release_install_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The hint once offered `uv tool install --force 'mintd[schema]'`, which
+    installs whatever PyPI calls mintd. It now gives the release's install line."""
+    import sys
+
+    from mintd import cli
+
+    real_import = builtins.__import__
+
+    def fake_import(name: str, *args, **kwargs):
+        if name == "pandas":
+            raise ImportError("simulated: pandas not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.delitem(sys.modules, "pandas", raising=False)
+    monkeypatch.setenv("COLUMNS", "80")  # narrower than the line
+
+    rc = cli.main(["data", "schema", "generate", "--project-dir", str(tmp_path), "--data-dir", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    # Whole, on one line, so copying it from the terminal gives a working command.
+    assert cli._install_line(with_schema=True) in err
+    assert "uv tool install" not in err
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_the_reinstall_hint_names_the_shell_on_windows(windows: bool) -> None:
+    from mintd import cli
+
+    hint = cli._reinstall_hint(windows=windows)
+    assert hint.endswith(cli._install_line(with_schema=True, windows=windows))
+    assert ("in PowerShell" in hint) is windows
+
+
 # ---------------- parse_published_schema ----------------
 
 WRAPPER_3FILE = {
