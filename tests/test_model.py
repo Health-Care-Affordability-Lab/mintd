@@ -11,9 +11,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 import json
-from mintd.model import Metadata, Owner, field_metadata
+from mintd.model import Metadata, Owner, _unwrap_container, field_metadata
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -70,18 +70,18 @@ def test_wrong_schema_version_rejected():
 # ---------------------------------------------------------------------------
 
 def test_field_metadata_returns_owner():
-    """field_metadata(Metadata, 'project.name') returns Owner.MINTD —
-    mintd sets project.name at scaffold time."""
-    assert field_metadata(Metadata, "project.name") == Owner.MINTD
+    """field_metadata(Metadata, 'project.created_at') returns Owner.MINTD —
+    mintd sets it at scaffold time."""
+    assert field_metadata(Metadata, "project.created_at") == Owner.MINTD
 
 
 def test_field_metadata_traverses_nested():
     """field_metadata follows dotted paths through sub-models.
 
     e.g., field_metadata(Metadata, 'storage.dvc.remote_name') returns
-    Owner.MINTD.
+    Owner.REGISTRY.
     """
-    assert field_metadata(Metadata, "storage.dvc.remote_name") == Owner.MINTD
+    assert field_metadata(Metadata, "storage.dvc.remote_name") == Owner.REGISTRY
 
 
 def test_field_metadata_user_owned_fields():
@@ -91,10 +91,55 @@ def test_field_metadata_user_owned_fields():
 
 
 def test_field_metadata_pipeline_owned_fields():
-    """data_products.* and status.last_updated are PIPELINE-owned — auto-stamped
-    by the publish flow / DVC tracking."""
+    """The declared outputs are PIPELINE-owned: the producer declares them and
+    check compares them with the pipeline."""
     assert field_metadata(Metadata, "data_products.primary") == Owner.PIPELINE
-    assert field_metadata(Metadata, "status.last_updated") == Owner.PIPELINE
+    assert field_metadata(Metadata, "data_products.outputs.path") == Owner.PIPELINE
+
+
+def _owners(model: type[BaseModel], prefix: str = "") -> dict[str, Owner]:
+    """Every field path under `model` (a list steps into its item model), with its own tag."""
+    found = {}
+    for name in model.model_fields:
+        path = f"{prefix}{name}"
+        found[path] = field_metadata(model, name)
+        inner = _unwrap_container(model.model_fields[name].annotation)
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            found |= _owners(inner, f"{path}.")
+    return found
+
+
+#: The leaves a catalog rebuild copies from the product: the USER and PIPELINE ones.
+COPIED = {
+    "metadata.description", "metadata.tags", "ownership.team", "ownership.maintainers", "status.state",
+    "data_products.primary", "data_products.outputs.path", "data_products.outputs.description",
+    "data_products.outputs.primary",
+}
+#: The registry's fields, each parent with every field beneath it, plus the publish stamps.
+REGISTRY = {
+    "project.name", "project.type", "project.full_name",
+    "repository", "repository.github_url", "repository.default_branch", "repository.visibility",
+    "repository.mirror", "repository.mirror.url", "repository.mirror.purpose",
+    "access_control", "access_control.teams", "access_control.teams.name", "access_control.teams.permission",
+    "storage", "storage.provider", "storage.bucket", "storage.prefix", "storage.endpoint", "storage.versioning",
+    "storage.dvc", "storage.dvc.remote_name",
+    "governance", "governance.classification", "governance.contract_info",
+    "status.last_updated", "status.last_published_version", "data_products.outputs.last_published",
+}
+
+
+def test_each_field_owner_is_pinned():
+    """A catalog rebuild copies only the product's own leaves and keeps the
+    registry's, so every field's owner is a reviewed choice: a new field, or a
+    changed tag, fails here until this table says so.
+
+    Mutations: tag a registry field (leaf or parent) USER, MINTD or PIPELINE,
+    or tag a copied leaf REGISTRY -> red.
+    """
+    owners = _owners(Metadata)
+    leaves = {p for p in owners if not any(q.startswith(f"{p}.") for q in owners)}
+    assert {p for p in leaves if owners[p] in (Owner.USER, Owner.PIPELINE)} == COPIED
+    assert {p for p, o in owners.items() if o == Owner.REGISTRY} == REGISTRY
 
 
 
