@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
-from ._paths import inside
+from ._paths import inside, rel as rel_to
 from .errors import MintdError
 from ._dvc_state import (
     get_remote_config, parse_s3_url, remote_key, require_default_remote, s3_key_for_out, workspace_path_for,
@@ -608,13 +608,6 @@ def enumerate_push_items(
     empty_args: list[str] = []
     seen: set[str] = set()
 
-    def _rel_of(p: Path) -> str:
-        """Project-relative posix path of a symlink discovered mid-walk, so each
-        skipped symlink is named individually (not by the outer ``arg``). ``p``
-        lives under ``abs_path`` (itself under ``project_root``), so it is read
-        as text and the link is never followed."""
-        return inside(project_root, p, read="lexical", root_ok=True) or p.as_posix()
-
     def _classify(rel: str) -> RefusalReason | None:
         """The refusal reason for a repo-relative path, or None if cacheable.
         Order matters only for the single-file arg branch's message; the scan
@@ -634,7 +627,7 @@ def enumerate_push_items(
         # this one stayed only on local disk (silent data loss, the red-team P0).
         rel = inside(project_root, abs_path, read="lexical", root_ok=True)
         if rel is None:
-            refused.append(_Refused(_rel_of(abs_path), "outside_project"))
+            refused.append(_Refused(abs_path.as_posix(), "outside_project"))
             return
         reason = _classify(rel)
         if reason is not None:
@@ -690,8 +683,8 @@ def enumerate_push_items(
                 for d in sorted(dirnames):
                     child = Path(dirpath) / d
                     if child.is_symlink():
-                        symlinks.append(_rel_of(child))
-                    elif _is_protected_repo_path(_rel_of(child)):
+                        symlinks.append(rel_to(project_root, child))
+                    elif _is_protected_repo_path(rel_to(project_root, child)):
                         continue
                     else:
                         kept.append(d)
@@ -699,7 +692,7 @@ def enumerate_push_items(
                 for name in sorted(filenames):
                     fp = Path(dirpath) / name
                     if fp.is_symlink():
-                        symlinks.append(_rel_of(fp))
+                        symlinks.append(rel_to(project_root, fp))
                         continue
                     files_here += 1
                     _add_file(fp)
