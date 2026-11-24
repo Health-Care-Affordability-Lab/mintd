@@ -241,7 +241,10 @@ def import_product(
     # the same `dest_root/final/` without the namespace). Falls back to
     # the catalog name if full_name is missing on the entry.
     namespace = _import_namespace(dumped, name)
-    nested_root = dest_root / namespace
+    # Where the OS reaches it, once, here: a `..` after a folder that is
+    # missing or a link (`--dest-root foo/..`) otherwise reaches the index,
+    # the refusals and the note unresolved, where `foo/..` reads as nothing.
+    nested_root = _physical(dest_root) / namespace
 
     # Status feedback (slice 38a). Multi-output imports relabel the spinner
     # per output. We use the spinner (not the determinate progress bar)
@@ -1035,7 +1038,8 @@ def _import_destination(
     # Mirror the producer's own path under the namespace (D-A). The
     # basename-only form collided two outputs sharing a leaf name
     # (`data/final/` + `archive/final/`) on one dest under `--all`.
-    dest = nested_root / Path(p.rstrip("/"))
+    # Where the OS reaches it, as `nested_root` is: `p` can hold a `..` too.
+    dest = _physical(nested_root / Path(p.rstrip("/")))
     # `p` is producer-controlled and unnormalized (catalog
     # `outputs[].path` / `primary`, or an unchecked `--path`): `..`
     # escapes the project, and pathlib drops the left operand

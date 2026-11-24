@@ -1616,3 +1616,62 @@ def test_a_non_string_path_row_is_dropped_by_both_readers() -> None:
     # And the user gets the listing error rather than an AttributeError.
     with pytest.raises(UnknownProductPath, match="no tracked output"):
         _validate_requested_targets(entry, requested=["data/final/"], name="provider_a")
+
+
+# --- `--dest-root foo/..` with `foo` missing, and a `..` in the producer's path ---
+# Resolved once where they enter (`_physical`): unresolved, `foo/..` reads as
+# nothing, so the index saw no earlier import and a link at the destination
+# read as absent.
+
+
+def test_a_folder_inside_an_earlier_import_through_a_dotdot_dest_root_names_that_import(tmp_path: Path) -> None:
+    """agy's reproduction: the index read `foo/../data_demo_xw` as missing, so
+    `within` was empty and the earlier import's empty folder got "it is empty
+    and safe to remove: rmdir". Mutation: build `nested_root` from `dest_root`
+    unresolved -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/"))
+    fake = _FakeDvcOps()
+    import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path)
+    (tmp_path / "data_demo_xw" / "outputs" / "cms_based").mkdir()
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is inside an earlier import "
+                                                      r"\(data_demo_xw/outputs\.dvc\)") as refused:
+        import_product(client, fake, "demo_xw", path="outputs/cms_based/", cwd=tmp_path,
+                       dest_root=tmp_path / "foo" / "..")
+    assert "safe to remove" not in str(refused.value) + refused.value.hint
+    assert "rmdir" not in refused.value.hint
+
+
+def test_a_folder_holding_earlier_imports_through_a_dotdot_dest_root_names_them(tmp_path: Path) -> None:
+    """agy's reproduction: `holds` was empty, so a folder holding an earlier
+    import's pointer was "no pointer records it ... rm -r". Mutation: build
+    `nested_root` unresolved -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("outputs/cms_based/"))
+    fake = _FakeDvcOps()
+    import_product(client, fake, "demo_xw", path="outputs/cms_based/a.csv", cwd=tmp_path, dest_root=tmp_path)
+    with pytest.raises(ImportDestinationExists, match=r"cms_based already holds imports "
+                                                      r"\(data_demo_xw/outputs/cms_based/a\.csv\.dvc\)") as refused:
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=tmp_path / "foo" / "..")
+    assert "no pointer records" not in str(refused.value) and "rm" not in refused.value.hint
+
+
+@pytest.mark.parametrize("via", ["dest-root", "producer-path"])
+def test_a_dangling_link_reached_through_a_dotdot_is_refused(tmp_path: Path, via: str) -> None:
+    """agy's reproduction, with real dvc: through `foo/..`, `is_symlink()` read
+    the link as absent, the import ran without --force, and dvc replaced the
+    link and exited 0. The same through a `..` in the producer's own path.
+    Mutations: build `dest` unresolved -> the producer-path case red; build
+    both `nested_root` and `dest` unresolved -> both red (either resolution
+    alone catches the dest-root case)."""
+    client = InMemoryCatalogClient()
+    primary = "outputs/cms_based/" if via == "dest-root" else "outputs/missing/../cms_based/"
+    _register(client, mutate=_with_primary(primary))
+    fake = _FakeDvcOps()
+    dest = tmp_path / "data_demo_xw" / "outputs" / "cms_based"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(dest.parent / "gone")
+    root = tmp_path / "foo" / ".." if via == "dest-root" else tmp_path
+    with pytest.raises(ImportDestinationExists, match=r"cms_based is already a link and no pointer records it"):
+        import_product(client, fake, "demo_xw", cwd=tmp_path, dest_root=root)
+    assert fake.calls == [] and dest.is_symlink()
