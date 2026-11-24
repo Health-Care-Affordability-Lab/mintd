@@ -421,7 +421,7 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
     from ._fast_sync_ops import discover_all_outs
     from .imports import DataDependency, NotAnImportError
 
-    from ._push_verify import _in_subrepo
+    from ._push_verify import in_subrepo
 
     # Every path here, the working folder, the project, each target and each
     # pointer, goes through `_canonical` once, so none is compared with
@@ -446,7 +446,7 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
             ]
     urls = []
     for pointer in dict.fromkeys(pointers):
-        if pointer.is_relative_to(root) and _in_subrepo(root, pointer.relative_to(root).as_posix()):
+        if pointer.is_relative_to(root) and in_subrepo(root, pointer.relative_to(root).as_posix()):
             continue  # a nested project's own import: dvc, run from this project, never reads it
         try:
             urls.append(DataDependency.from_dvc_file(pointer).producer_repo)

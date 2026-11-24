@@ -853,6 +853,22 @@ def test_push_with_tags_sends_the_commit_and_its_tag_or_neither(
     ).strip()
 
 
+def test_has_commit_reads_an_unborn_branch_whose_name_prefixes_another(tmp_path: Path) -> None:
+    """`for-each-ref refs/heads/feat` also lists `refs/heads/feat/x`: an
+    orphan `feat` beside a committed `feat/x` is still a branch with no
+    commit yet, and the main branch of a seeded repo has one.
+
+    Mutation: test for-each-ref's output as non-empty -> the orphan reads
+    as broken and raises, red.
+    """
+    repo = _repo(tmp_path)
+    ops = SubprocessRegistryGitOps()
+    assert ops.has_commit(repo) is True
+    _git(["checkout", "-q", "-b", "feat/x"], cwd=repo)
+    _git(["checkout", "-q", "--orphan", "feat"], cwd=repo)
+    assert ops.has_commit(repo) is False
+
+
 @pytest.fixture(scope="module")
 def _gh_state_cached_before_the_test() -> None:
     """What an earlier test on this worker could leave: gh read as missing, and a

@@ -427,13 +427,18 @@ def test_stamped_install_sh_never_asks_an_index_planted_where_it_runs(tmp_path: 
     assert result.returncode == 0, result.stderr
     assert planted.requests == [], planted.requests
     assert default.requests, result.stderr  # real uv did look for reflink, on the default index
+    # Not found on the default index is no refusal; the warning says why a user's own mirror isn't used.
+    assert "Warning: reflink install failed" in result.stderr and _SETTINGS in result.stderr, result.stderr
+    assert _REFUSED not in result.stdout + result.stderr
 
 
-@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
-@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
-def test_stamped_install_sh_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_path: Path) -> None:
-    """An index (PyPI itself, compromised) serving another reflink-0.2.2 sdist, whose
-    setup.py would leave a mark: uv refuses it on its hash, so the setup.py never runs."""
+_REFUSED = "reflink was refused: a download didn't match its pinned hash, so it may have been tampered with."
+_SETTINGS = "This step ignores uv settings files (uv.toml, pyproject.toml), your own included."
+
+
+def _tampered_index(tmp_path: Path) -> tuple[_Index, Path]:
+    """An index (PyPI itself, compromised) serving another reflink-0.2.2 sdist, and the
+    mark its setup.py would leave if it ever ran."""
     import io
     import tarfile
 
@@ -449,12 +454,21 @@ def test_stamped_install_sh_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_pa
             info = tarfile.TarInfo(name)
             info.size = len(text.encode())
             tar.addfile(info, io.BytesIO(text.encode()))
-    default = _Index()
-    sdist = f"{default.root}/files/reflink-0.2.2.tar.gz"
-    default.pages = {
+    index = _Index()
+    sdist = f"{index.root}/files/reflink-0.2.2.tar.gz"
+    index.pages = {
         "/simple/reflink/": ("text/html", f'<a href="{sdist}">reflink-0.2.2.tar.gz</a>'.encode()),
         "/files/reflink-0.2.2.tar.gz": ("application/gzip", buf.getvalue()),
     }
+    return index, mark
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+def test_stamped_install_sh_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_path: Path) -> None:
+    """uv refuses the substituted sdist on its hash, so its setup.py never runs, and the
+    closing summary names the refusal: tampering, not a network failure."""
+    default, mark = _tampered_index(tmp_path)
     try:
         run_in = _plant(tmp_path, None)
         result, _ = _run_sh(
@@ -467,7 +481,9 @@ def test_stamped_install_sh_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_pa
     assert "/files/reflink-0.2.2.tar.gz" in default.requests, default.requests
     assert "Hash mismatch" in result.stderr, result.stderr
     assert not mark.exists()
-    assert "Warning: reflink install failed" in result.stderr
+    closing = result.stdout[result.stdout.rindex("mintd installed"):]
+    assert closing.startswith("mintd installed (with dvc), but:") and f"  - {_REFUSED}" in closing, result.stdout
+    assert _SETTINGS not in result.stderr  # no mirror advice for a tampered file
 
 
 @pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
@@ -892,4 +908,28 @@ def test_stamped_install_ps1_never_asks_an_index_planted_where_it_runs(tmp_path:
     assert "caught" not in result.stdout, result.stdout + result.stderr
     assert planted.requests == [], planted.requests
     assert default.requests, result.stdout + result.stderr  # real uv did look for reflink, on the default index
+    assert _SETTINGS in result.stdout and _REFUSED not in result.stdout, result.stdout
+
+
+@_NEEDS_PWSH
+@pytest.mark.skipif(_REAL_UV is None, reason="needs a real uv")
+def test_stamped_install_ps1_refuses_a_reflink_file_whose_hash_isnt_pinned(tmp_path: Path) -> None:
+    """install.ps1, as install.sh: refused on its hash, setup.py never run, the refusal in the summary."""
+    default, mark = _tampered_index(tmp_path)
+    try:
+        run_in = _plant(tmp_path, None)
+        scripts = tmp_path / "tools" / "mintd" / "Scripts"
+        if os.name != "nt":
+            scripts.mkdir()
+            (scripts / "python.exe").symlink_to(tmp_path / "tools" / "mintd" / "bin" / "python")
+        result, _ = _run_stamped_ps1(tmp_path, tool_python=False, cwd=run_in, env=_real_uv_env(tmp_path, default))
+    finally:
+        default.close()
+    out = result.stdout
+    assert "caught" not in out, out + result.stderr
+    assert "Hash mismatch" in out and not mark.exists(), out
+    lines = out.splitlines()
+    closing = lines[max(i for i, line in enumerate(lines) if line.startswith("mintd installed")):]
+    assert closing[0] == "mintd installed (with dvc), but:" and any(_REFUSED in line for line in closing[1:]), out
+    assert _SETTINGS not in out
 
