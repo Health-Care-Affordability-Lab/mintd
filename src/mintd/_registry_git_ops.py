@@ -158,6 +158,10 @@ class RegistryGitOps(Protocol):
     def repo_toplevel(self, work_dir: Path) -> Path: ...
     def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]: ...
     def head_text(self, work_dir: Path, path: str) -> str | None: ...
+    def index_text(self, work_dir: Path, path: str) -> str | None: ...
+    def staged_changes(self, work_dir: Path) -> list[tuple[str, str]]: ...
+    def head_files(self, work_dir: Path) -> list[str]: ...
+    def has_commit(self, work_dir: Path) -> bool: ...
     def head_paths(self, work_dir: Path) -> list[str]: ...
     def commit_paths(self, work_dir: Path, paths: list[str], message: str) -> None: ...
     def branch_info(self, work_dir: Path) -> BranchInfo: ...
@@ -460,6 +464,52 @@ class SubprocessRegistryGitOps:
             if "does not exist in" in e.stderr or "but not in" in e.stderr:
                 return None
             raise
+
+    def index_text(self, work_dir: Path, path: str) -> str | None:
+        """``path`` (relative to ``work_dir``) as staged in the index; None when
+        the index does not hold it. Any other failure raises."""
+        try:
+            return self._git(["show", f":./{path}"], cwd=work_dir)
+        except GitOpError as e:
+            # `:./x` missing from the index: "unknown revision or path not in the working tree"
+            if "not in the working tree" in e.stderr or "does not exist" in e.stderr:
+                return None
+            raise
+
+    def staged_changes(self, work_dir: Path) -> list[tuple[str, str]]:
+        """``(status, path)`` for each path under ``work_dir`` the index changes
+        against HEAD (``A``, ``M``, ``D``, ...), relative to ``work_dir``; a
+        rename shows as a delete and an add. Before the first commit, every
+        staged path is an add."""
+        # -z: unquoted names, so a path with a quote, backslash or tab reads as itself
+        out = self._git(["diff", "--cached", "--name-status", "--no-renames", "--relative", "-z"], cwd=work_dir)
+        parts = out.split("\0")
+        return [(parts[i][0], parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i]]
+
+    def head_files(self, work_dir: Path) -> list[str]:
+        """Every path under ``work_dir`` the HEAD commit tracks, relative to
+        ``work_dir`` (``ls-tree`` lists the current folder by default)."""
+        out = self._git(["ls-tree", "-r", "--name-only", "-z", "HEAD"], cwd=work_dir)
+        return [name for name in out.split("\0") if name]
+
+    def has_commit(self, work_dir: Path) -> bool:
+        """Whether HEAD names a readable commit. False only for a branch with
+        no commit yet: HEAD names a branch that has no ref at all. Anything
+        else (a broken or empty ref, a missing object, not a repository, git
+        missing, a timeout) raises, so a check that can't read the repository
+        can't pass. Asked of git's exit codes, not its messages."""
+        try:
+            self._git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], cwd=work_dir)
+            return True
+        except GitOpError as e:
+            cause = e.__cause__
+            if not (isinstance(cause, subprocess.CalledProcessError) and cause.returncode == 1):
+                raise
+        branch = self._git(["symbolic-ref", "-q", "HEAD"], cwd=work_dir).strip()  # a broken ref fails here
+        # for-each-ref matches a prefix too (`feat` lists `feat/x`): compare names exactly
+        if branch in self._git(["for-each-ref", "--format=%(refname)", branch], cwd=work_dir).splitlines():
+            raise GitOpError(["git", "rev-parse", "--verify", "HEAD^{commit}"], f"HEAD names {branch}, which isn't a commit")
+        return False
 
     def head_paths(self, work_dir: Path) -> list[str]:
         """The repo-relative paths the HEAD commit changed (against its first

@@ -15,7 +15,7 @@ import pytest
 
 from tests._harness.consumer import fresh_project  # noqa: F401
 from tests._harness.mintd import Mintd, mintd, mintd_bin  # noqa: F401
-from tests._harness.producer import LocalProducer, build_local_producer, register
+from tests._harness.producer import LocalProducer, build_local_producer
 from tests._harness.s3 import BUCKET, S3Server
 
 
@@ -58,7 +58,7 @@ def product(
     producer._write_metadata(meta)
     producer.add_output("data/extra/")
     producer.publish(product.outs)
-    register(remote_registry_empty, producer.metadata(), tmp_path / "registry-work")
+    producer.register_in(remote_registry_empty, tmp_path / "registry-work")
     mintd.config.write_text(
         f"registry_url: {remote_registry_empty}\ncache_dir: {tmp_path / 'mintd-cache'}\n", encoding="utf-8"
     )

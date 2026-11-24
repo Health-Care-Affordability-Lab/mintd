@@ -41,6 +41,9 @@ class LocalProducer:
     bare: Path
     work: Path
     remote: Path | Mapping[str, str]
+    #: `(registry, its work clone)` once `register_in` ran: each later
+    #: metadata change updates the catalog entry too, so it never goes stale
+    catalog: tuple[Path, Path] | None = None
 
     @property
     def url(self) -> str:
@@ -59,6 +62,15 @@ class LocalProducer:
         (self.work / "metadata.json").write_text(
             json.dumps(meta, indent=2) + "\n", encoding="utf-8"
         )
+        if self.catalog is not None:  # import reads its outputs from the catalog entry, not from here
+            register(self.catalog[0], meta, self.catalog[1])
+
+    def register_in(self, registry: Path, work: Path) -> None:
+        """Register this producer as its catalog entry, and keep the entry
+        current: every later metadata change (`add_output`, `rename_primary`,
+        `restamp`) registers again."""
+        self.catalog = (registry, work)
+        register(registry, self.metadata(), work)
 
     # -- movement -----------------------------------------------------------
 
@@ -238,14 +250,17 @@ def build_local_producer(root: Path, *, remote: Mapping[str, str] | None = None)
 
 def register(registry: Path, meta: dict, work: Path) -> None:
     """Merge `meta` into the scratch registry as its catalog entry, as an
-    approved registration PR would."""
-    _git(["clone", str(registry), str(work)])
+    approved registration PR would. `work` is the registry clone to do it in,
+    made on the first call; a registered producer registers again in it."""
+    if not (work / ".git").is_dir():
+        _git(["clone", str(registry), str(work)])
     entry = work / "catalog" / meta["project"]["type"] / f"{meta['project']['name']}.yaml"
     entry.parent.mkdir(parents=True, exist_ok=True)  # git keeps no empty folder
     entry.write_text(yaml.safe_dump(meta, sort_keys=False), encoding="utf-8")
     _git(["add", "-A"], cwd=work)
-    _git(["commit", "-m", f"register {meta['project']['name']}"], cwd=work)
-    _git(["push", "origin", "main"], cwd=work)
+    if _git(["status", "--porcelain"], cwd=work):  # a change that leaves the entry as it was commits nothing
+        _git(["commit", "-m", f"register {meta['project']['name']}"], cwd=work)
+        _git(["push", "origin", "main"], cwd=work)
 
 
 @pytest.fixture
