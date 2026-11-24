@@ -291,13 +291,19 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool, V
 
 class VersionAwareRefused(MintdError):
     """A remote's ``version_aware`` or ``worktree`` that dvc reads as neither true
-    nor false, so dvc refuses the whole config (its schema's ``Bool``)."""
+    nor false, so dvc refuses the whole config (its schema's ``Bool``). ``where``
+    is the file the value is in: a clone carries ``.dvc/config`` and never
+    ``.dvc/config.local``, so the fix for one in ``.dvc/config`` is a commit, even
+    where a ``config.local`` overrides it on this machine."""
 
-    def __init__(self, remote: str, key: str, value: object) -> None:
+    def __init__(self, remote: str, key: str, value: object, *, where: str = ".dvc/config") -> None:
+        self.remote, self.key, self.value = remote, key, value
+        committed = where == ".dvc/config"
         super().__init__(
-            f"the DVC remote {remote} sets {key} to {value!r}, which dvc reads as neither true nor false, "
-            "so dvc refuses the config",
-            hint=f"set {key} to true or false in .dvc/config or .dvc/config.local",
+            f"the DVC remote {remote} sets {key} to {value!r} in {where}, which dvc reads as neither true nor false, "
+            f"so dvc refuses the config {'in any clone of the project' if committed else 'on this machine'}",
+            hint=(f"set {key} to true or false in .dvc/config and commit it; a clone doesn't carry .dvc/config.local"
+                  if committed else f"set {key} to true or false in {where}"),
         )
 
 

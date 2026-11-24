@@ -1330,6 +1330,8 @@ def commit_pushed_pointers(
         except GitOpError:
             return left("the repository has no commit yet")
         head = {p: git_ops.head_text(root, p) for p in pts}
+        # `storage.dvc_refused` can't be set here: with config.local overriding the value, the
+        # redirect check refused above; without, push's `prepare` refused the same value first.
         judged = judge_pointers(
             root, pts, head=head, remote_name=default,
             version_aware=storage.dvc_version_aware, selection=selection,

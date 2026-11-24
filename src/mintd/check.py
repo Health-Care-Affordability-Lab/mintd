@@ -204,6 +204,7 @@ def check_project(
     if remote:
         # The remote lane reads the config through the same readers: an error the
         # offline check already said (a version_aware dvc refuses) isn't said twice.
+        # Matching on the message alone is one fact: remote-lane messages name their remote or pointer.
         said = {f.message for f in findings if f.severity == "error"}
         findings.extend(f for f in _check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile)
                         if not (f.severity == "error" and f.message in said))

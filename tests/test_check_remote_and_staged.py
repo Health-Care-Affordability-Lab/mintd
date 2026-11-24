@@ -83,8 +83,10 @@ def _lock(stage: str, md5: str, vid: str | None, *, path: str = "data/x.csv") ->
 
 #: `.dvc/config` shapes dvc refuses to push with: one remote and no default
 #: (`data push --remote` can still have pinned files there), or a `version_aware`
-#: that dvc reads as neither true nor false.
-CONFIGS_DVC_REFUSES = ["no-default-remote", "a-note-after-true", "yes"]
+#: or `worktree` that dvc reads as neither true nor false.
+CONFIGS_DVC_REFUSES = ["no-default-remote", "a-note-after-true", "yes", "worktree-bogus"]
+#: The shapes where the refused value is a version-aware setting.
+VERSION_AWARE_REFUSED = CONFIGS_DVC_REFUSES[1:]
 
 
 def _config_dvc_refuses(proj: Path, how: str) -> tuple[str, str]:
@@ -95,10 +97,17 @@ def _config_dvc_refuses(proj: Path, how: str) -> tuple[str, str]:
         cfg.write_text(text.replace(f"[core]\n    remote = {REMOTE}\n", ""), encoding="utf-8")
         return ("no default DVC remote in .dvc/config",
                 f"set a default: dvc remote default {REMOTE}, and commit .dvc/config")
-    value = {"a-note-after-true": "true ; note", "yes": "yes"}[how]
-    cfg.write_text(text.replace("version_aware = true", f"version_aware = {value}"), encoding="utf-8")
-    return (f"the DVC remote {REMOTE} sets version_aware to {value!r}, which dvc reads as neither true nor false, "
-            "so dvc refuses the config", "set version_aware to true or false in .dvc/config or .dvc/config.local")
+    key, value = {"a-note-after-true": ("version_aware", "true ; note"), "yes": ("version_aware", "yes"),
+                  "worktree-bogus": ("worktree", "bogus")}[how]  # worktree: beside `version_aware = true`
+    line = f"version_aware = {value}" if key == "version_aware" else f"version_aware = true\n    worktree = {value}"
+    cfg.write_text(text.replace("version_aware = true", line), encoding="utf-8")
+    return (f"the DVC remote {REMOTE} sets {key} to {value!r} in .dvc/config, which dvc reads as neither true nor "
+            "false, so dvc refuses the config in any clone of the project",
+            f"set {key} to true or false in .dvc/config and commit it; a clone doesn't carry .dvc/config.local")
+
+
+def _errors(findings) -> list[tuple[str, str, str]]:
+    return [(f.kind, f.message, f.hint) for f in findings if f.severity == "error"]
 
 
 def _remote(findings) -> list[tuple[str, str, str]]:
@@ -447,26 +456,48 @@ def test_remote_refuses_a_remote_it_cant_read_as_dvc_does(pushed, how: str) -> N
     message, hint = _config_dvc_refuses(proj, how)
     findings = check_project(proj, remote=True)
     assert not [f for f in findings if f.kind == "remote_not_checked"]
-    (finding,) = [f for f in findings if f.message == message]
-    assert (finding.severity, finding.hint) == ("error", hint)
+    if how == "no-default-remote":  # the storage check names the missing default too, as before this lane
+        assert _errors(findings) == [
+            ("storage_partial_meta_only", "storage drift detected: partial_meta_only",
+             f".dvc/config has remote '{REMOTE}' but sets no default remote. Run: dvc remote default {REMOTE}"),
+            ("remote_unreadable", message, hint)]
+    else:
+        assert _errors(findings) == [("dvc_state_unreadable", message, hint)]
 
 
 @pytest.mark.parametrize("remote", [False, True], ids=["check", "check-remote"])
-@pytest.mark.parametrize("how", ["a-note-after-true", "yes"])
+@pytest.mark.parametrize("how", VERSION_AWARE_REFUSED)
 def test_a_version_aware_dvc_refuses_is_one_finding(pushed, how: str, remote: bool) -> None:
-    """Unpinned files behind `version_aware = yes`: one finding says dvc refuses
-    the value, where check also said the remote "is version_aware" beside it.
+    """Unpinned files behind `version_aware = yes`: the one error says dvc refuses
+    the value, where check also said the folder can't be delivered, the remote
+    "is version_aware", beside it.
 
-    Mutations: read `yes` as true in the storage check -> a second finding, red;
+    Mutations: read `yes` as true in the storage check -> a second error, red;
     drop the offline check's finding -> none in plain check, red; say the
-    remote lane's again -> two under --remote, red.
+    remote lane's again -> two under --remote, red; read `worktree` only when
+    `version_aware` is unset -> none for `worktree = bogus`, red.
     """
     proj, _, _, files = pushed
     _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
     _commit(proj)
     message, hint = _config_dvc_refuses(proj, how)
-    about = [f for f in check_project(proj, remote=remote) if "version_aware" in f.message]
-    assert [(f.severity, f.message, f.hint) for f in about] == [("error", message, hint)]
+    assert _errors(check_project(proj, remote=remote)) == [("dvc_state_unreadable", message, hint)]
+
+
+def test_a_committed_value_dvc_refuses_is_refused_under_a_local_override(pushed) -> None:
+    """`yes` in .dvc/config under `true` in .dvc/config.local: dvc accepts it here, but
+    a clone carries only .dvc/config. Check still refuses, says so, and offers the fix
+    that clears it: a commit, not config.local.
+
+    Mutation: read the override in the storage check -> no error, red.
+    """
+    proj, _, _, files = pushed
+    _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+    _commit(proj)
+    message, hint = _config_dvc_refuses(proj, "yes")
+    (proj / ".dvc" / "config.local").write_text(f"['remote \"{REMOTE}\"']\n    version_aware = true\n",
+                                               encoding="utf-8")
+    assert _errors(check_project(proj)) == [("dvc_state_unreadable", message, hint)]
 
 
 def test_remote_with_no_remote_at_all_says_so(tmp_path: Path) -> None:
@@ -476,7 +507,7 @@ def test_remote_with_no_remote_at_all_says_so(tmp_path: Path) -> None:
         ("info", "remote_not_checked", "the project has no DVC remote, so nothing is pinned by version to check")]
 
 
-@pytest.mark.parametrize("how", ["a-note-after-true", "yes"])
+@pytest.mark.parametrize("how", VERSION_AWARE_REFUSED)
 def test_push_refuses_a_version_aware_dvc_reads_as_neither_true_nor_false(tmp_path: Path, how: str) -> None:
     """The same reading as check's: push stops before any S3 call, where
     reading it as not version-aware would skip verifying the pins.
@@ -490,6 +521,24 @@ def test_push_refuses_a_version_aware_dvc_reads_as_neither_true_nor_false(tmp_pa
     with pytest.raises(PushRefused) as exc:
         prepare(proj, remote_arg=None, selection=None, aws_profile=None)
     assert (str(exc.value), exc.value.hint) == (message, hint)
+
+
+def test_push_names_config_local_when_the_value_dvc_refuses_is_there(tmp_path: Path) -> None:
+    """`yes` in .dvc/config.local over `true` in .dvc/config: dvc refuses it on this
+    machine only, so the fix is in config.local, and a commit wouldn't clear it.
+
+    Mutation: name .dvc/config whatever file holds the value -> the commit hint, red.
+    """
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    (proj / ".dvc" / "config.local").write_text(f"['remote \"{REMOTE}\"']\n    version_aware = yes\n",
+                                               encoding="utf-8")
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (
+        f"the DVC remote {REMOTE} sets version_aware to 'yes' in .dvc/config.local, which dvc reads as neither true "
+        "nor false, so dvc refuses the config on this machine", "set version_aware to true or false in .dvc/config.local")
 
 
 def test_push_to_a_named_remote_with_no_default_names_the_missing_default(tmp_path: Path) -> None:
