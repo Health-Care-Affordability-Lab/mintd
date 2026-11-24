@@ -63,7 +63,9 @@ def inside(
     p = Path(path)
     if dotdot == "refuse" and ".." in p.parts:
         return None
-    if Path.cwd() / p == Path.cwd() / root:  # pathlib keeps `..`: `link/..` is not the root here
+    # `absolute()` keeps `..` (`link/..` is not the root here) and asks for the working folder only for a
+    # relative path, so absolute paths work from a deleted one, as `relative_to` did.
+    if p.absolute() == Path(root).absolute():
         return "." if root_ok else None  # the root itself, however a link names it, in every mode
     there: str | None
     base: str | None
@@ -129,7 +131,7 @@ def physical(p: Path) -> Path:
     """``p`` where the OS reaches it: its folder with links and ``..`` resolved, since
     ``link/..`` is the folder above where ``link`` points, not the folder ``link`` is in,
     and its own name kept, so a link there is named as the link. ``read="folder"``."""
-    p = Path.cwd() / p  # absolute, its `..` kept
+    p = p.absolute()  # its `..` kept
     if p.name in ("", ".."):
         return Path(os.path.realpath(p))
     return Path(os.path.realpath(p.parent)) / p.name
@@ -137,7 +139,7 @@ def physical(p: Path) -> Path:
 
 def _real_folder(full: Path) -> str | None:
     """:func:`physical`, or None when the folder it resolves holds a link loop."""
-    absolute = Path.cwd() / full
+    absolute = full.absolute()
     if _real(str(absolute if absolute.name in ("", "..") else absolute.parent)) is None:
         return None
     return str(physical(full))

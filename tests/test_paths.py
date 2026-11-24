@@ -178,6 +178,22 @@ def test_a_root_that_is_a_link_is_the_root_in_every_mode(root: Path, read: Read)
     assert inside(linked, linked / "a", read=read) == "a"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows can't delete the working folder")
+@pytest.mark.parametrize("read", ["lexical", "follow", "folder"])
+def test_absolute_paths_need_no_working_folder(root: Path, tmp_path: Path, read: Read,
+                                               monkeypatch: pytest.MonkeyPatch) -> None:
+    """From a working folder since deleted, as `relative_to` answered there.
+
+    Mutation: ask for the working folder for an absolute path -> FileNotFoundError, red."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    assert inside(root, root / "a" / "b", read=read) == "a/b"
+    assert inside(root, root, read=read, root_ok=True) == "."
+    assert inside(root, tmp_path / "elsewhere", read=read) is None
+
+
 def test_wdir_is_for_recorded_paths_only(root: Path) -> None:
     with pytest.raises(ValueError, match="wdir"):
         inside(root, "x", read="lexical", wdir="code")
