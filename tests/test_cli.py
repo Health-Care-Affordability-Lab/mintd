@@ -5373,8 +5373,8 @@ def test_cli_data_import_json_paths_stay_relative_for_a_default_import(
     rc = cli.main(["--json", "data", "import", "demo-xw"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0, payload
-    assert payload["produced"] and all(p.startswith("data/imports/") for p in payload["produced"]), payload
-    assert payload["dest"].startswith("data/imports/"), payload
+    assert payload["produced"] and all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
 
 
 def _import_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fake, *argv: str) -> dict:
@@ -5425,8 +5425,8 @@ def test_cli_data_import_under_a_symlinked_home_stays_short_and_relative(
     (tmp_path / "home").symlink_to(tmp_path / "real", target_is_directory=True)
     monkeypatch.chdir(tmp_path / "home" / "proj")
     payload = _import_json(monkeypatch, capsys, fake)
-    assert all(p.startswith("data/imports/") for p in payload["produced"]), payload
-    assert payload["dest"].startswith("data/imports/"), payload
+    assert all(Path(p).parts[:2] == ("data", "imports") for p in payload["produced"]), payload
+    assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
 
 
 def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
@@ -5441,5 +5441,5 @@ def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
     monkeypatch.chdir(tmp_path / "proj")
     payload = _import_json(monkeypatch, capsys, fake, "--dest-root", str(elsewhere))
     real = os.path.realpath(elsewhere)
-    assert all(Path(p).is_absolute() and p.startswith(real) for p in payload["produced"]), payload
+    assert all(Path(p).is_absolute() and Path(p).is_relative_to(real) for p in payload["produced"]), payload
     assert payload["total_bytes"] == 4096, payload
