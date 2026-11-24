@@ -74,7 +74,8 @@ esac
 
 
 def _run_sh(
-    tmp_path: Path, script: str, *args: str, assets: dict[str, bytes], uv_dir: Path | None = None, **env: str
+    tmp_path: Path, script: str, *args: str, assets: dict[str, bytes], uv_dir: Path | None = None,
+    cwd: Path | None = None, **env: str,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """Runs `script` with stub curl, and stub uv in `uv_dir` (default: the stubs, first on PATH)."""
     stubs, served, home = tmp_path / "stubs", tmp_path / "assets", tmp_path / "home"
@@ -90,7 +91,9 @@ def _run_sh(
     log = tmp_path / "log"
     log.touch()
     full_env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(home), "LOG": str(log), "STUB_ASSETS": str(served), **env}
-    result = subprocess.run(["bash", "-c", script, "install.sh", *args], env=full_env, capture_output=True, text=True)
+    result = subprocess.run(
+        ["bash", "-c", script, "install.sh", *args], env=full_env, capture_output=True, text=True, cwd=cwd
+    )
     return result, log.read_text()
 
 
@@ -308,6 +311,24 @@ def test_install_sh_reads_the_callers_path_without_globbing(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
+@pytest.mark.parametrize("entry", ["a newline in a name", "a trailing colon"])
+def test_install_sh_reads_every_entry_of_the_callers_path(tmp_path: Path, entry: str) -> None:
+    """A newline is part of a directory name, and an empty entry (a trailing ':') is the current directory."""
+    bin_dir = tmp_path / ("new\nline" if entry == "a newline in a name" else "bin")  # uv's bin dir
+    _exe(bin_dir, "mintd", "mintd 9.9.9")
+    _exe(bin_dir, "dvc", "3.67.1")
+    if entry == "a newline in a name":
+        path, cwd = f"{tmp_path / 'stubs'}:{bin_dir}:/usr/bin:/bin", None
+    else:
+        path, cwd = f"{tmp_path / 'stubs'}:/usr/bin:/bin:", bin_dir
+    result, _ = _run_sh(
+        tmp_path, _STAMPED_SH, assets=_release_assets(), cwd=cwd, PATH=path, STUB_UV_BIN=str(bin_dir)
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1].startswith("mintd installed successfully"), result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="install.sh is the POSIX installer")
 @pytest.mark.parametrize("python_there", [True, False])
 def test_stamped_install_sh_finds_the_tool_python_where_uv_keeps_its_tools(tmp_path: Path, python_there: bool) -> None:
     tools = tmp_path / "mytools"  # UV_TOOL_DIR, as `uv tool dir` reports it
@@ -456,28 +477,35 @@ def _run_stamped_ps1(
     uv_says: str = "uv 0.13.9",
     uv_fails: bool = False,
     path: tuple[Path, ...] = (),
+    bin_name: str = "bin",
+    tools_name: str = "tools",
+    tool_python: bool = True,
+    temp: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     """The stamped install.ps1 under `irm | iex`, from a session whose
     preferences are not the defaults. Downloads come from tmp_path; `uv` only
-    records what it was asked, and says `uv_says` for --version, tmp_path/bin
-    for `tool dir --bin` and tmp_path/tools for `tool dir`; PATH is `path` alone.
+    records what it was asked, and says `uv_says` for --version, tmp_path/`bin_name`
+    for `tool dir --bin` and tmp_path/`tools_name` for `tool dir`; PATH is `path` alone.
+    The tool's python.exe is under the latter when `tool_python`, and always at
+    the %LOCALAPPDATA% guess the script must not use. `temp` is the session's temp folder.
     Returns the run, its last line of output the session check, and the log."""
     for name, data in _release_assets(sha256).items():
         (tmp_path / name).write_bytes(data)
     (tmp_path / "install.ps1").write_text(PS1.replace('\n$MintdTag = ""\n', '\n$MintdTag = "v9.9.9"\n'))
-    tool_python = tmp_path / "local" / "uv" / "tools" / "mintd" / "Scripts" / "python.exe"
-    tool_python.parent.mkdir(parents=True, exist_ok=True)
-    tool_python.touch()
+    for tools in [tmp_path / "local" / "uv" / "tools", *([tmp_path / tools_name] if tool_python else [])]:
+        (tools / "mintd" / "Scripts").mkdir(parents=True, exist_ok=True)
+        (tools / "mintd" / "Scripts" / "python.exe").touch()
     log = tmp_path / "log"
     script = (
         f"$env:LOCALAPPDATA = {_ps(str(tmp_path / 'local'))}\n"
         f"$env:PATH = {_ps(os.pathsep.join(map(str, path)))}\n"
-        "function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) "
+        + (f"$env:TMPDIR = {_ps(str(temp))}; $env:TEMP = {_ps(str(temp))}\n" if temp else "")
+        + "function Invoke-WebRequest { param($Uri, $OutFile, [switch]$UseBasicParsing) "
         f"Add-Content {_ps(str(log))} \"get $Uri\"; Copy-Item (Join-Path {_ps(str(tmp_path))} ($Uri -split '/')[-1]) $OutFile }}\n"
         f"function uv {{ Add-Content {_ps(str(log))} \"uv $($args -join ' ')\"; $global:LASTEXITCODE = 0\n"
         f"  if ($args[0] -eq '--version') {{ {_ps(uv_says)} }}\n"
-        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ if ($args -contains '--bin') {{ {_ps(str(tmp_path / 'bin'))} }}"
-        f" else {{ {_ps(str(tmp_path / 'tools'))} }} }}\n"
+        f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'dir') {{ if ($args -contains '--bin') {{ {_ps(str(tmp_path / bin_name))} }}"
+        f" else {{ {_ps(str(tmp_path / tools_name))} }} }}\n"
         f"  elseif ($args[0] -eq 'tool' -and $args[1] -eq 'install') {{ $global:LASTEXITCODE = {int(uv_fails)} }} }}\n"
         + _SESSION_BEFORE
         + f"try {{ Invoke-Expression (Get-Content -Raw {_ps(str(tmp_path / 'install.ps1'))}) *>&1 | ForEach-Object {{ \"$_\" }} }}"
@@ -597,3 +625,77 @@ def test_stamped_install_ps1_names_a_dvc_it_replaces(
     lines = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
     want = f"Replaced {tmp_path / 'bin' / 'dvc.exe'}, a dvc that was not mintd's, with the dvc installed with mintd."
     assert lines == ([want] if replaced else [])
+
+
+@_NEEDS_PWSH
+@pytest.mark.parametrize(
+    "which",
+    [
+        pytest.param("uv's bin", marks=pytest.mark.skipif(os.name == "nt", reason="chmod 000 locks nothing on Windows")),
+        pytest.param("mintd's", marks=pytest.mark.skipif(os.name == "nt", reason="chmod 000 locks nothing on Windows")),
+        "a folder in uv's bin",
+    ],
+)
+def test_stamped_install_ps1_installs_when_a_dvc_cant_be_read(tmp_path: Path, which: str) -> None:
+    """A dvc.exe that can't be read (antivirus, another installer) or a folder in its
+    place never stops the install: it counts as not mintd's."""
+    bin_dvc, mintds = tmp_path / "bin" / "dvc.exe", tmp_path / "tools" / "mintd" / "Scripts" / "dvc.exe"
+    mintds.parent.mkdir(parents=True)
+    mintds.write_bytes(b"mintd's dvc")
+    bin_dvc.parent.mkdir()
+    if which == "a folder in uv's bin":
+        bin_dvc.mkdir()
+    else:
+        bin_dvc.write_bytes(b"mintd's dvc")
+        (bin_dvc if which == "uv's bin" else mintds).chmod(0)
+    try:
+        result, ran = _run_stamped_ps1(tmp_path)
+    finally:
+        for f in (bin_dvc, mintds):
+            if f.is_file():
+                f.chmod(0o644)
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    assert "uv tool install " in ran
+    want = f"Replaced {bin_dvc}, a dvc that was not mintd's, with the dvc installed with mintd."
+    assert want in result.stdout.splitlines(), result.stdout
+
+
+@_NEEDS_PWSH
+@pytest.mark.parametrize(("in_bin", "replaced"), [(b"a dvc of its own", True), (b"mintd's dvc", False)])
+def test_stamped_install_ps1_reads_folders_with_brackets_literally(tmp_path: Path, in_bin: bytes, replaced: bool) -> None:
+    """'b[1]' and 't[1]' are folder names, not wildcards: both dvc.exe files are found and compared."""
+    bin_dir, scripts = tmp_path / "b[1]", tmp_path / "t[1]" / "mintd" / "Scripts"
+    bin_dir.mkdir()
+    scripts.mkdir(parents=True)
+    (bin_dir / "dvc.exe").write_bytes(in_bin)
+    (scripts / "dvc.exe").write_bytes(b"mintd's dvc")
+    result, ran = _run_stamped_ps1(tmp_path, bin_name="b[1]", tools_name="t[1]")
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    assert f"uv pip install --python {scripts / 'python.exe'} " in ran, ran  # the tool's Python, found too
+    lines = [line for line in result.stdout.splitlines() if line.startswith("Replaced ")]
+    want = f"Replaced {bin_dir / 'dvc.exe'}, a dvc that was not mintd's, with the dvc installed with mintd."
+    assert lines == ([want] if replaced else []), result.stdout
+
+
+@_NEEDS_PWSH
+def test_stamped_install_ps1_checks_the_wheel_in_a_temp_folder_with_brackets(tmp_path: Path) -> None:
+    """A temp folder like 'tmp[2]' is a name, not a wildcard: the wheel's hash is still checked, and it installs."""
+    temp = tmp_path / "tmp[2]"
+    temp.mkdir()
+    result, ran = _run_stamped_ps1(tmp_path, temp=temp)
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    assert re.search(r"^uv tool install .*tmp\[2\].*mintd-9\.9\.9-py3-none-any\.whl$", ran, re.M), ran
+    assert list(temp.iterdir()) == []  # and its own folder there is removed afterwards
+
+
+@_NEEDS_PWSH
+@pytest.mark.parametrize("python_there", [True, False])
+def test_stamped_install_ps1_finds_the_tool_python_where_uv_keeps_its_tools(tmp_path: Path, python_there: bool) -> None:
+    """`uv tool dir` locates the tool's Python, as it locates mintd's dvc.exe; the
+    %LOCALAPPDATA% guess is never used."""
+    result, ran = _run_stamped_ps1(tmp_path, tool_python=python_there)
+    assert "caught" not in result.stdout, result.stdout + result.stderr
+    python = tmp_path / "tools" / "mintd" / "Scripts" / "python.exe"
+    assert (f"uv pip install --python {python} " in ran) is python_there, ran
+    assert ("uv pip install " in ran) is python_there, ran
+    assert ("Could not locate mintd tool Python" in result.stdout) is not python_there, result.stdout

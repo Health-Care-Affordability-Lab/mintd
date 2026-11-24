@@ -43,9 +43,12 @@ physical() {
 # below changes only for this script. (`PATH=... command -v` would answer
 # from bash's hash table.)
 on_caller_path() {
-    local dir dirs
-    IFS=: read -r -a dirs <<< "$CALLER_PATH"   # split without globbing
-    for dir in ${dirs[@]+"${dirs[@]}"}; do
+    # Split on ':' by hand: no globbing, a newline is part of a name, and an
+    # empty entry (a trailing ':' included) is the current directory.
+    local dir rest="$CALLER_PATH:"
+    while [[ -n "$rest" ]]; do
+        dir="${rest%%:*}"
+        rest="${rest#*:}"
         if [[ -f "${dir:-.}/$1" && -x "${dir:-.}/$1" ]]; then
             echo "${dir:-.}/$1"
             return 0
