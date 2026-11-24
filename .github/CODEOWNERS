@@ -1,9 +1,9 @@
 # Changes to CI, install scripts, the story harness, lint settings and pinned dependencies need the maintainer's review.
-/.github/ @daltonmaurice
-/install.sh @daltonmaurice
-/install.ps1 @daltonmaurice
-/tests/_harness/ @daltonmaurice
-/tests/stories/ @daltonmaurice
-/tests/conftest.py @daltonmaurice
-/pyproject.toml @daltonmaurice
-/uv.lock @daltonmaurice
+/.github/ @Health-Care-Affordability-Lab/maintainers
+/install.sh @Health-Care-Affordability-Lab/maintainers
+/install.ps1 @Health-Care-Affordability-Lab/maintainers
+/tests/_harness/ @Health-Care-Affordability-Lab/maintainers
+/tests/stories/ @Health-Care-Affordability-Lab/maintainers
+/tests/conftest.py @Health-Care-Affordability-Lab/maintainers
+/pyproject.toml @Health-Care-Affordability-Lab/maintainers
+/uv.lock @Health-Care-Affordability-Lab/maintainers
