@@ -2551,6 +2551,30 @@ def test_cli_publish_blocked_names_the_field_of_a_finding_with_no_file(
     assert rc == 1
     assert "data_products.outputs[0].description: Field required" in captured.out + captured.err, captured
 
+def test_cli_publish_blocked_list_prints_a_multi_line_hint_aligned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, patched_git_ops
+) -> None:
+    """publish's blocked list prints a finding's hint of several lines with
+    each line under the first, after the 💡, as check does: here the hint for
+    a file placed in a tracked folder (an empty `.dir`) and not recorded.
+
+    Mutation: publish's renderer back to one f-string -> red."""
+    stage_dvc_project(tmp_path)
+    (tmp_path / "data" / "final").mkdir(parents=True)
+    (tmp_path / "data" / "final.dvc").write_text(
+        "outs:\n- md5: d751713988987e9331980363e24189ce.dir\n  size: 0\n  nfiles: 0\n  hash: md5\n  path: final\n")
+    (tmp_path / "data" / "final" / "placed.csv").write_text("p\n")
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    lines = capsys.readouterr().err.splitlines()
+    assert rc == 1
+    i = lines.index("    💡 to record the folder again: mintd data add data/final")
+    assert lines[i + 1:i + 3] == ["       to leave a file out instead, list it in .dvcignore",
+                                  "       then check again: mintd check"]
+
+
 def test_cli_publish_full_flow_calls_each_op(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -3579,6 +3603,25 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
 
     assert len(captured) == 4
     assert all(r is recording_reporter for r in captured)
+
+
+@pytest.mark.parametrize("json_out", [False, True], ids=["text", "json"])
+def test_a_multi_line_finding_hint_prints_aligned_under_its_first_line(capsys, json_out: bool) -> None:
+    """A hint of several lines prints each under the first, after the 💡, not
+    at column 0. --json keeps the hint as one string with its newlines.
+
+    Mutation: print the hint in one f-string again -> the text case red."""
+    f = CheckFinding(severity="error", section="producer", message="m", kind="dvc_folder_unlisted",
+                     hint="to record the folder again: mintd data add data/final\nthen check again: mintd check")
+    cli._render_findings([f], json_out=json_out)
+    out = capsys.readouterr().out
+    if json_out:
+        assert json.loads(out.splitlines()[0])["hint"] == f.hint
+    else:
+        lines = out.splitlines()
+        i = next(n for n, line in enumerate(lines) if "💡" in line)
+        assert lines[i] == "    💡 to record the folder again: mintd data add data/final"
+        assert lines[i + 1] == "       then check again: mintd check"
 
 
 def test_no_handler_calls_sys_stderr_directly() -> None:
