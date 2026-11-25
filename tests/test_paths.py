@@ -31,6 +31,7 @@ def root(tmp_path: Path) -> Path:
 @pytest.mark.parametrize(("path", "want"), [
     ("data/x.csv", "data/x.csv"),
     ("a/../b", "b"),
+    ("..a", "..a"),  # a name that starts with two dots, not `..`
     ("sub/..", None),  # the project root itself: not an out
     ("..", None),
     ("a/../../x", None),
