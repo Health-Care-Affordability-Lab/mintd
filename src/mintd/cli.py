@@ -1713,18 +1713,23 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     print(f"removed: {args.name}")
     if not left:
         return 0
-    shown = ", ".join(f"{p}/" if Path(p).is_dir() else p for p in left)
-    reporter.info(f"DVC no longer tracks it; the data stays on disk: {shown}")
+    def shown(paths: list[str]) -> str:
+        return ", ".join(f"{p}/" if Path(p).is_dir() else p for p in paths)
+
+    reporter.info(f"DVC no longer tracks it; the data stays on disk: {shown(left)}")
     # dvc remove also drops the pointer's .gitignore line, so git may now see
     # the data as untracked, ready for the next `git add` to commit it.
+    # Untracked: what git lists, less what it ignores and what HEAD tracks.
     try:
         git = _resolve_git_ops(config, reporter)
-        untracked = sorted(set(git.listed_files(Path("."), left)) - set(git.ignored_files(Path("."), left)))
+        tracked = set(git.head_files(Path("."))) if git.has_commit(Path(".")) else set()
+        untracked = set(git.listed_files(Path("."), left)) - set(git.ignored_files(Path("."), left)) - tracked
     except GitOpError:  # not a git repository, or git failed: nothing to warn about
-        untracked = []
-    if untracked:
-        reporter.warn(f"git now sees {len(untracked)} file(s) in {shown} as untracked: a `git add` would commit them")
-        reporter.warn(f"to keep them out: delete them, or add {shown} to .gitignore")
+        untracked = set()
+    seen = [p for p in left if any(f == p or f.startswith(f"{p}/") for f in untracked)]
+    if seen:
+        reporter.warn(f"git now sees {len(untracked)} file(s) in {shown(seen)} as untracked: a `git add` would commit them")
+        reporter.warn(f"to keep them out: delete them, or add {shown(seen)} to .gitignore")
     return 0
 
 

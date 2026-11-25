@@ -1448,7 +1448,7 @@ def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
         else:  # a stage of the root dvc.yaml; dvc.lock's out paths are project-relative
             stage = name.removeprefix("dvc.yaml:")
             outs = [o.path for o in parse_dvc_lock_outs(project_path, "") if o.stage == stage]
-    except MintdError:  # a file dvc can't read either: dvc remove reports it
+    except (MintdError, OSError):  # a file dvc can't read (or a folder named x.dvc): dvc remove reports it
         outs = []
     dvc_ops.remove(name, cwd=project_path)
     left = [posixpath.normpath(rel) for rel in outs]

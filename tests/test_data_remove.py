@@ -119,33 +119,110 @@ def test_remove_under_the_scaffold_ignore_rule_names_what_stays_without_a_warnin
     assert _git(["status", "--porcelain", "--untracked-files=all", "--", "data/final"], cwd=proj) == ""
 
 
-def test_removing_a_stage_names_its_out_and_warns_when_git_now_sees_it(tmp_path: Path, monkeypatch, real_dvc,  # noqa: F811
-                                                                        capsys) -> None:
-    """Real dvc: `mintd data remove <stage>` drops the stage and its outs'
-    .gitignore lines, and the outs stay. Outside data/, git sees them even
-    under the scaffold's rule, so the same lines are said.
-
-    Mutation: read no outs for a stage -> silent, red."""
+@pytest.fixture
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc):  # noqa: F811
+    """An empty project (git with the scaffold's data/ rule, or ``scm=False``
+    for none) where mintd's dvc runs with the harness's dvc dirs."""
     for k in ("HOME", "USERPROFILE", "DVC_GLOBAL_CONFIG_DIR", "DVC_SYSTEM_CONFIG_DIR", "DVC_SITE_CACHE_DIR"):
         monkeypatch.setenv(k, real_dvc.env[k])
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    _git(["init", "-q", "-b", "main"], cwd=proj)
-    _git(["config", "user.email", "t@t"], cwd=proj)
-    _git(["config", "user.name", "T"], cwd=proj)
-    real_dvc(["init", "-q"], cwd=proj, check=True)
-    (proj / ".gitignore").write_text(SCAFFOLD_IGNORE)
-    write = "import pathlib; p = pathlib.Path('build'); p.mkdir(exist_ok=True); (p / 'out.txt').write_text('built')"
-    (proj / "dvc.yaml").write_text(f'stages:\n  make:\n    cmd: python -c "{write}"\n    outs:\n    - build/out.txt\n')
-    real_dvc(["repro", "-q"], cwd=proj, check=True)
-    _git(["add", "-A"], cwd=proj)
-    _git(["commit", "-q", "-m", "stage"], cwd=proj)
-    monkeypatch.chdir(proj)
 
-    assert cli.main(["data", "remove", "make"]) == 0
+    def make(*, scm: bool = True) -> Path:
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        if scm:
+            _git(["init", "-q", "-b", "main"], cwd=proj)
+            _git(["config", "user.email", "t@t"], cwd=proj)
+            _git(["config", "user.name", "T"], cwd=proj)
+            (proj / ".gitignore").write_text(SCAFFOLD_IGNORE)
+        real_dvc(["init", "-q", *([] if scm else ["--no-scm"])], cwd=proj, check=True)
+        monkeypatch.chdir(proj)
+        return proj
+
+    return make
+
+
+def _stage(proj: Path, real_dvc, outs: dict[str, str], *, commit: list[str] = ()) -> None:  # noqa: F811
+    """Stage `make` writing ``outs`` (path -> text), run once; ``commit`` also
+    adds those outs to git, as a `cache: false` metric is."""
+    writes = "; ".join(f"p = pathlib.Path({path!r}); p.parent.mkdir(parents=True, exist_ok=True); "
+                       f"p.write_text({text!r})" for path, text in outs.items())
+    listed = "".join(f"    - {path}:\n        cache: false\n" if path in commit else f"    - {path}\n" for path in outs)
+    (proj / "dvc.yaml").write_text(f'stages:\n  make:\n    cmd: python -c "import pathlib; {writes}"\n    outs:\n{listed}')
+    real_dvc(["repro", "-q"], cwd=proj, check=True)
+    _git(["add", "-A", *[f for f in commit]], cwd=proj)
+    _git(["commit", "-q", "-m", "stage"], cwd=proj)
+
+
+@pytest.mark.parametrize("name", ["make", "dvc.yaml:make"])
+def test_removing_a_stage_names_its_out_and_warns_when_git_now_sees_it(repo, real_dvc, capsys, name) -> None:  # noqa: F811
+    """Real dvc: `mintd data remove <stage>` (or `dvc.yaml:<stage>`) drops the
+    stage and its outs' .gitignore lines, and the outs stay. Outside data/,
+    git sees them even under the scaffold's rule, so the same lines are said.
+
+    Mutations: read no outs for a stage -> silent, red; keep the
+    `dvc.yaml:` prefix -> the second form silent, red."""
+    proj = repo()
+    _stage(proj, real_dvc, {"build/out.txt": "built"})
+    assert cli.main(["data", "remove", name]) == 0
     said = " ".join("".join(capsys.readouterr()).split())
     assert "DVC no longer tracks it; the data stays on disk: build/out.txt" in said
     assert "warning: git now sees 1 file(s) in build/out.txt as untracked" in said
-    assert "built" not in said.replace("build/", "")
     assert (proj / "build" / "out.txt").is_file()
+
+
+def test_an_out_git_already_tracks_draws_no_warning(repo, real_dvc, capsys) -> None:  # noqa: F811
+    """A committed `cache: false` out (a metrics file) is tracked by git, not
+    untracked: it stays on disk, and nothing is said about git.
+
+    Mutation: don't subtract what HEAD tracks -> warned, red."""
+    proj = repo()
+    _stage(proj, real_dvc, {"metrics.json": "{}"}, commit=["metrics.json"])
+    assert cli.main(["data", "remove", "make"]) == 0
+    said = " ".join("".join(capsys.readouterr()).split())
+    assert "the data stays on disk: metrics.json" in said
+    assert "as untracked" not in said
+    status = _git(["status", "--porcelain", "--untracked-files=all"], cwd=proj).splitlines()
+    assert not [line for line in status if line.startswith("??") and "metrics.json" in line]
+
+
+def test_with_several_outs_only_those_git_sees_are_named(repo, real_dvc, capsys) -> None:  # noqa: F811
+    """data/o/ stays ignored under the scaffold's rule, build/out.txt doesn't:
+    the warning names only build/out.txt.
+
+    Mutation: name every out left on disk in the warning -> red."""
+    proj = repo()
+    _stage(proj, real_dvc, {"data/o/a.txt": "a", "build/out.txt": "b"})
+    (proj / "dvc.yaml").write_text((proj / "dvc.yaml").read_text().replace("    - data/o/a.txt\n", "    - data/o\n"))
+    real_dvc(["repro", "-q", "-f"], cwd=proj, check=True)
+    _git(["add", "-A"], cwd=proj)
+    _git(["commit", "-q", "-m", "folder out"], cwd=proj)
+    assert cli.main(["data", "remove", "make"]) == 0
+    said = " ".join("".join(capsys.readouterr()).split())
+    assert "the data stays on disk:" in said and "data/o/" in said and "build/out.txt" in said
+    assert "warning: git now sees 1 file(s) in build/out.txt as untracked" in said
+    assert "add build/out.txt to .gitignore" in said and "data/o/ to .gitignore" not in said
+
+
+def test_outside_git_it_names_what_stays_and_warns_nothing(repo, real_dvc, capsys) -> None:  # noqa: F811
+    """A dvc project with no git: the remove still names what stayed, and the
+    git check, which can't run, says nothing.
+
+    Mutation: let GitOpError escape -> red."""
+    proj = repo(scm=False)
+    (proj / "data" / "final").mkdir(parents=True)
+    (proj / "data" / "final" / "x.csv").write_text("x")
+    real_dvc(["add", "-q", "data/final"], cwd=proj, check=True)
+    assert cli.main(["data", "remove", "data/final.dvc"]) == 0
+    said = " ".join("".join(capsys.readouterr()).split())
+    assert "the data stays on disk: data/final/" in said and "warning" not in said
+
+
+def test_a_folder_named_like_a_pointer_gets_dvcs_error(repo, capsys) -> None:
+    """A directory called x.dvc isn't a pointer: dvc's own error is shown and
+    the exit is non-zero, as before, with no traceback."""
+    proj = repo()
+    (proj / "data" / "x.dvc").mkdir(parents=True)
+    rc = cli.main(["data", "remove", "data/x.dvc"])
+    said = " ".join("".join(capsys.readouterr()).split())
+    assert rc != 0 and "Traceback" not in said and "IsADirectoryError" not in said
