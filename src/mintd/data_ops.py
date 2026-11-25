@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import re
 import hashlib
 import shlex
@@ -35,28 +36,38 @@ from ._dvc_ops import (
     DvcStorageKeyError,
     pull_retry_hint,
 )
-from ._fast_sync_ops import (
+from ._dvc_state import (
     DvcOut,
-    FastSyncOps,
     PointerCutShort,
-    cached_targets,
     discover_all_outs,
     outs_for_target,
     outs_materialized,
+    parse_dvc_lock_outs,
+    parse_dvc_outs,
     partition_pipeline_outs,
+    remote_key,
     resolve_target_outs,
     skipped_targets,
 )
+from ._fast_sync_ops import (
+    FastSyncOps,
+    cached_targets,
+    ensure_out_cached,
+)
 from ._dvc_state import (
+    _all_dvc_outs,
     _names_a_stage,
     abbreviate,
     does_not_parse,
+    dvc_cache_dir,
     judge_pointers,
+    outs_matching,
     push_targets,
+    require_default_remote,
     stages_behind,
     with_outputs,
-    unlisted_on_disk,
 )
+from ._pin_proof import unlisted_on_disk
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path, specific_hint
 from ._storage_state import inspect_storage
@@ -836,7 +847,10 @@ def data_pull(
             f"{target}: DVC skips {pointer} because .gitignore rules exclude it, so it can't be pulled; "
             "change the .gitignore, or drop this target"
         )
-    remote_name = remote or _default_dvc_remote(project_path) or "origin"
+    default_remote = remote_key(remote) if remote else _default_dvc_remote(project_path)
+    # "" names no remote: a pull of imports alone reads only their producers' buckets, and
+    # dvc pull needs no remote of this project for them either. Anything else does (below).
+    remote_name = default_remote or ""
 
     # dvc.lock stage outs are discovered ONLY on pull-all. A targeted pull
     # of a bare stage-out path (e.g. `data pull data/staged`, no .dvc file)
@@ -881,6 +895,23 @@ def data_pull(
             )
         else:
             logger.info("no .dvc targets and no pipeline outs discovered")
+
+    if default_remote is None:
+        # dvc pull needs no remote of this project for imports or for what its cache holds; for other
+        # data this asks for one before dvc runs, saying how to set one. A target that reaches no out
+        # with a hash (a typo, an import made with --no-download, a stage named by its stage name) is
+        # left to dvc, which lands it or says why. Stricter than dvc for an out with its own `remote:`.
+        cache_dir = dvc_cache_dir(project_path)
+        tracked: list[DvcOut] | None = None
+        needed = list(all_pipeline)
+        for t in targets or []:
+            outs = outs_for_target(project_path, t, remote_name)
+            if not outs:  # a path at, inside or above an out, a pointer's or dvc.lock's
+                tracked = _all_dvc_outs(project_path, remote_name) if tracked is None else tracked
+                outs = [o for o in outs_matching(project_path, t, remote_name, outs=tracked) if o.use_cache]
+            needed += outs
+        if not all(o.is_import or ensure_out_cached(cache_dir, o) for o in needed):
+            require_default_remote(project_path, local_ok=True)
 
     total_bytes = _compute_total_bytes(
         project_path, targets or [], pipeline_outs, remote_name,
@@ -1000,31 +1031,12 @@ def data_pull(
 
 
 def _default_dvc_remote(project_path: Path) -> str | None:
-    """Pick the dvc remote name for the project.
+    """The project's default DVC remote, as dvc picks it (``_dvc_state.default_remote_name``:
+    ``core.remote`` from ``.dvc/config.local`` over ``.dvc/config``); ``None`` when there is
+    none. A config dvc can't read stops here with its ``MintdError``."""
+    from ._dvc_state import default_remote_name
 
-    Order:
-      1. ``[core] remote = <name>`` if present (DVC's standard default).
-      2. The single ``[remote "..."]`` section if there's exactly one
-         (covers freshly-cloned data products: their .dvc/config typically
-         declares one remote per product and no [core] default).
-      3. None — caller defaults to "origin".
-
-    Name-resolution logic is hoisted into
-    ``_fast_sync_ops._default_remote_name_from_config`` so it is written once
-    (shared with ``parse_remote_config_text``'s default-remote path).
-    """
-    import configparser
-
-    from ._fast_sync_ops import _default_remote_name_from_config
-    config_file = project_path / ".dvc" / "config"
-    if not config_file.is_file():
-        return None
-    cp = configparser.ConfigParser()
-    try:
-        cp.read(config_file)
-    except configparser.Error:
-        return None
-    return _default_remote_name_from_config(cp)
+    return default_remote_name(project_path)
 
 
 def _cut_short_hint(pointers: list[str]) -> str:
@@ -1047,9 +1059,9 @@ def data_push(
     aws_profile: str | None = None,
     memo_path: Path | None = None,
 ) -> PushSummary:
-    # Resolve the effective remote for display only (explicit > .dvc/config >
-    # "origin"); the actual dvc push still gets the raw ``remote`` so dvc
-    # applies its own default when None. ``targets=None`` pushes everything
+    # The effective remote is the explicit one, else .dvc/config's default; with
+    # neither, push stops here, as dvc push does. dvc still gets the raw ``remote``
+    # and applies its own default when None. ``targets=None`` pushes everything
     # tracked (dvc's default) in one argv.
     #
     # Push needs no fast-sync analog — it uploads from an intact local cache.
@@ -1061,7 +1073,8 @@ def data_push(
     # ``.dvc`` paths with bare paths uploads only the last ``.dvc`` target's
     # outs at exit 0 (the ``index_from_targets`` leak ``_shape_groups``
     # documents), so the groups are never mixed.
-    effective_remote = remote or _default_dvc_remote(project_path) or "origin"
+    remote = remote_key(remote) if remote else remote
+    effective_remote = remote or require_default_remote(project_path)  # dvc push refuses with no default too
     groups: list[list[str] | None] = [None]
     selection: frozenset[str] | None = None
     if targets:
@@ -1247,26 +1260,19 @@ def _local_redirect(root: Path, default: str, *, named: bool) -> str | None:
     records version IDs (or an object layout) importers cannot use, or checks
     them against a service importers don't read. ``named``: the
     push named its remote (``--remote``), so ``[core] remote`` did not pick it."""
-    import configparser
+    from ._dvc_state import read_dvc_config
 
-    from ._storage_state import _extract_remote_section_name
-
-    parser = configparser.ConfigParser(strict=False, interpolation=None)
-    try:
-        parser.read(root / ".dvc" / "config.local", encoding="utf-8")
-    except configparser.Error:
-        return None
-    local = parser.get("core", "remote", fallback="")
-    if local and local != default and not named:
-        return f".dvc/config.local sends pushes to {local}; importers pull from the default remote {default}"
-    for section in parser.sections():
-        if _extract_remote_section_name(section) == default:
-            keys = sorted(
-                k for k in ("url", "version_aware", "worktree", "endpointurl", "endpoint")  # worktree: version-aware too
-                if parser.has_option(section, k)
-            )
-            if keys:
-                return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
+    local = read_dvc_config(root, "local")  # dvc can't push with an unreadable one either: its MintdError stops here
+    redirected = local.get("core", {}).get("remote", "")
+    if redirected and redirected != default and not named:
+        return f".dvc/config.local sends pushes to {redirected}; importers pull from the default remote {default}"
+    section = local["remote"].get(default, {})
+    keys = sorted(
+        k for k in ("url", "version_aware", "worktree", "endpointurl", "endpoint")  # worktree: version-aware too
+        if k in section
+    )
+    if keys:
+        return f".dvc/config.local overrides {default}'s {' and '.join(keys)}; importers use .dvc/config's"
     return None
 
 
@@ -1311,7 +1317,7 @@ def commit_pushed_pointers(
     default = storage.dvc_remote_name
     if default is None:
         return left("no default DVC remote in .dvc/config")
-    if remote is not None and remote != default:
+    if remote is not None and remote_key(remote) != default:
         return left(f"pushed to --remote {remote}; importers pull from the default remote {default}")
     redirect = _local_redirect(root, default, named=remote is not None)
     if redirect is not None:
@@ -1431,5 +1437,23 @@ def data_verify(
     return dvc_ops.status(targets=targets, cwd=project_path)
 
 
-def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> None:
+def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
+    """Stop tracking ``name`` with dvc (`dvc remove`, without `--outs`): the
+    pointer, or the stage, and its .gitignore lines go; the data stays.
+    Returns the outs it named that are still on disk, repo-relative, for the
+    caller to name; never their contents."""
+    try:
+        if name.endswith(".dvc"):  # its out paths are relative to its folder
+            outs = [posixpath.join(posixpath.dirname(name), o.path) for o in parse_dvc_outs(project_path / name, "")]
+        else:  # a stage of the root dvc.yaml; dvc.lock's out paths are project-relative
+            stage = name.removeprefix("dvc.yaml:")
+            outs = [o.path for o in parse_dvc_lock_outs(project_path, "") if o.stage == stage]
+    except (MintdError, OSError):  # a file dvc can't read (or a folder named x.dvc): dvc remove reports it
+        outs = []
     dvc_ops.remove(name, cwd=project_path)
+    left = [posixpath.normpath(rel) for rel in outs]
+    # An out outside the project (`cache: false` allows ../x or /abs) is neither
+    # probed nor named. A lexical check, until the shared path check takes it over.
+    inside = [rel for rel in left if rel != ".." and not rel.startswith("../") and not Path(rel).is_absolute()
+              and not posixpath.isabs(rel)]
+    return [rel for rel in inside if (project_path / rel).exists()]

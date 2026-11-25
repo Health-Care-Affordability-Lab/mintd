@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mintd._fast_sync_ops import cache_path_for
+from mintd._dvc_state import cache_path_for
 from mintd._pin_proof import (
     NO_ID,
     STALE_ID,

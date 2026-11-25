@@ -24,7 +24,7 @@ Why: the producer section of `mintd check` is what a project owner is responsibl
 
 ### Consumer
 
-A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project also records subscriptions in `enclave_manifest.yaml`. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd data import <name> --bump`, `mintd enclave bump`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
+A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd import`, the same command as `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project also records subscriptions in `enclave_manifest.yaml`. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd import <name> --bump`, `mintd enclave bump`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
 
 Why: the consumer section of `mintd check` is what a project owner is responsible for keeping current as upstreams move.
 
@@ -89,7 +89,7 @@ Why it runs even when validation failed: drift is independent of metadata-schema
 
 ### Delivery gate (`Delivery` / `DeliveryState`)
 
-`_dvc_state.delivery` answers, offline from a tree's pointers and `dvc.lock`, whether `mintd data import <path>` would land bytes. States: `pinned`, `via_parent` (under a pinned `.dir` out), `untracked`, `not_pullable` (only `cache: false` or `dvc import` outs), `unpinned` / `partial` (on a version-aware remote, no / some files carry an S3 version ID), `missing_from_manifest`. Only `pinned` and `via_parent` are deliverable. `check` runs it on the primary and every `outputs[].path` and emits one `data_products_output_<state>` error per undeliverable path (`partial` reports as `unpinned`). When an import with a recorded pin lands no file, `data import` runs the same function on the producer's tree at that pin; if the tree cannot deliver the path, or cannot be read, it fails (`UndeliverableImport`) instead of reporting success.
+`_dvc_state.delivery` answers, offline from a tree's pointers and `dvc.lock`, whether `mintd import <name> --path <path>` would land bytes. States: `pinned`, `via_parent` (under a pinned `.dir` out), `untracked`, `not_pullable` (only `cache: false` or `dvc import` outs), `unpinned` / `partial` (on a version-aware remote, no / some files carry an S3 version ID), `missing_from_manifest`. Only `pinned` and `via_parent` are deliverable. `check` runs it on the primary and every `outputs[].path` and emits one `data_products_output_<state>` error per undeliverable path (`partial` reports as `unpinned`). When an import with a recorded pin lands no file, `data import` runs the same function on the producer's tree at that pin; if the tree cannot deliver the path, or cannot be read, it fails (`UndeliverableImport`) instead of reporting success.
 
 Why: `metadata.json` holds a human's claim about outputs and DVC holds the truth. Without the gate, a product could declare a path DVC tracks nowhere, or one with no S3 version IDs, pass `check`, publish, and hand every consumer an empty directory at exit 0.
 
@@ -161,7 +161,7 @@ Why: it unifies the two ways DVC records imports on the consumer side.
 
 ### Import namespace (`data/imports/<full_name>/<producer path>`)
 
-`mintd data import` writes each output to `<dest_root>/<namespace>/<the producer's own output path>`. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The import writer and the bump reader share one definition.
+`mintd import` (or `mintd data import`) writes each output to `<dest_root>/<namespace>/<the producer's own output path>`, relative to the folder it runs in. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The import writer and the bump reader share one definition. Import, `--bump` included, runs from any folder inside a project (a `.dvc/` there or above, found as dvc finds it, by `dvc_root`); outside one it stops before reading the catalog or running dvc, and points at `mintd clone` for the whole product or `mintd init` for a new project.
 
 Why: without the namespace, two products that both publish `data/final/` would collide. Mirroring the full producer path, not just the basename, keeps `data/final/` and `archive/final/` apart under `--all`.
 
@@ -199,7 +199,7 @@ An import has drifted when the producer's DVC pointer md5 for the imported path 
 
 Why: producer metadata has no per-output content identity (`last_published` is a per-publish stamp), so bytes committed without a `mintd publish` still count and the pointer is the ground truth. An unreadable pointer is never `up_to_date`: silent degradation to "up to date" is the bug class this lane exists to kill.
 
-### `mintd data import --bump` (`bump_import`)
+### `mintd import --bump` (`bump_import`)
 
 Re-pins one existing import to the producer's current `HEAD` SHA, selecting it by the same `(name, --path)` pair a plain import uses. It reads the import's consumer finding from `check_project(upgrades=True)`: `up_to_date` changes nothing, `drift` rewrites the same `.dvc` via `dvc import --rev <head_sha> --force` on the path the import recorded (or `HEAD`'s primary if it recorded none). `schema_too_old` re-pins the same way when `HEAD` reads (check judges the schema at the pin only); when `HEAD` is too old as well it raises `BumpBlocked` with that finding, and when `HEAD` cannot be read, with a `drift_unknown` one. Any other kind raises `BumpBlocked` with the finding attached.
 
@@ -228,6 +228,18 @@ A **pointer** is a git-tracked DVC file that records data by hash: a `.dvc` file
 A target inside a tracked output pushes the whole output. `--no-commit` uploads only.
 
 Why: importers read the producer's pushed commit, never its working tree, so a pointer that is not committed and pushed is one no importer can see yet.
+
+### Reading DVC's own files
+
+The shared readers of the files DVC itself writes or reads live in one module, `_dvc_state`: `.dvc` pointers, `dvc.lock`, `dvc.yaml`, `.dvc/config` (with `config.local` on top) and the cache's layout, each read the way dvc reads it. They parse YAML with `load12` (YAML 1.2, so `on` and `no` stay names; a value its type can't hold is invalid YAML, so a pointer with one is cut short). A few older call sites still parse DVC files with their own `yaml.safe_load`, in `check`, import rescue, `enclave`, `imports` and one CLI handler; moving them onto the shared readers is a follow-up. `.dvc/config` is read once by every caller, with quoting and inline comments as dvc treats them. `_fast_sync_ops` keeps the S3 code and the cache writers and imports what it reads from `_dvc_state`; `_dvc_state` imports no other mintd module but `mintd.errors`. What a push records, and the folder comparison built on it (`unlisted_on_disk`), live in `_pin_proof`, which talks to S3.
+
+Why: when five places parsed `.dvc/config` each its own way, a quoted value, an inline comment or a remote set in `config.local` meant different things to fast sync, the push check and publish.
+
+### `mintd data remove`: stop tracking, keep the data
+
+`mintd data remove <pointer>` runs `dvc remove` without `--outs`: the pointer and its `.gitignore` line go, and the data stays on disk. The command names what stayed (never its contents), for a `.dvc` pointer or a root stage, and warns about the outs whose files git now sees as untracked (neither tracked by HEAD nor ignored), so a `git add` would commit them: delete them, or add them to `.gitignore`. Under the scaffold's `/data/**` rule git still ignores files under `data/`.
+
+Why: the name reads as "delete", so the command says plainly what it did and didn't do.
 
 ### Version-aware remote / out
 
@@ -365,7 +377,7 @@ Why add, status and remove are transfers: add hashes every byte, status hashes e
 
 ### Subprocess seams (`DvcOps`, `RegistryGitOps`, `Fetcher`, `InitOps`)
 
-External commands are spawned behind Protocols that tests replace with fakes: `DvcOps` (dvc); `RegistryGitOps` ([src/mintd/_registry_git_ops.py](src/mintd/_registry_git_ops.py)), git and gh for the catalog client, the catalog cache, and the project-side git calls of `check`, `publish`, `registry register`, `data push` and `data import`, plus the producer clone in `data clone`; `Fetcher` (the other git reads against producers); `InitOps` (`git init`, `dvc init`, remote setup). `RegistryGitOps` failures become typed exceptions: `GitOpError` (with `GitTagError`, `GitTagAlreadyExists`, `RegistryBranchExists`), `GhAuthError`, `GhNotInstalled`, `PRConflictError`. Only five modules are exempt from the lint ban on spawning through `subprocess` directly (`_subprocess`, `_registry_git_ops`, `_init_ops`, `_fast_sync_ops`, `_producer_git_ops`), a list `tests/test_substrate_rules.py` pins. Every dvc spawn uses `dvc_cmd()` (`sys.executable -m dvc`, the dvc in mintd's own env) and `dvc_env()` (`DVC_NO_ANALYTICS=1`); every git spawn uses `git_env()`, which pins git's messages to English.
+External commands are spawned behind Protocols that tests replace with fakes: `DvcOps` (dvc); `RegistryGitOps` ([src/mintd/_registry_git_ops.py](src/mintd/_registry_git_ops.py)), git and gh for the catalog client, the catalog cache, and the project-side git calls of `check`, `publish`, `registry register`, `data push`, `data remove` and `import`, plus the producer clone in `clone`; `Fetcher` (the other git reads against producers); `InitOps` (`git init`, `dvc init`, remote setup). `RegistryGitOps` failures become typed exceptions: `GitOpError` (with `GitTagError`, `GitTagAlreadyExists`, `RegistryBranchExists`), `GhAuthError`, `GhNotInstalled`, `PRConflictError`. Only five modules are exempt from the lint ban on spawning through `subprocess` directly (`_subprocess`, `_registry_git_ops`, `_init_ops`, `_fast_sync_ops`, `_producer_git_ops`), a list `tests/test_substrate_rules.py` pins. Every dvc spawn uses `dvc_cmd()` (`sys.executable -m dvc`, the dvc in mintd's own env) and `dvc_env()` (`DVC_NO_ANALYTICS=1`); every git spawn uses `git_env()`, which pins git's messages to English.
 
 Why: one seam normalizes subprocess failures into typed exceptions and lets implementations be swapped without touching callers. mintd parses git's stderr, so a translated `fatal:` line would silently stop matching. dvc telemetry is off because an unannounced outbound request on project creation is a governance question for enclave and lab-only projects.
 

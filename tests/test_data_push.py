@@ -18,7 +18,8 @@ import yaml
 
 from mintd import cli
 from mintd._dvc_ops import DvcPushError, DvcPushResult, _parse_push_output
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import DvcFileEntry
+from mintd._fast_sync_ops import ensure_dir_manifest
 from mintd._registry_git_ops import GitOpError, SubprocessRegistryGitOps
 from mintd._subprocess import WallTimeoutExceeded
 from mintd.data_ops import PushSummary, commit_pushed_pointers, data_push
@@ -102,9 +103,18 @@ def test_remote_precedence_config_default(tmp_path: Path) -> None:
     assert summary.remote == "from_config"
 
 
-def test_remote_precedence_falls_back_to_origin(tmp_path: Path) -> None:
-    summary = data_push(project_path=tmp_path, dvc_ops=_FakeDvcOps())
-    assert summary.remote == "origin"
+def test_remote_precedence_with_no_default_is_refused(tmp_path: Path) -> None:
+    """With no `--remote` and no default, dvc push refuses ("Create a default remote");
+    mintd stops before pushing, saying how to set one. It used to guess `origin`.
+    Mutation that must redden this: guess `origin` again."""
+    from mintd.errors import MintdError
+
+    _write_dvc_config(tmp_path, "['remote \"store\"']\n    url = s3://b/p\n")
+    dvc_ops = _FakeDvcOps()
+    with pytest.raises(MintdError, match="no default DVC remote") as raised:
+        data_push(project_path=tmp_path, dvc_ops=dvc_ops)
+    assert raised.value.hint == "set a default: dvc remote default store, and commit .dvc/config"
+    assert dvc_ops.push_calls == []
 
 
 def test_data_push_returns_summary_with_counts(tmp_path: Path) -> None:
@@ -126,6 +136,7 @@ def test_data_push_never_mixes_dvc_files_and_bare_paths_in_one_argv(
 
     Mutation: push ``targets`` in one call again -> one mixed argv, red.
     """
+    _write_dvc_config(tmp_path, "[core]\n    remote = origin\n")  # dvc pushes only to a default remote
     dvc_ops = _FakeDvcOps()
     dvc_ops.push_result = DvcPushResult(pushed=2, up_to_date=False)
 
@@ -148,6 +159,7 @@ def test_data_push_targets_none_still_pushes_everything_in_one_argv(
     """The no-targets case must stay one ``dvc push`` with no target list —
     dvc's own "push everything tracked". Mutation: group ``None`` -> an empty
     argv list or two calls, red."""
+    _write_dvc_config(tmp_path, "[core]\n    remote = origin\n")  # dvc pushes only to a default remote
     dvc_ops = _FakeDvcOps()
     data_push(project_path=tmp_path, dvc_ops=dvc_ops)
     assert [c.targets for c in dvc_ops.push_calls] == [None]
@@ -157,6 +169,7 @@ def test_data_push_is_up_to_date_only_when_every_group_is(tmp_path: Path) -> Non
     """A ✓ "already up to date" line must not be printed when one group really
     uploaded. Mutation: ``any(...)`` instead of ``all(...)`` -> red."""
 
+    _write_dvc_config(tmp_path, "[core]\n    remote = origin\n")  # dvc pushes only to a default remote
     class _MixedPush(_FakeDvcOps):
         def push(
             self,
@@ -1096,7 +1109,7 @@ def test_push_leaves_the_commit_when_git_state_is_unusual(
         _git(["commit", "-q", "-m", "lock only"], cwd=proj)
     if shape == "staged-deletion":
         _git(["rm", "-q", "--cached", "data/final.dvc"], cwd=proj)
-    if shape == "no-default-remote":
+    if shape == "no-default-remote":  # reached only with --remote now: with neither, push stops before uploading
         (proj / ".dvc" / "config").write_text("")
         _git(["commit", "-q", "-am", "no remote"], cwd=proj)
     before = _git(["rev-list", "--all"], cwd=repo)
@@ -1111,7 +1124,7 @@ def test_push_leaves_the_commit_when_git_state_is_unusual(
     else:
         _rewrites_like_dvc(push_clients, monkeypatch)
 
-    assert cli.main(["data", "push"]) == 0
+    assert cli.main(["data", "push", *(["--remote", "storage"] if shape == "no-default-remote" else [])]) == 0
     err = _err(capsys)
     assert "commit and push them" in err and f"not committed: {reason}" in err
     assert _git(["rev-list", "--all"], cwd=repo) == before
@@ -1326,7 +1339,7 @@ def test_real_dvc_push_of_one_file_commits_the_whole_folder(
 
 import hashlib  # noqa: E402
 
-from mintd._fast_sync_ops import cache_path_for  # noqa: E402
+from mintd._dvc_state import cache_path_for  # noqa: E402
 
 KEY = "lab/p/data/x.csv"
 
@@ -1906,11 +1919,11 @@ def test_check_a_nested_dvc_project_is_not_in_scope(moto_push, tmp_path) -> None
 def test_check_a_config_local_naming_only_another_remote_keeps_the_default(tmp_path: Path) -> None:
     """`dvc remote add --local scratch ...` leaves `.dvc/config`'s
     `core.remote` the default; DVC still pushes there, so mintd checks there."""
-    from mintd._push_verify import merged_default_remote
+    from mintd._dvc_state import default_remote_name
 
     stage_dvc_project(tmp_path)
     (tmp_path / ".dvc" / "config.local").write_text("['remote \"scratch\"']\n    url = /tmp/scratch\n")
-    assert merged_default_remote(tmp_path) == "storage"
+    assert default_remote_name(tmp_path) == "storage"
 
 
 def test_check_a_first_push_of_new_data_is_not_reported_as_a_repair(moto_push, tmp_path, monkeypatch, capsys) -> None:
@@ -2186,11 +2199,34 @@ def test_check_a_reupload_dvc_drops_from_its_pointer_fails(moto_push, tmp_path, 
     assert "dropped them from their pointer: data/d/b.csv" in err and "✓" not in err
 
 
-def test_check_refuses_outs_with_their_own_remote(moto_push, tmp_path, monkeypatch, capsys) -> None:
+def test_check_takes_the_default_remote_named_in_another_case_as_dvc_does(
+    moto_push, tmp_path, monkeypatch, capsys,
+) -> None:
+    """dvc looks remote names up lowercased, so `--remote Storage` names the default remote
+    `storage`, and dvc pins under that name. Mutations that must redden this: compare the names
+    as given, in the check or in the commit gate."""
+    dvc, s3, bucket = moto_push
+    proj = _moto_producer(tmp_path, s3)
+    before = _head(proj)
+    monkeypatch.chdir(proj)
+    dvc.on_push = _dvc_uploads(s3, bucket, proj)
+    assert cli.main(["data", "push", "--remote", "Storage"]) == 0, _err(capsys)
+    assert dvc.push_calls
+    assert _head(proj) != before and _head(tmp_path / "origin.git", "main") == _head(proj)
+
+
+@pytest.mark.parametrize("own", [
+    "backup",
+    pytest.param("Storage", id="the-default-in-another-case"),  # dvc pins it as `cloud.Storage`
+])
+def test_check_refuses_outs_with_their_own_remote(moto_push, tmp_path, monkeypatch, capsys, own) -> None:
+    """An out's own `remote:` is refused, even the default's name in another case: dvc reads
+    that remote's config lowercased but records the out's pins under the name as written, where
+    the check can't find them. Mutation that must redden the second case: compare it lowercased."""
     dvc, s3, bucket = moto_push
     proj = _moto_producer(tmp_path, s3)
     doc = yaml.safe_load((proj / "data" / "x.csv.dvc").read_text())
-    doc["outs"][0]["remote"] = "backup"
+    doc["outs"][0]["remote"] = own
     (proj / "data" / "x.csv.dvc").write_text(yaml.safe_dump(doc, sort_keys=False))
     monkeypatch.chdir(proj)
     assert cli.main(["data", "push"]) == 1

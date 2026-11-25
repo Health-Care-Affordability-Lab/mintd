@@ -447,7 +447,7 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
     import yaml
 
     from ._dvc_invoke import dvc_root
-    from ._fast_sync_ops import discover_all_outs
+    from ._dvc_state import discover_all_outs
     from .imports import DataDependency, NotAnImportError
 
     from ._push_verify import in_subrepo

@@ -129,23 +129,28 @@ def _subparser(*path: str) -> argparse.ArgumentParser:
 
 
 def test_import_and_clone_help_say_what_each_form_brings_as_the_readme_does() -> None:
-    """`data import --help` and `data clone --help` carry README's "Command |
-    Brings" rows word for word, and no others, so the two can't drift apart.
+    """`import --help` and `clone --help`, and their `data` twins', carry README's
+    "Command | Brings" rows word for word, and no others, so they can't drift apart.
 
     Mutation: change a word in one README "Brings" cell, or add a row to one
     help table only -> red."""
     readme = (REPO / "README.md").read_text(encoding="utf-8")
     for verb in ("import", "clone"):
-        rows = re.findall(rf"^\| `(mintd data {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
+        rows = re.findall(rf"^\| `(mintd {verb}[^`]*)` \| (.+?) \|$", readme, re.M)
         assert len(rows) >= 2, verb
-        documented = {" ".join(f"{command} {brings.replace('`', '')}".split()) for command, brings in rows}
-        epilog = _subparser("data", verb).epilog or ""
-        # The table is the epilog's first paragraph; each row starts at "  mintd data".
-        table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
-        shown = {" ".join(row.split()) for row in re.split(rf"\s(?=mintd data {verb}\b)", " " + table) if row.strip()}
-        assert shown == documented, verb
-        # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
-        assert max(map(len, epilog.splitlines())) <= 80, verb
+        for group in ((), ("data",)):
+            spelled = " ".join(("mintd", *group, verb))
+            documented = {
+                " ".join(f"{command.replace(f'mintd {verb}', spelled, 1)} {brings.replace('`', '')}".split())
+                for command, brings in rows
+            }
+            epilog = _subparser(*group, verb).epilog or ""
+            # The table is the epilog's first paragraph; each row starts at the command.
+            table = " ".join(epilog.split("\n\n")[0].splitlines()[1:])
+            shown = {" ".join(row.split()) for row in re.split(rf"\s(?={spelled}\b)", " " + table) if row.strip()}
+            assert shown == documented, spelled
+            # Printed as written (RawDescriptionHelpFormatter), so it must fit 80 columns itself.
+            assert max(map(len, epilog.splitlines())) <= 80, spelled
 
 
 def test_docs_send_github_access_through_gh_not_ssh() -> None:
