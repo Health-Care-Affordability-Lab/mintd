@@ -186,6 +186,17 @@ def test_apply_idempotent_on_v2_input(tmp_path: Path) -> None:
         apply_metadata_migration(tmp_path)
 
 
+@pytest.mark.parametrize("value", ["[]", '"x"', "3", "null", "{not json"])
+def test_apply_refuses_a_file_that_is_not_a_json_object(tmp_path: Path, value: str) -> None:
+    """`mintd update metadata` used to crash with a traceback on these (`.get` on
+    a non-object, or the JSON error). Mutation: drop either check -> red."""
+    from mintd.errors import MintdError
+
+    (tmp_path / "metadata.json").write_text(value, encoding="utf-8")
+    with pytest.raises(MintdError, match="metadata.json"):
+        apply_metadata_migration(tmp_path)
+
+
 def test_apply_missing_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         apply_metadata_migration(tmp_path)

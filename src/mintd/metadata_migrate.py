@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 from pydantic import ValidationError
 
+from .errors import MintdError
 from .model import Metadata
 from .publish import atomic_write_json
 
@@ -255,7 +256,12 @@ def apply_metadata_migration(
     if not metadata_path.is_file():
         raise FileNotFoundError(f"no metadata.json at {metadata_path}")
 
-    v1_data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    try:
+        v1_data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise MintdError(f"malformed JSON in {metadata_path}: {exc.msg} (line {exc.lineno})") from exc
+    if not isinstance(v1_data, dict):
+        raise MintdError(f"{metadata_path} must hold a JSON object")
     schema = str(v1_data.get("schema_version", ""))
     if schema.startswith("2."):
         raise MetadataAlreadyV2(

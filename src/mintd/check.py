@@ -284,7 +284,7 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
     raw = metadata_path.read_text(encoding="utf-8")
 
     try:
-        json.loads(raw)
+        value = json.loads(raw)
     except json.JSONDecodeError as e:
         return [
             CheckFinding(
@@ -294,6 +294,9 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                 kind="metadata_invalid",
             )
         ]
+    if not isinstance(value, dict):
+        return [CheckFinding(severity="error", section="producer", kind="metadata_invalid",
+                             message="metadata.json must hold a JSON object")]
 
     findings: list[CheckFinding] = []
     meta: Metadata | None = None

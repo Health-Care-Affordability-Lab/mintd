@@ -82,6 +82,23 @@ def test_check_missing_file_returns_error(tmp_path: Path):
     assert "metadata.json" in f.message
 
 
+@pytest.mark.parametrize("value", ["[]", '"x"', "3", "null", "true"])
+def test_check_a_metadata_json_that_is_not_an_object_is_one_finding(tmp_path: Path, value: str):
+    """Valid JSON that isn't an object used to crash check with a traceback
+    (the storage reader called `.get` on it). Now it's one error naming the
+    file.
+
+    Mutation: drop the object check in `_producer_findings` -> red (pydantic's
+    own message instead, which names neither).
+    """
+    (tmp_path / "metadata.json").write_text(value)
+
+    findings = check_project(tmp_path)
+
+    assert [(f.severity, f.kind) for f in findings] == [("error", "metadata_invalid")]
+    assert findings[0].message == "metadata.json must hold a JSON object"
+
+
 def test_check_malformed_json_returns_error(tmp_path: Path):
     """When metadata.json contains malformed JSON, return an error finding.
 

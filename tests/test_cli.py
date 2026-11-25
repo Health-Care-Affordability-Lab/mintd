@@ -5931,3 +5931,15 @@ def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
     real = os.path.realpath(elsewhere)
     assert all(Path(p).is_absolute() and Path(p).is_relative_to(real) for p in payload["produced"]), payload
     assert payload["total_bytes"] == 4096, payload
+
+
+
+@pytest.mark.parametrize("content, primary", [
+    ("[]", None), ('"x"', None), ('{"data_products": []}', None), ('{"data_products": {"primary": "data/final/"}}', "data/final/"),
+])
+def test_clone_reads_the_primary_only_from_an_object(tmp_path: Path, content: str, primary: str | None) -> None:
+    """A cloned product's metadata.json is the producer's file: one that holds JSON
+    but not an object, or a `data_products` that isn't one, gives no primary
+    instead of a traceback. Mutation: drop either object check -> red."""
+    (tmp_path / "metadata.json").write_text(content, encoding="utf-8")
+    assert cli._read_primary_from_clone(tmp_path) == primary
