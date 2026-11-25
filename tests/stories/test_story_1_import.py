@@ -29,7 +29,7 @@ Default case (Holds):
 - Pass: every file under the named path lands and matches; nothing outside it
   downloads, the primary included.
 
-`--all` case (Target until `--all` changes):
+`--all` case:
 - When: I run `mintd data import <name> --all`.
 - Then: everything the producer tracks at that rev lands: every `.dvc` pointer
   and every `dvc.lock` out, declared or not.

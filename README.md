@@ -282,8 +282,10 @@ producer commit it came from (`--rev`; default: the producer's HEAD).
 | `mintd import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
 | `mintd import <name> --all` | everything the product's DVC tracks, raw and intermediate data included |
 
-**Get a product's whole project, code and data, to read or work on** with
-`mintd clone`. A data product's clone lands in `./data_<name>/`.
+**Get a product's whole project, code and data, to read** with
+`mintd clone`. A data product's clone lands in `./data_<name>/`. To rerun its
+pipeline (`dvc repro`), which needs the raw and intermediate data too, clone
+with `--all`, or run `mintd data pull` in the clone.
 
 | Command | Brings |
 |---|---|
