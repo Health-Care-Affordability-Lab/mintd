@@ -37,11 +37,16 @@ def root(tmp_path: Path) -> Path:
     ("a/../../x", None),
     ("/abs/x", None),
     ("C:/x", None),  # a drive, on POSIX too
+    ("1:a", None),  # any first character: pathlib took only ASCII letters as a drive on 3.11
+    ("\u00e9:x", None),
+    ("::", None),
+    ("a/1:b", "a/1:b"),  # a colon further in is a name
     ("\\\\server\\share\\x", None),
     ("a\\b", None),
 ])
 def test_a_recorded_path_is_read_as_a_posix_string(root: Path, path: str, want: str | None) -> None:
-    """Mutation: drop the drive rule -> `C:/x` reads as inside, red."""
+    """Mutations: drop the drive rule -> `C:/x` reads as inside, red; read a drive as pathlib does -> `1:a`
+    reads as inside on 3.11, red."""
     assert inside(root, path, read="recorded") == want
 
 
@@ -132,6 +137,22 @@ def test_a_link_loop_reads_as_outside(root: Path, read: Read) -> None:
     _link(root / "x", root / "y")
     _link(root / "y", root / "x")
     assert inside(root, root / "x" / "f.txt", read=read) is None
+
+
+@pytest.mark.parametrize("read", ["follow", "folder"])
+def test_a_root_that_is_a_link_loop_holds_nothing(tmp_path: Path, read: Read, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not even itself, and a path elsewhere isn't read against the working folder in
+    its place.
+
+    Mutations: answer "." for the root itself without resolving it -> red; drop the
+    check that both paths resolved -> `relpath(there, None)` reads from the working
+    folder and answers "a", red."""
+    loop = tmp_path / "loop"
+    _link(loop, tmp_path / "loop2")
+    _link(tmp_path / "loop2", loop)
+    assert inside(loop, loop, read=read, root_ok=True) is None
+    monkeypatch.chdir(tmp_path)
+    assert inside(loop, tmp_path / "a", read=read) is None
 
 
 def test_a_path_that_does_not_exist_yet_resolves_as_far_as_it_can(root: Path) -> None:

@@ -33,6 +33,7 @@ from .data import (
 from .check import CheckFinding, _resolve_approved_product_url, consumer_walk_failure
 from .producer import MissingPrimaryDataProduct, ProducerView
 from ._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcOpError, DvcOps
+from ._paths import inside, reads_as_a_drive
 from .errors import MintdError
 
 if TYPE_CHECKING:
@@ -208,10 +209,9 @@ class PathTraversalDetected(MintdError):
 
     hint = "unsafe paths — do not extract; contact the sender"
 
-    def __init__(self, member: str) -> None:
-        super().__init__(
-            f"transfer manifest references {member!r} which escapes the dest dir"
-        )
+    def __init__(self, member: str, *, drive: bool = False) -> None:
+        why = ", and a name in it reads as a Windows drive" if drive else " which escapes the dest dir"
+        super().__init__(f"transfer manifest references {member!r}{why}")
         self.member = member
 
 
@@ -1284,9 +1284,9 @@ def enclave_verify(
     pre-checks on both `content.repo` and `content.version_folder` (empty,
     `.`, a path separator, `is_absolute()`, `..` segments) plus two resolve-based
     checks (the constructed member path, and an `rglob` walk for symlinks
-    inside the data) together cover the CVE-2007-4559 family. All
-    `startswith` comparisons append `os.sep` to avoid sibling-directory
-    false positives.
+    inside the data) together cover the CVE-2007-4559 family. The resolve
+    checks ask `_paths.inside`, so a sibling folder (`/tmp/a` vs `/tmp/ab`)
+    is never read as inside.
 
     Idempotent: entries whose `(repo, contract_pin, artifact_pin)` triple
     is already in `transferred[]` are skipped, so re-running on the same
@@ -1328,8 +1328,6 @@ def enclave_verify(
         (t.repo, t.contract_pin, t.artifact_pin) for t in manifest.transferred
     }
 
-    extracted_abs = extracted_dir.resolve()
-    extracted_prefix = str(extracted_abs) + os.sep
 
     # Track destination paths seen so far in this single transfer to
     # reject manifests that would move two entries to the same dest
@@ -1354,16 +1352,14 @@ def enclave_verify(
         # when the second `shutil.move` finds `B/C`'s source under the
         # already-moved `B`. Repo/version_folder are flat segments by
         # design (see `enclave_pull`'s `target_dir`).
+        # A single name: no `/`; and as a recorded path, not `.`, `..`, absolute, a drive or with a `\\`.
         if (
             not content.repo
-            or content.repo == "."
             or "/" in content.repo
-            or "\\" in content.repo
-            or Path(content.repo).is_absolute()
-            or ".." in Path(content.repo).parts
+            or inside(Path("."), content.repo, read="recorded", dotdot="refuse") is None
         ):
             raise PathTraversalDetected(
-                f"{content.repo}/{content.version_folder}"
+                f"{content.repo}/{content.version_folder}", drive=reads_as_a_drive(content.repo)
             )
         # (b) String pre-check on `version_folder`. `..` resolves
         # silently *inside* `extracted_dir` if paired with a deep
@@ -1372,14 +1368,11 @@ def enclave_verify(
         # reasons as in the `repo` check above.
         if (
             not content.version_folder
-            or content.version_folder == "."
             or "/" in content.version_folder
-            or "\\" in content.version_folder
-            or Path(content.version_folder).is_absolute()
-            or ".." in Path(content.version_folder).parts
+            or inside(Path("."), content.version_folder, read="recorded", dotdot="refuse") is None
         ):
             raise PathTraversalDetected(
-                f"{content.repo}/{content.version_folder}"
+                f"{content.repo}/{content.version_folder}", drive=reads_as_a_drive(content.version_folder)
             )
 
         # Skip filesystem checks for entries already in transferred[].
@@ -1399,8 +1392,7 @@ def enclave_verify(
 
         # (d) Resolve check — catches symlink at the version_folder
         # itself pointing outside `extracted_dir`.
-        resolved = str(member.resolve())
-        if resolved != str(extracted_abs) and not resolved.startswith(extracted_prefix):
+        if inside(extracted_dir, member, read="follow", root_ok=True) is None:
             raise PathTraversalDetected(
                 f"{content.repo}/{content.version_folder}"
             )
@@ -1410,8 +1402,7 @@ def enclave_verify(
         # `p.resolve()` still produces an absolute path we can check.
         for p in member.rglob("*"):
             if p.is_symlink():
-                target = str(p.resolve())
-                if target != str(extracted_abs) and not target.startswith(extracted_prefix):
+                if inside(extracted_dir, p, read="follow", root_ok=True) is None:
                     raise PathTraversalDetected(str(p))
 
         # (f) Dest collision check — refuse to overwrite an existing

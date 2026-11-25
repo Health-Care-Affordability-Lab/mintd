@@ -25,6 +25,7 @@ from typing import Any
 
 
 from ._dvc_state import abbreviate, dvc_cache_dir
+from ._paths import rel as _rel
 from .errors import MintdError
 from ._dvc_state import (
     default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files, read_dvc_config,
@@ -380,7 +381,7 @@ def _lockfiles(root: Path) -> list[str]:
         dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")
                        and not os.path.isdir(os.path.join(dirpath, d, ".dvc"))]
         if "dvc.lock" in filenames:
-            found.append((Path(dirpath) / "dvc.lock").relative_to(root).as_posix())
+            found.append(_rel(root, Path(dirpath) / "dvc.lock"))
     return found
 
 
