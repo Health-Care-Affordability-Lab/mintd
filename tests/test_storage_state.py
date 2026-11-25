@@ -51,6 +51,14 @@ def test_inspect_storage_fresh(tmp_path: Path) -> None:
     assert inspection.state == StorageState.FRESH
 
 
+@pytest.mark.parametrize("value", ["[]", '"x"', "3", "null"])
+def test_inspect_storage_treats_a_metadata_json_that_is_not_an_object_as_absent(tmp_path: Path, value: str) -> None:
+    """Every caller (check, publish, data push, import's producer tree) used to
+    crash on `.get`. Mutation: drop the object check -> AttributeError, red."""
+    (tmp_path / "metadata.json").write_text(value)
+    assert inspect_storage(tmp_path).state == StorageState.FRESH
+
+
 def test_inspect_storage_initialized_matching(tmp_path: Path) -> None:
     """Both sides present, name + URL match => INITIALIZED."""
     _write_metadata(tmp_path, {
