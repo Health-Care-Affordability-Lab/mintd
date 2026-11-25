@@ -531,10 +531,12 @@ def test_a_rerun_writes_a_changelog_that_failed_last_time(tmp_path: Path) -> Non
 
 
 def test_ci_lints_the_release_scripts_too() -> None:
-    """scripts/release_notes.py runs in the release; CI's lint covers it."""
+    """The release runs scripts/; every runner's lint covers it, Windows' included. Mutation: drop `scripts` from
+    either step -> red."""
     steps = [step for job in _WF["test.yml"]["jobs"].values() for step in job.get("steps", [])]
-    lint = next(step["run"] for step in steps if step.get("run", "").startswith("ruff check src tests"))
-    assert lint.split()[2:] == ["src", "tests", "scripts"]
+    lints = [step["run"].split() for step in steps if " check src tests" in f" {step.get('run', '')}"]
+    assert len(lints) == 2, lints  # Linux and macOS, and Windows
+    assert all(lint[-3:] == ["src", "tests", "scripts"] for lint in lints), lints
 
 
 def test_evidence_reads_the_history_back_to_the_last_promoted_release() -> None:

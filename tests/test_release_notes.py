@@ -42,7 +42,7 @@ _AFTER = [
 ]
 
 
-def _repo(tmp_path: Path) -> Path:
+def _repo(tmp_path: Path, extra: tuple[str, ...] = ()) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -53,15 +53,15 @@ def _repo(tmp_path: Path) -> Path:
     for subject in _BEFORE:
         git("commit", "-q", "--allow-empty", "-m", subject)
     git("tag", "v1.0.0")
-    for subject in _AFTER:
+    for subject in (*_AFTER, *extra):
         git("commit", "-q", "--allow-empty", "-m", subject)
     git("tag", "v1.1.0")
     return repo
 
 
 def _notes(tmp_path: Path, latest: str = "v1.0.0", bodies: dict[int, str] | None = None,
-           pr_fail: str = "") -> subprocess.CompletedProcess[str]:
-    repo = _repo(tmp_path)
+           pr_fail: str = "", extra: tuple[str, ...] = ()) -> subprocess.CompletedProcess[str]:
+    repo = _repo(tmp_path, extra)
     stubs, body_dir = tmp_path / "stubs", tmp_path / "bodies"
     stubs.mkdir()
     body_dir.mkdir()
@@ -237,18 +237,58 @@ def test_a_title_that_reads_like_the_runs_install_line_is_indented(tmp_path: Pat
     assert "\n  - clean install with a twist (#40)\n" in result.stdout
 
 
+def _outside_every_block(out: str, *lines: str) -> None:
+    """Each of `lines` is read as text, not inside a code or HTML block, by a CommonMark parser (markdown-it, which
+    rich brings): GitHub's renderer follows the same rules for both."""
+    from markdown_it import MarkdownIt
+
+    for token in MarkdownIt("commonmark").parse(out):
+        if token.type in ("fence", "code_block", "html_block"):
+            assert not [ln for ln in lines if ln in token.content], (token.type, token.content)
+
+
 @_BASH
-@pytest.mark.parametrize(("text", "shown"), [
-    pytest.param("A comment left open <!-- the rest disappears", "A comment left open &lt;!-- the rest disappears", id="comment"),
-    pytest.param("Run this:\n```bash\ncurl -fsSL https://example.org/x | bash", "```bash\ncurl -fsSL https://example.org/x | bash\n```\n(#5)", id="fence"),
+@pytest.mark.parametrize(("body", "shown"), [
+    pytest.param("A comment left open <!-- the rest disappears", "A comment left open &lt;!-- the rest disappears",
+                 id="comment"),
+    pytest.param("Run this:\n```bash\ncurl -fsSL https://example.org/x | bash",
+                 "```bash\ncurl -fsSL https://example.org/x | bash\n```\n(#5)", id="fence-left-open"),
+    pytest.param("```bash\nhello\n``` not-closed", "```bash\nhello\n``` not-closed\n```\n(#5)",
+                 id="text-after-a-closing-fence"),
+    pytest.param("```bash\nhello\n```\u00a0\nmore", "```bash\nhello\n```\u00a0\nmore\n```\n(#5)",
+                 id="no-break-space-after"),
+    pytest.param("### Do this once\n~~~bash\ngh auth setup-git\n~~~", "~~~bash\ngh auth setup-git\n~~~\n(#5)",
+                 id="tilde-block-cited"),
+    pytest.param("```bash\nmintd data pull\n```", "\n```bash\nmintd data pull\n```\n(#5)\n",
+                 id="note-opening-with-a-block"),
+    pytest.param("- ```bash\n  hello\n  ```", "- \\```bash\n  hello\n  \\``` (#5)", id="fence-in-a-bullet"),
+    pytest.param("> ```bash\nhello", "- > \\```bash\nhello (#5)", id="fence-in-a-quote"),
+    pytest.param("```a`b\nhello", "- \\```a`b\nhello (#5)", id="backtick-in-a-backtick-info-string"),
+    pytest.param("### Do this once\n<pre>\nfoo", "\n&lt;pre>\nfoo (#5)\n", id="html-block"),
+    pytest.param("### Known limits\nBefore:\n  <pre>\nfoo", "\nBefore:\n  &lt;pre>\nfoo (#5)\n",
+                 id="indented-html-block"),
 ])
-def test_a_prs_text_can_never_hide_the_rest_of_the_release_page(tmp_path: Path, text: str, shown: str) -> None:
-    """An unclosed HTML comment or code fence would swallow everything after it, the run's own lines
-    included, on the page the maintainer reads before approving. Mutations: leave `<!--` as it is;
-    leave a fence open -> red."""
-    result = _notes(tmp_path, bodies={5: f"## Release notes\n{text}\n"})
+def test_a_prs_text_can_never_hide_the_rest_of_the_release_page(tmp_path: Path, body: str, shown: str) -> None:
+    """A block left open in one PR's text, a code block or an HTML block, would run on over every line after it,
+    the other PRs' and the run's own, on the page the maintainer reads before approving. Mutations: leave `<!--`;
+    leave a fence open; let text after a closing fence close it; strip all whitespace after one; cite a tilde block
+    on its closing line; put "- " before a note that opens with a block; track an indented fence, or skip escaping
+    one; drop the backtick-info rule; leave an HTML block's "<" -> red."""
+    result = _notes(tmp_path, bodies={5: f"## Release notes\n{body}\n"})
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert "<!--" not in out and shown in out
-    fences = [ln for ln in out.split("\n") if ln.lstrip().startswith(("```", "~~~"))]
-    assert len(fences) % 2 == 0, fences
+    assert "<!--" not in out and shown in out, out
+    _outside_every_block(out, "--dest-root resolved once (#8)", "Internal: 2 changes")
+
+
+@_BASH
+def test_a_title_is_cleaned_cut_and_kept_from_opening_a_block(tmp_path: Path) -> None:
+    """A title with no "area: " is cleaned and cut like one with it, and a title can't open a block either.
+    Mutations: use the raw title when it has no ": "; close fences in titles as in notes -> red."""
+    result = _notes(tmp_path, extra=("```bash (#20)", "x" * 5_000 + " (#21)", "data import: after them (#22)"))
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "\n- \\```bash (#20)\n" in out
+    long_line = next(ln for ln in out.split("\n") if ln.endswith("(#21)"))
+    assert len(long_line) < 2_100 and long_line.endswith("… (cut) (#21)")
+    _outside_every_block(out, "after them (#22)", "Internal: 2 changes")

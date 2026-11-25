@@ -14,9 +14,9 @@ a squash merge whose subject ends "(#N)", and a PR's title reads "<area>: <what>
   it puts under "### Do this once" or "### Known limits" goes to those sections, at the top and the bottom.
 - A PR's text can be edited after it merges, so it is never trusted as is: control and format characters (an
   escape, a right-to-left override) are dropped, each part is cut at a length, the whole section too, and a line
-  that starts like one the release run writes itself is indented, so the run never takes it for its own. An
-  HTML comment's opening and a code fence left open, which would hide the rest of the release page, are
-  neutralised and closed.
+  that starts like one the release run writes itself is indented, so the run never takes it for its own. Nothing
+  in it can start a block that runs on over the rest of the release page: an HTML comment's opening and an HTML
+  block are escaped, a code block opens only at the start of a line, and one left open is closed.
 
 Only the standard library, plus the git and gh the runner has.
 """
@@ -36,7 +36,11 @@ MAX_SECTION = 60_000  # characters of the whole section; GitHub refuses notes pa
 RUN_LINES = ("- clean install with ", "A prerelease: ")
 # data._unprintable's rule: a control, format, surrogate or separator character; here newline and tab stay.
 _UNPRINTABLE = ("Cc", "Cf", "Cs", "Zl", "Zp")
-_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")  # a code fence's opening or closing line, as markdown reads it
+# A code fence as markdown reads it: up to 3 spaces, 3 or more backticks or tildes, then the rest of the line.
+_FENCE = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+# The start of a block that can run on past its own lines, a fence or an HTML block's "<", after any indent and
+# list or quote markers.
+_BLOCK_START = re.compile(r"^([ \t>*+\-.)\d]*)(`{3}|~{3}|<)")
 HOISTED = ("Do this once", "Known limits")
 _SUBJECT = re.compile(r"^(?P<title>.+) \(#(?P<number>\d+)\)$")
 
@@ -103,26 +107,43 @@ def release_notes(body: str) -> dict[str, str]:
 
 
 def clean(text: str, limit: int) -> str:
-    """Text from a PR, safe in the notes: no control or format characters (newlines and tabs kept), at most
-    `limit` characters, no HTML comment opening, and no code fence left open: either would hide the rest of the
-    release page, the run's own lines included."""
+    """Text from a PR, safe in the notes: `_scrub`'s, with no block that could run on over the rest of the release
+    page, the run's own lines included."""
+    return _close_fence(_scrub(text, limit))
+
+
+def _scrub(text: str, limit: int) -> str:
+    """Text from a PR with no control or format characters (newlines and tabs kept), at most `limit` characters,
+    and no HTML comment opening."""
     text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c) not in _UNPRINTABLE)
     if len(text) > limit:
         text = text[:limit].rstrip() + " … (cut)"
-    return _close_fence(text.replace("<!--", "&lt;!--"))
+    return text.replace("<!--", "&lt;!--")
 
 
 def _close_fence(text: str) -> str:
-    """`text` with a closing line for a code fence it leaves open."""
+    """`text` with no block left open, as GitHub's markdown reads it.
+
+    Outside a code block, only a fence at the very start of a line opens one (a backtick fence's info string can't
+    hold a backtick). Every other line that could start a block running on is escaped, so it starts nothing: a
+    fence after an indent or a list or quote marker (in a list item, what closes it depends on the item's indent)
+    and an HTML block's "<". Inside a code block, only a line of the opener's character, at least as long, with
+    nothing after it but spaces or tabs, closes it. A block still open at the end gets that closing line."""
     open_fence = ""
+    out = []
     for line in text.split("\n"):
-        if (m := _FENCE.match(line)) is None:
-            continue
-        if not open_fence:
-            open_fence = m[1]
-        elif m[1][0] == open_fence[0] and len(m[1]) >= len(open_fence):
-            open_fence = ""
-    return f"{text}\n{open_fence}" if open_fence else text
+        if open_fence:
+            m = _FENCE.match(line)
+            if m and m[2][0] == open_fence[0] and len(m[2]) >= len(open_fence) and not m[3].strip(" \t"):
+                open_fence = ""
+        elif (m := _FENCE.match(line)) and not m[1] and not (m[2][0] == "`" and "`" in m[3]):
+            open_fence = m[2]
+        elif start := _BLOCK_START.match(line):
+            line = start[1] + ("&lt;" if start[2] == "<" else "\\" + start[2]) + line[start.end():]
+        out.append(line)
+    if open_fence:
+        out.append(open_fence)
+    return "\n".join(out)
 
 
 def guard(section: str) -> str:
@@ -134,7 +155,8 @@ def _cite(text: str, number: int | None) -> str:
     """`text` with its PR number at the end, on a line of its own after a code block."""
     if number is None:
         return text
-    return f"{text}\n(#{number})" if text.endswith("```") else f"{text} (#{number})"
+    last = _FENCE.match(text.rsplit("\n", 1)[-1])
+    return f"{text}\n(#{number})" if last and not last[3].strip(" \t") else f"{text} (#{number})"
 
 
 def render(heading: str, entries: list[tuple[int | None, str, dict[str, str]]]) -> str:
@@ -143,7 +165,8 @@ def render(heading: str, entries: list[tuple[int | None, str, dict[str, str]]]) 
     groups: dict[str, list[str]] = {}
     internal: list[int] = []
     for number, title, notes in entries:
-        area, _, what = clean(title, MAX_PART).partition(": ")
+        title = _scrub(title, MAX_PART)  # one line, always after "- ": the last clean escapes a block start in it
+        area, _, what = title.partition(": ")
         if not what:
             area, what = "other", title
         for name in HOISTED:
@@ -151,7 +174,8 @@ def render(heading: str, entries: list[tuple[int | None, str, dict[str, str]]]) 
                 hoisted[name].append(_cite(notes[name], number))
         if "" in notes:
             text = notes[""]
-            groups.setdefault(area, []).append(_cite(text if text.startswith("- ") else f"- {text}", number))
+            # A note that opens with a code block keeps it at the start of a line, where it stays one block.
+            groups.setdefault(area, []).append(_cite(text if text.startswith(("- ", "```", "~~~")) else f"- {text}", number))
         elif area in INTERNAL and number is not None:
             internal.append(number)
         else:
