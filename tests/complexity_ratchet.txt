@@ -1,0 +1,31 @@
+# Each function in src/mintd over complexity 15 (ruff's C901), and the most it may reach.
+# Owned by the maintainers; tests/test_complexity_ratchet.py explains how a line changes.
+_cache_ops.py::enumerate_push_items 25
+_dvc_state.py::delivery 18
+_dvc_state.py::judge_pointers 16
+_dvc_state.py::parse_dvc_lock_outs 16
+_fast_sync_ops.py::SubprocessFastSyncOps.try_fast_pull 26
+_fast_sync_ops.py::fetch_files_dir_contents 18
+_import_rescue_ops.py::_match_out_files 17
+_import_rescue_ops.py::rescue_import_pull 25
+_pin_proof.py::publishable_scope 21
+_pin_proof.py::write_repair 20
+_s3_listing_ops.py::list_product_objects 19
+_subprocess.py::run_streaming 25
+check.py::_check_remote 21
+check.py::_match_out_md5 18
+check.py::_unreadable_dvc_files 27
+check.py::_untracked_pipeline_inputs 37
+check.py::check_staged 21
+cli.py::_handle_data_push 33
+config_ops.py::interactive_setup 18
+config_ops.py::migrate_v1_to_v2 18
+data.py::clone_and_pull_product 16
+data.py::import_product 22
+data_ops.py::commit_pushed_pointers 30
+data_ops.py::data_pull 20
+enclave.py::enclave_pull 23
+enclave.py::enclave_verify 18
+init.py::init_project 25
+metadata_migrate.py::migrate_v1_to_v2 25
+publish.py::_apply_publish 39
