@@ -42,6 +42,7 @@ from ._dvc_state import (
     discover_all_outs,
     outs_for_target,
     outs_materialized,
+    parse_dvc_lock_outs,
     parse_dvc_outs,
     partition_pipeline_outs,
     remote_key,
@@ -1438,14 +1439,21 @@ def data_verify(
 
 def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
     """Stop tracking ``name`` with dvc (`dvc remove`, without `--outs`): the
-    pointer and its .gitignore line go, the data stays. Returns the outs a
-    ``.dvc`` pointer named that are still on disk, repo-relative, for the
+    pointer, or the stage, and its .gitignore lines go; the data stays.
+    Returns the outs it named that are still on disk, repo-relative, for the
     caller to name; never their contents."""
     try:
-        outs = parse_dvc_outs(project_path / name, "") if name.endswith(".dvc") else []
-    except MintdError:  # a pointer dvc can't read either: dvc remove reports it
+        if name.endswith(".dvc"):  # its out paths are relative to its folder
+            outs = [posixpath.join(posixpath.dirname(name), o.path) for o in parse_dvc_outs(project_path / name, "")]
+        else:  # a stage of the root dvc.yaml; dvc.lock's out paths are project-relative
+            stage = name.removeprefix("dvc.yaml:")
+            outs = [o.path for o in parse_dvc_lock_outs(project_path, "") if o.stage == stage]
+    except MintdError:  # a file dvc can't read either: dvc remove reports it
         outs = []
     dvc_ops.remove(name, cwd=project_path)
-    # A .dvc file's out paths are relative to the folder it sits in.
-    left = [posixpath.normpath(posixpath.join(posixpath.dirname(name), o.path)) for o in outs]
-    return [rel for rel in left if (project_path / rel).exists()]
+    left = [posixpath.normpath(rel) for rel in outs]
+    # An out outside the project (`cache: false` allows ../x or /abs) is neither
+    # probed nor named. A lexical check, until the shared path check takes it over.
+    inside = [rel for rel in left if rel != ".." and not rel.startswith("../") and not Path(rel).is_absolute()
+              and not posixpath.isabs(rel)]
+    return [rel for rel in inside if (project_path / rel).exists()]
