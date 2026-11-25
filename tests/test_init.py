@@ -1452,6 +1452,42 @@ def test_prompt_classification_licensed_prompts_for_slug() -> None:
     assert slug == "optum"
 
 
+@pytest.mark.parametrize("typed", ["", "3\n"], ids=["classification", "licensed-slug"])
+def test_end_of_input_at_a_prompt_is_one_plain_error(monkeypatch: pytest.MonkeyPatch, typed: str) -> None:
+    """Ctrl-D (or a closed stdin) at either prompt raised EOFError, a traceback.
+    Real input() on an empty stdin now stops with one line and a hint.
+
+    Mutation: let EOFError through -> red."""
+    import io
+
+    from mintd._init_ops import InitNonInteractive
+    from mintd.init import _prompt_classification
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(typed))
+    with pytest.raises(InitNonInteractive) as excinfo:
+        _prompt_classification(reporter=Reporter(), prompt_fn=input, isatty_fn=lambda: True)
+    assert str(excinfo.value) == "no answer given"
+    assert excinfo.value.hint == "run mintd init again and answer the prompt"
+
+
+def test_end_of_input_at_inits_prompt_exits_1_with_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Through the CLI: exit 1, the line and its hint, and nothing written."""
+    import io
+
+    from mintd import cli
+    from mintd.init import _prompt_classification
+
+    monkeypatch.setitem(_prompt_classification.__kwdefaults__, "isatty_fn", lambda: True)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert cli.main(["init", "data", "demo", "--path", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "error: no answer given" in err and "hint: run mintd init again and answer the prompt" in err, err
+    assert "Traceback" not in err
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_init_then_inspect_returns_initialized(tmp_path: Path) -> None:
     """Integration: a freshly init'd project classifies as INITIALIZED.
 

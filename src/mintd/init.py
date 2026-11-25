@@ -115,12 +115,19 @@ def _prompt_classification(
     if not isatty_fn():
         raise InitNonInteractive("init is interactive; run from a terminal")
 
+    def ask(text: str) -> str:
+        try:
+            return prompt_fn(text).strip()
+        except EOFError:  # Ctrl-D, or stdin closed
+            reporter.info("")  # a terminal echoes no newline for Ctrl-D: end the prompt's line
+            raise InitNonInteractive("no answer given", hint="run mintd init again and answer the prompt") from None
+
     reporter.info("Choose a storage classification for this product:")
     for i, (_key, desc) in enumerate(_TIERS, 1):
         reporter.info(f"  {i}. {desc}")
 
     while True:
-        raw = prompt_fn("Choice [1-3]: ").strip()
+        raw = ask("Choice [1-3]: ")
         try:
             idx = int(raw)
         except ValueError:
@@ -134,7 +141,7 @@ def _prompt_classification(
     slug: str | None = None
     if tier == "licensed":
         while True:
-            slug = prompt_fn("Slug (licensor / DUA, e.g. 'optum'): ").strip()
+            slug = ask("Slug (licensor / DUA, e.g. 'optum'): ")
             if not slug:
                 reporter.warn("Slug is required for licensed tier.")
                 continue
