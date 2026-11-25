@@ -1,1 +1,1 @@
-+1: clone --all and the default, and import --all, read from the producer's tree
++25: clone --all and import --all read the producer's tree, skipping stale lock stages as pull does; --all says what it brings, and names the rest when one output is refused
