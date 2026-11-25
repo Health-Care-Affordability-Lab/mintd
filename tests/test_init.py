@@ -222,6 +222,31 @@ def test_init_refuses_a_symlinked_scaffold_directory(tmp_path: Path) -> None:
     assert list(shared_code.iterdir()) == [team_utils]
 
 
+def test_init_refuses_a_scaffold_directory_that_is_a_link_loop(tmp_path: Path) -> None:
+    """`code -> loop -> code`: Python 3.11's `resolve()` raised `RuntimeError`, a
+    traceback; 3.13's reads it as inside, and the write fails later. Refused up front,
+    as a link out of the project is.
+
+    Mutation: resolve the target without detecting the loop -> no refusal, red."""
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        (work / "code").symlink_to(work / "loop", target_is_directory=True)
+        (work / "loop").symlink_to(work / "code", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"can't make a link here: {exc}")
+
+    with pytest.raises(InitDestinationExists, match="outside"):
+        init_project(
+            project_type="data",
+            name="cohort",
+            target_dir=work,
+            use_current_repo=True,
+            force=True,
+            ops=_FakeInitOps(),
+        )
+
+
 def test_init_code_type_ignores_a_readme(tmp_path: Path) -> None:
     """A code scaffold writes metadata.json and nothing else, so a README in
     the target is not a collision for it."""

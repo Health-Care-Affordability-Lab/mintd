@@ -11,11 +11,12 @@ minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below).
 import types
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
+from ._paths import inside
 from .catalog import CatalogEntry
 
 
@@ -116,8 +117,7 @@ def _a_path_inside_the_repo(v: str) -> str:
     # Catalog builders hand these paths to git and dvc, so each must be a
     # relative posix path inside the repo and never read as an option
     # (`--output=...`).
-    if (not v or v.startswith(("-", "/")) or "\\" in v or "\x00" in v or ".." in v.split("/")
-            or PureWindowsPath(v).drive):
+    if not v or v.startswith("-") or inside(Path("."), v, read="recorded", root_ok=True, dotdot="refuse") is None:
         raise ValueError("must be a relative posix path inside the repo: no leading '/' or '-', "
                          "no drive, no '..' and no backslash")
     return v
