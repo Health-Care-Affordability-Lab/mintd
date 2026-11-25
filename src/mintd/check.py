@@ -538,9 +538,9 @@ def _unhashed_lock_deps(project_path: Path) -> list[CheckFinding]:
 
 
 _RAW_INPUT_HINT = (
-    "'mintd data add {path}' tracks it in DVC and the next 'mintd data push' uploads it; or have a stage write it, "
-    "like the scaffold's commented-out fetch stage. Whether raw files belong in lab storage (licence, size) is the "
-    "producer's call."
+    "to track it: mintd data add {path}\nthen mintd data push uploads it\n"
+    "or let a pipeline stage download it, like the scaffold's fetch stage\n"
+    "whether raw data belongs in lab storage (licence, size) is your call"
 )
 
 
@@ -638,7 +638,7 @@ def _untracked_pipeline_inputs(
                 if rel is None:
                     warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is outside the "
                          "project, so a fresh clone has it only if that path exists on its machine",
-                         "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                         "copy it into the project (e.g. data/raw/), and point the dep there\n"
                          + _RAW_INPUT_HINT.format(path="data/raw"))
                 else:
                     inputs.setdefault(rel, (yaml_rel, str(name)))
@@ -673,7 +673,7 @@ def _untracked_pipeline_inputs(
         if query == ".." or query.startswith("../"):
             warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is a "
                  "symlink to a path outside the project, so a fresh clone has it only if that path exists on its "
-                 "machine", "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                 "machine", "copy it into the project (e.g. data/raw/), and point the dep there\n"
                  + _RAW_INPUT_HINT.format(path="data/raw"))
             continue
         if os.path.isdir(real):

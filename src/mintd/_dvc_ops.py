@@ -18,6 +18,7 @@ from typing import Optional, Protocol
 from ._config import Timeouts
 from ._console import Reporter
 from ._dvc_invoke import dvc_cmd, dvc_env
+from ._paths import inside
 from ._subprocess import StreamResult, run_streaming
 from .errors import MintdError, unreachable_repo_hint
 
@@ -471,11 +472,11 @@ def _import_urls(cwd: Path, targets: list[str] | None) -> list[str]:
                 pointers += [_canonical(path / rel) for rel in discover_all_outs(path)]
             pointers += [
                 beside for p in (path, *path.parents)
-                if p.is_relative_to(root) and p != root and (beside := p.with_name(p.name + ".dvc")).is_file()
+                if inside(root, p, read="follow") is not None and (beside := p.with_name(p.name + ".dvc")).is_file()
             ]
     urls = []
     for pointer in dict.fromkeys(pointers):
-        if pointer.is_relative_to(root) and in_subrepo(root, pointer.relative_to(root).as_posix()):
+        if (where := inside(root, pointer, read="follow")) is not None and in_subrepo(root, where):
             continue  # a nested project's own import: dvc, run from this project, never reads it
         try:
             urls.append(DataDependency.from_dvc_file(pointer).producer_repo)

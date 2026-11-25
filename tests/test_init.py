@@ -222,6 +222,31 @@ def test_init_refuses_a_symlinked_scaffold_directory(tmp_path: Path) -> None:
     assert list(shared_code.iterdir()) == [team_utils]
 
 
+def test_init_refuses_a_scaffold_directory_that_is_a_link_loop(tmp_path: Path) -> None:
+    """`code -> loop -> code`: Python 3.11's `resolve()` raised `RuntimeError`, a
+    traceback; 3.13's reads it as inside, and the write fails later. Refused up front,
+    as a link out of the project is.
+
+    Mutation: resolve the target without detecting the loop -> no refusal, red."""
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        (work / "code").symlink_to(work / "loop", target_is_directory=True)
+        (work / "loop").symlink_to(work / "code", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"can't make a link here: {exc}")
+
+    with pytest.raises(InitDestinationExists, match="outside"):
+        init_project(
+            project_type="data",
+            name="cohort",
+            target_dir=work,
+            use_current_repo=True,
+            force=True,
+            ops=_FakeInitOps(),
+        )
+
+
 def test_init_code_type_ignores_a_readme(tmp_path: Path) -> None:
     """A code scaffold writes metadata.json and nothing else, so a README in
     the target is not a collision for it."""
@@ -245,7 +270,7 @@ def test_init_missing_bucket_writes_nothing(tmp_path: Path) -> None:
     survived and the rerun wedged on the destination guard.
     """
     fake = _FakeInitOps()
-    with pytest.raises(InitOpError, match="bucket not configured"):
+    with pytest.raises(InitOpError, match="storage_bucket_prefix is not set in "):
         init_project(
             project_type="data",
             name="my_proj",
@@ -258,6 +283,33 @@ def test_init_missing_bucket_writes_nothing(tmp_path: Path) -> None:
     assert not (tmp_path / "data_my_proj").exists()
     assert fake.git_calls == []
     assert fake.dvc_calls == []
+
+
+def test_a_missing_bucket_names_the_config_file_the_reader_uses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal named ~/.mintd/config.yaml, a file mintd never reads, so a user
+    who wrote the bucket there was refused again. It now names the file
+    Config.load reads, and the key: writing the key to that file is what clears it.
+
+    Mutations: any literal path in the message, or the hint's first two lines joined with "; " -> red."""
+    from mintd._config import Config
+
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "cfg"))
+    with pytest.raises(InitOpError) as excinfo:
+        init_project(project_type="data", name="my_proj", target_dir=tmp_path, classification="labonly",
+                     bucket=None, endpoint="", ops=_FakeInitOps())
+    named = tmp_path / "cfg" / "config.yaml"
+    assert str(excinfo.value) == f"storage_bucket_prefix is not set in {named}"
+    assert (excinfo.value.hint or "").splitlines() == [
+        "to set it: mintd config setup",
+        "or: mintd config setup --set storage_bucket_prefix=<bucket>",
+        "then rerun the same command",
+    ]
+
+    named.parent.mkdir()
+    named.write_text("storage_bucket_prefix: lab-bucket\n", encoding="utf-8")
+    assert Config.load().storage_bucket_prefix == "lab-bucket"
 
 
 def test_init_invalid_name_leaves_no_directory(tmp_path: Path) -> None:
@@ -817,7 +869,7 @@ def test_init_removes_sentinel_on_success(tmp_path: Path) -> None:
 def test_init_project_requires_bucket_when_classification_set(tmp_path: Path) -> None:
     from mintd._init_ops import InitOpError
     fake = _FakeInitOps()
-    with pytest.raises(InitOpError, match="bucket not configured"):
+    with pytest.raises(InitOpError, match="storage_bucket_prefix is not set in "):
         init_project(
             project_type="data",
             name="foo",

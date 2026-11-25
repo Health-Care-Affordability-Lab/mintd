@@ -103,7 +103,7 @@ def scaffold_code(language: str, name: str, full_name: str, source_dir: str = "c
 def scaffold_enclave(language: str, name: str, full_name: str, source_dir: str = "code") -> tuple[list[str], list[tuple[str, str]]]:
     """Enclave scaffold — language arg ignored (always Python toolchain inside)."""
     del language, name, full_name, source_dir
-    dirs = ["data", "src", "scripts", "transfers"]
+    dirs = ["data", "src", "transfers"]
     files = [
         ("README.md", "README_enclave.md.j2"),
         ("metadata.json", "metadata.json.j2"),
@@ -111,9 +111,6 @@ def scaffold_enclave(language: str, name: str, full_name: str, source_dir: str =
         (".gitignore", "gitignore.txt"),
         (".dvcignore", "dvcignore.txt"),
         ("src/__init__.py", "__init__.py.j2"),
-        ("src/registry.py", "registry.py.j2"),
-        ("src/download.py", "download.py.j2"),
-        ("scripts/pull_data.sh", "pull_data.sh.j2"),
     ]
     # Removed: enclave_cli.py, src/transfer.py, scripts/unpack_transfer.sh,
     # scripts/verify_transfer.sh, requirements.txt. All five were v1 leftovers
@@ -127,10 +124,10 @@ def scaffold_enclave(language: str, name: str, full_name: str, source_dir: str =
     # because deleting src/transfer.py orphaned it: its last line is
     # `python -m src.transfer package`.
     #
-    # Still here and still stale: scripts/pull_data.sh and src/{registry,
-    # download}.py, all superseded by `mintd enclave pull`. download.py also
-    # reads the v1 `dvc_hash` field, which v2 manifests do not have. They are
-    # merely stale rather than broken-by-this-change — BACKLOG, not this diff.
+    # scripts/pull_data.sh, src/registry.py and src/download.py went later,
+    # superseded by `mintd enclave pull`: both Python scripts cloned GitHub
+    # over an SSH URL they built themselves, around mintd's own GitHub access,
+    # and download.py read the v1 `dvc_hash` field v2 manifests don't have.
     return dirs, files
 
 

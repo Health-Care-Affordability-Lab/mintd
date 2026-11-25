@@ -316,3 +316,21 @@ def test_write_tree_writes_each_text_exactly_and_refuses_a_path_outside_its_root
     with pytest.raises(ValueError, match="outside"):
         _atomic.write_tree(root, {"../escape.dvc": "x"})
     assert not (tmp_path / "escape.dvc").exists()
+
+
+def test_write_tree_refuses_a_path_through_a_link_out_of_its_root(tmp_path: Path) -> None:
+    """A link in the scratch tree to a folder outside it: a path through the link
+    lands outside, so it is refused before anything is written there.
+
+    Mutation: read the path as text -> written outside, red."""
+    root = tmp_path / "tree"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (root / "ln").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # Windows without the privilege to make links
+        pytest.skip(f"can't make a link here: {exc}")
+    with pytest.raises(ValueError, match="outside"):
+        _atomic.write_tree(root, {"ln/x.dvc": "x"})
+    assert not (outside / "x.dvc").exists()

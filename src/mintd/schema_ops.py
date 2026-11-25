@@ -13,6 +13,7 @@ import json
 import math
 from pathlib import Path
 
+from ._paths import rel
 from .errors import MintdError
 from typing import Any, TypedDict
 
@@ -248,7 +249,7 @@ def generate_schema_file(
         data_files.extend(data_dir.glob(pattern))
     # By the relative path's characters, so the committed output lists files in
     # the same order on every OS.
-    data_files = sorted(data_files, key=lambda p: p.relative_to(data_dir).as_posix())
+    data_files = sorted(data_files, key=lambda p: rel(data_dir, p))
 
     if not data_files:
         raise FileNotFoundError(
@@ -270,7 +271,7 @@ def generate_schema_file(
         _refuse_data_as_column_names(data_file, df, allow_numeric_column_names)
         files_schemas.append({
             "filename": data_file.name,
-            "path": data_file.relative_to(data_dir).as_posix(),
+            "path": rel(data_dir, data_file),
             "columns": len(df.columns),
             "schema": schema,
         })
