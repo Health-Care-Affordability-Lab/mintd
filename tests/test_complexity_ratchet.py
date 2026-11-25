@@ -2,7 +2,8 @@
 
 Complexity is ruff's C901 count, the one CI already caps at the largest function's. That cap lets every function
 grow to it; this test holds each one where it is. `complexity_ratchet.txt` lists each function over `LIMIT` as
-`<module>::<function> <complexity>`. A function may not rise above its line, and one not listed may not pass
+`<module>::<qualified name> <complexity>` (`check.py::_check_remote`, `_fast_sync_ops.py::SubprocessFastSyncOps.try_fast_pull`),
+so a method can't hide behind a function of the same name. A `# noqa: C901` hides nothing here. A function may not rise above its line, and one not listed may not pass
 `LIMIT`. A listed function that falls, or goes, gets a warning to lower or drop its line, so the gain stays. Raising
 a line is an edit to a file the maintainers own, justified in the PR; moving a function to another module moves its
 line.
@@ -10,6 +11,7 @@ line.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -24,20 +26,42 @@ RATCHET = Path(__file__).with_name("complexity_ratchet.txt")
 LIMIT = 15
 
 
+def _qualified_names(source: str) -> dict[int, str]:
+    """The line each function is defined on -> its dotted name (`Class.method`, `outer.inner`)."""
+    names: dict[int, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = f"{prefix}{child.name}"
+                if not isinstance(child, ast.ClassDef):
+                    names[child.lineno] = name
+                walk(child, f"{name}.")
+            else:
+                walk(child, prefix)
+
+    walk(ast.parse(source), "")
+    return names
+
+
 def over_limit() -> dict[str, int]:
-    """`<module>::<function>` -> complexity, for each function over `LIMIT`, as ruff counts it."""
+    """`<module>::<qualified name>` -> complexity, for each function over `LIMIT`, as ruff counts it."""
     out = subprocess.run(
-        [sys.executable, "-m", "ruff", "check", "src/mintd", "--isolated", "--select", "C901",
+        [sys.executable, "-m", "ruff", "check", "src/mintd", "--isolated", "--ignore-noqa", "--select", "C901",
          "--config", f"lint.mccabe.max-complexity = {LIMIT}", "--output-format", "json", "--exit-zero"],
         cwd=ROOT, capture_output=True, text=True, check=True,
     ).stdout
     found: dict[str, int] = {}
+    names: dict[str, dict[int, str]] = {}
     for row in json.loads(out):
         m = re.fullmatch(r"`(.+)` is too complex \((\d+) > \d+\)", row["message"])
         assert m, row["message"]
         module = Path(row["filename"]).as_posix().split("/src/mintd/", 1)[1]
-        key = f"{module}::{m.group(1)}"
-        found[key] = max(found.get(key, 0), int(m.group(2)))
+        if module not in names:
+            names[module] = _qualified_names((ROOT / "src" / "mintd" / module).read_text(encoding="utf-8"))
+        qualified = names[module][row["location"]["row"]]
+        assert qualified.rsplit(".", 1)[-1] == m.group(1), (module, row["location"]["row"], qualified, m.group(1))
+        found[f"{module}::{qualified}"] = int(m.group(2))
     return found
 
 
@@ -51,7 +75,8 @@ def _check(now: dict[str, int], kept: dict[str, int]) -> None:
     assert not worse, (
         f"more complex than tests/{RATCHET.name} allows (a function not listed may reach {LIMIT}):\n"
         + "\n".join(f"  {key}: {was or 'new'} -> {n}" for key, (was, n) in sorted(worse.items()))
-        + "\nsplit it; or, if the growth is worth it, raise its line and say why in the PR"
+        + "\nsplit it; or, if the growth is worth it, raise its line and say why in the PR: the maintainers"
+        + " approve every change to the list (CODEOWNERS)"
     )
     lower = {key: now.get(key) for key, n in kept.items() if now.get(key, 0) < n}
     if lower:

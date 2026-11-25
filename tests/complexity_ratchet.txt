@@ -4,8 +4,8 @@ _cache_ops.py::enumerate_push_items 25
 _dvc_state.py::delivery 18
 _dvc_state.py::judge_pointers 16
 _dvc_state.py::parse_dvc_lock_outs 16
+_fast_sync_ops.py::SubprocessFastSyncOps.try_fast_pull 26
 _fast_sync_ops.py::fetch_files_dir_contents 18
-_fast_sync_ops.py::try_fast_pull 26
 _import_rescue_ops.py::_match_out_files 17
 _import_rescue_ops.py::rescue_import_pull 25
 _pin_proof.py::publishable_scope 21
