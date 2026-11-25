@@ -1,0 +1,1 @@
++28: readers refuse a cached folder list that does not hash to its name and a file list naming a path twice, and check reads a producer pointer at a pin as YAML 1.2

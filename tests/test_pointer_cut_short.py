@@ -156,6 +156,8 @@ FILES_NULL = "outs:\n- path: final\n  hash: md5\n  files:\n"
     (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: {A}\n    size: [2]\n",
      "a file entry of final is incomplete"),
     (f"outs:\n- md5: {A}\n  size: twelve\n  path: x\n", "a value of x is not in the shape dvc writes"),
+    (f"outs:\n- path: final\n  hash: md5\n  files:\n  - relpath: a.csv\n    md5: {A}\n  - relpath: a.csv\n    md5: {'b' * 32}\n",
+     "the file list of final lists a path twice, which dvc never writes"),
     ("outs: [\n", "it isn't valid YAML"),
     (f"outs:\n- md5: {A}\n  path: x\n  extra: !!bool x\n", "it isn't valid YAML"),
     (f"outs:\n- md5: {A}\n  path: x\n  size: !!int ''\n", "it isn't valid YAML"),
@@ -170,7 +172,7 @@ FILES_NULL = "outs:\n- path: final\n  hash: md5\n  files:\n"
      "the version block of x is incomplete"),
 ], ids=["empty", "outs-null", "outs-empty", "out-null", "no-path", "no-hash", "md5-null", "files-null",
         "entry-null", "entry-no-md5", "entry-no-relpath", "entry-size-not-a-number", "size-not-a-number",
-        "not-yaml", "a-bool-tag-on-no-bool", "an-int-tag-on-nothing", "an-int-tag-on-a-word",
+        "a-path-listed-twice", "not-yaml", "a-bool-tag-on-no-bool", "an-int-tag-on-nothing", "an-int-tag-on-a-word",
         "a-float-tag-on-a-word", "a-tagged-date-no-calendar-has", "a-date-no-calendar-has",
         "a-number-too-long-to-read", "cloud-key-cut", "remote-entry-cut", "version-id-not-text"])
 def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
@@ -199,10 +201,13 @@ def test_a_dvc_file_cut_short_raises_naming_it(tmp_path: Path, text: str, detail
      "the file list of data/out is missing"),
     (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {A}\n      size: two\n",
      "a value of data/a.csv is not in the shape dvc writes"),
+    (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out\n      hash: md5\n      files:\n"
+     f"      - relpath: a.csv\n        md5: {A}\n      - relpath: a.csv\n        md5: {'b' * 32}\n",
+     "the file list of data/out lists a path twice, which dvc never writes"),
     (f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/a.csv\n      md5: {A}\n      size: !!float ''\n",
      "it isn't valid YAML"),
 ], ids=["empty", "stages-null", "stage-null", "outs-null", "no-hash", "hash-null", "files-null", "size-not-a-number",
-        "a-float-tag-on-nothing"])
+        "a-path-listed-twice", "a-float-tag-on-nothing"])
 def test_a_dvc_lock_cut_short_raises_naming_it(tmp_path: Path, text: str, detail: str) -> None:
     """Mutations: `check_lock` lets a null stage or stage outs through, or
     an out with no `hash` key, or a null one -> red."""

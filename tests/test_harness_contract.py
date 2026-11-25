@@ -261,6 +261,41 @@ def _pull(project: Path, targets: list[str] | None = None) -> None:
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="DVC's trust of a read-only cache object, reproduced on POSIX")
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "Target: a cached .dir that does not hash to its name, left read-only as DVC leaves its cache objects, "
+    "is trusted by the fallback dvc pull, so pull returns normally with p2.csv missing; it should land both "
+    "files or exit non-zero. mintd's own readers already refuse such a list; the dvc fallback is follow-up work"
+))
+def test_a_pull_never_returns_normally_with_a_file_its_cached_tree_dropped(
+    local_producer: LocalProducer, tmp_path: Path
+) -> None:
+    """A changed .dir in the clone's cache (valid JSON, p2.csv dropped, read-only
+    again): pull must repair it, so both files land, or fail. Either fix flips
+    this Target."""
+    from mintd._dvc_state import dvc_cache_dir
+    from mintd.errors import MintdError
+
+    local_producer.publish(PAYLOAD)
+    clone = _clone(local_producer, tmp_path / "consumer")
+    _pull(clone)
+    (listing,) = dvc_cache_dir(clone).rglob("*.dir")
+    listing.chmod(0o644)
+    entries = [e for e in json.loads(listing.read_text(encoding="utf-8")) if e["relpath"] != "p2.csv"]
+    listing.write_text(json.dumps(entries), encoding="utf-8")
+    listing.chmod(0o444)
+    shutil.rmtree(clone / "data" / "parts")
+
+    try:
+        summary = data_pull(project_path=clone, targets=None, dvc_ops=SubprocessDvcOps(timeouts=Timeouts()),
+                            fast_sync_ops=SubprocessFastSyncOps())
+    except MintdError:
+        return  # pull failed, which the CLI turns into exit 1
+    if summary.error_count:
+        return  # reported as not delivered, which the CLI turns into exit 1
+    assert sorted(p.name for p in (clone / "data" / "parts").iterdir()) == ["p1.csv", "p2.csv"]
+
+
 def test_clone_from_local_producer_lands_payload_bytes(
     local_producer: LocalProducer, tmp_path: Path
 ) -> None:

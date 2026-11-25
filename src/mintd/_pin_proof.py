@@ -30,6 +30,7 @@ from ._dvc_state import (
     dvc_cache_dir,
     flagged_outs,
     read_cached_dir_manifest,
+    refuse_a_path_listed_twice,
     resolve_out,
     stage_wdir,
     wdir_map,
@@ -135,6 +136,8 @@ def _out_entries(
     md5 = str(raw.get("md5") or "")
     files = raw.get("files")
     if isinstance(files, list):
+        refuse_a_path_listed_twice(pointer, f"the file list of {out_path}",
+                                   [fe.get("relpath") for fe in files if isinstance(fe, dict)])
         entries = []
         for j, fe in enumerate(files):
             if not isinstance(fe, dict):

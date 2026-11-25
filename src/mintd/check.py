@@ -54,6 +54,7 @@ from ._dvc_state import (
     discover_all_outs,
     load12,
     normalize_target,
+    refuse_a_path_listed_twice,
     resolve_out,
     stage_wdir,
     wdir_map,
@@ -1736,11 +1737,17 @@ def _pointer_md5(
                     absent_so_far = False
                 continue
             try:
-                data = yaml.safe_load(raw)
-            except yaml.YAMLError:
+                data = _producer_doc(raw)
+            except ValueError:
                 absent_so_far = False
                 continue
-        md5 = _match_out_md5(data, clean, base_dir=base_dir)
+        try:
+            md5 = _match_out_md5(data, clean, base_dir=base_dir)
+        except PointerCutShort:
+            # A file list naming a path twice answers for one file with two
+            # md5s: unreadable, never a pick of one entry.
+            absent_so_far = False
+            continue
         # A `.outs` digest is a SET identity over the outs beneath the path;
         # with a stage dropped the set is incomplete, and a missing member
         # would read as "vanished" — drift that `bump` acts on. An exact or
@@ -1751,6 +1758,19 @@ def _pointer_md5(
         # A readable document with no matching out is absence evidence.
     memo[key] = verdict = _POINTER_ABSENT if absent_so_far else None
     return verdict
+
+
+def _producer_doc(raw: bytes) -> Any:
+    """A file fetched from the producer at a pin, read as dvc reads it
+    (``load12``, YAML 1.2), as every local reader of a pointer already does.
+    PyYAML's YAML 1.1 reads an unquoted ``NO`` or ``on`` as a boolean, and a
+    path dvc wrote that way never matched. ValueError when it isn't UTF-8 YAML."""
+    from ruamel.yaml import YAMLError
+
+    try:
+        return load12(raw.decode("utf-8"))
+    except (YAMLError, UnicodeDecodeError) as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _pointer_candidates(clean: str) -> list[tuple[str, str]]:
@@ -1796,10 +1816,10 @@ def _resolved_lock(
         return memo[key]
     result: tuple[Any, bool] | None
     try:
-        data = yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.lock"))
+        data = _producer_doc(fetcher.fetch_path_at(repo, pin, "dvc.lock"))
     except FetchError as e:
         result = ({}, False) if e.reason == FetchError.Reason.PATH_MISSING else None
-    except yaml.YAMLError:
+    except ValueError:
         result = None
     else:
         # `dvc.lock` records each out relative to its stage's `wdir`, and the
@@ -1834,12 +1854,12 @@ def _stage_wdirs(
         return memo[key]
     resolved: dict[str, str | None] | None
     try:
-        resolved = wdir_map(yaml.safe_load(fetcher.fetch_path_at(repo, pin, "dvc.yaml")))
+        resolved = wdir_map(_producer_doc(fetcher.fetch_path_at(repo, pin, "dvc.yaml")))
     except FetchError as e:
         # Only "the file is not there" is evidence about the producer; every
         # other reason is evidence about the network.
         resolved = {} if e.reason == FetchError.Reason.PATH_MISSING else None
-    except yaml.YAMLError:
+    except ValueError:
         resolved = None
     memo[key] = resolved
     return resolved
@@ -1905,6 +1925,9 @@ def _out_identity(out: dict[str, Any], subpath: str = "") -> str | None:
     """
     md5 = out.get("md5")
     files = out.get("files")
+    if isinstance(files, list):
+        refuse_a_path_listed_twice("the producer's pointer", f"the file list of {out.get('path')}",
+                                   [e.get("relpath") for e in files if isinstance(e, dict)])
     if subpath:
         if isinstance(files, list):
             beneath: list[tuple[str, str]] = []

@@ -776,3 +776,23 @@ def test_an_unreachable_producer_gets_the_shared_hint() -> None:
     """Mutation: put back "check git access to <url>" -> red."""
     _reason, hint = _fetch_error_reason(FetchError.unreachable("https://h/r", "abc"), "https://h/r")
     assert hint == unreachable_repo_hint("https://h/r")
+
+
+def test_a_producer_pointer_naming_a_path_twice_is_refused_naming_the_producer_file():
+    """The rescue reads the producer's pointer itself, past the pointer
+    readers' check, so the twice-listed rule runs there too, naming the file.
+    Mutation: make ``refuse_a_path_listed_twice`` a no-op -> red."""
+    pointer = _pointer_dvc([DvcFileEntry(md5="a" * 32, relpath="a.csv", size=1),
+                            DvcFileEntry(md5="b" * 32, relpath="a.csv", size=1)])
+
+    class _F:
+        def fetch_path_at(self, repo, pin, path):
+            if path == "data/final.dvc":
+                return pointer.encode()
+            raise FetchError.path_missing(repo, pin)
+
+    from mintd._import_rescue_ops import _Producer
+    producer = _Producer(bucket="lab", prefix="p", remote_cfg={}, remote_name="storage")
+    with pytest.raises(PointerCutShort, match=r"data/final\.dvc in https://h/r at 1234567 is cut short or damaged: "
+                                              r"the file list of data/final lists a path twice, which dvc never writes"):
+        _entries_from_producer_pointer(_dep(repo="https://h/r", pin="1234567abc"), producer, fetcher=_F())

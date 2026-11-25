@@ -227,6 +227,16 @@ def _cloud_ok(rec: dict[str, Any]) -> bool:
         v is None or (isinstance(v, dict) and _scalars_ok(v)) for v in cloud.values()))
 
 
+def refuse_a_path_listed_twice(pointer: Path | str, what: str, relpaths: Sequence[object]) -> None:
+    """``PointerCutShort`` when ``what`` (a file list in ``pointer``) names a
+    path twice. dvc lists each path once; a second entry answers for the same
+    file with other bytes, and readers disagree on which one counts (dvc's own
+    checkout keeps the last). Compared as readers read a relpath, as text."""
+    names = [str(r) for r in relpaths]
+    if len(set(names)) != len(names):
+        raise PointerCutShort(pointer, f"{what} lists a path twice, which dvc never writes")
+
+
 def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = False) -> None:
     if not isinstance(out, dict):
         raise PointerCutShort(pointer, "an output entry is empty" if out is None
@@ -255,6 +265,7 @@ def _check_out(pointer: Path | str, out: Any, *, hashed: bool, unrun_ok: bool = 
             if not hash_in_dvc_shape(fe["md5"]):
                 raise PointerCutShort(
                     pointer, f"a file entry of {name} records a hash not in the shape dvc writes: {fe['md5']!r}")
+        refuse_a_path_listed_twice(pointer, f"the file list of {name}", [fe["relpath"] for fe in files])
 
 
 def check_dvc_file(pointer: Path | str, doc: Any) -> None:
@@ -784,10 +795,12 @@ def is_cached(cache_dir: Path, md5: str) -> bool:
 
 def _listed(entries: "list[DvcFileEntry]", source: str) -> "list[DvcFileEntry]":
     """``entries``, read from the folder list ``source``, unless one records
-    a hash dvc never writes: then ``PointerCutShort`` naming ``source``."""
+    a hash dvc never writes or names a path twice: then ``PointerCutShort``
+    naming ``source``."""
     for e in entries:
         if not hash_in_dvc_shape(e.md5):
             raise PointerCutShort(source, f"the hash of {e.relpath!r} is not in the shape dvc writes: {e.md5!r}")
+    refuse_a_path_listed_twice(source, "it", [e.relpath for e in entries])
     return entries
 
 
@@ -796,17 +809,22 @@ def read_cached_dir_manifest(cache_dir: Path, dir_md5: str) -> "list[DvcFileEntr
 
     ``dir_md5`` may arrive with or without the ``.dir`` suffix; the cache
     filename always carries it (DVC's own layout — see ensure_dir_manifest).
-    Returns ``None`` when the manifest is absent or malformed in any way
-    (bad JSON, non-list payload, non-dict entries): callers treat that as
-    "manifest not usable from cache" and fetch or route accordingly. An
-    entry whose hash dvc never writes is ``PointerCutShort`` (``_listed``).
+    Returns ``None`` when the manifest is absent, when its bytes don't hash
+    to ``dir_md5`` (changed in place, it can stay valid JSON while dropping a
+    file or swapping an md5), or when it is malformed in any way (bad JSON,
+    non-list payload, non-dict entries): callers treat that as "manifest not
+    usable from cache" and fetch or route accordingly. An entry whose hash dvc
+    never writes, or a path listed twice, is ``PointerCutShort`` (``_listed``).
     """
     full_md5 = dir_md5 if dir_md5.endswith(".dir") else f"{dir_md5}.dir"
     manifest_path = cache_path_for(cache_dir, full_md5)
     if not manifest_path.is_file():
         return None
     try:
-        payload = json.loads(manifest_path.read_bytes())
+        raw = manifest_path.read_bytes()
+        if hashlib.md5(raw, usedforsecurity=False).hexdigest() != full_md5.removesuffix(".dir"):
+            return None
+        payload = json.loads(raw)
         if not isinstance(payload, list):
             return None
         entries = [

@@ -3049,3 +3049,52 @@ def test_a_finding_names_its_file_else_its_field_else_the_project(source, field_
     finding = CheckFinding(severity="error", section="producer", message="m", kind="metadata_invalid",
                            source=source, field_path=field_path)
     assert finding.location == shown
+
+
+# ---------------------------------------------------------------------------
+# A producer's pointer at a pin, read as dvc reads it
+# ---------------------------------------------------------------------------
+
+
+def _import_kinds(tmp_path: Path, producer_path: str, at_pin: bytes, at_head: bytes) -> list[str]:
+    """`check --upgrades` kinds for a project importing one producer path at
+    `_PIN` into `imported`, the producer's pointer for it being `at_pin` there
+    and `at_head` at HEAD."""
+    from tests._harness.consumer import Import, write_import
+
+    _write_metadata(tmp_path)
+    write_import(tmp_path, Import(name="demo-map", producer_url=_VIEW_REPO, pin=_PIN, producer_path=producer_path,
+                                  local_path="imported"))
+    pointer = f"{producer_path.rstrip('/')}.dvc"
+    findings = check_project(
+        tmp_path, upgrades=True,
+        producer_view_factory=_factory_by_pin({
+            _PIN: _view_with_primary(producer_path, pin=_PIN),
+            "": _view_with_primary(producer_path, pin=_HEAD),
+        }),
+        fetcher=_fetcher_serving({(_VIEW_REPO, _PIN, pointer): at_pin, (_VIEW_REPO, _HEAD, pointer): at_head}),
+    )
+    return [f.kind for f in findings if f.section == "consumer"]
+
+
+def test_a_producer_pointer_naming_a_file_twice_is_unreadable_not_up_to_date(tmp_path: Path) -> None:
+    """A file list naming a.csv twice answers for one file with two md5s. The
+    same list at the pin and at HEAD read as unchanged; now it can't be read,
+    which is what `drift_unknown` says. Mutation: make
+    `refuse_a_path_listed_twice` a no-op -> up_to_date, red."""
+    twice = _files_pointer(("a.csv", "a" * 32), ("a.csv", "b" * 32))
+
+    assert _import_kinds(tmp_path, _OUT, twice, twice) == ["drift_unknown"]
+
+
+@pytest.mark.parametrize("head_md5, kind", [("a" * 32, "up_to_date"), ("z" * 32, "drift")], ids=["unchanged", "moved"])
+def test_a_producer_pointer_is_read_as_dvc_reads_it(tmp_path: Path, head_md5: str, kind: str) -> None:
+    """`dvc add NO` (a folder per country) writes `path: NO` unquoted. Read as
+    YAML 1.1 that path was the value false, so it never matched and check
+    couldn't tell whether the output changed. Mutation: read the fetched
+    pointer with `yaml.safe_load` again -> red."""
+    at_pin = _files_pointer(("a.csv", "a" * 32), path="NO")
+    at_head = _files_pointer(("a.csv", head_md5), path="NO")
+
+    assert _import_kinds(tmp_path, "outputs/NO/", at_pin, at_head) == [kind]
+

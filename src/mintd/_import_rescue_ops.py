@@ -48,6 +48,7 @@ from ._dvc_state import (
     hash_in_dvc_shape,
     is_cached,
     outs_for_target,
+    refuse_a_path_listed_twice,
     outs_materialized,
     parse_remote_config_text,
     parse_s3_url,
@@ -236,11 +237,12 @@ def _entries_from_producer_pointer(
         except yaml.YAMLError:
             continue
         entries = _match_out_files(data, output_path, producer.remote_name)
+        # no credentials from the URL in the error itself, so no log line or traceback carries them
+        source = f"{candidate} in {strip_userinfo(dep.producer_repo)} at {dep.contract_pin[:7]}"
         bad = next((e.md5 for e in entries or [] if e.md5 and not hash_in_dvc_shape(e.md5)), None)
         if bad is not None:  # an empty one is the caller's "missing a file hash"
-            # no credentials from the URL in the error itself, so no log line or traceback carries them
-            raise PointerCutShort(f"{candidate} in {strip_userinfo(dep.producer_repo)} at {dep.contract_pin[:7]}",
-                                  f"a hash in it is not in the shape dvc writes: {bad!r}")
+            raise PointerCutShort(source, f"a hash in it is not in the shape dvc writes: {bad!r}")
+        refuse_a_path_listed_twice(source, f"the file list of {output_path}", [e.relpath for e in entries or []])
         if entries is not None:
             return entries
     return None
