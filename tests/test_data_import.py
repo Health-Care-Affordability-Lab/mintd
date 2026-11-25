@@ -203,6 +203,57 @@ def test_a_failure_partway_through_all_names_what_landed(tmp_path: Path) -> None
     assert any("1 of 2 outputs were imported" in m for m in reporter.warns)
 
 
+def test_import_all_says_how_many_outputs_it_brings_and_which_no_output_declares(tmp_path: Path) -> None:
+    """Before the first download, one line from the listing: how many outs
+    `--all` imports, and those the catalog declares no output for.
+    Mutation: drop the line, or count a declared output as undeclared -> red."""
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("data/final/"))
+    reporter = _RecordingReporter()
+
+    import_product(
+        client, _FakeDvcOps(), "demo_map", all_outputs=True, list_tracked=_lists("data/final", "data/mid", "data/raw"),
+        cwd=tmp_path, dest_root=tmp_path, reporter=reporter,
+    )
+
+    assert "--all: 3 outputs, 2 not declared (data/mid, data/raw)" in reporter.infos
+
+
+@pytest.mark.parametrize(("refused", "rest_hint"), [
+    ("outputs/b.csv", "import the rest by name:\nmintd import demo_map --rev v1.0.0 --dest-root {root} --path outputs/c.csv\n"),
+    ("outputs/c.csv", "the other outputs are imported\n"),
+], ids=["middle", "last"])
+def test_a_refused_output_of_all_names_the_rest_as_a_path_command(tmp_path: Path, refused: str, rest_hint: str) -> None:
+    """A re-run of `--all` stops at the first output already imported, so a user
+    without access to one output (licensed raw data) can finish only with
+    `--path`: the hint names the outputs still to import, at the same rev and
+    destination. Mutations: drop the hint, or name the refused output among the
+    rest -> red."""
+    from mintd._dvc_ops import DvcOpError
+
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_outputs("outputs/a.csv"))
+    fake = _FakeDvcOps()
+    real_import = fake.import_
+
+    def refuse(**kw: Any) -> Path:
+        if kw["path"] == refused:
+            raise DvcOpError("dvc import failed (exit 1)")
+        return real_import(**kw)
+
+    fake.import_ = refuse  # type: ignore[method-assign]
+
+    with pytest.raises(DvcOpError) as exc:
+        import_product(
+            client, fake, "demo_map", all_outputs=True, rev="v1.0.0", cwd=tmp_path, dest_root=tmp_path / "imports",
+            list_tracked=_lists("outputs/a.csv", "outputs/b.csv", "outputs/c.csv"),
+        )
+
+    rest_hint = rest_hint.format(root=shlex.quote(str(tmp_path / "imports")))
+    assert exc.value.hint == (f"if {refused} is licensed data you have no access to,\n{rest_hint}"
+                              "or retry with --dvc-arg=-v for verbose DVC output")
+
+
 @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
 def test_an_interrupted_import_still_names_what_landed(
     tmp_path: Path, interrupt: type[BaseException]

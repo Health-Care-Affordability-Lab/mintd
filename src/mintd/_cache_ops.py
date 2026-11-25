@@ -32,7 +32,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Collection, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
 from ._paths import inside, rel as rel_to
@@ -261,7 +261,10 @@ class _Collision:
     source: str
 
 
-def dvc_tracked_paths(project_path: Path, remote_name: str) -> set[str]:
+def dvc_tracked_paths(
+    project_path: Path, remote_name: str, *,
+    declared: Collection[str] | None = None, skipped: list[str] | None = None,
+) -> set[str]:
     """Repo-relative posix path of every DVC-tracked workspace out (files AND
     directory-out roots). ``cache push`` refuses any path in — or under a
     directory in — this set (a versioned product belongs to ``mintd data
@@ -269,10 +272,10 @@ def dvc_tracked_paths(project_path: Path, remote_name: str) -> set[str]:
     clobber a tracked out). Uses ``workspace_path_for`` — the exact anchoring
     ``.dvc``-file/``dvc.lock`` outs record — so it matches where DVC materializes
     each out. Outs that resolve outside the project (shouldn't happen) are
-    skipped."""
+    skipped. ``declared`` and ``skipped``: as ``partition_pipeline_outs``."""
     root = project_path.resolve()
     tracked: set[str] = set()
-    for out in _all_dvc_outs(project_path, remote_name):
+    for out in _all_dvc_outs(project_path, remote_name, declared=declared, skipped=skipped):
         try:
             rel = workspace_path_for(project_path, out).resolve().relative_to(root).as_posix()
         except ValueError:

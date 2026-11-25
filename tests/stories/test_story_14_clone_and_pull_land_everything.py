@@ -15,6 +15,8 @@
   - Then: everything else lands, the stale step is named in one warning; exit 0.
   - Pass: the shared landed-files check passes, so it too expects only the
     steps dvc.yaml still declares.
+  - `mintd data import --all` lists the same tree: the stale step is skipped
+    and named, and everything else is imported; exit 0.
 - Failed checkout case: the product also imports a folder from another
   producer, and one stage's output was renamed in dvc.yaml without a rerun,
   so `dvc checkout` refuses the lock's old name.
@@ -158,6 +160,27 @@ def test_a_stale_lock_entry_is_skipped_and_named(product, mintd, s3_server, tmp_
     assert assert_landed_match_pointers(dest, skipped) == {
         **{k: md5(b) for k, b in product.published().items()}, still_lands: md5(built)}
     assert skipped == [f"dvc.lock:{step}"]
+
+
+@pytest.mark.parametrize("stale", list(STALE))
+def test_import_all_skips_a_stale_lock_entry_and_names_it(product, mintd, s3_server, fresh_project, stale) -> None:
+    """`import --all` lists the producer's tree as clone and pull read it: the
+    stale step is skipped and named once, and every other out is imported.
+    Mutation: list the tree without dvc's stage names -> dvc refuses to import
+    `fan@q`'s out, exit 1, red."""
+    make_stale, step, still_lands = STALE[stale]
+    make_stale(product)
+    project = fresh_project()
+
+    run = mintd("data", "import", product.name, "--all", cwd=project, json=False)
+
+    assert run.returncode == 0, run.stderr
+    warning = f"skipped dvc.lock entries for 1 stage(s) dvc.yaml no longer declares, as dvc pull does: {step}"
+    assert " ".join(run.stderr.split()).count(warning) == 1, run.stderr
+    root = f"data/imports/data_{product.name}"
+    built = (product.producer.work / still_lands).read_bytes()
+    assert assert_landed_match_pointers(project) == {
+        **{f"{root}/{k}": md5(b) for k, b in product.published().items()}, f"{root}/{still_lands}": md5(built)}
 
 
 RENAMED = """stages:

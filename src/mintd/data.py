@@ -29,7 +29,7 @@ from ._cache_ops import dvc_tracked_paths
 from ._paths import physical as _physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import (
-    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+    abbreviate, default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
 )
 from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
@@ -37,7 +37,7 @@ from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
-from .data_ops import data_pull
+from .data_ops import _dvc_stage_names, data_pull
 from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
@@ -231,17 +231,21 @@ def import_product(
     if all_outputs:
         # Everything DVC tracks at the pin, raw and intermediate included, as
         # `clone --all` pulls it: the producer's tree decides, not the catalog.
-        selected = (list_tracked or _tracked_at)(repo_url, rev or "HEAD")
+        pin = rev or "HEAD"
+        selected = list_tracked(repo_url, pin) if list_tracked else _tracked_at(repo_url, pin, dvc_ops, reporter)
         if not selected:
-            raise NoTrackedOutputs(
-                f"{name!r} tracks nothing with DVC at {rev or 'HEAD'}; --all has nothing to import"
-            )
+            raise NoTrackedOutputs(f"{name!r} tracks nothing with DVC at {pin}; --all has nothing to import")
     else:
         if rev is not None and path is None:
             factory = producer_view_factory or ProducerView.at
             path = factory(repo_url, rev).primary_or_raise()
         selected = _resolve_paths(dumped, path=path, name=name)
     paths = _drop_nested_paths(selected, reporter=reporter)
+    if all_outputs and reporter is not None:
+        declared = [d.rstrip("/") for d in _tracked_output_targets(dumped)]
+        extra = [p for p in paths if not any(path_covers(d, p) or path_covers(p, d) for d in declared)]
+        reporter.info(f"--all: {len(paths)} outputs, {len(extra)} not declared"
+                      + (f" ({abbreviate(extra)})" if extra else ""))
 
     # Namespace the destination by the producer's full_name (e.g.
     # `data_cms-synpuf`) so importing multiple products into the same
@@ -445,6 +449,16 @@ def import_product(
                 f"this failure and remain on disk: "
                 + ", ".join(str(q) for q in produced)
             )
+        if all_outputs and isinstance(exc, DvcOpError) and exc.hint is None:
+            # A re-run of --all stops at the first output already imported, so
+            # without access to this one (licensed raw data) only --path finishes.
+            rest = paths[len(produced) + 1:]
+            argv = ["mintd", "import", name, *(["--rev", rev] if rev else []),
+                    *([] if dest_root == Path("data/imports") else ["--dest-root", str(dest_root)]),
+                    *(a for r in rest for a in ("--path", r))]
+            exc.hint = (f"if {paths[len(produced)]} is licensed data you have no access to,\n"
+                        + (f"import the rest by name:\n{shlex.join(argv)}\n" if rest else "the other outputs are imported\n")
+                        + "or retry with --dvc-arg=-v for verbose DVC output")
         raise
     return produced
 
@@ -556,17 +570,25 @@ def _rows(section: dict[str, Any], key: str) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _tracked_at(repo_url: str, pin: str) -> list[str]:
+def _tracked_at(repo_url: str, pin: str, dvc_ops: DvcOps, reporter: "Reporter | None") -> list[str]:
     """Every out DVC tracks in the producer's tree at ``pin``, `.dvc`
     pointers and `dvc.lock` outs alike, raw and intermediate included: what
-    `import --all` imports. Reads the producer's git, never its bucket."""
+    `import --all` imports. Reads the producer's git, never its bucket. A lock
+    entry for a stage dvc.yaml no longer declares is skipped and named, as
+    `data_pull` does: dvc refuses to import it."""
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp)
         try:
             GitArchiveFetcher().checkout_at(repo_url, pin, tree)
         except FetchError as exc:
             raise ProducerError.from_fetch_error(exc) from exc
-        return sorted(dvc_tracked_paths(tree, inspect_storage(tree).dvc_remote_name or ""))
+        stale: list[str] = []
+        tracked = dvc_tracked_paths(tree, inspect_storage(tree).dvc_remote_name or "",
+                                    declared=_dvc_stage_names(tree, dvc_ops), skipped=stale)
+    if stale and reporter is not None:
+        reporter.warn(f"skipped dvc.lock entries for {len(stale)} stage(s) dvc.yaml no longer declares, "
+                      f"as dvc pull does: {abbreviate(sorted(stale))}")
+    return sorted(tracked)
 
 
 def _resolve_paths(
