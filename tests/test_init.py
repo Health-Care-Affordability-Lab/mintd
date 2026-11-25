@@ -267,7 +267,7 @@ def test_a_missing_bucket_names_the_config_file_the_reader_uses(
     who wrote the bucket there was refused again. It now names the file
     Config.load reads, and the key: writing the key to that file is what clears it.
 
-    Mutation: any literal path in the message -> red."""
+    Mutations: any literal path in the message, or the hint's first two lines joined with "; " -> red."""
     from mintd._config import Config
 
     monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "cfg"))
@@ -276,7 +276,11 @@ def test_a_missing_bucket_names_the_config_file_the_reader_uses(
                      bucket=None, endpoint="", ops=_FakeInitOps())
     named = tmp_path / "cfg" / "config.yaml"
     assert str(excinfo.value) == f"storage_bucket_prefix is not set in {named}"
-    assert "mintd config setup --set storage_bucket_prefix=<bucket>" in (excinfo.value.hint or "")
+    assert (excinfo.value.hint or "").splitlines() == [
+        "to set it: mintd config setup",
+        "or: mintd config setup --set storage_bucket_prefix=<bucket>",
+        "then rerun the same command",
+    ]
 
     named.parent.mkdir()
     named.write_text("storage_bucket_prefix: lab-bucket\n", encoding="utf-8")
