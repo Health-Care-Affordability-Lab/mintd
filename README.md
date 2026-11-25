@@ -95,9 +95,6 @@ look it up at most once a day, give up after 2 seconds, and say nothing
 offline or under `--json` or `-q`. `MINTD_NO_UPDATE_CHECK=1` turns the lookup
 off, and so does a CI run (any value in `CI`).
 
-> Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them
-> under WSL2, Git Bash, or MSYS2 — there are no `.ps1` siblings yet.
-
 ## First-time setup
 
 mintd reaches GitHub through [gh](https://cli.github.com) only. Log in, and let git
