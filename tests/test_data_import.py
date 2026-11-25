@@ -1730,3 +1730,25 @@ def test_another_producers_import_is_named_relative_to_the_imports_working_folde
     assert str(refused.value).startswith(
         "data_demo_map/outputs/core_rows.dvc imports https://github.com/example-org/demo_map, not "
     ), str(refused.value)
+
+
+def test_import_refuses_an_output_whose_destination_is_a_link_out_of_the_import_root(tmp_path: Path) -> None:
+    """The output's own destination is a link to a folder outside the import
+    root: where the import would write is outside, so it is refused before
+    dvc runs, as the resolved check refused it before.
+
+    Mutation: read the destination with only its folder resolved -> passes, red."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    ns = tmp_path / "data_demo_map"
+    ns.mkdir()
+    try:
+        (ns / "final").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:  # Windows without the privilege to make links
+        pytest.skip(f"can't make a link here: {exc}")
+    client = InMemoryCatalogClient()
+    _register(client, mutate=_with_primary("final/"))
+    fake = _FakeDvcOps()
+    with pytest.raises(UnknownProductPath):
+        import_product(client, fake, "demo_map", cwd=tmp_path, dest_root=tmp_path)
+    assert fake.calls == []

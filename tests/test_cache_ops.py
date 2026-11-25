@@ -502,6 +502,51 @@ def test_enumerate_collects_any_repo_files(tmp_path: Path) -> None:
     assert scan.symlinks == [] and scan.refused == [] and scan.empty_args == []
 
 
+def _stage(tmp_path: Path, out: str) -> None:
+    """One stage writing ``out``, recorded in dvc.yaml and dvc.lock."""
+    (tmp_path / ".dvc").mkdir(exist_ok=True)
+    _write(tmp_path / "dvc.yaml", f"stages:\n  make:\n    cmd: run\n    outs:\n      - {out}\n")
+    _write(tmp_path / "dvc.lock", f"schema: '2.0'\nstages:\n  make:\n    cmd: run\n    outs:\n"
+                                  f"    - path: {out}\n      md5: '11111111111111111111111111111111'\n")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_a_one_file_out_checked_out_as_a_link_is_tracked_by_its_own_name(tmp_path: Path) -> None:
+    """dvc checks a file out as a link into `.dvc/cache/` when it can't reflink or
+    hardlink. Resolved, it was tracked by its cache path; now it is `data/x.csv`. No
+    refusal changes: pull's `.git/`/`.dvc/` screens and push's link skip answer first.
+
+    Mutation: read the out fully resolved only -> `data/x.csv` missing, red."""
+    _stage(tmp_path, "data/x.csv")
+    cached = tmp_path / ".dvc" / "cache" / "files" / "md5" / "11" / ("1" * 30)
+    _write(cached, "x")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "x.csv").symlink_to(cached)
+    assert "data/x.csv" in c.dvc_tracked_paths(tmp_path, "origin")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+@pytest.mark.parametrize(("out", "tracked_has", "refused_args"), [
+    pytest.param("data/f.bin", {"store/f.bin"}, ["data/f.bin", "store/f.bin"], id="an-out-under-a-linked-folder"),
+    pytest.param("data", {"data", "store"}, ["data/f.bin", "store/f.bin", "store"], id="an-out-that-is-a-linked-folder"),
+])
+def test_an_out_through_a_linked_folder_is_refused_by_either_spelling(
+    tmp_path: Path, out: str, tracked_has: set[str], refused_args: list[str],
+) -> None:
+    """`data -> store`: push refuses the DVC-tracked bytes whichever spelling names
+    them, because the set holds the out read both ways (folder resolved, and fully).
+
+    Mutations: read outs lexically -> `store/f.bin` uploads (first case), red; read
+    them with the folder resolved only -> `store/f.bin` uploads (second case), red."""
+    _stage(tmp_path, out)
+    _write(tmp_path / "store" / "f.bin", "x")
+    (tmp_path / "data").symlink_to(tmp_path / "store", target_is_directory=True)
+    tracked = c.dvc_tracked_paths(tmp_path, "origin")
+    assert tracked_has <= tracked
+    for arg in refused_args:
+        assert _enum(tmp_path, [arg], tracked=tracked).items == [], arg
+
+
 def test_enumerate_collects_a_top_level_file(tmp_path: Path) -> None:
     _write(tmp_path / "notes.txt", "x")
     scan = _enum(tmp_path, ["notes.txt"])
@@ -2349,3 +2394,46 @@ def test_push_file_vanishing_before_upload_becomes_failed_not_traceback(
     assert fail.rel == "cache/vanish.bin"
     assert "local read error" in (fail.reason or "")
     assert "mintd cache push cache/vanish.bin" in (fail.hint or "")
+
+
+@pytest.mark.parametrize("name", ["q:notes.txt", "d:dir/x.csv", "C:", "1:a"])
+def test_a_first_name_windows_reads_as_a_drive_is_no_cache_key(name: str) -> None:
+    """Pulled on Windows, `q:notes.txt` would land on drive Q:, so it is no key.
+    A colon further in is a plain name.
+
+    Mutation: drop the drive rule from the cache key -> red."""
+    assert c._is_forbidden_path(name)
+    assert not c._is_forbidden_path("a/q:b.csv")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="q:notes.txt names drive Q: there")
+def test_push_refuses_a_drive_shaped_name_and_says_so(tmp_path: Path) -> None:
+    """The refusal names the real reason, not a backslash or a control character.
+
+    Mutation: report a drive-shaped name as `forbidden` -> red."""
+    _write(tmp_path / "q:notes.txt", "x")
+    scan = _enum(tmp_path, ["q:notes.txt"])
+    assert scan.refused_by("drive") == ["q:notes.txt"]
+    with pytest.raises(CacheError) as exc:
+        c._raise_on_refusals(scan)
+    assert "Windows reads as a drive" in str(exc.value) and "backslash" not in str(exc.value)
+    assert exc.value.hint == "rename it so its first name doesn't start like a drive (q:)"
+
+
+def test_pull_refuses_a_drive_shaped_key_and_says_so(s3_versioned, tmp_path: Path) -> None:
+    """A key such as `cache/q:notes.txt` already in the bucket is refused by name,
+    and the rest still pulls.
+
+    Mutation: say "escapes the project root" for it -> red."""
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {"good.bin": b"g" * 10})
+    s3.put_object(Bucket=bucket, Key="lab/proj/cache/q:notes.txt", Body=b"x")
+    dest = _project(tmp_path / "clone", bucket)
+    summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                           s3_client_factory=_factory(s3))
+    assert summary.pulled == 1
+    assert [f.reason for f in summary.failed] == [
+        "unsafe key refused (its first name reads as a Windows drive): lab/proj/cache/q:notes.txt"]
+    from mintd.cli import _render_cache_pull
+
+    assert _render_cache_pull(summary, Reporter()) == 1  # the pull exits 1

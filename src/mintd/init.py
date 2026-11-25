@@ -19,6 +19,7 @@ from typing import Literal
 from ._console import Reporter
 from .errors import MintdError
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
+from ._paths import inside
 from ._storage_state import SLUG_REGEX, compute_storage_prefix
 from ._templates import (
     InitNameInvalid,
@@ -50,24 +51,6 @@ class InitDestinationExists(MintdError):
     def __init__(self, msg: str, *, hint: str | None = None) -> None:
         super().__init__(msg)
         self.hint = hint
-
-
-def _escapes(project_path: Path, rel: str) -> bool:
-    """True if writing ``rel`` would land outside ``project_path``.
-
-    ``os.path.lexists`` catches a symlinked *leaf*, but a symlinked parent
-    directory (``code/ -> ../shared_code``) is transparent to it: mkdir is
-    satisfied by the link and write_text then follows it out of the project.
-    Resolving the whole path is what closes that.
-    """
-    try:
-        resolved = (project_path / rel).resolve()
-        resolved.relative_to(project_path.resolve())
-    except OSError:
-        return False
-    except ValueError:
-        return True
-    return False
 
 
 def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:
@@ -215,13 +198,14 @@ def init_project(
 
     # Refused even under --force: --force authorizes overwriting files in
     # THIS project, never following a link out of it.
-    escaping = sorted(rel for rel in targets if _escapes(project_path, rel))
+    # Resolved whole: `lexists` catches a linked leaf, not a linked folder above it (`code/ -> ../shared_code`),
+    # which mkdir accepts and write_text follows out. A link loop reads as outside: refused, not a traceback.
+    escaping = sorted(r for r in targets if inside(project_path, project_path / r, read="follow", root_ok=True) is None)
     if escaping:
         raise InitDestinationExists(
             f"refusing to write outside {project_path} through a symlink:\n  "
             + "\n  ".join(escaping),
-            hint="a directory in the scaffold's path is a symlink; "
-            "replace it with a real directory",
+            hint="a directory in the scaffold's path is a symlink\nreplace it with a real directory",
         )
 
     if collisions and not force and not resuming:
@@ -271,7 +255,7 @@ def init_project(
     try:
         project_path.mkdir(parents=True, exist_ok=True)
         # unlink first, same reason as _write_file: the sentinel path is
-        # not a scaffold target, so _escapes never sees it, and
+        # not a scaffold target, so the link check above never sees it, and
         # write_text would follow a symlink there and truncate whatever
         # it points at.
         sentinel.unlink(missing_ok=True)

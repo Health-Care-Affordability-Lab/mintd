@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
-from ._paths import physical as _physical
+from ._paths import inside, physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import (
     abbreviate, default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
@@ -260,7 +260,7 @@ def import_product(
     # Every path the import returns or prints is this one too, named by
     # `_where`: relative to `cwd` inside it (`data/imports/...` for the
     # default), absolute outside it.
-    nested_root = _physical(dest_root) / namespace
+    nested_root = physical(dest_root) / namespace
 
     # Status feedback (slice 38a). Multi-output imports relabel the spinner
     # per output. We use the spinner (not the determinate progress bar)
@@ -1058,7 +1058,7 @@ def _import_destination(
     # basename-only form collided two outputs sharing a leaf name
     # (`data/final/` + `archive/final/`) on one dest under `--all`.
     # Where the OS reaches it, as `nested_root` is: `p` can hold a `..` too.
-    dest = _physical(nested_root / Path(p.rstrip("/")))
+    dest = physical(nested_root / Path(p.rstrip("/")))
     # `p` is producer-controlled and unnormalized (catalog
     # `outputs[].path` / `primary`, or an unchecked `--path`): `..`
     # escapes the project, and pathlib drops the left operand
@@ -1066,7 +1066,7 @@ def _import_destination(
     # clear would then delete. Anchor on `nested_root`, the TIGHTER base:
     # `dest_root` alone lets `../<other-product>/data/final/` through,
     # landing on ANOTHER product's `.dvc`.
-    if not dest.resolve().is_relative_to(nested_root.resolve()):
+    if inside(nested_root, dest, read="follow", root_ok=True) is None:
         raise UnknownProductPath(
             f"{name!r} resolves output {p!r} to {_shown(dest, cwd)}, outside the "
             f"import root {_shown(nested_root, cwd)}; refusing to import or delete "
@@ -1103,9 +1103,9 @@ def _import_destination(
         # (exit 0, data nested); `--force` replaces a file. With or without
         # `force`, which never clears what no pointer records. Resolved:
         # `foo/..` reads as absent while `foo` is missing.
-        here = dest.resolve()
-        holds = [q for q in index.values() if q.resolve().is_relative_to(here)]
-        within = [q for q in index.values() if here.is_relative_to(q.resolve().with_suffix(""))]
+        holds = [q for q in index.values() if inside(dest, q, read="follow", root_ok=True) is not None]
+        within = [q for q in index.values()
+                  if inside(q.resolve().with_suffix(""), dest, read="follow", root_ok=True) is not None]
         why, hint = _occupied(dest, cwd, holds=holds, within=within)
         raise ImportDestinationExists(why, hint=hint)
     return dest, target_dvc
@@ -1121,12 +1121,11 @@ def _pointer_at(target_dvc: Path) -> bool:
 
 
 def _where(p: Path, cwd: Path) -> str:
-    """``p`` where the OS reaches it (``_physical``): relative to the project
+    """``p`` where the OS reaches it (``_paths.physical``): relative to the project
     inside it, and absolute outside it, where a ``..`` would climb out from
     where the project really is. Spelled as the file system spells it; a
     message prints ``_shown``."""
-    q, top = _physical(p), Path(os.path.realpath(cwd))
-    return (q.relative_to(top) if q.is_relative_to(top) else q).as_posix()
+    return inside(cwd, p, read="folder", root_ok=True) or physical(p).as_posix()
 
 
 def _unprintable(c: str) -> bool:
@@ -1194,7 +1193,7 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
         return f"{where} already holds imports ({_named(sorted(holds), cwd)}); {nothing}", pointers
     if within:
         return f"{where} is inside an earlier import ({_named(sorted(within), cwd)}); {nothing}", pointers
-    folder = _physical(dest)
+    folder = physical(dest)
     if folder.is_symlink() or not folder.is_dir():
         # A link is not listed, even to a folder: `rm` removes the link only.
         effect = "write where it points" if folder.is_symlink() else "replace it"

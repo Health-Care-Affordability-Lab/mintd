@@ -618,3 +618,15 @@ def test_get_dest_trailing_slash_into_nonexistent_dir(
     assert got.dest == results / "model.parquet"
     assert results.is_dir()
     assert (results / "model.parquet").is_file()
+
+
+def test_a_share_sub_path_that_reads_as_a_drive_is_refused_and_named() -> None:
+    """`share put --as c:dir/` would land on drive C: when got on Windows. The hint
+    names the drive among the shapes it refuses, in one short line.
+
+    Mutation: drop the drive rule from sub-paths -> no error, red."""
+    from mintd._share_ops import ShareError, _normalise_or_share_error
+
+    with pytest.raises(ShareError) as exc:
+        _normalise_or_share_error("c:dir/")
+    assert "drive (c:)" in (exc.value.hint or "") and len(exc.value.hint or "") <= 70
