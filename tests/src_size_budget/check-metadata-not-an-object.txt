@@ -1,1 +1,1 @@
-+12: one object check at each raw metadata.json read (check, the storage reader, update metadata, clone)
++8: one object check at each raw metadata.json read (check, the storage reader, update metadata)
