@@ -463,6 +463,54 @@ def test_a_file_placed_in_a_dir_tracked_folder_is_flagged_by_check_and_push(
     assert not [f for f in check_project(producer) if f.kind == "dvc_folder_unlisted"]
 
 
+def test_a_clone_flags_a_file_placed_in_a_folder_pushed_while_empty(
+    producer, s3_server, real_dvc, tmp_path, capsys,  # noqa: F811
+) -> None:
+    """A version-aware push leaves an empty folder's pointer an empty `.dir`
+    (not a `files:` list), and a clone has no cache of its list. A file a
+    teammate places in it is still named by check, as on the producer.
+
+    Mutation: read the empty `.dir` from the cache -> the clone leaves it
+    out, red."""
+    (producer / "metadata.json").write_text(MINIMAL_METADATA.read_text(encoding="utf-8"), encoding="utf-8")
+    (producer / "data" / "empty").mkdir()
+    real_dvc(["add", "-q", "data/empty"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "an empty folder"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    out = yaml.safe_load((producer / "data" / "empty.dvc").read_text())["outs"][0]
+    assert out["md5"] == "d751713988987e9331980363e24189ce.dir" and "files" not in out
+
+    clone = tmp_path / "teammate"
+    _git(["clone", "-q", str(producer), str(clone)])
+    assert not (clone / ".dvc" / "cache").exists()
+    (clone / "data" / "empty").mkdir(exist_ok=True)
+    (clone / "data" / "empty" / "placed.csv").write_text("p\n")
+    found = [f for f in check_project(clone) if f.kind == "dvc_folder_unlisted"]
+    assert len(found) == 1 and "data/empty.dvc lists 0 file(s) of data/empty/" in found[0].message
+    assert "(placed.csv): files were added since the folder was recorded" in found[0].message
+
+
+def test_a_files_list_and_a_dir_folder_flagged_together_get_the_cut_clause(
+    producer, s3_server, real_dvc, capsys,  # noqa: F811
+) -> None:
+    """With one flagged folder's list a `files:` list (data/raw, after a
+    version-aware push) and the other a `.dir` list, the combined hint keeps
+    "if a pointer was cut": one of them could have been.
+
+    Mutation: never add the cut clause -> red."""
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    assert "files" in yaml.safe_load((producer / "data" / "raw.dvc").read_text())["outs"][0]
+    (producer / "data" / "more").mkdir()
+    (producer / "data" / "more" / "m.csv").write_text("m\n")
+    real_dvc(["add", "-q", "data/more"], cwd=producer, check=True)
+    (producer / "data" / "raw" / "z.csv").write_text("z\n")
+    (producer / "data" / "more" / "n.csv").write_text("n\n")
+    assert cli.main(["data", "push"]) == 1
+    err = _out(capsys)
+    assert "record each folder again" in err and "if a pointer was cut, restore it from git" in err
+
+
 def test_two_dir_folders_with_placed_files_get_one_hint_without_a_cut(
     producer, s3_server, real_dvc, capsys,  # noqa: F811
 ) -> None:

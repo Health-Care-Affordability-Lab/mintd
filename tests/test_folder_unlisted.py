@@ -203,6 +203,21 @@ def test_a_file_placed_beside_an_empty_files_list_keeps_the_cut_cause(tmp_path: 
     assert u.hint().endswith("; if the pointer was cut, restore it from git")
 
 
+def test_an_empty_dir_pointer_is_compared_without_a_cache(tmp_path: Path) -> None:
+    """The empty folder's md5 names its list, so a clone with no cache
+    compares it too: a file placed there is named.
+
+    Mutation: read the empty `.dir` from the cache like any other -> left
+    out, red."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text(
+        "outs:\n- md5: d751713988987e9331980363e24189ce.dir\n  size: 0\n  nfiles: 0\n  hash: md5\n  path: final\n")
+    _folder(tmp_path, "data/final", ["placed.csv"])
+    assert not dvc_cache_dir(tmp_path).exists()
+    (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
+    assert (u.listed, u.unlisted, u.cut_possible) == (0, ("placed.csv",), False)
+
+
 def test_a_dir_folder_whose_list_isnt_cached_is_left_out(tmp_path: Path) -> None:
     """Without the `.dir` list in the cache there's nothing to compare."""
     _dir_pointer(tmp_path, PARTS)

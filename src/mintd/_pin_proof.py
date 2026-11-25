@@ -22,6 +22,7 @@ from typing import Any
 
 from ._dvc_state import load12 as _load12
 from ._dvc_state import (
+    EMPTY_DIR_MD5,
     DvcFileEntry,
     _files_on_disk,
     cache_path_for,
@@ -148,7 +149,8 @@ def _out_entries(
             ))
         return entries, True
     if md5.endswith(".dir"):
-        tree = read_cached_dir_manifest(cache_dir, md5)
+        # The empty folder's md5 names its list: a clone with no cache reads it too.
+        tree = [] if md5 == EMPTY_DIR_MD5 else read_cached_dir_manifest(cache_dir, md5)
         if tree is None:
             return [], False
         return [
