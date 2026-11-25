@@ -56,11 +56,27 @@ def _steps(path: Path, **kw: object) -> dict[str, ValidationStep]:
 # --- loading the credentials ---------------------------------------------------
 
 
+def _hint(where: str) -> str:
+    return (f"run mintd config setup to add your lab keys\nthey go in a [mintd] section of {where}\n"
+            "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+
+
 def test_no_credentials_are_found(aws: Path) -> None:
-    """Mutation: take get_credentials() returning None as found -> red."""
+    """The hint is one idea a line, and names the file AWS_SHARED_CREDENTIALS_FILE points at.
+    Mutation: take get_credentials() returning None as found -> red."""
     with pytest.raises(MintdError, match="no AWS credentials were found") as raised:
         _s3.load_credentials({}, None)
-    assert "AWS_ACCESS_KEY_ID" in (raised.value.hint or "")
+    assert raised.value.hint == _hint(str(aws / "credentials"))
+
+
+def test_the_hint_says_the_default_file_as_home_relative(aws: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default file reads as ~/.aws/credentials, and every hint line stays short.
+    Mutation: always show the full path -> red."""
+    monkeypatch.setattr(_s3, "shared_credentials_path", _s3.default_credentials_path)  # boto3 still reads the empty one
+    with pytest.raises(MintdError) as raised:
+        _s3.load_credentials({}, None)
+    assert raised.value.hint == _hint("~/.aws/credentials")
+    assert max(len(line) for line in _hint("~/.aws/credentials").splitlines()) <= 70
 
 
 @pytest.mark.parametrize("section", [
@@ -107,7 +123,7 @@ def test_a_failed_load_names_only_the_error_type(aws: Path, code: str, kind: str
     with pytest.raises(MintdError) as raised:
         _s3.load_credentials({"profile": "lab"}, None)
     assert str(raised.value) == f"AWS credentials could not be loaded ({kind})"
-    assert "AWS_ACCESS_KEY_ID" in (raised.value.hint or "")
+    assert raised.value.hint == _hint(str(aws / "credentials"))
 
 
 # --- validate ----------------------------------------------------------------------
@@ -119,7 +135,14 @@ def test_validate_fails_with_no_credentials_and_skips_s3(aws: Path, tmp_path: Pa
     assert steps["aws_profile"].status == "fail"
     assert "no AWS credentials were found" in steps["aws_profile"].message
     assert (steps["s3"].status, steps["s3"].message) == ("skipped", "aws_profile failed")
-    assert render_validation(list(steps.values()), json_out=False)[1] == 1
+    text, code = render_validation(list(steps.values()), json_out=False)
+    hint = _hint(str(aws / "credentials"))
+    # The hint's lines go under the step; --json keeps its keys, the hint after "; " in the message as before.
+    # Mutations: print the message only; leave the hint out of the JSON message -> red.
+    assert code == 1 and "\n".join(f"  hint: {line}" for line in hint.splitlines()) in text
+    assert "✗ aws_profile: no AWS credentials were found\n  hint: run mintd config setup" in text
+    as_json = json.loads(render_validation(list(steps.values()), json_out=True)[0])
+    assert as_json["aws_profile"]["message"] == "; ".join(["no AWS credentials were found", *hint.splitlines()])
     assert cli.main(["config", "validate", "--path", str(path)]) == 1
 
 

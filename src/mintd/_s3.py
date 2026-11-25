@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from ._aws_credentials import shared_credentials_path
+from ._aws_credentials import default_credentials_path, shared_credentials_path
 from .errors import MintdError
 
 try:
@@ -337,7 +337,9 @@ def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -
     instance metadata service: two requests, one try each, a one-second timeout each (botocore's
     defaults), so about two seconds off EC2, paid only on the way to "no AWS credentials"."""
     session = profile_session(remote_cfg, aws_profile_name)
-    hint = (f"add a [mintd] section to {shared_credentials_path()} (mintd config setup offers to), "
+    path = shared_credentials_path()
+    hint = (f"run mintd config setup to add your lab keys\nthey go in a [mintd] section of "
+            f"{'~/.aws/credentials' if path == default_credentials_path() else path}\n"
             "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
     try:  # all of the load, field access included, so no error escapes this one message
         creds = session.get_credentials()

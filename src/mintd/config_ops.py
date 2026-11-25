@@ -233,6 +233,7 @@ class ValidationStep(BaseModel):
     message: str
     latency_ms: int | None = None
     bucket: str | None = None  # the bucket the s3 step checked; not in the JSON
+    hint: str | None = None  # printed under the step, a line each; JSON's message carries it after "; "
 
 
 def validate_config(
@@ -292,15 +293,12 @@ def validate_config(
     try:
         session, method = load_credentials({}, profile)
     except MintdError as e:
-        problem = f"{e}; {e.hint}" if e.hint else str(e)
+        problem, hint = str(e), e.hint
     except Exception as e:  # a malformed AWS config file, say: this command diagnoses it, so report it
-        problem = f"could not read the AWS configuration: {type(e).__name__}: {e}"
+        problem, hint = f"could not read the AWS configuration: {type(e).__name__}: {e}", None
     if problem is not None:
-        return [
-            schema_step,
-            ValidationStep(name="aws_profile", status="fail", message=problem),
-            ValidationStep(name="s3", status="skipped", message="aws_profile failed"),
-        ]
+        return [schema_step, ValidationStep(name="aws_profile", status="fail", message=problem, hint=hint),
+                ValidationStep(name="s3", status="skipped", message="aws_profile failed")]
     if source.startswith("named by AWS_"):
         which = f"'{named}' profile, {source}"
     elif named == "mintd":
@@ -332,8 +330,7 @@ def _check_bucket(
     try:
         client = create_client({"endpointurl": endpoint_url} if endpoint_url else {}, profile, session=session)
     except MintdError as e:
-        # ValidationStep has no hint field, and render_validation prints the message only.
-        return ValidationStep(name="s3", status="fail", message=f"{e}; {e.hint}", bucket=bucket)
+        return ValidationStep(name="s3", status="fail", message=str(e), hint=e.hint, bucket=bucket)
     except Exception as e:
         return ValidationStep(
             name="s3",
@@ -675,7 +672,7 @@ def render_validation(
             {
                 step.name: {
                     "status": step.status,
-                    "message": step.message,
+                    "message": "; ".join([step.message, *(step.hint or "").splitlines()]),
                     "latency_ms": step.latency_ms,
                 }
                 for step in steps
@@ -683,7 +680,7 @@ def render_validation(
             indent=2,
         )
     else:
-        lines = [f"{_STATUS_GLYPH[step.status]} {step.name}: {step.message}" for step in steps]
-        text = "\n".join(lines)
+        text = "\n".join(f"{_STATUS_GLYPH[step.status]} {step.name}: {step.message}"
+                          + "".join(f"\n  hint: {line}" for line in (step.hint or "").splitlines()) for step in steps)
     exit_code = 1 if any(step.status == "fail" for step in steps) else 0
     return text, exit_code

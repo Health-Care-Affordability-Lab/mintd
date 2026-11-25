@@ -258,7 +258,7 @@ def test_every_s3_client_is_refused_without_usable_credentials(
     with pytest.raises(_s3.CredentialsUnavailable) as raised:
         _s3.create_client({"endpointurl": "http://127.0.0.1:9"}, None)
     assert str(raised.value) == message and "AKIABLANK" not in str(raised.value)
-    assert "add a [mintd] section" in (raised.value.hint or "")
+    assert "they go in a [mintd] section of" in (raised.value.hint or "")
 
 
 def test_a_pull_falls_back_to_dvc_when_only_dvc_has_the_keys(
@@ -329,7 +329,7 @@ def test_config_validate_fails_a_missing_named_profile_with_its_hint(
     step = steps["aws_profile"]
     assert step.status == "fail"
     assert "AWS profile 'nope' (named by AWS_PROFILE)" in step.message
-    assert "add a [nope] section there, or unset AWS_PROFILE" in step.message
+    assert step.hint == "add a [nope] section there, or unset AWS_PROFILE"  # printed under the step
     assert (steps["s3"].status, steps["s3"].message) == ("skipped", "aws_profile failed")
 
 
