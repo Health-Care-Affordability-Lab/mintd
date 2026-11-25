@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from mintd import cli
 from mintd._catalog_serializer import serialize
 from mintd._registry_git_ops import SubprocessRegistryGitOps
-from mintd.catalog import COPIED_LEAVES, rebuild_catalog
+from mintd.catalog import copied_leaves, rebuild_catalog
 from mintd.model import Metadata, Owner, _unwrap_container
 
 MINIMAL = Path(__file__).parent / "fixtures" / "metadata_v2_minimal.json"
@@ -192,7 +192,7 @@ def test_publish_stamps_never_reach_the_entry(tmp_path: Path) -> None:
 
 def test_the_copied_leaves_are_pinned() -> None:
     """A new field the product may set is a reviewed choice: this changes with it."""
-    assert COPIED_LEAVES == (
+    assert copied_leaves() == (
         "metadata.description", "metadata.tags", "ownership.team", "ownership.maintainers", "data_products.primary",
         "data_products.outputs[].path", "data_products.outputs[].description", "data_products.outputs[].primary",
         "status.state",
@@ -206,31 +206,37 @@ def _owned_leaves(model: type[BaseModel], prefix: str = "") -> set[str]:
         key = info.alias or name
         inner = _unwrap_container(info.annotation)
         if isinstance(inner, type) and issubclass(inner, BaseModel):
-            listed = "list" in str(info.annotation)  # "[]" marks each item of a list of models, as COPIED_LEAVES does
+            listed = "list" in str(info.annotation)  # "[]" marks each item of a list of models, as copied_leaves does
             leaves |= _owned_leaves(inner, f"{prefix}{key}{'[]' if listed else ''}.")
         elif any(m in (Owner.USER, Owner.PIPELINE) for m in info.metadata):
             leaves.add(f"{prefix}{key}")
     return leaves
 
 
-@pytest.mark.xfail(strict=True, reason="until the model tags the registry's own fields Owner.REGISTRY")
-def test_the_copied_leaves_agree_with_the_models_owner_tags() -> None:
-    """When the model's re-marking lands this passes, the strict xfail fails,
-    and the marker comes off: from then on the pinned list and the tags agree."""
-    assert _owned_leaves(Metadata) == set(COPIED_LEAVES)
+def test_the_copied_leaves_are_the_models_user_and_pipeline_leaves() -> None:
+    """A rebuild copies exactly the leaves the model tags as the product's own.
+    Mutation: copy only the USER leaves -> red."""
+    assert set(copied_leaves()) == _owned_leaves(Metadata)
 
 
+def _declare(where: str, bad: str) -> Callable[[dict[str, Any]], None]:
+    if where == "primary":
+        return lambda m: m["data_products"].update(primary=bad)
+    return lambda m: m["data_products"]["outputs"].append(
+        {"path": bad, "description": "x", "primary": False, "last_published": ""})
+
+
+@pytest.mark.parametrize("where", ["output", "primary"])
 @pytest.mark.parametrize(
     "bad", ["../x", "/abs/x", "data\\final", "", "-x", "data/fi\x00nal", "C:/x"],
     ids=["dotdot", "absolute", "backslash", "empty", "leading-dash", "nul", "drive"],
 )
-def test_an_output_path_a_consumer_cant_import_holds_the_entry(tmp_path: Path, bad: str) -> None:
-    """Held however the refusal is phrased: by the pinned rule today, or by the
-    model's own validator once it refuses the path first.
+def test_an_output_path_a_consumer_cant_import_holds_the_entry(tmp_path: Path, where: str, bad: str) -> None:
+    """An output's path is refused by the model, the primary by the same rule
+    before check runs, so check is never handed it.
 
-    Mutation: drop the output-path rule -> the entry takes the path."""
-    repo, sha = _product(tmp_path, "demo", _meta("demo", lambda m: m["data_products"]["outputs"].append(
-        {"path": bad, "description": "x", "primary": False, "last_published": ""})))
+    Mutation: drop the primary's path rule -> check holds it instead, red."""
+    repo, sha = _product(tmp_path, "demo", _meta("demo", _declare(where, bad)))
     path = _entry(tmp_path / "registry", "demo", repo)
     before = _read(path)
 
@@ -238,6 +244,8 @@ def test_an_output_path_a_consumer_cant_import_holds_the_entry(tmp_path: Path, b
 
     entry = _read(path)
     assert result.verdict == "held", result.why
+    refused_by = "data_products.primary must be" if where == "primary" else "metadata.json doesn't validate"
+    assert result.why.startswith(refused_by), result.why
     assert entry["data_products"] == before["data_products"]
     assert entry["source"]["held"]["commit"] == sha
     assert "\n" not in result.why and (not bad or bad not in result.why.replace("'/' or '-'", ""))  # names no value

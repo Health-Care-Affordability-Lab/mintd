@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, get_origin
 
 from pydantic import BaseModel, ConfigDict
 
@@ -553,25 +553,28 @@ if TYPE_CHECKING:
 # registry rebuild: each entry from its product's default branch
 # ---------------------------------------------------------------------------
 
-#: The leaves a rebuild copies from a product's `metadata.json` into its entry,
-#: as dotted paths on `Metadata` ("[]" for each item of a list). Every other
-#: field of the entry is the registry's and stays as the entry has it: the
-#: registry's workflows act on some of them (repository permissions from
-#: `access_control`, bucket policies from `storage`, a public mirror from
-#: `repository.mirror.url`), so a product must never set them by editing its
-#: own file. Pinned here until the model tags the registry's own fields
-#: `Owner.REGISTRY`; a test then checks that the two agree.
-COPIED_LEAVES: tuple[str, ...] = (
-    "metadata.description",
-    "metadata.tags",
-    "ownership.team",
-    "ownership.maintainers",
-    "data_products.primary",
-    "data_products.outputs[].path",
-    "data_products.outputs[].description",
-    "data_products.outputs[].primary",
-    "status.state",
-)
+def copied_leaves(model: Any = None, prefix: str = "") -> tuple[str, ...]:
+    """The leaves a rebuild copies from a product's `metadata.json` into its
+    entry: those the model tags `Owner.USER` or `Owner.PIPELINE`, as dotted
+    paths ("[]" for each item of a list). Every other field of the entry is the
+    registry's and stays as the entry has it: the registry's workflows act on
+    some of them (repository permissions from `access_control`, bucket policies
+    from `storage`, a public mirror from `repository.mirror.url`), so a product
+    must never set them by editing its own file."""
+    from pydantic import BaseModel
+
+    from .model import Metadata, Owner, _unwrap_container, field_metadata
+
+    model = model or Metadata
+    leaves: list[str] = []
+    for name, info in model.model_fields.items():
+        inner = _unwrap_container(info.annotation)
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            listed = "[]" if get_origin(info.annotation) is list else ""
+            leaves += copied_leaves(inner, f"{prefix}{name}{listed}.")
+        elif field_metadata(model, name) in (Owner.USER, Owner.PIPELINE):
+            leaves.append(f"{prefix}{name}")
+    return tuple(leaves)
 
 #: Fields the registry decides that a product's file may still say otherwise:
 #: a difference is reported, never copied. A reviewed registry PR changes them.
@@ -609,7 +612,7 @@ def rebuild_catalog(registry: Path, *, git_ops: "RegistryGitOps", write: bool) -
     gets none. For each, the product's repository (the entry's own
     ``repository.github_url``) is cloned at the HEAD of its
     ``repository.default_branch``, one commit deep and without DVC data, and
-    its ``metadata.json`` is read. Only ``COPIED_LEAVES`` are copied; the
+    its ``metadata.json`` is read. Only ``copied_leaves()`` are copied; the
     entry records the commit (``source.commit``) and its date
     (``status.last_updated``). An entry with nothing new is left byte for
     byte, so a second run makes no change. ``write=False`` reports what would
@@ -705,7 +708,7 @@ def _refusal(
     from pydantic import ValidationError
 
     from .check import check_project
-    from .model import Metadata
+    from .model import Metadata, _a_path_inside_the_repo
 
     file = product / "metadata.json"
     if file.is_symlink():
@@ -719,11 +722,11 @@ def _refusal(
         return why, None, False
     except (OSError, ValueError):
         return "metadata.json can't be read", None, False
-    paths = [o.path for o in meta.data_products.outputs]
-    if meta.data_products.primary is not None:
-        paths.append(meta.data_products.primary)
-    if not all(_output_path_ok(p) for p in paths):
-        return "an output path is empty, starts with '/' or '-', or holds a drive, '..', a backslash or a NUL", meta, False
+    if meta.data_products.primary is not None:  # each output's path is a `RepoPath`, refused above
+        try:
+            _a_path_inside_the_repo(meta.data_products.primary)
+        except ValueError as exc:
+            return f"data_products.primary {exc}", meta, False
     try:
         findings = check_project(product, upgrades=False, client=catalog)
     except (TypeError, AttributeError, LookupError) as exc:
@@ -743,23 +746,13 @@ def _refusal(
     return why, meta, False
 
 
-def _output_path_ok(path: str) -> bool:
-    """A declared output path a consumer can import: a relative posix path
-    inside the product that git and dvc never read as an option. The rule the
-    model is to apply to `DataProductOutput.path`, pinned here until it does."""
-    from pathlib import PureWindowsPath
-
-    return bool(path) and not path.startswith(("-", "/")) and "\\" not in path and "\x00" not in path \
-        and ".." not in path.split("/") and not PureWindowsPath(path).drive
-
-
 def _copy_leaves(entry: dict[str, Any], product: dict[str, Any]) -> None:
-    """Set each of ``COPIED_LEAVES`` in ``entry`` from ``product``. A list's
+    """Set each of ``copied_leaves()`` in ``entry`` from ``product``. A list's
     items are the product's, each starting from the entry's item at the same
     path, so a key the entry keeps on an item (a publish stamp, a key the model
     doesn't know) stays with it."""
     lists: dict[str, list[str]] = {}
-    for leaf in COPIED_LEAVES:
+    for leaf in copied_leaves():
         if "[]." in leaf:
             where, _, key = leaf.partition("[].")
             lists.setdefault(where, []).append(key)
