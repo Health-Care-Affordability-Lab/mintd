@@ -98,8 +98,12 @@ def test_a_raw_file_no_one_tracks_is_named(tmp_path: Path) -> None:
         "a fresh clone can't rerun the stage",
         proj / "dvc.yaml",
     )]
-    assert "mintd data add data/raw" in warned[0].hint
-    assert "producer's call" in warned[0].hint
+    assert warned[0].hint.splitlines() == [
+        "to track it: mintd data add data/raw",
+        "then mintd data push uploads it",
+        "or let a pipeline stage download it, like the scaffold's fetch stage",
+        "whether raw data belongs in lab storage (licence, size) is your call",
+    ]
 
 
 def test_it_is_a_warning_and_json_output_stays_clean(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
