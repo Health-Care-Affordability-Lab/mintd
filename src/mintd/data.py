@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
+from ._paths import physical as _physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import (
     default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
@@ -1110,17 +1111,6 @@ def _pointer_at(target_dvc: Path) -> bool:
     removes it again), even when ``x.dvc`` does. ``realpath``, which unlike
     ``Path.resolve`` never raises on a link loop (Python 3.11 and 3.12)."""
     return os.path.exists(os.path.realpath(target_dvc))
-
-
-def _physical(p: Path) -> Path:
-    """``p`` where the OS reaches it, as the checks resolve it: its folder with
-    links and ``..`` resolved, since ``link/..`` is the folder above where
-    ``link`` points, not the folder ``link`` is in, and its own name kept, so a
-    link there is named as the link."""
-    p = Path.cwd() / p  # absolute, its `..` kept
-    if p.name in ("", ".."):
-        return Path(os.path.realpath(p))
-    return Path(os.path.realpath(p.parent)) / p.name
 
 
 def _where(p: Path, cwd: Path) -> str:
