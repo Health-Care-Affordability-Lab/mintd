@@ -432,6 +432,32 @@ def test_a_folder_pointer_shorter_than_its_folder_stops_the_push_before_upload(
     assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
 
 
+def test_a_file_placed_in_a_folder_tracked_while_empty_stops_the_push(
+    producer, s3_server, real_dvc, capsys,  # noqa: F811
+) -> None:
+    """`mintd init data` tracks data/raw while it's empty. A file placed there
+    and not yet recorded went straight to `dvc push`, which uploaded the
+    folder as last recorded, without it. The push now refuses before any
+    upload, naming the file and how to record it.
+
+    Mutation: leave empty folders out of the comparison -> it pushes, red.
+    """
+    (producer / "data" / "empty").mkdir()
+    real_dvc(["add", "-q", "data/empty"], cwd=producer, check=True)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "track an empty folder"], cwd=producer)
+    assert cli.main(["data", "push"]) == 0, _out(capsys)
+    (producer / "data" / "empty" / "placed.csv").write_text("p\n")
+    puts = len(s3_server.puts)
+
+    assert cli.main(["data", "push"]) == 1
+    err = _out(capsys)
+    assert "data/empty.dvc lists 0 file(s) of data/empty/, but the folder on disk holds 1 it doesn't list " \
+           "(placed.csv)" in err, err
+    assert "mintd data add data/empty" in err
+    assert len(s3_server.puts) == puts
+
+
 def test_check_remote_finds_what_push_wrote_and_staged_refuses_dvc_commit_f(producer, s3_server, real_dvc, capsys):  # noqa: F811
     """After a real push, `mintd check --remote` finds every pinned version,
     for `.dvc` and dvc.lock outs, and uploads nothing. Then `dvc commit -f`

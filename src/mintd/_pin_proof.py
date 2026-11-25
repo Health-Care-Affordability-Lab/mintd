@@ -739,12 +739,16 @@ class Unlisted:
     #: The folder holds a ``.dvc`` file or folder, which makes DVC record it
     #: as an empty folder.
     holds_dvc: bool = False
+    #: The list is the pointer's own (a ``files:`` list, or none), which a cut
+    #: or a rewrite can shorten; a cached ``.dir`` list, under its md5, can't be.
+    cut_possible: bool = True
 
     def message(self) -> str:
         where = self.pointer if self.stage is None else f"{self.pointer} (stage {self.stage})"
         shown = ", ".join(self.unlisted[:5]) + (f" and {len(self.unlisted) - 5} more" if len(self.unlisted) > 5 else "")
         why = ("it holds a .dvc file or folder, so DVC would record it as an empty folder" if self.holds_dvc
-               else "the pointer was cut short, or the folder changed since it was recorded")
+               else "the pointer was cut short, or the folder changed since it was recorded" if self.cut_possible
+               else "files were added since the folder was recorded")
         return (f"{where} lists {self.listed} file(s) of {self.folder}/, but the folder on disk holds "
                 f"{len(self.unlisted)} it doesn't list ({shown}): {why}")
 
@@ -753,31 +757,40 @@ class Unlisted:
         again = (f"mintd data add {self.folder}" if self.stage is None
                  else f"dvc commit {pipeline}:{self.stage}, or dvc repro it")
         first = f"move the .dvc file or folder out of {self.folder}/, then " if self.holds_dvc else ""
-        return (f"{first}record the folder again ({again}), or list files DVC should skip in .dvcignore; "
-                "if the pointer was cut, restore it from git")
+        return (f"{first}record the folder again ({again}), or list files DVC should skip in .dvcignore"
+                + ("; if the pointer was cut, restore it from git" if self.cut_possible else ""))
 
 
 def unlisted_on_disk(root: Path, pointers: Sequence[str], *, remote: str) -> list[Unlisted]:
-    """The version-aware folder outs of ``pointers`` (``.dvc`` files, and
-    ``dvc.lock`` files at the root or in nested pipelines) whose folder on
-    disk holds files their list doesn't. DVC writes no count beside a folder's ``files:``, so a pointer
-    cut at the end of an entry reads as a smaller folder, and so does one
-    recorded before files were added: the folder is the only reference.
-    Files the list holds that the folder lacks don't count (deleted locally,
-    never pulled), and only outs DVC pushes are compared (``publishable_scope``:
-    not imports, ``cache: false`` or ``push: false``)."""
+    """The folder outs of ``pointers`` (``.dvc`` files, and ``dvc.lock``
+    files at the root or in nested pipelines) whose folder on disk holds
+    files their list doesn't: a file placed in a tracked folder and not yet
+    recorded. The list is a version-aware pointer's own ``files:``, which a
+    cut can also shorten; a ``.dir`` list, read from the cache as
+    ``publishable_scope`` reads it (``read_cached_dir_manifest``); or none,
+    for an empty folder (``nfiles: 0``). A ``.dir`` list that isn't cached
+    can't be compared and is left out. Files the list holds that the folder
+    lacks don't count (deleted locally, never pulled), and only outs DVC
+    pushes are compared (not imports, ``cache: false`` or ``push: false``)."""
     wanted = set(pointers)
     scope = publishable_scope(root, remote=remote, prefix="", cache_dir=dvc_cache_dir(root),
                               dvc_files=[p for p in pointers if p.endswith(".dvc")],
                               locks=[p for p in pointers if Path(p).name == "dvc.lock"])
     lists: dict[tuple[str, str | None, str], set[str]] = {}
+    uncut: set[tuple[str, str | None, str]] = set()  # a cached .dir list
     for e in scope.entries:
-        if e.relpath is not None and not e.legacy_dir and e.pointer in wanted:
+        if e.relpath is not None and e.pointer in wanted:
             lists.setdefault((e.pointer, e.stage, e.out), set()).add(e.relpath)
+            if e.legacy_dir:
+                uncut.add((e.pointer, e.stage, e.out))
+    for o in scope.empty:  # recorded empty, or a pointer emptied since
+        if o.pointer in wanted:
+            lists.setdefault((o.pointer, o.stage, o.path), set())
     found = []
     for (pointer, stage, folder), listed in lists.items():
         extra = sorted(set(_files_on_disk(root, folder)) - listed)
         if extra:
             found.append(Unlisted(pointer, stage, folder, len(listed), tuple(extra),
-                                  holds_dvc=(root / folder / ".dvc").exists()))
+                                  holds_dvc=(root / folder / ".dvc").exists(),
+                                  cut_possible=(pointer, stage, folder) not in uncut))
     return found
