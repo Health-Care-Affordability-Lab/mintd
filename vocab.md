@@ -15,7 +15,7 @@ Most other terms make sense only against one split: **who originated a piece of 
 A project whose `metadata.json` and DVC-tracked outputs other projects depend on. Any project type can be registered and published. The producer owns:
 
 - Its own `metadata.json` (validated by `Metadata`, below).
-- The data products themselves: DVC-tracked files at the paths declared in `data_products.outputs[].path`. `data_products.primary` names one of them and is required only when `project.type` is `data`.
+- The data products themselves: DVC-tracked files at the paths declared in `data_products.outputs[].path`, each a relative posix path inside the repo (`Metadata` refuses an absolute or drive path, `..`, a backslash, an empty path or a leading `-`). `data_products.primary` names one of them and is required only when `project.type` is `data`.
 - Its catalog entry (see Catalog projection), sent to the registry as a PR by `mintd registry register`, `mintd registry update`, or the last step of `mintd publish`.
 
 The catalog keys a producer by `project.name`; consumers use that name on the CLI and in an enclave's `approved_products[].repo`. `project.full_name` names the folder its imports land in. A consumer's `.dvc` pointer records the producer's git URL, not its name. Producer findings read the project's own `metadata.json`, `.dvc/config`, DVC pointers, `dvc.yaml` and `dvc.lock`.
@@ -53,10 +53,10 @@ Why publish merges: because sub-models drop unknown keys, writing the bare dump 
 
 Names the **role expected to write** a given field, attached to every `Metadata` field as `Annotated[T, Owner.X]`:
 
-- `USER`: humans edit it (`metadata.*`, `ownership.*`, `access_control.*`, `governance.*`, `repository.mirror`, `status.state`).
-- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.*`, `storage.*`, `schema_.location` and the rest of `repository.*`.
-- `PIPELINE`: `data_products.*` and `status.last_updated` / `last_published_version`. Publish writes the status fields and each `outputs[].last_published`; nothing derives `outputs[].path` or `primary` from DVC, so those are edited by hand.
-- `REGISTRY`: reserved; no field uses it.
+- `USER`: humans edit it (`metadata.*`, `ownership.*`, `status.state`).
+- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.created_at`, `project.created_by` and `schema_.location`.
+- `PIPELINE`: the declared outputs, `data_products.primary` and each output's `path`, `description` and `primary`. Nothing derives them from DVC, so they're edited by hand.
+- `REGISTRY`: the catalog registry's, set when a product joins and changed only by a reviewed registry change: `project.name`, `project.type` and `project.full_name`, and all of `repository.*`, `access_control.*`, `storage.*` and `governance.*`. Also the publish stamps `status.last_updated`, `status.last_published_version` and `outputs[].last_published`. A catalog rebuild copies only USER and PIPELINE leaves.
 
 `field_metadata(model_class, "dotted.path")` → `Owner` walks a dotted path (e.g. `"storage.dvc.remote_name"`) through nested models, unwrapping `Optional[...]` and `list[...]`, and raises `KeyError` for an unknown segment, a non-model intermediate, or a leaf with no Owner. It is Owner's only reader, and only tests call it: Owner is documentation, not enforcement, and no `mintd check` finding looks at it.
 
