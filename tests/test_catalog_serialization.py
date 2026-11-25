@@ -81,7 +81,7 @@ def test_metadata_without_a_schema_gains_no_schema_key():
     assert ("schema", "location") in [e["loc"] for e in ei.value.errors()]
 
 
-@pytest.mark.parametrize("location", ["--output=/tmp/x", "/etc/passwd", "../outside.json", "a/../../b", "a\\b", ""])
+@pytest.mark.parametrize("location", ["--output=/tmp/x", "/etc/passwd", "../outside.json", "a/../../b", "a\\b", "", "C:/x.json"])
 def test_schema_location_must_be_a_path_inside_the_repo(location: str) -> None:
     """Catalog builders hand `schema.location` to git, so it must be a path
     inside the repo, never an option, an absolute path or one that climbs out.
@@ -94,6 +94,35 @@ def test_schema_location_must_be_a_path_inside_the_repo(location: str) -> None:
         Metadata.model_validate(data)
     assert ("schema", "location") in [e["loc"] for e in ei.value.errors()]
 
+
+
+def _with_output(path: str) -> dict:
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["data_products"] = {"primary": None, "outputs": [{"path": path, "description": "d", "primary": True}]}
+    return data
+
+
+@pytest.mark.parametrize(
+    "path", ["/data/final/", "../outside/", "data/../../b", "data\\final", "", "-rf", "--output=x", "C:/data/", "a\x00b"]
+)
+def test_an_output_path_must_be_a_path_inside_the_repo(path: str) -> None:
+    """A catalog rebuild hands each declared output path to git and dvc, so
+    it must be a relative posix path inside the repo: never absolute, on a
+    drive, climbing out, written with a backslash, empty or read as an option.
+
+    Mutations: drop the validator from `DataProductOutput.path`, or drop any
+    one refused shape from `_a_path_inside_the_repo` -> red.
+    """
+    with pytest.raises(ValidationError) as ei:
+        Metadata.model_validate(_with_output(path))
+    assert ("data_products", "outputs", 0, "path") in [e["loc"] for e in ei.value.errors()]
+
+
+@pytest.mark.parametrize("path", ["data/final/", "./data/final", "data/final/a.csv", "data/a:b.csv"])
+def test_an_output_path_inside_the_repo_loads_unchanged(path: str) -> None:
+    """The refusal is narrow: a folder, a `./` path and a colon inside a name
+    all load as written."""
+    assert Metadata.model_validate(_with_output(path)).data_products.outputs[0].path == path
 
 def test_catalog_entry_includes_storage_when_populated():
     """storage is now in the catalog (no longer filtered out as PRODUCER_CONTRACT).
