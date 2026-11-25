@@ -1612,6 +1612,29 @@ def test_check_warns_of_a_lock_dep_recorded_with_no_hash(tmp_path: Path, dep: st
                      "without the dep's tree")] if warned else [])
 
 
+def test_a_worktree_flag_only_in_config_local_names_config_local(tmp_path: Path) -> None:
+    """`version_aware = false` committed and `worktree = true` only in config.local: a
+    clone has no worktree flag and is fine, so check says nothing, and push names
+    config.local, with the worktree refusal's own words.
+
+    Mutations: name the file by `version_aware` alone -> ".dvc/config ... any clone",
+    red; drop `worktree` when the refusal names another file -> "neither true nor
+    false", red."""
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    cfg = proj / ".dvc" / "config"
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("version_aware = true", "version_aware = false"),
+                   encoding="utf-8")
+    (proj / ".dvc" / "config.local").write_text(f"['remote \"{REMOTE}\"']\n    worktree = true\n", encoding="utf-8")
+    assert [f for f in check_project(proj) if f.kind == "dvc_state_unreadable"] == []
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    assert (str(exc.value), exc.value.hint) == (
+        f"the DVC remote {REMOTE} sets version_aware to false on a worktree remote in .dvc/config.local, which dvc "
+        "refuses: push and pull fail on this machine", "set version_aware to true in .dvc/config.local")
+
+
 def test_a_worktree_remote_not_version_aware_is_one_refusal_for_check_and_push(tmp_path: Path) -> None:
     """dvc refuses `version_aware = false` on a worktree remote when push or pull opens it;
     check says so once, and push stops before any S3 call, where both read the remote

@@ -284,13 +284,16 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool, V
     url = (section.get("url") or None) if section is not None else None
     try:
         aware = remote_is_version_aware(section.get, name) if section is not None and name else False
+    except VersionAwareRefused as exc:  # never read as version-aware; check reports it
+        return name, url, False, exc
+    try:
         # dvc's schema checks every remote's flags when it loads the config, the default's or not.
         for other, values in sorted(conf["remote"].items()):
             if other != name:
                 _dvc_bool(values.get, other, "version_aware")
                 _dvc_bool(values.get, other, "worktree")
-    except VersionAwareRefused as exc:  # never read as version-aware; check reports it
-        return name, url, False, exc
+    except VersionAwareRefused as exc:  # another remote's: check reports it; the default's flag stands
+        return name, url, aware, exc
     return name, url, aware, None
 
 

@@ -488,6 +488,9 @@ _OTHER = "['remote \"other\"']\n    url = s3://b/o\n"
     pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    version_aware = yes\n", ["status"],
                  "expected true or false", "the DVC remote other sets version_aware to 'yes' in .dvc/config",
                  id="a-refused-value-on-another-remote"),
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    worktree = yes\n", ["status"],
+                 "expected true or false", "the DVC remote other sets worktree to 'yes' in .dvc/config",
+                 id="a-refused-worktree-on-another-remote"),
     pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    version_aware = false\n    worktree = true\n",
                  ["status"], None, None, id="a-worktree-remote-not-version-aware-that-dvc-never-opens"),
 ])
@@ -499,7 +502,8 @@ def test_a_remote_config_dvc_refuses_mintd_refuses_too(real_dvc, tmp_path: Path,
 
     Mutations: drop the worktree rule -> the first passes, red; join a one-item list
     without its comma -> the second passes, red; read only the default remote's flags ->
-    the third passes, red; refuse the worktree rule on every remote -> the last, red."""
+    the third passes, red; read only another remote's `version_aware` -> the fourth
+    passes, red; refuse the worktree rule on every remote -> the last, red."""
     from mintd._storage_state import _read_dvc_config
     from tests._harness.git import _git
 

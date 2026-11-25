@@ -71,7 +71,8 @@ def _version_aware(root: Path, cfg: dict[str, str], name: str) -> bool:
     try:
         return remote_is_version_aware(cfg.get, name)
     except VersionAwareRefused as exc:
-        if exc.key in read_dvc_config(root, "local")["remote"].get(remote_key(name), {}):
+        local = read_dvc_config(root, "local")["remote"].get(remote_key(name), {})
+        if exc.key in local or (exc.worktree and "worktree" in local):  # a clone has neither
             exc = exc.at(".dvc/config.local")
         raise PushRefused(str(exc), hint=exc.hint) from exc
 

@@ -1,1 +1,1 @@
-+12: three remote config shapes dvc refuses (worktree off, a trailing comma, another remote) are refused too
++16: three remote config shapes dvc refuses (worktree off, a trailing comma, another remote) are refused too
