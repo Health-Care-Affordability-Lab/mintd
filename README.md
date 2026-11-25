@@ -90,9 +90,12 @@ mintd --help
 ```
 
 `mintd --version` and bare `mintd` also say, on stderr, when a newer release
-is out, or that this version was withdrawn, with the line that updates. They
-look it up at most once a day, give up after 2 seconds, and say nothing
-offline or under `--json` or `-q`. `MINTD_NO_UPDATE_CHECK=1` turns the lookup
+is out, with the line that updates. A version newer than the newest release
+says whether it is a prerelease not yet promoted, withdrawn or not released,
+and only a withdrawn one gets the line, back to the newest release. They look
+it up at most once a day (every 10 minutes on a version newer than the newest
+release), give up after 2 seconds, and say nothing offline or under `--json`
+or `-q`. `MINTD_NO_UPDATE_CHECK=1` turns the lookup
 off, and so does a CI run (any value in `CI`).
 
 > Windows note: the scaffolded `scripts/*.sh` are bash scripts. Run them

@@ -1,0 +1,1 @@
++32: --version tells a prerelease not yet promoted, a withdrawn release and an unreleased tag apart, and offers a way back only from a withdrawn one

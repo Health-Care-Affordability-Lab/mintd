@@ -656,8 +656,9 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
     # 6 -> 4: a fetched folder list is read before it lands in the cache, so
     # the two unlinks that dropped a bad one after it landed are gone.
     "src/mintd/_fast_sync_ops.py": {"unlink": 4, "write_bytes": 1},
-    # The URL opener's .open(Request(...)): a fetch, which the scan can't tell from a write.
-    "src/mintd/_release_check.py": {"open-for-write": 1},
+    # The URL opener's two .open(Request(...)): fetches (releases/latest, and the API's release for the
+    # install's tag when it is newer than that), which the scan can't tell from writes.
+    "src/mintd/_release_check.py": {"open-for-write": 2},
     "src/mintd/_share_ops.py": {"unlink": 3},
     "src/mintd/_templates/_render.py": {"unlink": 1, "write_text": 3},
     "src/mintd/data.py": {"rename": 2, "rmdir": 1, "unlink": 3, "write_bytes": 2},
