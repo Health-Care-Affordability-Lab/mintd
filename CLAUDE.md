@@ -53,15 +53,13 @@ Closing an issue records how it was verified and which follow-ups were filed.
 - Title: `<area>: <what the user now sees>`, e.g.
   `publish: the not-valid-semver error now names the value to write back`.
 - PR body: TLDR, Problem (a concrete failing command), Solution, Reviewer notes.
-- Every merged PR is tagged, and its tag reaches users only when the maintainer
-  promotes that tag's GitHub Release (`RELEASING.md`). mintd's version comes from git
-  tags (setuptools-scm), and merging a PR into `main` tags its merge commit
-  (`.github/workflows/tag.yml`): the next patch version, or the next minor when the
-  PR has the `minor` label. Add
-  `minor` when the PR adds, renames or removes a command, flag or default users see,
-  or changes what a command does in a way users notice, such as failing where it used
-  to pass. Add it before merging: the tag is chosen when the PR closes, and a label
-  added later changes nothing. Never tag by hand, except a hotfix tag (`RELEASING.md`).
+- Merging a PR makes no release. The maintainer starts one by hand (`RELEASING.md`):
+  `release.yml` on `main` with `patch`, or `minor` when a release adds, renames or
+  removes a command, flag or default users see, or changes what a command does in a
+  way users notice. It makes the `vX.Y.Z` tag (setuptools-scm reads mintd's version
+  from it), and the release reaches users only once the maintainer approves it. A PR
+  body's optional `## Release notes` section goes into the release's changelog. Never
+  tag by hand.
 
 ## Tests
 
