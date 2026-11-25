@@ -8,7 +8,9 @@ GitHub.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
+import zlib
 from pathlib import Path
 
 import boto3
@@ -32,6 +34,31 @@ from tests._harness.dvc import real_dvc  # noqa: F401
 from tests._harness.producer import local_producer  # noqa: F401
 from tests._harness.s3 import s3_server  # noqa: F401
 from tests._harness.synthetic import synthetic_project  # noqa: F401
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--test-shard", metavar="I/N", help="run only shard I of N of the tests (CI's Windows job)")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """With --test-shard i/n, run only shard i of n: CI's Windows job runs the suite as shards on separate
+    runners. A test is in the shard its node id hashes to (crc32, the same on every platform and every xdist
+    worker), so the shards split the suite exactly and none can lose a test. It is an option, not a variable,
+    so a pytest that a test starts itself never inherits it. A value that isn't i/n with 1 <= i <= n stops the
+    run, so a typo can't quietly run nothing. Pinned by tests/test_test_shards.py."""
+    shard = config.getoption("--test-shard")
+    if shard is None:
+        return
+    m = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
+    if m is None or int(m[1]) > int(m[2]):
+        raise pytest.UsageError(f"--test-shard must be i/n with 1 <= i <= n, not {shard!r}")
+    i, n = int(m[1]), int(m[2])
+    keep: list[pytest.Item] = []
+    drop: list[pytest.Item] = []
+    for item in items:
+        (keep if zlib.crc32(item.nodeid.encode()) % n == i - 1 else drop).append(item)
+    config.hook.pytest_deselected(items=drop)
+    items[:] = keep
 
 
 def _init_remote(tmp_path: Path, *, with_seed: bool) -> Path:
