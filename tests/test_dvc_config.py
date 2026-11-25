@@ -23,7 +23,7 @@ def _project(real_dvc, root: Path, config: str, local: str | None = None) -> Pat
 
 
 def _dvc_reads(real_dvc, root: Path, key: str, *level: str) -> str:
-    return real_dvc(["config", *level, key], cwd=root, check=True).stdout.strip()
+    return real_dvc(["config", *level, key], cwd=root, check=True).stdout.removesuffix("\n")  # spaces are dvc's
 
 
 @pytest.mark.parametrize(("config", "local", "key", "want"), [
@@ -90,23 +90,27 @@ def test_the_cache_dir_is_the_one_dvc_uses(real_dvc, tmp_path: Path, monkeypatch
     assert dvc_cache_dir(root).resolve() == (tmp_path / cache).resolve()
 
 
-@pytest.mark.parametrize(("value", "dvc_raw", "version_aware"), [
-    pytest.param('"true"', "true", True, id="quoted"),
-    pytest.param("True", "True", True, id="capitalised"),
-    pytest.param("true ; note", "true ; note", False, id="a-semicolon-is-no-comment"),
+@pytest.mark.parametrize(("value", "dvc_raw", "version_aware", "refused"), [
+    pytest.param('"true"', "true", True, False, id="quoted"),
+    pytest.param("True", "True", True, False, id="capitalised"),
+    pytest.param("true ; note", "true ; note", False, True, id="a-semicolon-is-no-comment"),
+    pytest.param('" true "', " true ", False, True, id="spaces-inside-the-quotes"),
+    pytest.param("", "", False, True, id="empty"),
 ])
-def test_version_aware_reads_as_dvc_reads_it(real_dvc, tmp_path: Path, value, dvc_raw, version_aware) -> None:
+def test_version_aware_reads_as_dvc_reads_it(real_dvc, tmp_path: Path, value, dvc_raw, version_aware, refused) -> None:
     """`version_aware` decides whether a consumer's pull needs an S3 version ID per file. dvc
-    strips the quotes and keeps a `;`, and its schema refuses `true ; note`, so the storage
-    check never reads it as version-aware, and says dvc refuses it, never a traceback.
-    Mutation that must redden this: strip `;` comments again in `_storage_state`."""
+    strips the quotes and keeps a `;` and the spaces inside quotes, and its schema refuses
+    `true ; note`, `" true "` and an empty value, so the storage check never reads one as
+    version-aware, and says dvc refuses it, never a traceback.
+    Mutations that must redden this: strip `;` comments again in `_storage_state`; strip
+    spaces before the true-or-false test; read an empty value as unset."""
     from mintd._storage_state import _read_dvc_config
 
     root = _project(real_dvc, tmp_path, f"[core]\n    remote = storage\n{R}    url = s3://b/p\n    version_aware = {value}\n")
     assert _dvc_reads(real_dvc, root, "remote.storage.version_aware", "--project") == dvc_raw
-    name, url, aware, refused = _read_dvc_config(root / ".dvc" / "config")
+    name, url, aware, found_refused = _read_dvc_config(root / ".dvc" / "config")
     assert (name, url, aware) == ("storage", "s3://b/p", version_aware)
-    assert (refused is not None) == (value == "true ; note")
+    assert (found_refused is not None) == refused
 
 
 # --- what changes on purpose: dvc can't read these files, so mintd stops too ----------------
