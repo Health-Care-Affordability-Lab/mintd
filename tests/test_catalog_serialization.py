@@ -103,12 +103,14 @@ def _with_output(path: str) -> dict:
 
 
 @pytest.mark.parametrize(
-    "path", ["/data/final/", "../outside/", "data/../../b", "data\\final", "", "-rf", "--output=x", "C:/data/", "a\x00b"]
+    "path", ["/data/final/", "../outside/", "data/../../b", "data/../final/", "data\\final", "", "-rf", "--output=x",
+             "C:/data/", "a\x00b"]
 )
 def test_an_output_path_must_be_a_path_inside_the_repo(path: str) -> None:
     """A catalog rebuild hands each declared output path to git and dvc, so
     it must be a relative posix path inside the repo: never absolute, on a
-    drive, climbing out, written with a backslash, empty or read as an option.
+    drive, climbing out, written with a backslash, empty or read as an option,
+    and with no `..` at all, even one that stays inside (`data/../final/`).
 
     Mutations: drop the validator from `DataProductOutput.path`, or drop any
     one refused shape from `_a_path_inside_the_repo` -> red.

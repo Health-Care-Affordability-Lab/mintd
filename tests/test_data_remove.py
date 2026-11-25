@@ -8,6 +8,7 @@ and warns when git now sees those files as untracked.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import pytest
@@ -47,14 +48,23 @@ def test_data_remove_returns_the_outs_left_on_disk(tmp_path: Path, on_disk: bool
     assert fake.remove_calls[0].name == "data/final.dvc"
 
 
-@pytest.mark.parametrize("out", ["../../outside", "/etc/hosts"], ids=["dotdot", "absolute"])
+@pytest.mark.parametrize("out", [
+    "../../outside", "/etc/hosts",
+    pytest.param("C:/outside", marks=pytest.mark.skipif(sys.platform == "win32", reason="a drive is a drive there")),
+    "..",
+], ids=["dotdot", "absolute", "drive", "the-root"])
 def test_an_out_outside_the_project_is_neither_named_nor_probed(tmp_path: Path, out: str) -> None:
     """`cache: false` lets an out point outside the project: it isn't named,
-    whether or not something exists there.
+    whether or not something exists there. A recorded drive is outside on POSIX
+    too, and an out that collapses to the project root (`..` beside `data/x.dvc`)
+    isn't one: both exist on disk here.
 
-    Mutation: drop the inside-the-project filter -> red."""
+    Mutation: drop the inside-the-project filter -> red; join the pointer's folder
+    first -> `data/C:/outside` reads as inside, red."""
     proj = tmp_path / "a" / "proj"
     (proj / "data").mkdir(parents=True)
+    if out.startswith("C:"):  # POSIX only: where a joined data/C:/outside would land
+        (proj / "data" / "C:" / "outside").mkdir(parents=True)
     (tmp_path / "a" / "outside").mkdir()  # where data/../../outside lands; /etc/hosts exists too
     (proj / "data" / "x.dvc").write_text(f"outs:\n- md5: {'ab' * 16}\n  size: 1\n  hash: md5\n  cache: false\n  path: {out}\n")
     assert data_remove("data/x.dvc", project_path=proj, dvc_ops=_FakeDvcOps()) == []
