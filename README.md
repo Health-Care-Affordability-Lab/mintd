@@ -320,16 +320,18 @@ mintd import my-cleaned-survey --bump --path data/final/survey.parquet
 **An import in an old place.** An import made by hand or by an older mintd can
 sit outside `data/imports/<full_name>/`, at `data/external/rainfall/final.dvc`
 say. `--bump` and `mintd check --upgrades` don't look there, and a plain import
-adds a second copy under `data/imports/`. Move it by removing the old pointer together with
-its data, importing again, and committing both changes:
+adds a second copy under `data/imports/`. Move it: stop tracking the old pointer,
+delete the old folder it leaves on disk, import again, and commit:
 
 ```bash
-dvc remove --outs data/external/rainfall/final.dvc
+mintd data remove data/external/rainfall/final.dvc   # says what it left on disk
+rm -r data/external/rainfall/final
 mintd import county-rainfall
 git add -A data && git commit -m "Move the county-rainfall import to data/imports/data_county-rainfall/"
 ```
 
-(`mintd data remove` would leave the old data files on disk.)
+`mintd data remove` stops DVC tracking a pointer and leaves its data where it is,
+naming what stayed; it warns when git would now pick those files up.
 
 ## Example: enclave workflow
 

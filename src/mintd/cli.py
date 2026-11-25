@@ -672,8 +672,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--path", type=Path, default=Path("."))
     p_verify.set_defaults(_handler=_handle_data_verify)
 
-    p_remove = p_data_sub.add_parser("remove", help="Remove DVC data")
-    p_remove.add_argument("name")
+    p_remove = p_data_sub.add_parser(
+        "remove", help="Stop tracking a file or folder with DVC; the data stays on disk")
+    p_remove.add_argument("name", help="the .dvc file (or stage) to stop tracking")
     p_remove.set_defaults(_handler=_handle_data_remove)
 
     _add_schema_parser(p_data_sub)
@@ -1708,8 +1709,27 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
     with _hint(DvcOpError, "check the name; 'mintd data verify' lists tracked outputs"):
-        data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
+        left = data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
     print(f"removed: {args.name}")
+    if not left:
+        return 0
+    def shown(paths: list[str]) -> str:
+        return ", ".join(f"{p}/" if Path(p).is_dir() else p for p in paths)
+
+    reporter.info(f"DVC no longer tracks it; the data stays on disk: {shown(left)}")
+    # dvc remove also drops the pointer's .gitignore line, so git may now see
+    # the data as untracked, ready for the next `git add` to commit it.
+    # Untracked: what git lists, less what it ignores and what HEAD tracks.
+    try:
+        git = _resolve_git_ops(config, reporter)
+        tracked = set(git.head_files(Path("."))) if git.has_commit(Path(".")) else set()
+        untracked = set(git.listed_files(Path("."), left)) - set(git.ignored_files(Path("."), left)) - tracked
+    except GitOpError:  # not a git repository, or git failed: nothing to warn about
+        untracked = set()
+    seen = [p for p in left if any(f == p or f.startswith(f"{p}/") for f in untracked)]
+    if seen:
+        reporter.warn(f"git now sees {len(untracked)} file(s) in {shown(seen)} as untracked: a `git add` would commit them")
+        reporter.warn(f"to keep them out: delete them, or add {shown(seen)} to .gitignore")
     return 0
 
 
