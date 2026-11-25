@@ -3581,6 +3581,25 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     assert all(r is recording_reporter for r in captured)
 
 
+@pytest.mark.parametrize("json_out", [False, True], ids=["text", "json"])
+def test_a_multi_line_finding_hint_prints_aligned_under_its_first_line(capsys, json_out: bool) -> None:
+    """A hint of several lines prints each under the first, after the 💡, not
+    at column 0. --json keeps the hint as one string with its newlines.
+
+    Mutation: print the hint in one f-string again -> the text case red."""
+    f = CheckFinding(severity="error", section="producer", message="m", kind="dvc_folder_unlisted",
+                     hint="to record the folder again: mintd data add data/final\nthen check again: mintd check")
+    cli._render_findings([f], json_out=json_out)
+    out = capsys.readouterr().out
+    if json_out:
+        assert json.loads(out.splitlines()[0])["hint"] == f.hint
+    else:
+        lines = out.splitlines()
+        i = next(n for n, line in enumerate(lines) if "💡" in line)
+        assert lines[i] == "    💡 to record the folder again: mintd data add data/final"
+        assert lines[i + 1] == "       then check again: mintd check"
+
+
 def test_no_handler_calls_sys_stderr_directly() -> None:
     """Meta-test: the set of functions in cli.py that call
     `print(..., file=sys.stderr)`, asserted by set equality. Pins the
