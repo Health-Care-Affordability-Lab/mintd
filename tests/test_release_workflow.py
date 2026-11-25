@@ -72,10 +72,30 @@ def test_triggers_are_exactly_these() -> None:
         "type": "choice", "options": ["patch", "minor"], "default": "patch"}}}}
     assert "tag.yml" not in _WF
     assert _on(_WF["test.yml"]) == {
-        "push": {"branches": ["main"]}, "pull_request": {"branches": ["main"]}, "workflow_call": None,
+        "push": {"branches": ["main"]}, "pull_request": {"branches": ["main"]},
+        "merge_group": {"types": ["checks_requested"]}, "workflow_call": None,
     }
     for name, workflow in _WF.items():
         assert not {"pull_request_target", "workflow_run"} & set(_on(workflow)), name
+
+
+# The checks the main ruleset requires. The merge queue waits for each one on its merge_group run, and for good if
+# one never reports, so a renamed job needs the ruleset changed with it.
+_REQUIRED_CHECKS = {"test (ubuntu, 3.11)", "test (ubuntu, 3.13)", "test (macos, 3.13)", "windows-test (3.13)"}
+
+
+def test_the_merge_queue_gets_every_required_check() -> None:
+    """test.yml runs on merge_group, its jobs report the ruleset's required checks by name, and no job behind them
+    can skip a merge_group run: no condition but windows-test's always(), which reports even when a shard failed.
+    Mutations: drop merge_group; rename a check; put a condition on a job -> red."""
+    workflow = _WF["test.yml"]
+    assert "merge_group" in _on(workflow)
+    jobs = workflow["jobs"]
+    matrix = jobs["test"]["strategy"]["matrix"]["include"]
+    names = {jobs["test"]["name"].replace("${{ matrix.name }}", entry["name"]).replace("${{ matrix.python }}", entry["python"])
+             for entry in matrix} | {jobs["windows-test"]["name"]}
+    assert names == _REQUIRED_CHECKS
+    assert {name: job.get("if") for name, job in jobs.items()} == {"test": None, "windows-shard": None, "windows-test": "always()"}
 
 
 def test_each_job_gets_only_the_permissions_it_needs() -> None:
