@@ -1,4 +1,4 @@
-# Changes to CI, install scripts, the story harness, lint settings, pinned dependencies and the size budget need the maintainer's review.
+# Changes to CI, install scripts, the story harness, lint settings, pinned dependencies, the size budget and the CLI surface snapshot need the maintainer's review.
 /.github/ @Health-Care-Affordability-Lab/maintainers
 /install.sh @Health-Care-Affordability-Lab/maintainers
 /install.ps1 @Health-Care-Affordability-Lab/maintainers
@@ -9,3 +9,5 @@
 /uv.lock @Health-Care-Affordability-Lab/maintainers
 /tests/src_size_budget/ @Health-Care-Affordability-Lab/maintainers
 /tests/test_src_size.py @Health-Care-Affordability-Lab/maintainers
+/tests/cli_surface.txt @Health-Care-Affordability-Lab/maintainers
+/tests/test_cli_surface.py @Health-Care-Affordability-Lab/maintainers
