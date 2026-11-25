@@ -79,16 +79,20 @@ jobs:
           "$mintd" publish --help
           "$mintd" data --help
           "$mintd" init enclave ci-smoke --path "$RUNNER_TEMP"
-  windows-test:
-    # REQUIRED since the canary first went fully green (fsync fix #5 +
-    # test-portability #7): a red windows-test now means a real regression.
-    # Vendored *.sh templates do not yet have *.ps1 siblings, so the
-    # affected tests skip on nt with reasons rather than fail. Installs into
-    # a real .venv to mirror local dev.
+  windows-shard:
+    # The Windows tests, as three shards on three runners (--test-shard,
+    # tests/conftest.py): one runner took about 21 minutes for them. Each test
+    # is in exactly one shard. Lint, type-check and the smoke install run in
+    # shard 1. The required check is windows-test below, green only when every
+    # shard passed. Vendored *.sh templates do not yet have *.ps1 siblings, so
+    # the affected tests skip on nt with reasons rather than fail. Installs
+    # into a real .venv to mirror local dev.
+    name: windows-test shard ${{ matrix.shard }}/3 (${{ matrix.python }})
     strategy:
       fail-fast: false
       matrix:
         python: ["3.13"]
+        shard: [1, 2, 3]
     runs-on: windows-2025
     defaults:
       run:
@@ -120,14 +124,20 @@ jobs:
           git config --global user.email "ci@example.com"
           git config --global user.name "CI"
       - name: Lint
+        if: matrix.shard == 1
         run: .venv\Scripts\ruff.exe check src tests scripts
       - name: Lint (banned APIs, inline noqa ignored)
+        if: matrix.shard == 1
         run: .venv\Scripts\ruff.exe check src --ignore-noqa --select TID251,TID253
       - name: Type-check
+        if: matrix.shard == 1
         run: .venv\Scripts\mypy.exe src/mintd
       - name: Test
-        run: .venv\Scripts\pytest.exe -q -n auto
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: .venv\Scripts\pytest.exe -q -n auto --test-shard "$env:SHARD/3"
       - name: Smoke install
+        if: matrix.shard == 1
         # Mirrors the POSIX smoke step: confirms the mintd console-script,
         # installed from the built wheel with no extras into its own tool dir,
         # launches on Windows. Enclave init is used because
@@ -147,3 +157,16 @@ jobs:
           & $mintd publish --help
           & $mintd data --help
           & $mintd init enclave ci-smoke --path $env:RUNNER_TEMP
+  windows-test:
+    # REQUIRED, under this name, since the canary first went fully green: a
+    # red windows-test means a real regression. Green only when all three
+    # windows-shard runs passed; it runs even when one failed, so it reports.
+    name: windows-test (3.13)
+    needs: windows-shard
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Every Windows shard passed
+        env:
+          RESULT: ${{ needs.windows-shard.result }}
+        run: test "$RESULT" = success
