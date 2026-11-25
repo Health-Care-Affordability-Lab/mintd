@@ -1,1 +1,1 @@
--3: the enclave scaffold no longer lists the three stale v1 scripts
+-5: the enclave scaffold no longer lists the three stale v1 scripts, and nothing sets their exec bit
