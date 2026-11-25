@@ -57,7 +57,8 @@ def inside(root: Path, path: Path | str, *, read: Read, root_ok: bool = False,
     # `absolute()` keeps `..` (`link/..` is not the root here) and asks for the working folder only for a
     # relative path, so absolute paths work from a deleted one, as `relative_to` did.
     if p.absolute() == Path(root).absolute():
-        return "." if root_ok else None  # the root itself, however a link names it, in every mode
+        # The root itself, however a link names it, in every mode; a root that is a link loop is nowhere.
+        return "." if root_ok and (read == "lexical" or _real(str(root)) is not None) else None
     base = os.path.abspath(root) if read == "lexical" else _real(str(root))
     there = os.path.abspath(p) if read == "lexical" else _real(str(p)) if read == "follow" else _real_folder(p)
     if there is None or base is None:

@@ -134,6 +134,22 @@ def test_a_link_loop_reads_as_outside(root: Path, read: Read) -> None:
     assert inside(root, root / "x" / "f.txt", read=read) is None
 
 
+@pytest.mark.parametrize("read", ["follow", "folder"])
+def test_a_root_that_is_a_link_loop_holds_nothing(tmp_path: Path, read: Read, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Not even itself, and a path elsewhere isn't read against the working folder in
+    its place.
+
+    Mutations: answer "." for the root itself without resolving it -> red; drop the
+    check that both paths resolved -> `relpath(there, None)` reads from the working
+    folder and answers "a", red."""
+    loop = tmp_path / "loop"
+    _link(loop, tmp_path / "loop2")
+    _link(tmp_path / "loop2", loop)
+    assert inside(loop, loop, read=read, root_ok=True) is None
+    monkeypatch.chdir(tmp_path)
+    assert inside(loop, tmp_path / "a", read=read) is None
+
+
 def test_a_path_that_does_not_exist_yet_resolves_as_far_as_it_can(root: Path) -> None:
     assert inside(root, root / "a" / "new" / "deeper" / "file.bin", read="follow") == "a/new/deeper/file.bin"
 
