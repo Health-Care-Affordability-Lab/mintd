@@ -59,7 +59,7 @@ def _landed(dest: Path) -> dict[str, str]:
 
 def _clone(mintd, product, tmp_path: Path, *, json: bool = True):
     dest = tmp_path / "clone"
-    return dest, mintd("data", "clone", product.name, "--dest", str(dest), cwd=tmp_path, json=json)
+    return dest, mintd("data", "clone", product.name, "--all", "--dest", str(dest), cwd=tmp_path, json=json)
 
 
 def _git_clone_then_pull(mintd, product, tmp_path: Path, *, json: bool = True):

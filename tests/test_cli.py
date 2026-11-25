@@ -540,23 +540,29 @@ def test_data_import_all_with_no_outputs_exits_one(
     capsys: pytest.CaptureFixture[str],
     patched_clients,
 ) -> None:
-    """`--all` against a product whose entry lists no outputs imported 0 files
-    and exited 0 — a CI gate on that exit code passes on an import that moved
-    nothing. A producer registered before its first publish has exactly this
-    entry.
+    """`--all` against a producer whose tree DVC tracks nothing in imported 0
+    files and exited 0 -- a CI gate on that exit code passes on an import that
+    moved nothing. A producer before its first `mintd data add` is exactly this.
+    Real git: `--all` reads the producer's tree at HEAD.
     """
-    client, dvc_ops = patched_clients
-    metadata = _register_demo_map(client)
-    metadata.data_products.outputs = []
-    client.update(metadata)
+    from tests._harness.git import _git
 
-    rc = cli.main([
-        "data", "import", "demo-map", "--all", "--dest-root", str(tmp_path),
-    ])
+    client, dvc_ops = patched_clients
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer)
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+
+    rc = cli.main(["data", "import", "test_project", "--all", "--dest-root", str(tmp_path / "imports")])
 
     assert rc == 1
     assert dvc_ops.calls == []
-    assert "outputs" in " ".join(capsys.readouterr().err.split())
+    assert "tracks nothing with DVC at HEAD" in " ".join(capsys.readouterr().err.split())
 
 
 def test_data_import_jobs_reaches_the_dvc_argv(
@@ -727,7 +733,8 @@ def test_mintd_import_writes_the_same_files_as_mintd_data_import(
 def test_mintd_help_lists_import_and_clone_with_what_each_brings() -> None:
     text = " ".join(cli._build_parser().format_help().split())
     assert "import Bring a product's primary output into this project, pinned (--path, --all for more)" in text
-    assert "clone Get a product's whole project in its own folder, with every tracked output pulled" in text
+    assert ("clone Get a product's whole project in its own folder, with its declared outputs pulled "
+            "(--all for everything)") in text
 
 
 def test_data_import_bump_rejects_more_than_one_path(
@@ -1799,7 +1806,7 @@ def test_cli_data_clone_unknown_path_reports_tracked_outputs(
     err = " ".join(capsys.readouterr().err.split())
     assert "data/nope.csv" in err
     assert "data/final (primary)" in err
-    assert "drop --path" in err
+    assert "pass --all" in err
 
 
 def test_cli_data_clone_returns_one_on_catalog_not_found(
@@ -3314,7 +3321,8 @@ def test_cli_data_import_all_updates_status_per_output(
         for i in range(2)
     ]
     client.register(Metadata.model_validate(data))
-    cli.main(["data", "import", "multi", "--all", "--dest-root", str(tmp_path)])
+    cli.main(["data", "import", "multi", "--path", "outputs/o0.parquet", "--path", "outputs/o1.parquet",
+              "--dest-root", str(tmp_path)])
     labels = [e[1] for e in recording_reporter.events_of("update_status")]
     assert any("(1/2)" in s for s in labels)
     assert any("(2/2)" in s for s in labels)
@@ -5186,7 +5194,7 @@ def test_data_import_at_a_broken_rev_over_an_import_asks_for_force_again(
 def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_deliver(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--all` over a product with one deliverable output and one that is not.
+    """Two outputs, one deliverable and one not.
 
     The deliverable output lands and stays and is named; the import exits 1
     naming the other. The transfer is faked (`import_lands_nothing`); the
@@ -5202,7 +5210,8 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
 
     root = tmp_path / "imports"
     rc = cli.main([
-        "data", "import", "test_project", "--all", "--rev", sha, "--dest-root", str(root),
+        "data", "import", "test_project", "--path", "data/good/", "--path", "data/final/", "--rev", sha,
+        "--dest-root", str(root),
     ])
     err = " ".join(capsys.readouterr().err.split())
 
@@ -5218,7 +5227,7 @@ def test_data_import_all_keeps_what_landed_and_names_the_output_it_cannot_delive
 def test_data_import_all_refuses_before_any_output_lands_when_a_later_one_is_refused(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`--all`: a file already sits at the second output's pointer path. Every
+    """Two outputs: a file already sits at the second output's pointer path. Every
     destination is checked before the first dvc call, so the import is refused
     before the first output lands, rather than half done. (An output that
     fails in dvc after an earlier one landed keeps that one:
@@ -5235,7 +5244,8 @@ def test_data_import_all_refuses_before_any_output_lands_when_a_later_one_is_ref
     (ns / "final.dvc").write_text("not a pointer\n")
 
     rc = cli.main([
-        "data", "import", "test_project", "--all", "--rev", sha, "--dest-root", str(root),
+        "data", "import", "test_project", "--path", "data/good/", "--path", "data/final/", "--rev", sha,
+        "--dest-root", str(root),
     ])
     err = " ".join(capsys.readouterr().err.split())
 
@@ -5943,3 +5953,43 @@ def test_clone_reads_the_primary_only_from_an_object(tmp_path: Path, content: st
     instead of a traceback. Mutation: drop either object check -> red."""
     (tmp_path / "metadata.json").write_text(content, encoding="utf-8")
     assert cli._read_primary_from_clone(tmp_path) == primary
+
+
+def test_data_import_all_brings_what_the_producer_tracks_but_never_declared(
+    tmp_path: Path, patched_clients
+) -> None:
+    """`--all` imports everything DVC tracks in the producer, `data/raw` included,
+    though `metadata.json` declares only `data/final/`. Real git: the out list is
+    read from the producer's tree at HEAD. Mutation: list the catalog's declared
+    outputs instead of the tree -> `data/raw` is never imported, red."""
+    from tests._harness.git import _git
+
+    client, dvc_ops = patched_clients
+    producer = tmp_path / "producer"
+    producer.mkdir()
+    stage_dvc_project(producer, declared=("data/final/",))
+    write_pointer(producer, "data/final", files={"a.csv": "v-1"})
+    write_pointer(producer, "data/raw", files={"r.csv": "v-1"})
+    _git(["init", "-q", "-b", "main"], cwd=producer)
+    _git(["add", "-A"], cwd=producer)
+    _git(["commit", "-q", "-m", "producer"], cwd=producer)
+    meta = json.loads((producer / "metadata.json").read_text(encoding="utf-8"))
+    meta["repository"]["github_url"] = str(producer)
+    client.register(Metadata.model_validate(meta))
+
+    rc = cli.main(["data", "import", "test_project", "--all", "--dest-root", str(tmp_path / "imports")])
+
+    assert rc == 0
+    assert sorted(c.path for c in dvc_ops.calls) == ["data/final", "data/raw"]
+
+
+@pytest.mark.parametrize("narrowing", [["--primary"], ["--path", "data/final/"]], ids=["primary", "path"])
+@pytest.mark.parametrize("group", [[], ["data"]], ids=["mintd", "mintd-data"])
+def test_clone_all_with_primary_or_path_is_a_usage_error(
+    patched_clients, group: list[str], narrowing: list[str]
+) -> None:
+    """`--all` pulls everything; narrowing it is refused before anything runs.
+    Mutation: take `--all` out of the mutually exclusive group -> exit 0 or 1, red."""
+    with pytest.raises(SystemExit) as exc:
+        cli.main([*group, "clone", "demo-map", "--all", *narrowing])
+    assert exc.value.code == 64

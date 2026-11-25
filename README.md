@@ -280,14 +280,15 @@ producer commit it came from (`--rev`; default: the producer's HEAD).
 |---|---|
 | `mintd import <name>` | the primary output |
 | `mintd import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
-| `mintd import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
+| `mintd import <name> --all` | everything the product's DVC tracks, raw and intermediate data included |
 
 **Get a product's whole project, code and data, to read or work on** with
 `mintd clone`. A data product's clone lands in `./data_<name>/`.
 
 | Command | Brings |
 |---|---|
-| `mintd clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
+| `mintd clone <name>` | a full git clone of the producer's repo, with its declared outputs and primary pulled |
+| `mintd clone <name> --all` | the same clone, with everything DVC tracks pulled, raw and intermediate data included |
 | `mintd clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
 
 ```bash
@@ -298,8 +299,10 @@ mintd data list
 # Peek at the S3 layout of a specific product before pulling:
 mintd data ls my-cleaned-survey
 
-# Clone the whole producer repo + pull every tracked output:
+# Clone the whole producer repo + pull its declared outputs and primary:
 mintd clone my-cleaned-survey
+# or: everything DVC tracks, raw and intermediate data included (can be large)
+mintd clone my-cleaned-survey --all
 # or: only the primary output, pinned to a tag
 mintd clone my-cleaned-survey --rev v0.1.0 --primary
 # or: only specific declared outputs (repeatable; an unknown path lists the

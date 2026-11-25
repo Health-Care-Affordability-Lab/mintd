@@ -122,7 +122,7 @@ def test_clone_and_pull_product_happy_path(
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
-    git.tracks = ("outputs/main.parquet",)
+    git.tracks = ("data/final", "data/raw", "outputs/main.parquet")
 
     dest = clone_and_pull_product(
         client, dvc, git, _fast(),
@@ -135,8 +135,9 @@ def test_clone_and_pull_product_happy_path(
     assert git.clone_calls[0].branch is None
     assert git.clone_calls[0].url == "https://github.com/example-org/demo-map"
     assert len(dvc.pull_calls) == 1
-    # Default pulls every DISCOVERED output; --primary narrows to the primary.
-    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
+    # The default pulls the declared output and the primary, not the raw
+    # folder the product also tracks. Mutation: targets=None by default -> red.
+    assert dvc.pull_calls[0].targets == ["data/final", "outputs/main.parquet"]
 
 
 def test_clone_and_pull_product_with_explicit_dest(
@@ -150,7 +151,7 @@ def test_clone_and_pull_product_with_explicit_dest(
 
     dest_arg = tmp_path / "x"
     dest = clone_and_pull_product(
-        client, dvc, git, _fast(), name="demo-map", dest=dest_arg,
+        client, dvc, git, _fast(), all_outputs=True, name="demo-map", dest=dest_arg,
     )
 
     assert dest.dest == dest_arg.resolve()
@@ -167,28 +168,29 @@ def test_clone_and_pull_product_with_rev(
     git = _NoopCloneGitOps()
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="demo-map", rev="v1.2",
+        client, dvc, git, _fast(), all_outputs=True, name="demo-map", rev="v1.2",
     )
 
     assert git.clone_calls[0].branch == "v1.2"
 
 
-def test_clone_and_pull_product_default_pulls_all_outputs(
+def test_clone_and_pull_product_all_pulls_everything_dvc_tracks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Default (no flags) pulls every tracked output — dvc pull with targets=None."""
+    """`--all` pulls every out DVC tracks, raw data included, which the default
+    leaves out. Mutation: `--all` resolved like the default -> red."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
-    git.tracks = ("outputs/main.parquet",)
+    git.tracks = ("data/final", "data/raw")
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="demo-map",
+        client, dvc, git, _fast(), name="demo-map", all_outputs=True,
     )
 
-    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
+    assert dvc.pull_calls[0].targets == ["data/final.dvc", "data/raw.dvc"]
 
 
 def test_clone_and_pull_product_with_primary_only(
@@ -312,7 +314,7 @@ def test_clone_and_pull_product_strips_legacy_prefix_in_dest(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    dest = clone_and_pull_product(client, dvc, git, _fast(), name="data_demo-survey")
+    dest = clone_and_pull_product(client, dvc, git, _fast(), all_outputs=True, name="data_demo-survey")
 
     assert dest.dest == (tmp_path / "data_demo-survey").resolve()
 
@@ -331,7 +333,7 @@ def test_clone_and_pull_product_code_type_uses_bare_name(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    dest = clone_and_pull_product(client, dvc, git, _fast(), name="foo")
+    dest = clone_and_pull_product(client, dvc, git, _fast(), all_outputs=True, name="foo")
 
     assert dest.dest == (tmp_path / "foo").resolve()
 
@@ -387,7 +389,7 @@ def test_clone_and_pull_product_passes_the_clone_dest_as_cwd(
     git.tracks = ("outputs/main.parquet",)
 
     clone_and_pull_product(
-        client, dvc, git, _fast(), name="demo-map",
+        client, dvc, git, _fast(), all_outputs=True, name="demo-map",
     )
 
     assert [c.cwd for c in dvc.pull_calls] == [tmp_path / "data_demo-map"]
@@ -420,7 +422,7 @@ def test_clone_and_pull_product_never_changes_the_process_cwd(
     with pytest.raises(DvcOpError):
         clone_and_pull_product(
             client, _DvcPullErrorOps(), git, _fast(),
-            name="demo-map",
+            all_outputs=True, name="demo-map",
         )
 
     assert Path.cwd() == tmp_path  # restored even on failure
@@ -810,7 +812,7 @@ def test_clone_unresolvable_selector_raises_and_removes_the_clone(
     # The listed outs are DVC's, not the catalog's, so `--path` would refuse
     # them pre-clone: the hint must not send the user there.
     assert exc.value.hint is not None
-    assert "drop --path/--primary" in exc.value.hint
+    assert "pass --all" in exc.value.hint
     assert "pass --path" not in exc.value.hint
     assert len(git.clone_calls) == 1  # past the catalog pre-filter: the clone happened
     assert dvc.pull_calls == []
@@ -1117,19 +1119,19 @@ def test_clone_rejection_keeps_a_pre_existing_empty_dest(
 def test_clone_and_pull_product_no_flags_unchanged_with_paths_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """paths=None + primary_only=False keeps the pull-everything default."""
+    """paths=None + primary_only=False is the default: the declared outputs and the primary."""
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
     _register(client)
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
-    git.tracks = ("outputs/main.parquet",)
+    git.tracks = ("data/final", "outputs/main.parquet")
 
     clone_and_pull_product(
         client, dvc, git, _fast(), name="demo-map", paths=None,
     )
 
-    assert dvc.pull_calls[0].targets == ["outputs/main.parquet.dvc"]
+    assert dvc.pull_calls[0].targets == ["data/final", "outputs/main.parquet"]
 
 
 # ---------- _resolve_paths precedence matrix (shared import/clone) -------
@@ -1147,38 +1149,28 @@ _ENTRY: dict[str, Any] = {
 
 
 @pytest.mark.parametrize(
-    ("path", "all_outputs", "expected"),
+    ("path", "expected"),
     [
         # explicit single path (import --path) wins over primary fallback
-        ("data/final/", False, ["data/final/"]),
+        ("data/final/", ["data/final/"]),
         # explicit path list (clone --path, repeatable) is passed through
-        (["a", "b"], False, ["a", "b"]),
-        # all_outputs returns every outputs[].path
-        (
-            None,
-            True,
-            ["data/final/", "data/intermediate/markets/defs_30min.parquet"],
-        ),
+        (["a", "b"], ["a", "b"]),
         # neither → primary fallback
-        (None, False, ["outputs/main.parquet"]),
+        (None, ["outputs/main.parquet"]),
     ],
 )
-def test_resolve_paths_precedence_matrix(
-    path: str | list[str] | None, all_outputs: bool, expected: list[str]
-) -> None:
-    assert (
-        _resolve_paths(_ENTRY, path=path, all_outputs=all_outputs, name="x")
-        == expected
-    )
+def test_resolve_paths_precedence_matrix(path: str | list[str] | None, expected: list[str]) -> None:
+    """`--all` isn't resolved here: it reads the producer's tree, not the catalog."""
+    assert _resolve_paths(_ENTRY, path=path, name="x") == expected
 
 
 def test_resolve_paths_no_primary_raises_with_hint() -> None:
     entry: dict[str, Any] = {"data_products": {"primary": None, "outputs": []}}
     with pytest.raises(MissingPrimaryDataProduct, match="pass --path or --all"):
-        _resolve_paths(entry, path=None, all_outputs=False, name="x")
+        _resolve_paths(entry, path=None, name="x")
     with pytest.raises(MissingPrimaryDataProduct, match="drop --primary"):
         _resolve_paths(
-            entry, path=None, all_outputs=False, name="x",
+            entry, path=None, name="x",
             missing_primary_hint="drop --primary to pull all tracked outputs",
         )
 
@@ -1210,7 +1202,7 @@ def test_clone_and_pull_product_forwards_reporter_to_data_pull(
 
     clone_and_pull_product(
         client, _FakeDvcOps(), _NoopCloneGitOps(), _fast(),
-        name="demo-map",
+        all_outputs=True, name="demo-map",
         reporter=reporter,
     )
 
@@ -1240,7 +1232,7 @@ def test_clone_and_pull_product_propagates_pull_error_count(
             targets_pulled=1, total_bytes=0, elapsed_s=0.1, error_count=3,
         ),
     )
-    result = clone_and_pull_product(client, dvc, git, _fast(), name="demo-map")
+    result = clone_and_pull_product(client, dvc, git, _fast(), all_outputs=True, name="demo-map")
     assert result.pull_error_count == 3
 
 
@@ -1254,7 +1246,7 @@ def test_clone_and_pull_product_clean_pull_error_count_zero(
     dvc = _FakeDvcOps()
     git = _NoopCloneGitOps()
 
-    result = clone_and_pull_product(client, dvc, git, _fast(), name="demo-map")
+    result = clone_and_pull_product(client, dvc, git, _fast(), all_outputs=True, name="demo-map")
     assert result.pull_error_count == 0
 
 
@@ -1300,3 +1292,41 @@ def test_a_clone_of_a_producer_that_refuses_connections_is_unreachable(tmp_path:
 
     assert _clone_failure(ei.value, repo_url=url, rev="main", dest=tmp_path / "dst").reason \
         == ProducerError.Reason.UNREACHABLE
+
+
+@pytest.mark.parametrize("selection", [{"paths": ["data/final/"]}, {"primary_only": True}], ids=["path", "primary"])
+def test_clone_all_with_path_or_primary_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: dict[str, Any]
+) -> None:
+    """`--all` pulls everything, so narrowing it is a contradiction, refused
+    before the clone. Mutation: drop the check -> no error, red."""
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client)
+    git = _NoopCloneGitOps()
+    with pytest.raises(ValueError, match="--all pulls everything"):
+        clone_and_pull_product(client, _FakeDvcOps(), git, _fast(), name="demo-map", all_outputs=True, **selection)
+    assert git.clone_calls == []
+
+
+def test_clone_of_a_product_that_declares_no_output_holds_its_code_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Nothing declared, nothing pulled by default, and the clone says so and
+    names --all. Mutation: pull everything when nothing is declared -> red."""
+    from mintd._console import Reporter
+
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    _register(client, mutate=lambda d: d["data_products"].update(primary=None, outputs=[]))
+    dvc = _FakeDvcOps()
+    git = _NoopCloneGitOps()
+    git.tracks = ("data/raw",)
+
+    result = clone_and_pull_product(
+        client, dvc, git, _fast(), name="demo-map", reporter=Reporter(json_mode=False, no_color=True),
+    )
+
+    assert [c.targets for c in dvc.pull_calls] in ([], [[]])
+    assert result.pull_error_count == 0
+    assert "declares no outputs, so the clone holds its code only (--all pulls everything)" in capsys.readouterr().err

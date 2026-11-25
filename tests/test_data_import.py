@@ -106,6 +106,11 @@ def test_import_product_path_override(tmp_path: Path) -> None:
     assert fake.calls[0].dest == tmp_path / "data_demo_map" / "outputs" / "other.csv"
 
 
+def _lists(*paths: str):
+    """A stand-in for reading the producer's tree at the pin: what `--all` imports."""
+    return lambda repo, pin: list(paths)
+
+
 def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
     client = InMemoryCatalogClient()
     _register(
@@ -115,7 +120,7 @@ def test_import_product_all_outputs_loops(tmp_path: Path) -> None:
     fake = _FakeDvcOps()
 
     produced = import_product(
-        client, fake, "demo_map", all_outputs=True, cwd=tmp_path, dest_root=tmp_path
+        client, fake, "demo_map", all_outputs=True, list_tracked=_lists("outputs/a.csv", "outputs/b.csv", "outputs/c.csv"), cwd=tmp_path, dest_root=tmp_path
     )
 
     assert len(produced) == 3
@@ -146,7 +151,7 @@ def test_import_all_skips_an_output_nested_inside_another(tmp_path: Path) -> Non
     reporter = _RecordingReporter()
 
     produced = import_product(
-        client, fake, "demo_map", all_outputs=True, cwd=tmp_path,
+        client, fake, "demo_map", all_outputs=True, list_tracked=_lists("data/final", "data/final/b.csv"), cwd=tmp_path,
         dest_root=tmp_path, reporter=reporter,
     )
 
@@ -191,7 +196,7 @@ def test_a_failure_partway_through_all_names_what_landed(tmp_path: Path) -> None
 
     with pytest.raises(DvcOpError):
         import_product(
-            client, fake, "demo_map", all_outputs=True, cwd=tmp_path,
+            client, fake, "demo_map", all_outputs=True, list_tracked=_lists("outputs/a.csv", "outputs/b.csv"), cwd=tmp_path,
             dest_root=tmp_path, reporter=reporter,
         )
 
@@ -232,7 +237,7 @@ def test_an_interrupted_import_still_names_what_landed(
 
     with pytest.raises(interrupt):
         import_product(
-            client, fake, "demo_map", all_outputs=True, cwd=tmp_path,
+            client, fake, "demo_map", all_outputs=True, list_tracked=_lists("outputs/a.csv", "outputs/b.csv"), cwd=tmp_path,
             dest_root=tmp_path, reporter=reporter,
         )
 
@@ -517,7 +522,7 @@ def test_every_destination_is_checked_before_the_first_dvc_call(tmp_path: Path) 
     stray.mkdir(parents=True)
     (stray / "mine.txt").write_text("x\n")
     with pytest.raises(ImportDestinationExists, match=r"outputs/b is already a folder"):
-        import_product(client, fake, "demo_map", all_outputs=True, cwd=tmp_path, dest_root=tmp_path)
+        import_product(client, fake, "demo_map", all_outputs=True, list_tracked=_lists("outputs/a/", "outputs/b/"), cwd=tmp_path, dest_root=tmp_path)
     assert fake.calls == [] and not (tmp_path / "data_demo_map" / "outputs" / "a").exists()
 
 
@@ -1544,69 +1549,30 @@ def test_scalar_outputs_never_reaches_a_for_loop(outputs: Any) -> None:
     assert _tracked_output_targets({"data_products": {"outputs": outputs}}) == []
 
 
-@pytest.mark.parametrize(
-    "outputs,fault",
-    [
-        pytest.param([], "lists no data_products.outputs", id="declared-empty"),
-        pytest.param(
-            [{"description": "no path key"}, "junk"],
-            "lists 2 data_products.outputs, none with a usable path",
-            id="rows-unusable",
-        ),
-        pytest.param(True, "lists no data_products.outputs", id="scalar-not-a-list"),
-    ],
-)
-def test_import_all_with_no_importable_outputs_refuses(
-    tmp_path: Path, outputs: Any, fault: str
-) -> None:
-    """`--all` against an entry listing no usable output imported 0 files and
-    exited 0 — a CI gate on that exit code passes on an import that moved
-    nothing. A producer registered before its first publish carries
-    `outputs: []`; a v1-era entry carries rows the resolver's isinstance
-    filter drops.
-
-    `outputs: true` is a v1 hand-edit away from valid and is TRUTHY, so it
-    survived the resolver's `or []` and tracebacked out of `data import --all`
-    as `TypeError: 'bool' object is not iterable` instead of refusing.
-
-    `primary` IS set in every case, so this is not the missing-primary path:
-    `--all` selects the outputs list, and an empty selection is a refusal,
-    never a silent fallback to the primary.
-
-    The message names WHICH fault it is: "no outputs" is the producer's to
-    fix by publishing, whereas rows that exist but carry no usable `path` are
-    a malformed entry. And the way out is the primary, not `--path`: `--all`
-    wins over a `--path` the user already passed, so advising `--path` reads
-    as advice they just followed.
-
-    Mutations: drop `_resolve_paths`'s `if not selected` guard -> every param
-    returns [] and `import_product` returns [] having called no dvc; drop its
-    `isinstance(outputs, list)` guard -> `scalar-not-a-list` raises TypeError;
-    collapse the two message arms into one -> `rows-unusable` reddens.
-    """
+def test_import_all_from_a_producer_that_tracks_nothing_refuses(tmp_path: Path) -> None:
+    """`--all` reads the producer's tree at the pin; a tree DVC tracks nothing
+    in imports 0 files, which is a refusal, never an exit 0 that moved nothing.
+    Mutations: drop the `if not selected` guard -> import_product returns []
+    having called no dvc; read the catalog's outputs instead of the tree -> red."""
     fake = _FakeDvcOps()
-    client = _raw_client(
-        {**_V1_BASE, "data_products": {"primary": "data/final/", "outputs": outputs}}
-    )
+    client = _raw_client({**_V1_BASE, "data_products": {"primary": "data/final/", "outputs": [{"path": "data/final/"}]}})
+    seen: list[tuple[str, str]] = []
 
-    with pytest.raises(NoTrackedOutputs) as exc:
-        import_product(
-            client, fake, "provider_a", all_outputs=True,
-            cwd=tmp_path, dest_root=tmp_path,
-        )
-    assert fault in str(exc.value), str(exc.value)
-    assert "drop --all to import the primary ('data/final/')" in str(exc.value)
-    assert "--path" not in str(exc.value), "advises a flag --all already overrode"
+    def lists_nothing(repo: str, pin: str) -> list[str]:
+        seen.append((repo, pin))
+        return []
+
+    with pytest.raises(NoTrackedOutputs, match="tracks nothing with DVC at HEAD; --all has nothing to import"):
+        import_product(client, fake, "provider_a", all_outputs=True, list_tracked=lists_nothing,
+                       cwd=tmp_path, dest_root=tmp_path)
+    assert seen and seen[0][1] == "HEAD"
     assert fake.calls == []
 
-
 def test_a_non_string_path_row_is_dropped_by_both_readers() -> None:
-    """`_tracked_output_targets` filtered on `"path" in o` where
-    `_resolve_paths` filters on `isinstance(..., str)`, so `outputs:
+    """`_tracked_output_targets` filtered on `"path" in o`, so `outputs:
     [{path: 7}]` put an int into the tracked list and `data clone --path x`
     died inside `normalize_target` with `AttributeError: 'int' object has no
-    attribute 'replace'` -- the raw traceback the sibling reader's own
-    docstring says cannot happen. Both readers apply the same test now.
+    attribute 'replace'`. It filters on `isinstance(..., str)` now.
 
     Mutation: weaken either filter back to `"path" in o` -> this reddens.
     """

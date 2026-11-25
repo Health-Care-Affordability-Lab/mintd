@@ -66,11 +66,8 @@ def _tree(project: Path) -> set[str]:
     pytest.param((), ("data/final",), id="primary"),
     pytest.param(("--path", "data/extra"), ("data/extra",), id="path-extra"),
     pytest.param(("--path", "data/raw"), ("data/raw",), id="path-raw"),
-    # What --all brings today, declared outputs only; drop it when the Target below passes.
-    pytest.param(("--all",), ("data/final", "data/extra"), id="all-declared"),
-    pytest.param(("--all",), ("data/final", "data/extra", "data/raw"), id="all", marks=pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="Target: --all imports only data_products.outputs today, so data/raw does not land")),
+    # Everything DVC tracks, the undeclared data/raw included.
+    pytest.param(("--all",), ("data/final", "data/extra", "data/raw"), id="all"),
 ])
 def test_import_lands_what_was_asked_and_downloads_each_object_once(
     product, fresh_project, mintd, s3_server, flags, outs,
