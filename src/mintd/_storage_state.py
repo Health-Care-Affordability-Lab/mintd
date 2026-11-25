@@ -243,6 +243,8 @@ def _read_metadata_storage(
         data = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None, None, None, False
+    if not isinstance(data, dict):
+        return None, None, None, False
     storage = data.get("storage")
     if not isinstance(storage, dict):
         return None, None, None, False
