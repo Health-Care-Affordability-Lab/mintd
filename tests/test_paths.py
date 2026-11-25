@@ -37,11 +37,16 @@ def root(tmp_path: Path) -> Path:
     ("a/../../x", None),
     ("/abs/x", None),
     ("C:/x", None),  # a drive, on POSIX too
+    ("1:a", None),  # any first character: pathlib took only ASCII letters as a drive on 3.11
+    ("\u00e9:x", None),
+    ("::", None),
+    ("a/1:b", "a/1:b"),  # a colon further in is a name
     ("\\\\server\\share\\x", None),
     ("a\\b", None),
 ])
 def test_a_recorded_path_is_read_as_a_posix_string(root: Path, path: str, want: str | None) -> None:
-    """Mutation: drop the drive rule -> `C:/x` reads as inside, red."""
+    """Mutations: drop the drive rule -> `C:/x` reads as inside, red; read a drive as pathlib does -> `1:a`
+    reads as inside on 3.11, red."""
     assert inside(root, path, read="recorded") == want
 
 

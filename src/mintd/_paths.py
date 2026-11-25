@@ -25,10 +25,10 @@ from __future__ import annotations
 import errno
 import os
 import posixpath
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Literal
 
-__all__ = ["Read", "inside", "physical", "rel"]
+__all__ = ["Read", "inside", "physical", "reads_as_a_drive", "rel"]
 
 Read = Literal["recorded", "lexical", "follow", "folder"]
 
@@ -81,11 +81,17 @@ def rel(root: Path, path: Path | str, *, read: Read = "lexical", root_ok: bool =
 def _recorded(path: str, *, root_ok: bool, dotdot: str, wdir: str | None) -> str | None:
     parts = [path] if wdir is None else [wdir, path]
     for s in parts:
-        if s.startswith("/") or "\\" in s or PureWindowsPath(s).drive:
+        if s.startswith("/") or "\\" in s or reads_as_a_drive(s):
             return None
         if dotdot == "refuse" and ".." in s.split("/"):
             return None
     return _verdict(posixpath.normpath(posixpath.join(*parts)), root_ok)
+
+
+def reads_as_a_drive(name: str) -> bool:
+    """Its first name has two characters or more and the second is ``:`` (``c:``, ``q:notes.txt``, ``1:a``), which
+    Windows reads as a drive. The same on every Python: pathlib's own reading counts only ASCII letters on 3.11."""
+    return name[1:2] == ":"
 
 
 def _verdict(found: str, root_ok: bool) -> str | None:

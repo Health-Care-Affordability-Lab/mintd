@@ -33,7 +33,7 @@ from .data import (
 from .check import CheckFinding, _resolve_approved_product_url, consumer_walk_failure
 from .producer import MissingPrimaryDataProduct, ProducerView
 from ._dvc_ops import DvcImportPathNotFound, DvcImportRepoUnreachable, DvcNotInRepoError, DvcOpError, DvcOps
-from ._paths import inside
+from ._paths import inside, reads_as_a_drive
 from .errors import MintdError
 
 if TYPE_CHECKING:
@@ -209,10 +209,9 @@ class PathTraversalDetected(MintdError):
 
     hint = "unsafe paths — do not extract; contact the sender"
 
-    def __init__(self, member: str) -> None:
-        super().__init__(
-            f"transfer manifest references {member!r} which escapes the dest dir"
-        )
+    def __init__(self, member: str, *, drive: bool = False) -> None:
+        why = ", and a name in it reads as a Windows drive" if drive else " which escapes the dest dir"
+        super().__init__(f"transfer manifest references {member!r}{why}")
         self.member = member
 
 
@@ -1360,7 +1359,7 @@ def enclave_verify(
             or inside(Path("."), content.repo, read="recorded", dotdot="refuse") is None
         ):
             raise PathTraversalDetected(
-                f"{content.repo}/{content.version_folder}"
+                f"{content.repo}/{content.version_folder}", drive=reads_as_a_drive(content.repo)
             )
         # (b) String pre-check on `version_folder`. `..` resolves
         # silently *inside* `extracted_dir` if paired with a deep
@@ -1373,7 +1372,7 @@ def enclave_verify(
             or inside(Path("."), content.version_folder, read="recorded", dotdot="refuse") is None
         ):
             raise PathTraversalDetected(
-                f"{content.repo}/{content.version_folder}"
+                f"{content.repo}/{content.version_folder}", drive=reads_as_a_drive(content.version_folder)
             )
 
         # Skip filesystem checks for entries already in transferred[].

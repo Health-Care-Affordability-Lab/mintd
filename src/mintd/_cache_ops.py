@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
-from ._paths import inside, rel as rel_to
+from ._paths import inside, reads_as_a_drive, rel as rel_to
 from .errors import MintdError
 from ._dvc_state import (
     get_remote_config, parse_s3_url, remote_key, require_default_remote, s3_key_for_out, workspace_path_for,
@@ -147,12 +147,6 @@ def _is_forbidden_path(path_posix: str) -> bool:
         return True
     # A leading `/`, a `\`, a drive or a `..` segment: a recorded path that isn't inside.
     return inside(Path("."), path_posix, read="recorded", dotdot="refuse") is None
-
-
-def _reads_as_a_drive(rel: str) -> bool:
-    """Its first name is one character and a colon (``q:notes.txt``), which Windows
-    reads as a drive, so a pull there would write outside the project."""
-    return rel[1:2] == ":"
 
 
 def safe_cache_remainder(remainder: str) -> str:
@@ -618,7 +612,7 @@ def enumerate_push_items(
         Order matters only for the single-file arg branch's message; the scan
         records exactly one reason per path."""
         if _is_forbidden_path(rel):
-            return "drive" if _reads_as_a_drive(rel) else "forbidden"
+            return "drive" if reads_as_a_drive(rel) else "forbidden"
         if _is_protected_repo_path(rel):
             return "protected"
         if _is_tracked(rel, tracked):
@@ -1231,7 +1225,7 @@ def cache_pull(
         except CacheKeyError:
             pass
         if resolved_rel is None:
-            why = ("its first name reads as a Windows drive" if _reads_as_a_drive(remainder)
+            why = ("its first name reads as a Windows drive" if reads_as_a_drive(remainder)
                    else "escapes the project root")
             refusal = f"unsafe key refused ({why}): {_display_safe(full_key)}"
         screen_paths = [remainder] + ([resolved_rel] if resolved_rel is not None else [])

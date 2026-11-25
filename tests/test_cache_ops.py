@@ -2396,7 +2396,7 @@ def test_push_file_vanishing_before_upload_becomes_failed_not_traceback(
     assert "mintd cache push cache/vanish.bin" in (fail.hint or "")
 
 
-@pytest.mark.parametrize("name", ["q:notes.txt", "d:dir/x.csv", "C:"])
+@pytest.mark.parametrize("name", ["q:notes.txt", "d:dir/x.csv", "C:", "1:a"])
 def test_a_first_name_windows_reads_as_a_drive_is_no_cache_key(name: str) -> None:
     """Pulled on Windows, `q:notes.txt` would land on drive Q:, so it is no key.
     A colon further in is a plain name.
@@ -2434,3 +2434,6 @@ def test_pull_refuses_a_drive_shaped_key_and_says_so(s3_versioned, tmp_path: Pat
     assert summary.pulled == 1
     assert [f.reason for f in summary.failed] == [
         "unsafe key refused (its first name reads as a Windows drive): lab/proj/cache/q:notes.txt"]
+    from mintd.cli import _render_cache_pull
+
+    assert _render_cache_pull(summary, Reporter()) == 1  # the pull exits 1
