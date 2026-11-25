@@ -68,6 +68,7 @@ from .data import (
     ImportNotFound,
     PrimaryRemovedAtHead,
     UnknownProductPath,
+    _cloned_metadata_entry,
     bump_import,
     clone_and_pull_product,
     import_product,
@@ -2020,13 +2021,8 @@ def _read_primary_from_clone(dest: Path) -> str | None:
     Returns None if the file is missing or unreadable (e.g., in tests where
     `clone_and_pull_product` is stubbed and `dest` doesn't exist on disk).
     """
-    try:
-        meta = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
-        products = meta.get("data_products") if isinstance(meta, dict) else None
-        primary = products.get("primary") if isinstance(products, dict) else None
-        return primary if isinstance(primary, str) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+    primary = _cloned_metadata_entry(dest, fallback={}).get("data_products", {}).get("primary")
+    return primary if isinstance(primary, str) else None
 
 
 def _measure_clone_result(dest: Path) -> tuple[int, int]:
