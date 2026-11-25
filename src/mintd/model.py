@@ -11,10 +11,10 @@ minus a small exclude list" (see CATALOG_EXCLUDED_PATHS below).
 import types
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from .catalog import CatalogEntry
 
@@ -30,12 +30,16 @@ class Owner(StrEnum):
     Informs reviewers reading the model what to expect a field's lifecycle
     to be; no command enforces it.
 
-    - USER: human edits in metadata.json (description, tags, ownership, ...)
+    - USER: human edits in metadata.json (description, tags, ownership,
+      status.state)
     - MINTD: tool writes (schema_version, mint.*, project.created_at, ...)
-    - PIPELINE: derived from project state (status.last_updated and
-      data_products.outputs[].last_published from the publish flow)
-    - REGISTRY: catalog regenerates (none today; reserved for the
-      registry-side rewriting flow)
+    - PIPELINE: the declared outputs (data_products.primary and each
+      output's path, description and primary)
+    - REGISTRY: the catalog registry's. Set when a product joins and changed
+      only by a reviewed registry change: project.name, .type and
+      .full_name, and all of repository, access_control, storage and
+      governance. Also the publish stamps: status.last_updated,
+      status.last_published_version and outputs[].last_published.
     """
     USER = "user"
     MINTD = "mintd"
@@ -64,9 +68,9 @@ class Mint(BaseModel):
 
 
 class Project(BaseModel):
-    name: Annotated[str, Owner.MINTD]
-    type: Annotated[Literal["data", "code", "project", "enclave"], Owner.MINTD]
-    full_name: Annotated[str, Owner.MINTD]
+    name: Annotated[str, Owner.REGISTRY]
+    type: Annotated[Literal["data", "code", "project", "enclave"], Owner.REGISTRY]
+    full_name: Annotated[str, Owner.REGISTRY]
     created_at: Annotated[datetime, Owner.MINTD]
     created_by: Annotated[str, Owner.MINTD]
 
@@ -82,38 +86,52 @@ class Ownership(BaseModel):
 
 
 class AccessTeam(BaseModel):
-    name: Annotated[str, Owner.USER]
-    permission: Annotated[str, Owner.USER]
+    name: Annotated[str, Owner.REGISTRY]
+    permission: Annotated[str, Owner.REGISTRY]
 
 
 class AccessControl(BaseModel):
-    teams: Annotated[list[AccessTeam], Owner.USER]
+    teams: Annotated[list[AccessTeam], Owner.REGISTRY]
 
 
 class Governance(BaseModel):
-    classification: Annotated[str, Owner.USER]
-    contract_info: Annotated[str, Owner.USER]
+    classification: Annotated[str, Owner.REGISTRY]
+    contract_info: Annotated[str, Owner.REGISTRY]
 
 
 class DvcStorage(BaseModel):
-    remote_name: Annotated[str, Owner.MINTD]
+    remote_name: Annotated[str, Owner.REGISTRY]
 
 
 class Storage(BaseModel):
-    provider: Annotated[str, Owner.MINTD]
-    bucket: Annotated[str, Owner.MINTD]
-    prefix: Annotated[str, Owner.MINTD]
-    endpoint: Annotated[str, Owner.MINTD]
-    versioning: Annotated[bool, Owner.MINTD]
-    dvc: Annotated[DvcStorage, Owner.MINTD]
+    provider: Annotated[str, Owner.REGISTRY]
+    bucket: Annotated[str, Owner.REGISTRY]
+    prefix: Annotated[str, Owner.REGISTRY]
+    endpoint: Annotated[str, Owner.REGISTRY]
+    versioning: Annotated[bool, Owner.REGISTRY]
+    dvc: Annotated[DvcStorage, Owner.REGISTRY]
+
+
+def _a_path_inside_the_repo(v: str) -> str:
+    # Catalog builders hand these paths to git and dvc, so each must be a
+    # relative posix path inside the repo and never read as an option
+    # (`--output=...`).
+    if (not v or v.startswith(("-", "/")) or "\\" in v or "\x00" in v or ".." in v.split("/")
+            or PureWindowsPath(v).drive):
+        raise ValueError("must be a relative posix path inside the repo: no leading '/' or '-', "
+                         "no drive, no '..' and no backslash")
+    return v
+
+
+RepoPath = Annotated[str, AfterValidator(_a_path_inside_the_repo)]
 
 
 class DataProductOutput(BaseModel):
-    path: Annotated[str, Owner.PIPELINE]
+    path: Annotated[RepoPath, Owner.PIPELINE]
     description: Annotated[str, Owner.PIPELINE]
     primary: Annotated[bool, Owner.PIPELINE]
     # `mintd publish` stamps it, so an entry written by hand may leave it out.
-    last_published: Annotated[str, Owner.PIPELINE] = ""
+    last_published: Annotated[str, Owner.REGISTRY] = ""
 
 
 class DataProducts(BaseModel):
@@ -122,21 +140,21 @@ class DataProducts(BaseModel):
 
 
 class Mirror(BaseModel):
-    url: Annotated[str, Owner.USER]
-    purpose: Annotated[str, Owner.USER]
+    url: Annotated[str, Owner.REGISTRY]
+    purpose: Annotated[str, Owner.REGISTRY]
 
 
 class Repository(BaseModel):
-    github_url: Annotated[str, Owner.MINTD]
-    default_branch: Annotated[str, Owner.MINTD]
-    visibility: Annotated[str, Owner.MINTD]
-    mirror: Annotated[Mirror, Owner.USER]
+    github_url: Annotated[str, Owner.REGISTRY]
+    default_branch: Annotated[str, Owner.REGISTRY]
+    visibility: Annotated[str, Owner.REGISTRY]
+    mirror: Annotated[Mirror, Owner.REGISTRY]
 
 
 class Status(BaseModel):
     state: Annotated[str, Owner.USER]
-    last_updated: Annotated[datetime, Owner.PIPELINE]
-    last_published_version: Annotated[str, Owner.PIPELINE]
+    last_updated: Annotated[datetime, Owner.REGISTRY]
+    last_published_version: Annotated[str, Owner.REGISTRY]
 
 
 class SchemaRef(BaseModel):
@@ -145,16 +163,7 @@ class SchemaRef(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    location: Annotated[str, Owner.MINTD]
-
-    @field_validator("location")
-    @classmethod
-    def _a_path_inside_the_repo(cls, v: str) -> str:
-        # Catalog builders hand this to git, so it must be a path inside the
-        # repo and never read as an option (`--output=...`).
-        if not v or v.startswith(("-", "/")) or "\\" in v or "\x00" in v or ".." in v.split("/"):
-            raise ValueError("must be a path inside the repo, such as schemas/v1/schema.json")
-        return v
+    location: Annotated[RepoPath, Owner.MINTD]
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +179,11 @@ class Metadata(BaseModel):
     project: Annotated[Project, Owner.MINTD]
     metadata: Annotated[ProjectMetadataBlock, Owner.USER]
     ownership: Annotated[Ownership, Owner.USER]
-    access_control: Annotated[AccessControl, Owner.USER]
-    governance: Annotated[Governance, Owner.USER]
-    storage: Annotated[Storage | None, Owner.MINTD] = None
+    access_control: Annotated[AccessControl, Owner.REGISTRY]
+    governance: Annotated[Governance, Owner.REGISTRY]
+    storage: Annotated[Storage | None, Owner.REGISTRY] = None
     data_products: Annotated[DataProducts, Owner.PIPELINE] = Field(default_factory=DataProducts)
-    repository: Annotated[Repository, Owner.MINTD]
+    repository: Annotated[Repository, Owner.REGISTRY]
     status: Annotated[Status, Owner.PIPELINE]
     # BaseModel owns the name `schema`, hence the alias. serialize_by_alias
     # because publish and to_catalog_entry() dump without by_alias; exclude_if
@@ -286,9 +295,9 @@ def field_metadata(model_class: type[BaseModel], field_path: str) -> Owner:
     """Return the `Owner` annotation for a dotted field path.
 
     Examples:
-        field_metadata(Metadata, "project.name") -> Owner.MINTD
+        field_metadata(Metadata, "project.created_at") -> Owner.MINTD
         field_metadata(Metadata, "metadata.description") -> Owner.USER
-        field_metadata(Metadata, "storage.dvc.remote_name") -> Owner.MINTD
+        field_metadata(Metadata, "storage.dvc.remote_name") -> Owner.REGISTRY
 
     Raises KeyError if the path doesn't exist or the leaf has no Owner annotation.
     """

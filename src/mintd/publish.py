@@ -361,7 +361,7 @@ def _apply_publish(
         _atomic_write_json(metadata_path, original_metadata_json)
         raise DvcPushFailed(
             "dvc push reported success but this project is still not deliverable: "
-            + "; ".join(f.message for f in still_wrong),
+            + "; ".join(f"{f.location}: {f.message}" for f in still_wrong),
             recovery_hint=(
                 "metadata.json was rolled back; nothing was committed, tagged or advertised. "
                 "dvc push may have rewritten .dvc / dvc.lock files with the S3 version IDs it "
