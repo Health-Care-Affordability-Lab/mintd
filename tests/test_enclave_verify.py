@@ -479,3 +479,18 @@ def test_verify_multi_repo_extracted_dir(tmp_path: Path) -> None:
         # `manifest_path` / `data_root` were passed. os.path.isabs is the
         # portable check (a Windows absolute path is 'C:\\...', not '/...').
         assert os.path.isabs(item.local_path)
+
+
+@pytest.mark.parametrize(("repo", "version_folder"), [(".", "v1"), ("c:x", "v1"), ("ds-alpha", "c:v1")],
+                         ids=["repo-is-dot", "repo-reads-as-a-drive", "version-reads-as-a-drive"])
+def test_verify_rejects_a_name_that_is_not_one_plain_folder(tmp_path: Path, repo: str, version_folder: str) -> None:
+    """`.` lands on the data root itself, and a first name Windows reads as a drive
+    (`c:`) lands on that drive there: both are caught by the string pre-checks.
+
+    Mutations: count `.` as a name -> red; drop the drive rule -> red."""
+    extracted = _make_extracted(
+        tmp_path, create_data_dir=False, manifest_repo=repo, manifest_version_folder=version_folder,
+    )
+    m_path = _new_inside_manifest(tmp_path)
+    with pytest.raises(PathTraversalDetected):
+        enclave_verify(extracted_dir=extracted, manifest_path=m_path)

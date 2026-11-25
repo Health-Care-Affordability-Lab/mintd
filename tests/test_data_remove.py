@@ -48,26 +48,32 @@ def test_data_remove_returns_the_outs_left_on_disk(tmp_path: Path, on_disk: bool
     assert fake.remove_calls[0].name == "data/final.dvc"
 
 
-@pytest.mark.parametrize("out", [
-    "../../outside", "/etc/hosts",
-    pytest.param("C:/outside", marks=pytest.mark.skipif(sys.platform == "win32", reason="a drive is a drive there")),
-    "..",
-], ids=["dotdot", "absolute", "drive", "the-root"])
+@pytest.mark.parametrize("out", ["../../outside", "/etc/hosts", ".."], ids=["dotdot", "absolute", "the-root"])
 def test_an_out_outside_the_project_is_neither_named_nor_probed(tmp_path: Path, out: str) -> None:
     """`cache: false` lets an out point outside the project: it isn't named,
-    whether or not something exists there. A recorded drive is outside on POSIX
-    too, and an out that collapses to the project root (`..` beside `data/x.dvc`)
-    isn't one: both exist on disk here.
+    whether or not something exists there. Nor is an out that collapses to the
+    project root itself (`..` beside `data/x.dvc`), which exists.
 
-    Mutation: drop the inside-the-project filter -> red; join the pointer's folder
-    first -> `data/C:/outside` reads as inside, red."""
+    Mutations: drop the inside-the-project filter -> red; count the root -> red."""
     proj = tmp_path / "a" / "proj"
     (proj / "data").mkdir(parents=True)
-    if out.startswith("C:"):  # POSIX only: where a joined data/C:/outside would land
-        (proj / "data" / "C:" / "outside").mkdir(parents=True)
     (tmp_path / "a" / "outside").mkdir()  # where data/../../outside lands; /etc/hosts exists too
     (proj / "data" / "x.dvc").write_text(f"outs:\n- md5: {'ab' * 16}\n  size: 1\n  hash: md5\n  cache: false\n  path: {out}\n")
     assert data_remove("data/x.dvc", project_path=proj, dvc_ops=_FakeDvcOps()) == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a `\\` and a `c:` are separators and drives there")
+@pytest.mark.parametrize("out", ["bs\\q.csv", "c:/q.csv"], ids=["a-backslash-name", "a-c-colon-folder"])
+def test_an_out_named_as_posix_names_files_is_named(tmp_path: Path, out: str) -> None:
+    """On POSIX `bs\\q.csv` is one file and `c:` a folder, both inside the project,
+    as dvc tracks them: `data remove` names what stays, as it always has.
+
+    Mutation: read each out as a recorded string -> neither is named, red."""
+    proj = tmp_path / "proj"
+    (proj / "sub" / out).parent.mkdir(parents=True, exist_ok=True)
+    (proj / "sub" / out).write_text("x")
+    (proj / "sub" / "x.dvc").write_text(f"outs:\n- md5: {'ab' * 16}\n  size: 1\n  hash: md5\n  path: '{out}'\n")
+    assert data_remove("sub/x.dvc", project_path=proj, dvc_ops=_FakeDvcOps()) == [f"sub/{out}"]
 
 
 @pytest.fixture

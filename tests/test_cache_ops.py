@@ -2394,3 +2394,43 @@ def test_push_file_vanishing_before_upload_becomes_failed_not_traceback(
     assert fail.rel == "cache/vanish.bin"
     assert "local read error" in (fail.reason or "")
     assert "mintd cache push cache/vanish.bin" in (fail.hint or "")
+
+
+@pytest.mark.parametrize("name", ["q:notes.txt", "d:dir/x.csv", "C:"])
+def test_a_first_name_windows_reads_as_a_drive_is_no_cache_key(name: str) -> None:
+    """Pulled on Windows, `q:notes.txt` would land on drive Q:, so it is no key.
+    A colon further in is a plain name.
+
+    Mutation: drop the drive rule from the cache key -> red."""
+    assert c._is_forbidden_path(name)
+    assert not c._is_forbidden_path("a/q:b.csv")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="q:notes.txt names drive Q: there")
+def test_push_refuses_a_drive_shaped_name_and_says_so(tmp_path: Path) -> None:
+    """The refusal names the real reason, not a backslash or a control character.
+
+    Mutation: report a drive-shaped name as `forbidden` -> red."""
+    _write(tmp_path / "q:notes.txt", "x")
+    scan = _enum(tmp_path, ["q:notes.txt"])
+    assert scan.refused_by("drive") == ["q:notes.txt"]
+    with pytest.raises(CacheError) as exc:
+        c._raise_on_refusals(scan)
+    assert "Windows reads as a drive" in str(exc.value) and "backslash" not in str(exc.value)
+    assert exc.value.hint == "rename it so its first name doesn't start like a drive (q:)"
+
+
+def test_pull_refuses_a_drive_shaped_key_and_says_so(s3_versioned, tmp_path: Path) -> None:
+    """A key such as `cache/q:notes.txt` already in the bucket is refused by name,
+    and the rest still pulls.
+
+    Mutation: say "escapes the project root" for it -> red."""
+    s3, bucket = s3_versioned
+    _seed_remote(s3, bucket, tmp_path, {"good.bin": b"g" * 10})
+    s3.put_object(Bucket=bucket, Key="lab/proj/cache/q:notes.txt", Body=b"x")
+    dest = _project(tmp_path / "clone", bucket)
+    summary = c.cache_pull(project_path=dest, config=_cfg(), reporter=Reporter(json_mode=True),
+                           s3_client_factory=_factory(s3))
+    assert summary.pulled == 1
+    assert [f.reason for f in summary.failed] == [
+        "unsafe key refused (its first name reads as a Windows drive): lab/proj/cache/q:notes.txt"]

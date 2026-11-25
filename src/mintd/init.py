@@ -205,8 +205,7 @@ def init_project(
         raise InitDestinationExists(
             f"refusing to write outside {project_path} through a symlink:\n  "
             + "\n  ".join(escaping),
-            hint="a directory in the scaffold's path is a symlink; "
-            "replace it with a real directory",
+            hint="a directory in the scaffold's path is a symlink\nreplace it with a real directory",
         )
 
     if collisions and not force and not resuming:

@@ -1453,7 +1453,7 @@ def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
     caller to name; never their contents."""
     from ._paths import inside
 
-    wdir = None
+    wdir = ""
     try:
         if name.endswith(".dvc"):  # its out paths are relative to its folder
             wdir, outs = posixpath.dirname(name), [o.path for o in parse_dvc_outs(project_path / name, "")]
@@ -1463,6 +1463,7 @@ def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
     except (MintdError, OSError):  # a file dvc can't read (or a folder named x.dvc): dvc remove reports it
         outs = []
     dvc_ops.remove(name, cwd=project_path)
-    # An out outside the project (`cache: false` allows ../x or /abs) is neither probed nor named.
-    kept = [r for o in outs if (r := inside(project_path, o, read="recorded", wdir=wdir)) is not None]
+    # An out outside the project (`cache: false` allows ../x or /abs) is neither probed nor named. Each is
+    # the file it names on this OS (lexical), so a POSIX name with a `\` or a `c:` folder stays named.
+    kept = [r for o in outs if (r := inside(project_path, project_path / wdir / o, read="lexical")) is not None]
     return [rel for rel in kept if (project_path / rel).exists()]

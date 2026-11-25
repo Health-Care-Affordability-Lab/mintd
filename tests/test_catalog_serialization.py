@@ -168,3 +168,14 @@ def test_to_catalog_entry_idempotent():
     """Calling to_catalog_entry() twice on the same Metadata returns equal entries."""
     m = Metadata.from_json_file(MINIMAL)
     assert m.to_catalog_entry() == m.to_catalog_entry()
+
+
+def test_the_repo_itself_is_a_path_inside_the_repo() -> None:
+    """`.` names the repo itself, which a schema location or a declared output may
+    be, as before.
+
+    Mutation: refuse the repo itself -> red."""
+    data = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    data["schema"] = {"location": "."}
+    assert Metadata.model_validate(data).schema_.location == "."
+    assert Metadata.model_validate(_with_output(".")).data_products.outputs[0].path == "."

@@ -149,6 +149,12 @@ def _is_forbidden_path(path_posix: str) -> bool:
     return inside(Path("."), path_posix, read="recorded", dotdot="refuse") is None
 
 
+def _reads_as_a_drive(rel: str) -> bool:
+    """Its first name is one character and a colon (``q:notes.txt``), which Windows
+    reads as a drive, so a pull there would write outside the project."""
+    return rel[1:2] == ":"
+
+
 def safe_cache_remainder(remainder: str) -> str:
     """RELATIVE-REMAINDER space. ``remainder`` is what ``list_product_objects``
     returns when listing under ``<prefix>/cache``. Returns it unchanged iff it
@@ -558,7 +564,7 @@ def _resolve_arg(project_path: Path, arg: str) -> Path:
 # One refusal reason per path the enumerator declines. Ordered by the priority
 # ``cache_push`` reports them in (the most likely user intent first).
 RefusalReason = Literal[
-    "dvc_tracked", "protected", "outside_project", "forbidden", "project_root"
+    "dvc_tracked", "protected", "outside_project", "forbidden", "drive", "project_root"
 ]
 
 
@@ -612,7 +618,7 @@ def enumerate_push_items(
         Order matters only for the single-file arg branch's message; the scan
         records exactly one reason per path."""
         if _is_forbidden_path(rel):
-            return "forbidden"
+            return "drive" if _reads_as_a_drive(rel) else "forbidden"
         if _is_protected_repo_path(rel):
             return "protected"
         if _is_tracked(rel, tracked):
@@ -842,6 +848,11 @@ _REFUSAL_COPY: dict[RefusalReason, tuple[str, str]] = {
         "these path(s) contain characters not allowed in a cache key (a "
         "backslash or a control character)",
         "rename the file(s) — a cache key must be a clean forward-slash path",
+    ),
+    "drive": (
+        "these path(s) start with a name Windows reads as a drive (such as q:), "
+        "so a pull there would write outside the project",
+        "rename it so its first name doesn't start like a drive (q:)",
     ),
     "project_root": (
         "refusing to cache the entire project root",
@@ -1220,7 +1231,9 @@ def cache_pull(
         except CacheKeyError:
             pass
         if resolved_rel is None:
-            refusal = f"unsafe key refused (escapes the project root): {_display_safe(full_key)}"
+            why = ("its first name reads as a Windows drive" if _reads_as_a_drive(remainder)
+                   else "escapes the project root")
+            refusal = f"unsafe key refused ({why}): {_display_safe(full_key)}"
         screen_paths = [remainder] + ([resolved_rel] if resolved_rel is not None else [])
         if refusal is None and any(_is_protected_repo_path(p) for p in screen_paths):
             refusal = (
