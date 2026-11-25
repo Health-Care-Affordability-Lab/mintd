@@ -512,6 +512,8 @@ def test_evidence_fills_the_notes_while_the_gate_placeholder_is_there(tmp_path: 
     assert "and the story tests against the Linux install: success\n" in notes
     assert "gate run: https://github.com/o/r/actions/runs/1\n" in notes  # the one link to the run
     assert "live tier" not in notes and "canary" not in notes  # nothing left for people to fill in
+    # What approving does, including to the catalog job; promote drops the line. Mutation: drop the sentence -> red.
+    assert notes.endswith("(RELEASING.md). Promoting it also makes it the mintd the catalog job runs.")
 
 
 @_BASH
@@ -576,7 +578,7 @@ gate run: https://example/run
 
 - CI (test.yml) on this tag: passed
 
-A prerelease: `releases/latest` skips it. It becomes the latest release only when the maintainer approves this run's `release` environment (RELEASING.md)."""
+A prerelease: `releases/latest` skips it. It becomes the latest release only when the maintainer approves this run's `release` environment (RELEASING.md). Promoting it also makes it the mintd the catalog job runs."""
 
 
 @_BASH

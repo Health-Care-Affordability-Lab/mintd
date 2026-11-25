@@ -12,7 +12,18 @@ with write access can edit a release):
    command, flag or default.
 2. Wait until every job before `promote` is green: it tests and builds that commit, publishes it as a
    prerelease, installs it from its own URL on Linux, macOS and Windows, and runs the stories.
-3. Review deployments → tick `release` → Approve and deploy. Or Reject: nothing reaches users.
+3. Preview the catalog. Promoting a release also makes it the mintd the catalog job runs, so before approving,
+   run the prerelease's `registry rebuild --check` on a fresh clone of the catalog repo's main (your
+   `registry_url`), cloned with read-only credentials. It writes nothing:
+
+   ```bash
+   uvx --from git+https://github.com/Health-Care-Affordability-Lab/mintd@vX.Y.Z mintd registry rebuild --check --registry path/to/catalog
+   ```
+
+   Look for entries that would change though their product didn't, holds that the catalog job's open issue
+   doesn't list, and any entry losing fields. On a Mac, run `export TMPDIR=$(cd "$TMPDIR" && pwd -P)` first:
+   until mintd resolves the temp folder itself, its path through /var gives false holds.
+4. Review deployments → tick `release` → Approve and deploy. Or Reject: nothing reaches users.
 
 One release runs at a time: a second press waits for the first's yes or no. A read-only run of the live tier on the lab Linux box before promoting is still worth doing, as
 practice, until a nightly clone of every product runs.
