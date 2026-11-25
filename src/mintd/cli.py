@@ -2781,8 +2781,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
     except PublishBlocked as exc:
         reporter.error(str(exc))
         for f in exc.findings[:5]:
-            src = f.source or "<project>"
-            reporter.info(f"  [{f.severity}] {src}: {f.message}")
+            reporter.info(f"  [{f.severity}] {f.location}: {f.message}")
             if f.hint:
                 reporter.info(f"    💡 {f.hint}")
         if len(exc.findings) > 5:
@@ -2999,8 +2998,7 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
     else:
         for f in findings:
             prefix = _resolve_prefix(f.kind)
-            loc = f.source if f.source else "<project>"
-            print(strip_userinfo(f"{prefix} [{f.severity}] {loc}: {f.message}"))
+            print(strip_userinfo(f"{prefix} [{f.severity}] {f.location}: {f.message}"))
             if f.hint:
                 print(strip_userinfo(f"    💡 {f.hint}"))
         if not findings:
