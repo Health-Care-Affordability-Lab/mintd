@@ -645,8 +645,10 @@ def test_a_project_reached_through_a_link_finds_its_pointers(tmp_path: Path) -> 
     declared output untracked. A link named `var` stands in for `/var` here, on
     any OS.
 
-    Mutation: walk the project as spelled, not resolved -> the pointer reads as
-    ignored and isn't found, red."""
+    Mutations: walk the project as spelled, not resolved -> the pointer reads as
+    ignored and isn't found, red; resolve only the folder above the project and
+    keep its own name -> a project that is itself a link named `var` loses its
+    pointer, red."""
     from mintd._dvc_state import discover_all_outs
     from tests._harness.git import _git
 
@@ -657,10 +659,13 @@ def test_a_project_reached_through_a_link_finds_its_pointers(tmp_path: Path) -> 
     write_pointer(real, "data/final", files={"a.csv": "v-1"})
     try:
         (tmp_path / "var").symlink_to(tmp_path / "private", target_is_directory=True)
+        (tmp_path / "linked").mkdir()
+        (tmp_path / "linked" / "var").symlink_to(real, target_is_directory=True)  # the project itself
     except OSError as exc:  # Windows without the privilege to make links
         pytest.skip(f"can't make a link here: {exc}")
     assert discover_all_outs(real) == ["data/final.dvc"]
     assert discover_all_outs(tmp_path / "var" / "proj") == ["data/final.dvc"]
+    assert discover_all_outs(tmp_path / "linked" / "var") == ["data/final.dvc"]
 
 
 def test_lock_outs_carry_their_stage(tracked: Path) -> None:
