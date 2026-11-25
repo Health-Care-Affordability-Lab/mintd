@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
+from .errors import MintdError
+
 
 SLUG_REGEX = re.compile(r"^[a-zA-Z0-9._-]+$")
 
@@ -53,6 +55,9 @@ class StorageInspection:
     # key is then the file's real path and a consumer's pull needs the version
     # ID recorded in the pointer, which is what the delivery gate checks for.
     dvc_version_aware: bool = False
+    # A ``version_aware`` or ``worktree`` dvc refuses: the remote is then never
+    # read as version-aware, and ``check`` reports this instead.
+    dvc_refused: "VersionAwareRefused | None" = None
 
 
 def inspect_storage(project_path: Path) -> StorageInspection:
@@ -80,7 +85,7 @@ def inspect_storage(project_path: Path) -> StorageInspection:
     from ._dvc_state import remote_key
 
     meta_bucket, meta_prefix, meta_name, meta_block_present = _read_metadata_storage(metadata_path)
-    dvc_name, dvc_url, dvc_version_aware = _read_dvc_config(dvc_config_path)
+    dvc_name, dvc_url, dvc_version_aware, dvc_refused = _read_dvc_config(dvc_config_path)
 
     meta_url: str | None = None
     if meta_bucket and meta_prefix:
@@ -116,6 +121,7 @@ def inspect_storage(project_path: Path) -> StorageInspection:
         metadata_path=metadata_path,
         dvc_config_path=dvc_config_path,
         dvc_version_aware=dvc_version_aware,
+        dvc_refused=dvc_refused,
     )
 
 
@@ -141,7 +147,6 @@ def repair_hint(inspection: StorageInspection) -> str | None:
 
     if state == StorageState.PARTIAL_META_ONLY:
         from ._dvc_state import read_dvc_config, remote_key
-        from .errors import MintdError
 
         name = inspection.metadata_remote_name or "<remote>"
         try:
@@ -255,8 +260,8 @@ def _read_metadata_storage(
     )
 
 
-def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
-    """Return (default_remote_name, url, version_aware) from .dvc/config.
+def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool, VersionAwareRefused | None]:
+    """Return (default_remote_name, url, version_aware, refused) from .dvc/config.
 
     Read through ``_dvc_state``'s DVC config reader, as dvc reads it; the default is
     ``core.remote`` (``default_remote_in``). With none set, or a config dvc can't read,
@@ -265,48 +270,68 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool]:
     ``version_aware`` is that remote's ``version_aware = true`` flag. Only the
     committed ``.dvc/config`` is read, never ``config.local``: a consumer's
     clone carries the former and not the latter, and the flag decides whether
-    their pull needs an S3 version ID per file.
+    their pull needs an S3 version ID per file. ``refused`` is set when that flag
+    is one dvc refuses: it then reads as False, and ``check`` reports it.
     """
     from ._dvc_state import default_remote_in, read_dvc_config_text
-    from .errors import MintdError
 
     try:
         conf = read_dvc_config_text(config_path.read_text(encoding="utf-8"), str(config_path))
     except (OSError, UnicodeDecodeError, MintdError):
-        return None, None, False  # a read-only classifier: a config dvc can't read either reads as no remote
+        return None, None, False, None  # a read-only classifier: a config dvc can't read either reads as no remote
     name = default_remote_in(conf)
     if not name:
-        return None, None, False
+        return None, None, False, None
     section = conf["remote"].get(name)
     if section is None:
-        return name, None, False
-    return name, section.get("url") or None, _version_aware(section)
+        return name, None, False, None
+    try:
+        return name, section.get("url") or None, remote_is_version_aware(section.get, name), None
+    except VersionAwareRefused as exc:  # never read as version-aware; check reports it
+        return name, section.get("url") or None, False, exc
 
 
-def _version_aware(section: dict[str, str]) -> bool:
-    return remote_is_version_aware(section.get)
+class VersionAwareRefused(MintdError):
+    """A remote's ``version_aware`` or ``worktree`` that dvc reads as neither true
+    nor false, so dvc refuses the whole config (its schema's ``Bool``). ``where``
+    is the file the value is in: a clone carries ``.dvc/config`` and never
+    ``.dvc/config.local``, so the fix for one in ``.dvc/config`` is a commit, even
+    where a ``config.local`` overrides it on this machine."""
+
+    def __init__(self, remote: str, key: str, value: object, *, where: str = ".dvc/config") -> None:
+        self.remote, self.key, self.value = remote, key, value
+        committed = where == ".dvc/config"
+        super().__init__(
+            f"the DVC remote {remote} sets {key} to {value!r} in {where}, which dvc reads as neither true nor false, "
+            f"so dvc refuses the config {'in any clone of the project' if committed else 'on this machine'}",
+            hint=f"set {key} to true or false in {where}" + (" and commit it" if committed else ""),
+        )
 
 
-def remote_is_version_aware(setting: Callable[[str], str | None]) -> bool:
-    """dvc's rule for a remote whose settings ``setting`` reads, one key at a
-    time, as ``_dvc_state.read_dvc_config`` leaves them: ``version_aware``,
+def remote_is_version_aware(setting: Callable[[str], str | None], remote: str) -> bool:
+    """dvc's rule for the remote ``remote``, whose settings ``setting`` reads one
+    key at a time, as ``_dvc_state.read_dvc_config`` leaves them: ``version_aware``,
     else ``worktree`` (dvc turns version_aware on for a worktree remote that
-    doesn't set it). The one reader of this setting, for storage inspection,
-    push and ``check`` alike."""
-    # The reader already stripped quotes and an inline `#` comment, as dvc does. Anything
-    # else (`true ; note`, a typo) reads as the md5 layout: this classifier never raises.
+    doesn't set it). Each must read as true or false once lowercased, as dvc's
+    schema requires; anything else (`yes`, `1`, `true ; note`) raises
+    ``VersionAwareRefused``. The one reader of this setting, for storage
+    inspection, push and ``check`` alike."""
     def flag(key: str) -> bool | None:
         raw = setting(key)
         if raw is None:
             return None
-        return str(raw).strip().lower() in ("true", "1", "yes", "on")
+        value = str(raw).lower()  # dvc's Bool: lowercased, then exactly one of two
+        if value not in ("true", "false"):
+            raise VersionAwareRefused(remote, key, raw)
+        return value == "true"
 
-    explicit = flag("version_aware")
+    # Both read first: dvc refuses the config when either one is neither true nor false.
+    explicit, worktree = flag("version_aware"), flag("worktree")
     if explicit is not None:
         return explicit
     # dvc (data_cloud.get_remote) turns version_aware on for a worktree
     # remote that does not set it.
-    return bool(flag("worktree"))
+    return bool(worktree)
 
 
 def _normalize_url(url: str | None) -> str | None:
