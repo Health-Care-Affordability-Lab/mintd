@@ -490,7 +490,7 @@ def _require_deliverable(
             f"which names the repair, then {retry}"
         )
     raise UndeliverableImport(
-        f"{path!r} of {name!r} @ {pin[:7]} cannot be delivered by 'mintd data import': "
+        f"{path!r} of {name!r} @ {pin[:7]} cannot be delivered by 'mintd import': "
         f"{verdict.detail}; nothing was imported for it",
         hint,
     )
@@ -1215,7 +1215,7 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
     held = _named(files, cwd) if files else "folders but no files"
     return (
         f"{where} is already a folder and no pointer records it (it holds {held}), {down}",
-        f"{_if_left('an earlier mintd data import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
+        f"{_if_left('an earlier mintd import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
     )
 
 
@@ -1590,9 +1590,9 @@ def _resolve_import_source(
         dumped = client.fetch(name).model_dump()
         namespace = _import_namespace(dumped, name)
         # Optional, unlike `_require_repo_url`: an entry with no
-        # `repository.github_url` must stay bumpable, so a missing URL means
-        # "no ownership evidence", not an error on this arm.
-        owner = _section(dumped, "repository").get("github_url")
+        # `repository.github_url` must stay bumpable, so a missing or blank URL
+        # means "no ownership evidence", not an error on this arm.
+        owner = _section(dumped, "repository").get("github_url") or None
     except CatalogNotFound:
         # No entry means no `full_name` — and imports live under `full_name`,
         # which `mintd init` sets to `<type>_<name>`. It therefore never
