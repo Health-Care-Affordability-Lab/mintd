@@ -68,6 +68,7 @@ from .data import (
     ImportNotFound,
     PrimaryRemovedAtHead,
     UnknownProductPath,
+    _cloned_metadata_entry,
     bump_import,
     clone_and_pull_product,
     import_product,
@@ -2015,12 +2016,8 @@ def _read_primary_from_clone(dest: Path) -> str | None:
     Returns None if the file is missing or unreadable (e.g., in tests where
     `clone_and_pull_product` is stubbed and `dest` doesn't exist on disk).
     """
-    try:
-        meta = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
-        primary = meta.get("data_products", {}).get("primary")
-        return primary if isinstance(primary, str) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+    primary = _cloned_metadata_entry(dest, fallback={}).get("data_products", {}).get("primary")
+    return primary if isinstance(primary, str) else None
 
 
 def _measure_clone_result(dest: Path) -> tuple[int, int]:
@@ -2839,7 +2836,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
         for f in exc.findings[:5]:
             reporter.info(f"  [{f.severity}] {f.location}: {f.message}")
             if f.hint:
-                reporter.info(f"    💡 {f.hint}")
+                reporter.info(_finding_hint(f.hint))
         if len(exc.findings) > 5:
             reporter.info(f"  ... and {len(exc.findings) - 5} more")
         return 1
@@ -3036,6 +3033,11 @@ def _resolve_prefix(kind: str | None) -> str:
     return _KIND_PREFIX.get(kind, "·")
 
 
+def _finding_hint(hint: str) -> str:
+    """A finding's hint under it: the first line after the 💡, the rest aligned beneath."""
+    return "    💡 " + hint.replace("\n", "\n       ")
+
+
 def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
     if json_out:
         for f in findings:
@@ -3057,7 +3059,7 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
             prefix = _resolve_prefix(f.kind)
             print(strip_userinfo(f"{prefix} [{f.severity}] {f.location}: {f.message}"))
             if f.hint:
-                print(strip_userinfo(f"    💡 {f.hint}"))
+                print(strip_userinfo(_finding_hint(f.hint)))
         if not findings:
             print("no issues found")
         else:

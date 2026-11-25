@@ -554,12 +554,14 @@ def judge(
         e for e in scope.entries
         if _identity(e) in repair_ids or (e.pointer, e.stage, e.record[0]) in differs
     ]
-    # Structural: a folder out left listing no files, while the folder on disk
-    # or HEAD's pointer holds some, has no entry to prove; and every file the
-    # push was to re-upload must still be in its pointer.
+    # Structural: a folder out this push left listing no files, while the
+    # folder on disk or HEAD's pointer holds some, has no entry to prove; and
+    # every file the push was to re-upload must still be in its pointer. An
+    # out already empty before the push, its folder holding files, never gets
+    # here: unlisted_on_disk refuses it before the push.
     hollow = [
         o.path for o in scope.empty
-        if (_in_selection(o, prepared.selection) or (o.pointer, o.stage, o.index) in differs)
+        if (o.pointer, o.stage, o.index) in differs
         and (_holds_files(root / o.path) or _head_lists_files(head.get(o.pointer), o))
     ]
     after = {(e.pointer, e.out, e.relpath) for e in scope.entries}

@@ -761,10 +761,12 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
 ) -> None:
     """An emptied listing passes a version-ID check (every listed file has
     one) but imports nothing. Refused while the last commit's pointer, or
-    the folder on disk, lists files, and still refused on a rerun.
+    the folder on disk, lists files, and still refused on a rerun, which the
+    folder comparison stops before the push.
 
-    Mutation: drop the empty-listing check -> the empty pointer is
-    committed, red.
+    Mutations: drop the post-push check's `_holds_files` arm -> the
+    never-committed case passes verification, red; drop the folder
+    comparison's empty folders -> the rerun's message changes, red.
     """
     proj = _producer(tmp_path)
     if not committed:
@@ -774,10 +776,17 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
     monkeypatch.chdir(proj)
     _rewrites_like_dvc(push_clients, monkeypatch, files={})
 
-    for _ in range(2):  # the rerun finds the emptied pointer still on disk
+    for run in range(2):  # the rerun finds the emptied pointer still on disk
         assert cli.main(["data", "push", "data/final"]) == 1
         err = _err(capsys)
-        assert "data/final" in err and "lists no files" in err
+        # The push empties it, so the first run is stopped after dvc push, by the
+        # post-push check (its own wording, with no ✓); the rerun is stopped
+        # before, by the folder comparison.
+        if run == 0:
+            assert "the push isn't verified" in err and "✓" not in err
+            assert "lists no files, but the folder or the last commit holds some: data/final" in err
+        else:
+            assert "data/final.dvc lists 0 file(s) of data/final/, but the folder on disk holds" in err
         assert _head(proj) == before
 
 
@@ -2167,7 +2176,7 @@ def test_check_a_folder_pointer_listing_no_files_fails(moto_push, tmp_path, monk
     monkeypatch.chdir(proj)
     assert cli.main(["data", "push"]) == 1
     err = _err(capsys)
-    assert "lists no files, but the folder or the last commit holds some: data/raw" in err and "✓" not in err
+    assert "data/raw.dvc lists 0 file(s) of data/raw/, but the folder on disk holds 1" in err and "✓" not in err
 
 
 def test_check_a_reupload_dvc_drops_from_its_pointer_fails(moto_push, tmp_path, monkeypatch, capsys) -> None:

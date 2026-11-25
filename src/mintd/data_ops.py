@@ -1186,9 +1186,10 @@ def data_push(
         raise PushRefused(
             "nothing was written or pushed: " + "; ".join(u.message() for u in unlisted),
             hint=(unlisted[0].hint() if len(unlisted) == 1 else
-                  "record each folder again (mintd data add <folder>, or dvc commit <stage> for a stage out), "
-                  "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
-            + "; then push",
+                  "to record each folder again: mintd data add <folder>\n(for a stage out: dvc commit <stage>)\n"
+                  "to leave a file out instead, list it in .dvcignore"
+                  + ("\nif a pointer was cut, restore it from git" if any(u.cut_possible for u in unlisted) else ""))
+            + "\nthen push again: mintd data push",
         )
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,
                        aws_profile=aws_profile, memo_path=memo_path)
