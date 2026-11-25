@@ -571,26 +571,25 @@ def test_pull_rejects_cleanly_when_a_pipeline_file_is_the_wrong_shape(
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
 def test_an_import_through_a_dest_root_linked_inside_the_project_lands_at_the_links_target(
-    ops, workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ops, workspace: Path, tmp_path: Path
 ) -> None:
-    """`mintd data import <name> --dest-root imports`, where `imports` is a
-    relative link to another folder of the same project, imports there: the
-    pointer, the files and dvc's `.gitignore` land at the link's target, and
-    the summary line names that folder relative to the project, not in full.
-    A link out of the project is the outside case below, which dvc refuses.
-    Real dvc only: the fake doesn't write where the OS resolves.
+    """A `--dest-root` that links to another folder of the same project imports
+    there: the pointer, the files and dvc's `.gitignore` land at the link's
+    target, and the import names the pointer by that folder, relative to the
+    project (the printed summary is the CLI test of the same name). A link out of the project is the
+    outside case below, which dvc refuses. Real dvc only: the fake doesn't
+    write where the OS resolves.
     It works because mintd hands dvc the folder the link reaches: given the
     link's own spelling, dvc refuses ("Cannot add files inside symlinked
     directories to DVC").
-    Mutations: give dvc the link's own spelling (`_physical` returns its
-    argument unresolved) -> dvc refuses, red; name paths in full (`_where`
-    returns them absolute) -> the summary names the absolute path, red."""
+    Mutation: give dvc the link's own spelling (`_physical` returns its
+    argument unresolved) -> dvc refuses, red."""
     if isinstance(ops, _FakeDvcOps):
         pytest.skip("only real dvc writes where the OS resolves the link")
     import json as _json
 
-    from mintd import cli
     from mintd.catalog import InMemoryCatalogClient
+    from mintd.data import import_product
     from mintd.model import Metadata
     from tests._harness.producer import build_local_producer
 
@@ -602,21 +601,12 @@ def test_an_import_through_a_dest_root_linked_inside_the_project_lands_at_the_li
     client.register(Metadata.model_validate(data))
     name, full_name = data["project"]["name"], data["project"]["full_name"]
     (workspace / "real_imports").mkdir()
-    (workspace / "imports").symlink_to("real_imports", target_is_directory=True)
-    monkeypatch.setattr("mintd.cli.Config.load", classmethod(lambda cls, path=None: cls()))
-    monkeypatch.setattr("mintd.cli._resolve_dvc_ops", lambda cfg, reporter=None, **_: ops)
-    monkeypatch.setattr("mintd.cli._resolve_catalog_client", lambda cfg, **_: client)
-    monkeypatch.chdir(workspace)
-    capsys.readouterr()  # the fixtures' own output (dvc init) isn't the import's
+    (workspace / "imports").symlink_to(workspace / "real_imports", target_is_directory=True)
 
-    rc = cli.main(["data", "import", name, "--dest-root", "imports"])
+    produced = import_product(client, ops, name, cwd=workspace, dest_root=workspace / "imports")
 
-    out = capsys.readouterr()
-    printed = " ".join((out.out + out.err).split())
     landed = workspace / "real_imports" / full_name / "data"
-    assert rc == 0, printed
-    assert f"→ real_imports/{full_name}/data/" in printed, printed  # the folder holding the output
-    assert str(workspace) not in printed and os.path.realpath(workspace) not in printed, printed
+    assert produced == [Path("real_imports", full_name, "data", "final.dvc")]
     assert (landed / "final.dvc").is_file() and (landed / "final" / "a.csv").read_bytes() == b"v1\n"
     assert "/final" in (landed / ".gitignore").read_text(encoding="utf-8")
 
