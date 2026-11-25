@@ -5314,6 +5314,9 @@ _EXPECTED_HINTS: dict[str, str | None] = {
     "UndeliverableImport": "ask the producer",
     "MissingPrimaryDataProduct": None,
     "NoTrackedOutputs": None,
+    # `--all` reads the producer's tree at the pin (`_tracked_at`): a producer
+    # that can't be reached gets the same advice as `--rev` reading metadata.
+    "ProducerError": "could not reach the producer's repository",
     "UnknownProductPath": "relative to the producer",
     "ValueError": None,
 }
@@ -5321,6 +5324,7 @@ _EXPECTED_HINTS: dict[str, str | None] = {
 #: Exception types whose constructor is not a bare message.
 _EXC_ARGS: dict[str, tuple[Any, ...]] = {
     "GitOpError": (["git", "fetch"], "boom"),
+    "ProducerError": ("unreachable", "/no/such/producer", "HEAD", "boom"),
     "UndeliverableImport": ("boom", "ask the producer"),
 }
 
