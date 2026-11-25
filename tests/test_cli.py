@@ -2433,6 +2433,46 @@ def test_cli_publish_blocked_by_check_errors_exits_one(
     assert "error:" in err
 
 
+
+def _outputs_missing_their_fields(project: Path) -> None:
+    """metadata.json whose one output gives only its path, as a producer
+    writing it by hand might: description and primary missing."""
+    meta = json.loads(MINIMAL.read_text(encoding="utf-8"))
+    meta["data_products"]["outputs"] = [{"path": "data/final/"}]
+    (project / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_check_text_names_the_field_of_a_finding_with_no_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients
+) -> None:
+    """`--json` named the missing fields; the text said `<project>: Field
+    required` for each. Mutations that turn it red: `CheckFinding.location`
+    ignoring `field_path`; the `[n]` index form dropped."""
+    _outputs_missing_their_fields(tmp_path)
+
+    rc = cli.main(["check", str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    for field in ("description", "primary"):
+        assert f"data_products.outputs[0].{field}: Field required" in out, out
+    assert "<project>: Field required" not in out
+
+
+def test_cli_publish_blocked_names_the_field_of_a_finding_with_no_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, patched_git_ops
+) -> None:
+    """publish's blocked list printed `<project>: Field required` too.
+    Mutation that turns it red: its line back to `f.source or "<project>"`."""
+    _outputs_missing_their_fields(tmp_path)
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "data_products.outputs[0].description: Field required" in captured.out + captured.err, captured
+
 def test_cli_publish_full_flow_calls_each_op(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
