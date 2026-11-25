@@ -280,32 +280,58 @@ def _read_dvc_config(config_path: Path) -> tuple[str | None, str | None, bool, V
     except (OSError, UnicodeDecodeError, MintdError):
         return None, None, False, None  # a read-only classifier: a config dvc can't read either reads as no remote
     name = default_remote_in(conf)
-    if not name:
-        return None, None, False, None
-    section = conf["remote"].get(name)
-    if section is None:
-        return name, None, False, None
+    section = conf["remote"].get(name) if name else None
+    url = (section.get("url") or None) if section is not None else None
     try:
-        return name, section.get("url") or None, remote_is_version_aware(section.get, name), None
+        aware = remote_is_version_aware(section.get, name) if section is not None and name else False
+        # dvc's schema checks every remote's flags when it loads the config, the default's or not.
+        for other, values in sorted(conf["remote"].items()):
+            if other != name:
+                _dvc_bool(values.get, other, "version_aware")
+                _dvc_bool(values.get, other, "worktree")
     except VersionAwareRefused as exc:  # never read as version-aware; check reports it
-        return name, section.get("url") or None, False, exc
+        return name, url, False, exc
+    return name, url, aware, None
 
 
 class VersionAwareRefused(MintdError):
-    """A remote's ``version_aware`` or ``worktree`` that dvc reads as neither true
-    nor false, so dvc refuses the whole config (its schema's ``Bool``). ``where``
-    is the file the value is in: a clone carries ``.dvc/config`` and never
-    ``.dvc/config.local``, so the fix for one in ``.dvc/config`` is a commit, even
-    where a ``config.local`` overrides it on this machine."""
+    """A remote's ``version_aware`` or ``worktree`` that dvc refuses: one it reads as
+    neither true nor false, so it refuses the whole config (its schema's ``Bool``), or
+    ``version_aware = false`` on a ``worktree`` remote (``worktree``), which it refuses
+    when it opens the remote. ``where`` is the file the value is in: a clone carries
+    ``.dvc/config`` and never ``.dvc/config.local``, so the fix for one in
+    ``.dvc/config`` is a commit, even where a ``config.local`` overrides it on this
+    machine."""
 
-    def __init__(self, remote: str, key: str, value: object, *, where: str = ".dvc/config") -> None:
-        self.remote, self.key, self.value = remote, key, value
+    def __init__(self, remote: str, key: str, value: object, *, where: str = ".dvc/config",
+                 worktree: bool = False) -> None:
+        self.remote, self.key, self.value, self.worktree = remote, key, value, worktree
         committed = where == ".dvc/config"
+        whom = "in any clone of the project" if committed else "on this machine"
+        fix = "true" if worktree else "true or false"
         super().__init__(
+            f"the DVC remote {remote} sets version_aware to false on a worktree remote in {where}, which dvc refuses: "
+            f"push and pull fail {whom}" if worktree else
             f"the DVC remote {remote} sets {key} to {value!r} in {where}, which dvc reads as neither true nor false, "
-            f"so dvc refuses the config {'in any clone of the project' if committed else 'on this machine'}",
-            hint=f"set {key} to true or false in {where}" + (" and commit it" if committed else ""),
+            f"so dvc refuses the config {whom}",
+            hint=f"set {key} to {fix} in {where}" + (" and commit it" if committed else ""),
         )
+
+    def at(self, where: str) -> VersionAwareRefused:
+        """The same refusal, naming ``where`` as the file the value is in."""
+        return VersionAwareRefused(self.remote, self.key, self.value, where=where, worktree=self.worktree)
+
+
+def _dvc_bool(setting: Callable[[str], str | None], remote: str, key: str) -> bool | None:
+    """``key`` as dvc's schema reads it: None when unset, else true or false once
+    lowercased; anything else raises ``VersionAwareRefused``."""
+    raw = setting(key)
+    if raw is None:
+        return None
+    value = str(raw).lower()  # dvc's Bool: lowercased, then exactly one of two
+    if value not in ("true", "false"):
+        raise VersionAwareRefused(remote, key, raw)
+    return value == "true"
 
 
 def remote_is_version_aware(setting: Callable[[str], str | None], remote: str) -> bool:
@@ -316,17 +342,10 @@ def remote_is_version_aware(setting: Callable[[str], str | None], remote: str) -
     schema requires; anything else (`yes`, `1`, `true ; note`) raises
     ``VersionAwareRefused``. The one reader of this setting, for storage
     inspection, push and ``check`` alike."""
-    def flag(key: str) -> bool | None:
-        raw = setting(key)
-        if raw is None:
-            return None
-        value = str(raw).lower()  # dvc's Bool: lowercased, then exactly one of two
-        if value not in ("true", "false"):
-            raise VersionAwareRefused(remote, key, raw)
-        return value == "true"
-
     # Both read first: dvc refuses the config when either one is neither true nor false.
-    explicit, worktree = flag("version_aware"), flag("worktree")
+    explicit, worktree = _dvc_bool(setting, remote, "version_aware"), _dvc_bool(setting, remote, "worktree")
+    if worktree and explicit is False:  # data_cloud.get_remote: "worktree remotes require version_aware cloud"
+        raise VersionAwareRefused(remote, "version_aware", setting("version_aware"), worktree=True)
     if explicit is not None:
         return explicit
     # dvc (data_cloud.get_remote) turns version_aware on for a worktree

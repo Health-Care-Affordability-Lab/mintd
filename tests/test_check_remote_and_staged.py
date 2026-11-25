@@ -1610,3 +1610,24 @@ def test_check_warns_of_a_lock_dep_recorded_with_no_hash(tmp_path: Path, dep: st
     assert [(f.severity, f.message) for f in found] == (
         [("warning", "dvc.lock stage build records its dep ../data/raw with no hash: the lock was re-dumped "
                      "without the dep's tree")] if warned else [])
+
+
+def test_a_worktree_remote_not_version_aware_is_one_refusal_for_check_and_push(tmp_path: Path) -> None:
+    """dvc refuses `version_aware = false` on a worktree remote when push or pull opens it;
+    check says so once, and push stops before any S3 call, where both read the remote
+    as not version-aware and skipped the pin checks.
+
+    Mutation: drop the worktree rule -> no finding, and prepare returns None, red."""
+    from mintd._push_verify import PushRefused, prepare
+
+    proj = _repo(tmp_path)
+    cfg = proj / ".dvc" / "config"
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("version_aware = true", "version_aware = false\n    worktree = true"),
+                   encoding="utf-8")
+    said = (f"the DVC remote {REMOTE} sets version_aware to false on a worktree remote in .dvc/config, which dvc "
+            "refuses: push and pull fail in any clone of the project")
+    assert [(f.kind, f.message, f.hint) for f in check_project(proj) if f.kind == "dvc_state_unreadable"] == [
+        ("dvc_state_unreadable", said, "set version_aware to true in .dvc/config and commit it")]
+    with pytest.raises(PushRefused) as exc:
+        prepare(proj, remote_arg=None, selection=None, aws_profile=None)
+    assert str(exc.value) == said
