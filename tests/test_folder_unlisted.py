@@ -236,6 +236,7 @@ def test_check_reports_a_file_placed_in_an_empty_tracked_folder(tmp_path: Path) 
     found = [f for f in check_project(tmp_path) if f.kind == "dvc_folder_unlisted"]
     assert len(found) == 1 and "placed.csv" in found[0].message
     assert "mintd data add data/final" in (found[0].hint or "")
+    assert (found[0].hint or "").endswith("\nthen check again: mintd check")  # its own line, last
 
 
 def test_a_lock_folder_out_is_compared_with_its_folder(tmp_path: Path) -> None:

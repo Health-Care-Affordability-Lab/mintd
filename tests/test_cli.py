@@ -2551,6 +2551,30 @@ def test_cli_publish_blocked_names_the_field_of_a_finding_with_no_file(
     assert rc == 1
     assert "data_products.outputs[0].description: Field required" in captured.out + captured.err, captured
 
+def test_cli_publish_blocked_list_prints_a_multi_line_hint_aligned(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients, patched_git_ops
+) -> None:
+    """publish's blocked list prints a finding's hint of several lines with
+    each line under the first, after the 💡, as check does: here the hint for
+    a file placed in a tracked folder (an empty `.dir`) and not recorded.
+
+    Mutation: publish's renderer back to one f-string -> red."""
+    stage_dvc_project(tmp_path)
+    (tmp_path / "data" / "final").mkdir(parents=True)
+    (tmp_path / "data" / "final.dvc").write_text(
+        "outs:\n- md5: d751713988987e9331980363e24189ce.dir\n  size: 0\n  nfiles: 0\n  hash: md5\n  path: final\n")
+    (tmp_path / "data" / "final" / "placed.csv").write_text("p\n")
+    _init_git_in(tmp_path)
+
+    rc = cli.main(["publish", "--dry-run", "--path", str(tmp_path)])
+
+    lines = capsys.readouterr().err.splitlines()
+    assert rc == 1
+    i = lines.index("    💡 to record the folder again: mintd data add data/final")
+    assert lines[i + 1:i + 3] == ["       to leave a file out instead, list it in .dvcignore",
+                                  "       then check again: mintd check"]
+
+
 def test_cli_publish_full_flow_calls_each_op(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
