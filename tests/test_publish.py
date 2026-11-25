@@ -126,6 +126,7 @@ def test_publish_increments_patch_version(tmp_path):
     assert result.version == "0.1.1"
     assert "0.1.1" in (proj / "metadata.json").read_text(encoding="utf-8")
 
+
 def test_publish_calls_catalog_update_last(tmp_path):
     proj = _seed_project(tmp_path)
     dvc = _FakeDvcOps()
@@ -1460,6 +1461,40 @@ class TestDeliveryGate:
             ["git", "show", "HEAD:data/final.dvc"], cwd=proj, check=True, capture_output=True, text=True
         ).stdout
         assert "version_id: v-1" in committed
+
+    def test_publish_still_not_deliverable_names_the_field(self, tmp_path):
+        """The check after the push said only "Field required" for a finding
+        with no file. This push pins the output but leaves metadata.json
+        without an output's description, which only that check sees.
+
+        Mutation: `publish.py` joining the messages alone again -> red.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+        _cache_the_tree(proj)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+
+        class _PushDropsADescription(_FakeDvcOps):
+            def push(self, *, cwd, **kw):
+                result = super().push(cwd=cwd, **kw)
+                write_pointer(cwd, "data/final", files={"a.parquet": "v-1"})
+                meta = json.loads((cwd / "metadata.json").read_text(encoding="utf-8"))
+                del meta["data_products"]["outputs"][0]["description"]
+                (cwd / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+                return result
+
+        with pytest.raises(DvcPushFailed) as excinfo:
+            publish_project(
+                project_path=proj,
+                version="0.1.1",
+                client=_FakeCatalogClient(),
+                dvc_ops=_PushDropsADescription(),
+                git_ops=_FakeRegistryGitOps(),
+            )
+
+        assert "still not deliverable" in str(excinfo.value)
+        assert "data_products.outputs[0].description: Field required" in str(excinfo.value)
 
     def test_publish_releases_past_an_untracked_pointer_gitignore_excludes(self, tmp_path):
         """A stray `.dvc` file in a folder `.gitignore` excludes, never
