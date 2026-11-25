@@ -274,9 +274,11 @@ _PLACEHOLDERS = {"install.sh": 'MINTD_TAG=""', "install.ps1": '$MintdTag = ""'}
 
 
 def _stamp(tmp_path: Path, scripts: dict[str, str], *extra: str) -> subprocess.CompletedProcess[str]:
-    """Run the one stamper, as the build does, on `scripts` in an empty directory."""
+    """Run the one stamper, as the build does, on `scripts` in an empty directory. The scripts are written as the
+    repo holds them, UTF-8 with their own line endings, whatever the platform's default encoding (cp1252 on Windows
+    can't hold their em dash as UTF-8 does)."""
     for name, text in scripts.items():
-        (tmp_path / name).write_text(text, newline="")
+        (tmp_path / name).write_bytes(text.encode("utf-8"))
     return subprocess.run(
         [sys.executable, str(_REPO / "scripts" / "stamp_install_scripts.py"), "v1.2.3", "--out", "dist", *extra],
         cwd=tmp_path, capture_output=True, text=True,
@@ -305,10 +307,11 @@ def test_only_ci_points_the_scripts_at_another_releases_url(tmp_path: Path) -> N
     """The release build passes no --releases, so a release's scripts keep GitHub's URL."""
     scripts = {name: (_REPO / name).read_text(encoding="utf-8") for name in _PLACEHOLDERS}
     assert _stamp(tmp_path, scripts).returncode == 0
-    assert 'RELEASES="https://github.com/Health-Care-Affordability-Lab/mintd/releases"' in (tmp_path / "dist" / "install.sh").read_text()
+    assert 'RELEASES="https://github.com/Health-Care-Affordability-Lab/mintd/releases"' in (
+        tmp_path / "dist" / "install.sh").read_text(encoding="utf-8")
     assert _stamp(tmp_path, scripts, "--releases", "http://127.0.0.1:8000").returncode == 0
-    assert '\nRELEASES="http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.sh").read_text()
-    assert '\n$Releases = "http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.ps1").read_text()
+    assert '\nRELEASES="http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.sh").read_text(encoding="utf-8")
+    assert '\n$Releases = "http://127.0.0.1:8000"\n' in (tmp_path / "dist" / "install.ps1").read_text(encoding="utf-8")
     assert "--releases" not in yaml.safe_dump(_JOBS)
 
 
