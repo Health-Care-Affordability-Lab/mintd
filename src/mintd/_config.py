@@ -22,40 +22,40 @@ class ConfigError(MintdError):
 
 class Timeouts(BaseModel):
     model_config = ConfigDict(frozen=True)
-    fast: float | None = 30.0
-    transfer: float | None = None
+    fast: float | None = Field(default=30.0, gt=0, allow_inf_nan=False, description="Seconds to wait on a quick git or dvc call. Optional; default 30.")
+    transfer: float | None = Field(default=None, gt=0, allow_inf_nan=False, description="Seconds a push, pull or clone may run. Optional; unset means no limit.")
 
 
 class Config(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     # CLI-runtime settings.
-    registry_url: str | None = None
-    cache_dir: Path | None = None
+    registry_url: str | None = Field(default=None, description="The git URL of the lab's catalog repo. Required for data list, import and publish.")
+    cache_dir: Path | None = Field(default=None, description="Where mintd keeps its own cache. Optional; unset means ~/.cache/mintd.")
     timeouts: Timeouts = Field(default_factory=Timeouts)
 
     # User identity — surfaces in generated scaffolds (READMEs, R DESCRIPTION,
     # citations.md, etc.). Absent → templates render empty strings.
-    author: str | None = None
+    author: str | None = Field(default=None, description="Your name, written into new repos' READMEs and citations. Optional.")
     # Pins the identity used by `mintd share put` keys. Falls back to a
     # slugified `author` when unset (the CLI prints the nudge).
     share_user: str | None = None
-    organization: str | None = None
+    organization: str | None = Field(default=None, description="Your organization, written into new repos. Optional.")
 
     # Registry conventions — used by the registry PR flow and by scaffold
     # templates that embed team / org names in metadata.json.
-    registry_org: str | None = None
-    admin_team: str | None = None
-    researcher_team: str | None = None
+    registry_org: str | None = Field(default=None, description="The GitHub organization new repos belong to. Required for a new repo to pass mintd check: it makes the repo's GitHub URL.")
+    admin_team: str | None = Field(default=None, description="The GitHub team given admin access in new repos' metadata.json. Optional.")
+    researcher_team: str | None = Field(default=None, description="The GitHub team given read access in new repos' metadata.json. Optional.")
 
     # Storage — needed for non-AWS S3 endpoints (Wasabi, MinIO) and for the
     # fast-sync bucket discovery.
-    storage_endpoint: str | None = None
-    storage_bucket_prefix: str | None = None
+    storage_endpoint: str | None = Field(default=None, description="The S3 endpoint URL, for storage that isn't AWS (Wasabi, MinIO). Required for share; leave unset for AWS.")
+    storage_bucket_prefix: str | None = Field(default=None, description="The S3 bucket for the lab's data. Required for init of data, code and project repos, and for share.")
 
     # Toolchain overrides — Windows / Stata variants need this; Unix users
     # with stata-mp also benefit.
-    stata_executable: str | None = None
+    stata_executable: str | None = Field(default=None, description="The Stata command to run. Optional; unset means stata.")
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
@@ -74,7 +74,9 @@ class Config(BaseModel):
             return cls.model_validate(data)
         except ValidationError as e:
             raise ConfigError(
-                f"invalid config in {path} (note the timeouts: block added in v2): {e}"
+                f"invalid config in {path} (note the timeouts: block added in v2): {_plain_errors(e)}",
+                hint="fix it with `mintd config setup` (return clears a value that isn't valid), "
+                     "or clear one field with `mintd config setup --set <field>=`",
             ) from e
 
     def resolved_cache_dir(self) -> Path:
@@ -110,6 +112,15 @@ class Config(BaseModel):
         except (configparser.Error, UnicodeDecodeError):
             return None
         return "mintd" if cp.has_section("mintd") else None
+
+
+def _plain_errors(e: ValidationError) -> str:
+    """One ``<field>: <message>`` per error, without pydantic's dump and links."""
+    parts = []
+    for err in e.errors():
+        field = ".".join(str(part) for part in err["loc"])
+        parts.append(f"{field}: {err['msg']}" if field else err["msg"])
+    return "; ".join(parts)
 
 
 def _default_config_path() -> Path:

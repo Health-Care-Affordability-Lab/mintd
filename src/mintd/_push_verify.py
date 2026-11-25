@@ -13,7 +13,6 @@ and only its verdict may print a ✓.
 
 from __future__ import annotations
 
-import configparser
 import contextlib
 import hashlib
 import os
@@ -27,7 +26,10 @@ from typing import Any
 
 from ._dvc_state import abbreviate, dvc_cache_dir
 from .errors import MintdError
-from ._fast_sync_ops import discover_all_outs, dvc_config_value, parse_s3_url, pipeline_files
+from ._dvc_state import (
+    default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files, read_dvc_config,
+    remote_key, require_default_remote,
+)
 from ._s3 import create_client as _create_s3_client
 from ._pin_proof import (
     CacheHashes,
@@ -58,55 +60,37 @@ class PushRefused(MintdError):
         self.hint = hint
 
 
-def _parsers(root: Path) -> list[configparser.ConfigParser]:
-    found = []
-    for name in ("config", "config.local"):
-        parser = configparser.ConfigParser(strict=False, interpolation=None)
-        try:
-            parser.read(root / ".dvc" / name, encoding="utf-8")
-        except configparser.Error:
-            continue
-        found.append(parser)
-    return found
-
-
-def _section(parser: configparser.ConfigParser, remote: str) -> dict[str, str]:
-    from ._storage_state import _extract_remote_section_name
-
-    for name in parser.sections():
-        if _extract_remote_section_name(name) == remote:
-            return dict(parser.items(name))
-    return {}
-
-
-def merged_remote(root: Path, remote: str) -> dict[str, str]:
-    """The remote's settings as DVC pushes with them: ``.dvc/config`` with
-    ``.dvc/config.local`` laid over it."""
-    merged: dict[str, str] = {}
-    for parser in _parsers(root):
-        merged.update(_section(parser, remote))
-    if "profile" in merged:
-        merged["profile"] = dvc_config_value(merged["profile"])
-    return merged
-
-
-def _version_aware(cfg: dict[str, str]) -> bool:
+def _version_aware(cfg: dict[str, str], name: str) -> bool:
+    """dvc's version-aware rule for the remote ``name``. A ``version_aware`` or
+    ``worktree`` that dvc reads as neither true nor false raises ``PushRefused``:
+    dvc refuses the whole config then, and reading it as "not version-aware"
+    would skip every check on the remote's pins."""
     from ._storage_state import remote_is_version_aware
 
+    for key in ("version_aware", "worktree"):
+        value = cfg.get(key)
+        if value is not None and str(value).lower() not in ("true", "false"):  # dvc's Bool: lowercased, one of two
+            raise PushRefused(
+                f"the DVC remote {name} sets {key} to {value!r}, which dvc reads as neither true nor false, "
+                "so dvc refuses the config",
+                hint=f"set {key} to true or false in .dvc/config or .dvc/config.local",
+            )
     return remote_is_version_aware(cfg.get)
 
 
-def merged_default_remote(root: Path) -> str | None:
-    """``core.remote`` with config.local over config, as DVC merges them;
-    else the one remote both files name between them."""
-    from ._storage_state import _extract_remote_section_name
-
-    parsers = _parsers(root)
-    for parser in reversed(parsers):
-        if parser.has_option("core", "remote"):
-            return parser.get("core", "remote")
-    names = {n for p in parsers for s in p.sections() if (n := _extract_remote_section_name(s))}
-    return names.pop() if len(names) == 1 else None
+def default_for_pins(root: Path) -> str | None:
+    """The remote ``check`` reads pins on: ``root``'s default remote, as dvc
+    reads it. None when there is no remote at all, so nothing is pinned by
+    version. Raises ``PushRefused`` when there is a remote but no default:
+    ``data push --remote`` can still have pinned files there, so passing would
+    skip a check that has something to check."""
+    name = default_remote_name(root)
+    if name is not None or not (read_dvc_config(root, "repo")["remote"] or read_dvc_config(root, "local")["remote"]):
+        return name
+    try:
+        return require_default_remote(root)
+    except MintdError as exc:
+        raise PushRefused(str(exc), hint=exc.hint) from exc
 
 
 def _own_remotes(root: Path, dvc_files: list[str], default: str) -> list[str]:
@@ -154,7 +138,7 @@ def pinned_remote(root: Path, name: str, tree: Path, dvc_files: list[str]) -> Pi
     carries its own access keys, or an out in ``dvc_files`` or the
     ``dvc.yaml`` (both read under ``tree``) names a remote of its own."""
     cfg = merged_remote(root, name)
-    if not _version_aware(cfg):
+    if not _version_aware(cfg, name):
         return None
     if any(cfg.get(k) for k in _CREDENTIAL_KEYS):
         raise PushRefused(
@@ -292,14 +276,16 @@ def prepare(
 ) -> Prepared | None:
     """Refuse, plan and write the repair; None when the remote isn't
     version-aware (nothing there is pinned by version)."""
-    default = merged_default_remote(root)
-    name = remote_arg or default
+    default = default_remote_name(root)
+    name = remote_key(remote_arg) if remote_arg else default
     if name is None:
         return None
-    versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r))]
+    versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r), r)]
     if not versioned:
         return None
-    if remote_arg is not None and remote_arg != default:
+    if name != default:
+        if default is None:
+            default_for_pins(root)  # raises dvc's "no default DVC remote" and its hint: pins are read through it
         raise PushRefused(
             f"--remote {remote_arg} isn't the default remote {default}. On a version-aware remote "
             "DVC records the versions it reads from the default remote, so the pins would point nowhere",
@@ -567,12 +553,14 @@ def judge(
         e for e in scope.entries
         if _identity(e) in repair_ids or (e.pointer, e.stage, e.record[0]) in differs
     ]
-    # Structural: a folder out left listing no files, while the folder on disk
-    # or HEAD's pointer holds some, has no entry to prove; and every file the
-    # push was to re-upload must still be in its pointer.
+    # Structural: a folder out this push left listing no files, while the
+    # folder on disk or HEAD's pointer holds some, has no entry to prove; and
+    # every file the push was to re-upload must still be in its pointer. An
+    # out already empty before the push, its folder holding files, never gets
+    # here: unlisted_on_disk refuses it before the push.
     hollow = [
         o.path for o in scope.empty
-        if (_in_selection(o, prepared.selection) or (o.pointer, o.stage, o.index) in differs)
+        if (o.pointer, o.stage, o.index) in differs
         and (_holds_files(root / o.path) or _head_lists_files(head.get(o.pointer), o))
     ]
     after = {(e.pointer, e.out, e.relpath) for e in scope.entries}

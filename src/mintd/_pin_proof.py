@@ -12,6 +12,7 @@ the checks don't depend on DVC's Python API.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import posixpath
 from collections.abc import Sequence
@@ -19,11 +20,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ._fast_sync_ops import load12 as _load12
-from ._fast_sync_ops import (
+from ._dvc_state import load12 as _load12
+from ._dvc_state import (
+    EMPTY_DIR_MD5,
     DvcFileEntry,
+    _files_on_disk,
     cache_path_for,
     dir_manifest_md5,
+    dvc_cache_dir,
     flagged_outs,
     read_cached_dir_manifest,
     resolve_out,
@@ -145,7 +149,8 @@ def _out_entries(
             ))
         return entries, True
     if md5.endswith(".dir"):
-        tree = read_cached_dir_manifest(cache_dir, md5)
+        # The empty folder's md5 names its list: a clone with no cache reads it too.
+        tree = [] if md5 == EMPTY_DIR_MD5 else read_cached_dir_manifest(cache_dir, md5)
         if tree is None:
             return [], False
         return [
@@ -721,3 +726,77 @@ def prove_pins(
             if pin in heads and verdicts[pin] == "ok":
                 memo.remember(bucket, e, heads[pin].size)
     return verdicts
+
+
+@dataclasses.dataclass(frozen=True)
+class Unlisted:
+    """A folder out whose folder on disk holds files its pointer's list
+    doesn't. ``stage`` names the ``dvc.lock`` stage, None for a ``.dvc``."""
+
+    pointer: str
+    stage: str | None
+    folder: str
+    listed: int
+    unlisted: tuple[str, ...]
+    #: The folder holds a ``.dvc`` file or folder, which makes DVC record it
+    #: as an empty folder.
+    holds_dvc: bool = False
+    #: The list is the pointer's own ``files:``, which a cut or a rewrite can
+    #: shorten; a ``.dir`` list, under its md5 (an empty one too, as ``dvc
+    #: add`` writes it), can't be.
+    cut_possible: bool = True
+
+    def message(self) -> str:
+        where = self.pointer if self.stage is None else f"{self.pointer} (stage {self.stage})"
+        shown = ", ".join(self.unlisted[:5]) + (f" and {len(self.unlisted) - 5} more" if len(self.unlisted) > 5 else "")
+        why = ("it holds a .dvc file or folder, so DVC would record it as an empty folder" if self.holds_dvc
+               else "the pointer was cut short, or the folder changed since it was recorded" if self.cut_possible
+               else "files were added since the folder was recorded")
+        return (f"{where} lists {self.listed} file(s) of {self.folder}/, but the folder on disk holds "
+                f"{len(self.unlisted)} it doesn't list ({shown}): {why}")
+
+    def hint(self) -> str:
+        pipeline = Path(self.pointer).with_name("dvc.yaml").as_posix()
+        again = (f"mintd data add {self.folder}" if self.stage is None
+                 else f"dvc commit {pipeline}:{self.stage}\nor run the stage again: dvc repro {pipeline}:{self.stage}")
+        first = f"move the .dvc file or folder out of {self.folder}/\n" if self.holds_dvc else ""
+        return (f"{first}to record the folder again: {again}\nto leave a file out instead, list it in .dvcignore"
+                + ("\nif the pointer was cut, restore it from git" if self.cut_possible else ""))
+
+
+def unlisted_on_disk(root: Path, pointers: Sequence[str], *, remote: str) -> list[Unlisted]:
+    """The folder outs of ``pointers`` (``.dvc`` files, and ``dvc.lock``
+    files at the root or in nested pipelines) whose folder on disk holds
+    files their list doesn't: a file placed in a tracked folder and not yet
+    recorded. The list is a version-aware pointer's own ``files:``, which a
+    cut can also shorten; a ``.dir`` list, read from the cache as
+    ``publishable_scope`` reads it (``read_cached_dir_manifest``); or none,
+    for an empty folder (``nfiles: 0``). A ``.dir`` list that isn't cached
+    can't be compared and is left out. Files the list holds that the folder
+    lacks don't count (deleted locally, never pulled), and only outs DVC
+    pushes are compared (not imports, ``cache: false`` or ``push: false``)."""
+    wanted = set(pointers)
+    scope = publishable_scope(root, remote=remote, prefix="", cache_dir=dvc_cache_dir(root),
+                              dvc_files=[p for p in pointers if p.endswith(".dvc")],
+                              locks=[p for p in pointers if Path(p).name == "dvc.lock"])
+    lists: dict[tuple[str, str | None, str], set[str]] = {}
+    uncut: set[tuple[str, str | None, str]] = set()  # a .dir list: nothing a cut could shorten
+    for e in scope.entries:
+        if e.relpath is not None and e.pointer in wanted:
+            lists.setdefault((e.pointer, e.stage, e.out), set()).add(e.relpath)
+            if e.legacy_dir:
+                uncut.add((e.pointer, e.stage, e.out))
+    for o in scope.empty:  # recorded empty, or a files: list emptied since
+        if o.pointer in wanted:
+            lists.setdefault((o.pointer, o.stage, o.path), set())
+            records = _records(_load(root / o.pointer), o.stage)
+            if o.index < len(records) and not isinstance(records[o.index].get("files"), list):
+                uncut.add((o.pointer, o.stage, o.path))
+    found = []
+    for (pointer, stage, folder), listed in lists.items():
+        extra = sorted(set(_files_on_disk(root, folder)) - listed)
+        if extra:
+            found.append(Unlisted(pointer, stage, folder, len(listed), tuple(extra),
+                                  holds_dvc=(root / folder / ".dvc").exists(),
+                                  cut_possible=(pointer, stage, folder) not in uncut))
+    return found

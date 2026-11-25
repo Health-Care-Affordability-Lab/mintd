@@ -1,0 +1,1 @@
++30: a new data product tracks data/raw from its first commit, so raw inputs reach lab storage by default

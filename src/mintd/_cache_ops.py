@@ -35,8 +35,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Literal, Mapping
 
 from ._dvc_state import _all_dvc_outs, path_covers
+from ._paths import inside, rel as rel_to
 from .errors import MintdError
-from ._fast_sync_ops import get_remote_config, parse_s3_url, s3_key_for_out, workspace_path_for
+from ._dvc_state import (
+    get_remote_config, parse_s3_url, remote_key, require_default_remote, s3_key_for_out, workspace_path_for,
+)
 from ._s3 import ClientError, create_client as _create_s3_client, check_bucket_versioning, retry_transient
 from ._s3_listing_ops import (
     S3ListingError,
@@ -360,11 +363,11 @@ def resolve_repo_remote(project_path: Path, remote: str | None) -> RepoRemote:
     ``.dvc/config`` — the materialized value is the truth, never recomputed via
     ``compute_storage_prefix``. Every failure is a typed, hinted ``CacheError``
     (no silent degradation — cache has no fallback lane)."""
-    from .data_ops import _default_dvc_remote
-
-    remote_name = remote or _default_dvc_remote(project_path) or "origin"
     try:
+        remote_name = remote_key(remote) if remote else require_default_remote(project_path)
         remote_cfg = get_remote_config(project_path, remote_name)
+    except MintdError as exc:  # no default remote, or a config dvc can't read: dvc refuses too
+        raise CacheError(str(exc), hint=exc.hint) from exc
     except (FileNotFoundError, KeyError) as exc:
         raise CacheError(
             f"could not resolve DVC remote {remote_name!r} from .dvc/config: {exc}",
@@ -579,21 +582,11 @@ class _PushScan:
         return [r.path for r in self.refused if r.reason == reason]
 
 
-def _repo_rel(project_root: Path, abs_path: Path) -> str | None:
-    """Repo-relative posix path iff ``abs_path`` is inside the project root
-    and not the root itself; else None (escaped the project)."""
-    try:
-        rel = abs_path.relative_to(project_root).as_posix()
-    except ValueError:
-        return None
-    return rel if rel != "." else None
-
-
 def cache_key_path(project_path: Path, arg: str) -> str | None:
     """A typed path's key under ``cache/``, mapped as push maps it: joined onto
     ``--path`` when relative, resolved, then made repo-relative. None outside the
     project or at its root. The path needn't exist: pull is what creates it."""
-    return _repo_rel(project_path.resolve(), _resolve_arg(project_path, arg).resolve())
+    return inside(project_path.resolve(), _resolve_arg(project_path, arg).resolve(), read="lexical")
 
 
 def enumerate_push_items(
@@ -615,16 +608,6 @@ def enumerate_push_items(
     empty_args: list[str] = []
     seen: set[str] = set()
 
-    def _rel_of(p: Path) -> str:
-        """Project-relative posix path of a symlink discovered mid-walk, so each
-        skipped symlink is named individually (not by the outer ``arg``). ``p``
-        lives under ``abs_path`` (itself under ``project_root``), so the
-        ``relative_to`` is pure-path and never follows the link."""
-        try:
-            return p.relative_to(project_root).as_posix()
-        except ValueError:
-            return p.as_posix()
-
     def _classify(rel: str) -> RefusalReason | None:
         """The refusal reason for a repo-relative path, or None if cacheable.
         Order matters only for the single-file arg branch's message; the scan
@@ -642,10 +625,9 @@ def enumerate_push_items(
         # to ``refused``), never silently dropped — a bare ``return`` would omit
         # it from every ledger, letting a sibling valid file report success while
         # this one stayed only on local disk (silent data loss, the red-team P0).
-        try:
-            rel = abs_path.relative_to(project_root).as_posix()
-        except ValueError:
-            refused.append(_Refused(_rel_of(abs_path), "outside_project"))
+        rel = inside(project_root, abs_path, read="lexical", root_ok=True)
+        if rel is None:
+            refused.append(_Refused(abs_path.as_posix(), "outside_project"))
             return
         reason = _classify(rel)
         if reason is not None:
@@ -671,7 +653,7 @@ def enumerate_push_items(
             continue
         abs_path = raw.resolve()
         if abs_path.is_dir():
-            rel = _repo_rel(project_root, abs_path)
+            rel = inside(project_root, abs_path, read="lexical")  # resolved above; the root itself is refused
             if rel is None:
                 # The whole subtree escaped the project (or IS the project root —
                 # we refuse a bare project-root arg rather than sweep the tree).
@@ -701,8 +683,8 @@ def enumerate_push_items(
                 for d in sorted(dirnames):
                     child = Path(dirpath) / d
                     if child.is_symlink():
-                        symlinks.append(_rel_of(child))
-                    elif _is_protected_repo_path(_rel_of(child)):
+                        symlinks.append(rel_to(project_root, child))
+                    elif _is_protected_repo_path(rel_to(project_root, child)):
                         continue
                     else:
                         kept.append(d)
@@ -710,7 +692,7 @@ def enumerate_push_items(
                 for name in sorted(filenames):
                     fp = Path(dirpath) / name
                     if fp.is_symlink():
-                        symlinks.append(_rel_of(fp))
+                        symlinks.append(rel_to(project_root, fp))
                         continue
                     files_here += 1
                     _add_file(fp)
@@ -723,7 +705,7 @@ def enumerate_push_items(
                 # If it produced refusals, those already speak; don't also flag it.
                 empty_args.append(arg)
         elif abs_path.is_file():
-            rel = _repo_rel(project_root, abs_path)
+            rel = inside(project_root, abs_path, read="lexical")  # resolved above; the root itself is refused
             if rel is None:
                 refused.append(_Refused(arg, "outside_project"))
             else:

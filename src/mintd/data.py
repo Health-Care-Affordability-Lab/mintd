@@ -26,15 +26,18 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._cache_ops import dvc_tracked_paths
+from ._paths import physical as _physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
-from ._dvc_state import delivery, outs_matching, path_covers
-from ._fast_sync_ops import FastSyncOps, normalize_target
+from ._dvc_state import (
+    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+)
+from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
 from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
-from .data_ops import _default_dvc_remote, data_pull
+from .data_ops import data_pull
 from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
@@ -488,7 +491,7 @@ def _require_deliverable(
             f"which names the repair, then {retry}"
         )
     raise UndeliverableImport(
-        f"{path!r} of {name!r} @ {pin[:7]} cannot be delivered by 'mintd data import': "
+        f"{path!r} of {name!r} @ {pin[:7]} cannot be delivered by 'mintd import': "
         f"{verdict.detail}; nothing was imported for it",
         hint,
     )
@@ -745,7 +748,7 @@ def _resolve_targets_in_clone(
     Raises `UnknownProductPath` for a path that reaches no out, naming what
     the clone really tracks; the caller removes the clone.
     """
-    remote_name = _default_dvc_remote(dest) or "origin"
+    remote_name = default_remote_name(dest) or ""  # outs match by path; data_pull refuses where a remote is needed
     resolved: set[str] = set()
     unverified: list[str] = []
     # Re-enumerates the clone once per selector (documented on
@@ -1009,9 +1012,8 @@ def clone_and_pull_product(
         resolved_rev = None
     remote_bucket: str | None = None
     try:
-        from ._fast_sync_ops import get_remote_config, parse_s3_url
-        remote_name = _default_dvc_remote(resolved_dest) or "origin"
-        url = get_remote_config(resolved_dest, remote_name).get("url", "")
+        from ._dvc_state import get_remote_config, parse_s3_url
+        url = get_remote_config(resolved_dest, require_default_remote(resolved_dest, local_ok=True)).get("url", "")
         remote_bucket, _ = parse_s3_url(url)
     except Exception:
         remote_bucket = None
@@ -1110,17 +1112,6 @@ def _pointer_at(target_dvc: Path) -> bool:
     return os.path.exists(os.path.realpath(target_dvc))
 
 
-def _physical(p: Path) -> Path:
-    """``p`` where the OS reaches it, as the checks resolve it: its folder with
-    links and ``..`` resolved, since ``link/..`` is the folder above where
-    ``link`` points, not the folder ``link`` is in, and its own name kept, so a
-    link there is named as the link."""
-    p = Path.cwd() / p  # absolute, its `..` kept
-    if p.name in ("", ".."):
-        return Path(os.path.realpath(p))
-    return Path(os.path.realpath(p.parent)) / p.name
-
-
 def _where(p: Path, cwd: Path) -> str:
     """``p`` where the OS reaches it (``_physical``): relative to the project
     inside it, and absolute outside it, where a ``..`` would climb out from
@@ -1214,7 +1205,7 @@ def _occupied(dest: Path, cwd: Path, *, holds: list[Path], within: list[Path]) -
     held = _named(files, cwd) if files else "folders but no files"
     return (
         f"{where} is already a folder and no pointer records it (it holds {held}), {down}",
-        f"{_if_left('an earlier mintd data import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
+        f"{_if_left('an earlier mintd import', dest, cwd, 'folder')}, or import somewhere else with --dest-root",
     )
 
 
@@ -1589,9 +1580,9 @@ def _resolve_import_source(
         dumped = client.fetch(name).model_dump()
         namespace = _import_namespace(dumped, name)
         # Optional, unlike `_require_repo_url`: an entry with no
-        # `repository.github_url` must stay bumpable, so a missing URL means
-        # "no ownership evidence", not an error on this arm.
-        owner = _section(dumped, "repository").get("github_url")
+        # `repository.github_url` must stay bumpable, so a missing or blank URL
+        # means "no ownership evidence", not an error on this arm.
+        owner = _section(dumped, "repository").get("github_url") or None
     except CatalogNotFound:
         # No entry means no `full_name` — and imports live under `full_name`,
         # which `mintd init` sets to `<type>_<name>`. It therefore never

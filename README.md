@@ -124,8 +124,26 @@ Then point `mintd` at your lab's registry and your S3 storage:
 ```bash
 mintd config setup            # interactive walkthrough
 mintd config show             # see what got written
-mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 head_bucket check
+mintd config validate         # schema, AWS credentials, and that the bucket answers (storage_bucket_prefix, or --bucket NAME)
 ```
+
+`config validate` exits 1 when there are no AWS credentials, when they
+can't be loaded, or when the bucket doesn't answer. It can't prove
+everything a push needs:
+
+- The bucket answering means you can list it, not that you can write to it
+  or read its files.
+- It reads only this config, not a project's `.dvc/config`, which can name
+  another bucket, endpoint, region or AWS profile.
+- With both `AWS_ACCESS_KEY_ID` exported and a profile named (by
+  `AWS_PROFILE` or a `[mintd]` section), it checks the profile, while
+  `dvc push` in a project whose `.dvc/config` names no profile uses the
+  exported keys.
+- On AWS a wrong region is followed to the bucket's own, so it isn't
+  caught, and with no bucket to check, neither is a wrong
+  `storage_endpoint`.
+- With no bucket to check, ✓ on `aws_profile` means the keys loaded, not
+  that AWS accepts them: nothing has been asked of S3.
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
 `registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
@@ -256,25 +274,26 @@ derives it from DVC. A data product needs at least one output and a primary:
 
 ## Example: consume someone else's dataset
 
-Two commands, for two jobs.
+Two commands, for two jobs. (`mintd data import` and `mintd data clone` are the
+same commands, with the same flags, and keep working.)
 
-**Bring a product's data into your project** with `mintd data import`. The data
+**Bring a product's data into your project** with `mintd import`. The data
 lands under `data/imports/<full_name>/`, beside a `.dvc` file that pins the
 producer commit it came from (`--rev`; default: the producer's HEAD).
 
 | Command | Brings |
 |---|---|
-| `mintd data import <name>` | the primary output |
-| `mintd data import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
-| `mintd data import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
+| `mintd import <name>` | the primary output |
+| `mintd import <name> --path <path>` | only that dataset or folder, declared as an output or not (repeatable) |
+| `mintd import <name> --all` | every output in the product's `data_products.outputs`; a tracked folder no output declares is left out |
 
 **Get a product's whole project, code and data, to read or work on** with
-`mintd data clone`. A data product's clone lands in `./data_<name>/`.
+`mintd clone`. A data product's clone lands in `./data_<name>/`.
 
 | Command | Brings |
 |---|---|
-| `mintd data clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
-| `mintd data clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
+| `mintd clone <name>` | a full git clone of the producer's repo, with every DVC-tracked output pulled |
+| `mintd clone <name> --primary` | the same clone, with only the primary output pulled; `--path` pulls only declared outputs |
 
 ```bash
 # See what's published in the lab catalog:
@@ -285,23 +304,39 @@ mintd data list
 mintd data ls my-cleaned-survey
 
 # Clone the whole producer repo + pull every tracked output:
-mintd data clone my-cleaned-survey
+mintd clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
-mintd data clone my-cleaned-survey --rev v0.1.0 --primary
+mintd clone my-cleaned-survey --rev v0.1.0 --primary
 # or: only specific declared outputs (repeatable; an unknown path lists the
 # valid outputs):
-mintd data clone my-cleaned-survey --path data/final/survey.parquet
+mintd clone my-cleaned-survey --path data/final/survey.parquet
 
 # Inside an existing analysis project, import one or more outputs
 # (--path is repeatable) and record the pin in this repo's .dvc files:
-mintd data import my-cleaned-survey --path data/final/survey.parquet
+mintd import my-cleaned-survey --path data/final/survey.parquet
 
 # Later, check whether anything you depend on has moved:
 mintd check --upgrades
 # And bump a pin when you're ready — same name, same --path selector
 # (--path picks the row once you have imported more than one output):
-mintd data import my-cleaned-survey --bump --path data/final/survey.parquet
+mintd import my-cleaned-survey --bump --path data/final/survey.parquet
 ```
+
+**An import in an old place.** An import made by hand or by an older mintd can
+sit outside `data/imports/<full_name>/`, at `data/external/rainfall/final.dvc`
+say. `--bump` and `mintd check --upgrades` don't look there, and a plain import
+adds a second copy under `data/imports/`. Move it: stop tracking the old pointer,
+delete the old folder it leaves on disk, import again, and commit:
+
+```bash
+mintd data remove data/external/rainfall/final.dvc   # says what it left on disk
+rm -r data/external/rainfall/final
+mintd import county-rainfall
+git add -A data && git commit -m "Move the county-rainfall import to data/imports/data_county-rainfall/"
+```
+
+`mintd data remove` stops DVC tracking a pointer and leaves its data where it is,
+naming what stayed; it warns when git would now pick those files up.
 
 ## Example: enclave workflow
 
@@ -421,6 +456,8 @@ for durable-but-unpinned repo files; **`share`** for a one-off handoff.
 
 ```
 mintd init     {data|code|project|enclave} NAME   Scaffold a new project
+mintd import   NAME [--path P…] [--all] [--rev R] Bring a product's primary output into this project, pinned
+mintd clone    NAME [--primary | --path P…]       Get a product's whole project in its own folder
 mintd check    [path] [--upgrades] [--remote [--all] | --staged]
                                                   Validate metadata, output delivery + (optionally) pins;
                                                   --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
@@ -428,7 +465,7 @@ mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
-mintd registry register|update|status|sync        Catalog operations
+mintd registry register|update|status|sync|rebuild   Catalog operations; rebuild: each entry from its product
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
 mintd config   show|setup|validate
 mintd update   metadata [path]                    Migrate v1 metadata.json → v2
@@ -454,7 +491,7 @@ key, and arrays are always present, possibly empty, never null.
   each has `name`, `project_type`, `description` (str or null).
 - `data list --imported` — array of entries; each has `local_path`,
   `producer_repo`, `contract_pin`, `output_path`.
-- `data clone` — object: `dest` (absolute), `primary` (str or null),
+- `clone` / `data clone` — object: `dest` (absolute), `primary` (str or null),
   `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
   `remote_bucket` (str or null).
 

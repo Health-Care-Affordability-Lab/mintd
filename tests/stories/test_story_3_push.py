@@ -23,7 +23,7 @@ Notes:
   matching a foreach group only by its plain name turns the by-name case red;
   a size-only pin judged proven turns that case red; a push that leaves its
   pointers uncommitted, or that reads every file's pinned version id as absent
-  (`_fast_sync_ops._extract_version_id_from_file_entry`), turns the
+  (`_dvc_state._extract_version_id_from_file_entry`), turns the
   second-release case red; the failed upload, see its test.
 """
 

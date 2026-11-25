@@ -42,11 +42,12 @@ from typing import TYPE_CHECKING, Any, Literal
 import yaml
 from pydantic import ValidationError
 
-# `_dvc_state` imports only `_fast_sync_ops`; `_cache_ops` imports `_dvc_state`,
+# `_dvc_state` imports no mintd module but the leaf `errors`; `_cache_ops` imports `_dvc_state`,
 # so this module must never import `_cache_ops` at module level.
-from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers, unlisted_on_disk
+from ._dvc_state import Delivery, DeliveryState, _all_dvc_outs, abbreviate, delivery, path_covers
+from ._pin_proof import unlisted_on_disk
 from ._push_verify import pushed_lockfiles
-from ._fast_sync_ops import (
+from ._dvc_state import (
     PointerCutShort,
     check_dvc_file,
     check_lock,
@@ -60,7 +61,7 @@ from ._fast_sync_ops import (
 from ._registry_git_ops import GitOpError, RegistryGitOps, specific_hint
 from ._s3 import create_client as _create_s3_client  # the S3 boundary: tests stand a client in here
 from .catalog import CatalogClient, CatalogNotFound
-from .errors import unreachable_repo_hint
+from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
@@ -160,6 +161,19 @@ class CheckFinding:
         "repository_github_url_missing",
     ] | None = None
     hint: str | None = None  # NEW: actionable repair suggestion
+
+    @property
+    def location(self) -> str:
+        """What a printed finding names: its file, else its field with list
+        indexes as ``[n]`` (``data_products.outputs[0].description``), else
+        the project."""
+        if self.source:
+            return str(self.source)
+        if self.field_path:
+            # pydantic's loc joined with dots: a key holding a dot would split (no field has one today).
+            parts = self.field_path.split(".")
+            return "".join(f"[{p}]" if p.isdigit() else f".{p}" for p in parts).removeprefix(".")
+        return "<project>"
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +374,13 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                 # A folder pointer's list read against the folder on disk:
                 # the only reference that shows a list cut at an entry, or
                 # recorded before files were added. Publish refuses it too.
+                try:
+                    unlisted = unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
+                                                remote=inspection.dvc_remote_name or "")
+                except MintdError as exc:  # .dvc/config or config.local dvc can't read: one finding, and go on
+                    unlisted = []
+                    findings.append(CheckFinding(severity="error", section="producer", kind="dvc_state_unreadable",
+                                                 message=str(exc), hint=exc.hint))
                 findings.extend(
                     CheckFinding(
                         severity="error",
@@ -367,10 +388,9 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                         message=u.message(),
                         source=project_path / u.pointer,
                         kind="dvc_folder_unlisted",
-                        hint=u.hint() + ", then re-run 'mintd check'.",
+                        hint=u.hint() + "\nthen check again: mintd check",
                     )
-                    for u in unlisted_on_disk(project_path, [*pointers, *pushed_lockfiles(project_path)],
-                                              remote=inspection.dvc_remote_name or "")
+                    for u in unlisted
                 )
                 try:
                     findings.extend(
@@ -752,8 +772,8 @@ def _check_remote(
     from ._pin_proof import CacheHashes, prove_pins, publishable_scope
     from ._push_verify import (
         PushRefused,
+        default_for_pins,
         in_subrepo,
-        merged_default_remote,
         pinned_remote,
         pushed_dvc_files,
         pushed_lockfiles,
@@ -762,17 +782,18 @@ def _check_remote(
     from ._s3 import S3AccessDenied, resolve_profile
     from .errors import MintdError
 
-    name = merged_default_remote(project_path)
     pointers = pushed_dvc_files(project_path)
     try:
+        name = default_for_pins(project_path)
         remote = pinned_remote(project_path, name, project_path, pointers) if name else None
     except PushRefused as exc:  # push refuses it too
         return [CheckFinding(severity="error", section="producer", kind="remote_unreadable",
                              message=str(exc), hint=exc.hint)]
     if remote is None:
+        why = "the default remote isn't a version-aware S3 remote" if name else "the project has no DVC remote"
         return [CheckFinding(
             severity="info", section="producer", kind="remote_not_checked",
-            message="the default remote isn't a version-aware S3 remote, so nothing is pinned by version to check",
+            message=f"{why}, so nothing is pinned by version to check",
         )]
     git = git_ops or SubprocessRegistryGitOps()
     declared_outs = _declared_outputs(project_path)
@@ -879,7 +900,7 @@ def _remote_hint(project_path: Path, pointer: str, label: str, severity: str) ->
     """At HEAD only, the working tree is right and importers read the pushed
     commit; a pointer gone from the working tree, or one ``.gitignore``
     excludes, is no longer push's."""
-    from ._fast_sync_ops import gitignored_pointers
+    from ._dvc_state import gitignored_pointers
 
     if label != "at HEAD" or severity != "error":
         return "mintd data push re-attaches or re-uploads them"
@@ -928,10 +949,9 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
 
     from ._atomic import write_tree
     from ._dvc_invoke import dvc_root
-    from ._dvc_state import dvc_cache_dir
-    from ._fast_sync_ops import DvcFileEntry, dir_manifest_md5
+    from ._dvc_state import DvcFileEntry, dir_manifest_md5, dvc_cache_dir
     from ._pin_proof import publishable_scope
-    from ._push_verify import PushRefused, in_subrepo, merged_default_remote, pinned_remote
+    from ._push_verify import PushRefused, default_for_pins, in_subrepo, pinned_remote
     from ._registry_git_ops import SubprocessRegistryGitOps
 
     hint = "run mintd check --staged in the DVC project's folder, or pass it as the path"
@@ -970,7 +990,10 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     # is: they are pinned on that project's own.
     other = sorted(rel for status, rel in changes if status != "D" and in_subrepo(project_path, rel))
     findings = unchecked(f"the commit stages pointers in another DVC project ({abbreviate(other)})") if other else []
-    name = merged_default_remote(project_path)
+    try:
+        name = default_for_pins(project_path)
+    except PushRefused as exc:  # push refuses it too
+        return [*findings, *unchecked(str(exc), hint=exc.hint)]
     if name is None:
         return findings  # no remote to pin to
     ours = [(status, rel) for status, rel in changes if not in_subrepo(project_path, rel)]

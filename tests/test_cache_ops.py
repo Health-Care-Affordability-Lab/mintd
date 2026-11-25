@@ -396,7 +396,7 @@ def test_guard_trips_on_dvc_out_tracking_whole_cache_dir(tmp_path: Path) -> None
 def _dvc_config(tmp_path: Path, url: str, *, remote: str = "origin") -> None:
     cfg = tmp_path / ".dvc" / "config"
     cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(f'[remote "{remote}"]\n    url = {url}\n')
+    cfg.write_text(f'[core]\n    remote = {remote}\n[remote "{remote}"]\n    url = {url}\n')
 
 
 @pytest.mark.parametrize("prefix", TIER_PREFIXES)
@@ -414,6 +414,19 @@ def test_resolve_repo_remote_missing_config_raises_cache_error(tmp_path: Path) -
     with pytest.raises(CacheError) as ei:
         resolve_repo_remote(tmp_path, None)
     assert ei.value.hint is not None
+
+
+def test_resolve_repo_remote_with_no_default_is_refused_as_dvc_refuses_it(tmp_path: Path) -> None:
+    """One remote and no `core.remote`: dvc picks none, and the cache lane stops with the
+    same hint as pull and push. A remote it is given is looked up lowercased, as dvc does.
+    Mutations that must redden this: take the one remote, or guess "origin", again; look the
+    given name up as given."""
+    (tmp_path / ".dvc").mkdir()
+    (tmp_path / ".dvc" / "config").write_text('[\'remote "store"\']\n    url = s3://b/p\n')
+    with pytest.raises(CacheError, match="no default DVC remote") as ei:
+        resolve_repo_remote(tmp_path, None)
+    assert ei.value.hint == "set a default: dvc remote default store, and commit .dvc/config"
+    assert resolve_repo_remote(tmp_path, "Store").bucket == "b"
 
 
 def test_resolve_repo_remote_non_s3_raises_cache_error(tmp_path: Path) -> None:
@@ -653,7 +666,7 @@ from mintd._console import Reporter  # noqa: E402
 def _project(tmp_path: Path, bucket: str, prefix: str = "lab/proj") -> Path:
     (tmp_path / ".dvc").mkdir(parents=True, exist_ok=True)
     url = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
-    (tmp_path / ".dvc" / "config").write_text(f'[remote "origin"]\n    url = {url}\n')
+    (tmp_path / ".dvc" / "config").write_text(f'[core]\n    remote = origin\n[remote "origin"]\n    url = {url}\n')
     return tmp_path
 
 
@@ -1257,6 +1270,27 @@ def test_cache_key_path_maps_as_push_does(tmp_path: Path) -> None:
     assert c.cache_key_path(proj, "outlink/x") is None
     assert c.cache_key_path(proj, "../x") is None
     assert c.cache_key_path(proj, ".") is None
+
+
+def test_cache_key_path_compares_the_paths_it_resolved_as_text(tmp_path: Path, monkeypatch) -> None:
+    """The key compares the two paths it has just resolved, as text (`lexical`), which is
+    what `relative_to` did. `follow` would resolve them again and differ only on a link
+    loop, which 3.11's `resolve()` raises on before the comparison, so no loop can pin the
+    rule on every Python; it is pinned at the call.
+
+    Mutation: read the key as `follow` -> red."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    reads: list[dict] = []
+    real = c.inside
+
+    def spy(root, path, **kw):
+        reads.append(kw)
+        return real(root, path, **kw)
+
+    monkeypatch.setattr(c, "inside", spy)
+    assert c.cache_key_path(proj, "data/x.bin") == "data/x.bin"
+    assert reads == [{"read": "lexical"}]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")

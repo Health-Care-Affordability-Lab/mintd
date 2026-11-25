@@ -36,7 +36,7 @@ def _use_factory(monkeypatch: pytest.MonkeyPatch, client) -> None:
 def _project(tmp_path: Path, bucket: str, prefix: str = "lab/proj") -> Path:
     proj = tmp_path / "proj"
     (proj / ".dvc").mkdir(parents=True)
-    (proj / ".dvc" / "config").write_text(f'[remote "origin"]\n    url = s3://{bucket}/{prefix}\n')
+    (proj / ".dvc" / "config").write_text(f'[core]\n    remote = origin\n[remote "origin"]\n    url = s3://{bucket}/{prefix}\n')
     return proj
 
 

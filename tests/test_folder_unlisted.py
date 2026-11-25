@@ -16,8 +16,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from mintd._dvc_state import dvc_cache_dir, unlisted_on_disk
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import dvc_cache_dir, DvcFileEntry
+from mintd._pin_proof import Unlisted, unlisted_on_disk
+from mintd._fast_sync_ops import ensure_dir_manifest
 from mintd.check import check_project
 from tests._dvc_fixtures import REMOTE, stage_dvc_project
 from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)
@@ -88,8 +89,8 @@ def test_a_folder_holding_files_its_pointer_doesnt_list_is_named(tmp_path: Path)
     assert u.message() == ("data/final.dvc lists 3 file(s) of data/final/, but the folder on disk holds 2 it doesn't "
                            "list (part-03.csv, part-04.csv): the pointer was cut short, or the folder changed since "
                            "it was recorded")
-    assert u.hint().startswith("record the folder again (mintd data add data/final), or list files DVC should skip "
-                               "in .dvcignore")
+    assert u.hint().startswith("to record the folder again: mintd data add data/final\n"
+                               "to leave a file out instead, list it in .dvcignore")
 
 
 def test_the_message_names_the_first_five_unlisted_files(tmp_path: Path) -> None:
@@ -139,19 +140,16 @@ def test_no_folder_is_named_when_disk_holds_nothing_the_list_lacks(tmp_path: Pat
 
 
 @pytest.mark.parametrize("pointer", [
-    "outs:\n- md5: {tree}\n  size: 6\n  nfiles: 3\n  hash: md5\n  path: final\n",
     "deps:\n- path: data/final\n  repo:\n    url: https://example.org/producer\n    rev_lock: abc\n" + FOLDER_DVC,
     FOLDER_DVC.replace("  path: final\n", "  path: final\n  cache: false\n"),
     FOLDER_DVC.replace("  path: final\n", "  path: final\n  push: false\n"),
-], ids=["md5-layout-dir", "dvc-import", "cache-false", "push-false"])
-def test_only_version_aware_folders_dvc_pushes_are_compared(tmp_path: Path, pointer: str) -> None:
-    """An md5-layout `.dir` out can't be cut to a shorter list (its md5
-    would break), a dvc import's list is the producer's, and DVC pushes no
-    `cache: false` or `push: false` out: an extra file on disk beside any of
-    them is not named.
+], ids=["dvc-import", "cache-false", "push-false"])
+def test_only_folders_dvc_pushes_are_compared(tmp_path: Path, pointer: str) -> None:
+    """A dvc import's list is the producer's, and DVC pushes no `cache:
+    false` or `push: false` out: an extra file on disk beside any of them is
+    not named.
 
-    Mutations: compare cached `.dir` trees too -> md5-layout red; drop
-    publishable_scope's predicate -> the others red.
+    Mutation: drop publishable_scope's predicate -> red.
     """
     cache = dvc_cache_dir(tmp_path)
     tree = ensure_dir_manifest(cache, [DvcFileEntry(md5="0" * 32, relpath=n, size=1) for n in PARTS])
@@ -159,6 +157,86 @@ def test_only_version_aware_folders_dvc_pushes_are_compared(tmp_path: Path, poin
     (tmp_path / "data" / "final.dvc").write_text(pointer.replace("{tree}", tree))
     _folder(tmp_path, "data/final", [*PARTS, "extra.csv"])
     assert unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE) == []
+
+
+def _dir_pointer(root: Path, names) -> None:
+    """data/final.dvc in md5 layout (a `.dir` out, as `dvc add` writes it on
+    any remote until a version-aware push rewrites it as a `files:` list),
+    its list cached, listing ``names``."""
+    tree = ensure_dir_manifest(dvc_cache_dir(root), [DvcFileEntry(md5="0" * 32, relpath=n, size=1) for n in names])
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "final.dvc").write_text(
+        f"outs:\n- md5: {tree}\n  size: {len(names)}\n  nfiles: {len(names)}\n  hash: md5\n  path: final\n")
+
+
+@pytest.mark.parametrize("listed", [PARTS, ()], ids=["dir-list", "empty-dir"])
+def test_a_file_placed_in_a_dir_tracked_folder_is_named(tmp_path: Path, listed) -> None:
+    """A `.dir` list in the cache, and an empty `.dir` (`nfiles: 0`, as `dvc
+    add` writes for an empty folder, like the data/raw `mintd init` tracks),
+    are compared too: a file placed in the folder and not yet recorded is
+    named, with the way to record it. A `.dir` list can't be cut short, so
+    neither the message nor the hint says so.
+
+    Mutations: skip `.dir` entries (legacy_dir), or skip scope.empty -> red;
+    call an empty `.dir` cut -> red.
+    """
+    _dir_pointer(tmp_path, listed)
+    _folder(tmp_path, "data/final", [*listed, "placed.csv"])
+    (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
+    assert (u.folder, u.listed, u.unlisted, u.cut_possible) == ("data/final", len(listed), ("placed.csv",), False)
+    assert u.message().endswith(": files were added since the folder was recorded")
+    assert u.hint() == ("to record the folder again: mintd data add data/final\n"
+                        "to leave a file out instead, list it in .dvcignore")
+
+
+def test_a_file_placed_beside_an_empty_files_list_keeps_the_cut_cause(tmp_path: Path) -> None:
+    """A version-aware pointer's `files: []` may be a list emptied since it
+    was recorded, so it keeps "cut short" and "restore it from git".
+
+    Mutation: call every empty folder uncut -> red."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files: []\n")
+    _folder(tmp_path, "data/final", ["placed.csv"])
+    (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
+    assert (u.listed, u.unlisted, u.cut_possible) == (0, ("placed.csv",), True)
+    assert u.message().endswith(": the pointer was cut short, or the folder changed since it was recorded")
+    assert u.hint().endswith("\nif the pointer was cut, restore it from git")
+
+
+def test_an_empty_dir_pointer_is_compared_without_a_cache(tmp_path: Path) -> None:
+    """The empty folder's md5 names its list, so a clone with no cache
+    compares it too: a file placed there is named.
+
+    Mutation: read the empty `.dir` from the cache like any other -> left
+    out, red."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text(
+        "outs:\n- md5: d751713988987e9331980363e24189ce.dir\n  size: 0\n  nfiles: 0\n  hash: md5\n  path: final\n")
+    _folder(tmp_path, "data/final", ["placed.csv"])
+    assert not dvc_cache_dir(tmp_path).exists()
+    (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
+    assert (u.listed, u.unlisted, u.cut_possible) == (0, ("placed.csv",), False)
+
+
+def test_a_dir_folder_whose_list_isnt_cached_is_left_out(tmp_path: Path) -> None:
+    """Without the `.dir` list in the cache there's nothing to compare."""
+    _dir_pointer(tmp_path, PARTS)
+    for obj in dvc_cache_dir(tmp_path).rglob("*.dir"):
+        obj.unlink()
+    _folder(tmp_path, "data/final", [*PARTS, "placed.csv"])
+    assert unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE) == []
+
+
+def test_check_reports_a_file_placed_in_an_empty_tracked_folder(tmp_path: Path) -> None:
+    """The case `mintd init data` creates: data/raw tracked while empty, then
+    a raw file placed in it. check names it, as for any tracked folder."""
+    stage_dvc_project(tmp_path)
+    _dir_pointer(tmp_path, ())
+    _folder(tmp_path, "data/final", ["placed.csv"])
+    found = [f for f in check_project(tmp_path) if f.kind == "dvc_folder_unlisted"]
+    assert len(found) == 1 and "placed.csv" in found[0].message
+    assert "mintd data add data/final" in (found[0].hint or "")
+    assert (found[0].hint or "").endswith("\nthen check again: mintd check")  # its own line, last
 
 
 def test_a_lock_folder_out_is_compared_with_its_folder(tmp_path: Path) -> None:
@@ -241,7 +319,7 @@ def test_a_folder_holding_a_dvc_file_is_named_with_why(tmp_path: Path) -> None:
     (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
     assert u.unlisted == (".dvc",)
     assert "it holds a .dvc file or folder, so DVC would record it as an empty folder" in u.message()
-    assert u.hint().startswith("move the .dvc file or folder out of data/final/, then record the folder again")
+    assert u.hint().startswith("move the .dvc file or folder out of data/final/\nto record the folder again: ")
 
 
 def test_check_and_publish_compare_a_nested_pipeline_folder(tmp_path: Path) -> None:
@@ -270,3 +348,16 @@ def test_check_and_publish_compare_a_nested_pipeline_folder(tmp_path: Path) -> N
         publish_project(project_path=proj, version="0.2.0", client=_FakeCatalogClient(),
                         dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps())
     assert "dvc_folder_unlisted" in [f.kind for f in excinfo.value.findings]
+
+
+@pytest.mark.parametrize("u", [
+    Unlisted("data/final.dvc", None, "data/final", 3, ("x.csv",), holds_dvc=True),
+    Unlisted("dvc.lock", "build", "data/out", 2, ("c.csv",), cut_possible=True),
+], ids=["dvc-file", "stage"])
+def test_the_hint_is_short_lines_with_one_idea_each(u: Unlisted) -> None:
+    """Each line of the hint stays within 70 characters, holds one idea and
+    joins none with '; ', and each command sits on a line of its own."""
+    lines = u.hint().splitlines()
+    assert len(lines) >= 2 and all(len(line) <= 70 and "; " not in line for line in lines)
+    commands = [line for line in lines if "mintd " in line or "dvc " in line]
+    assert all(line.count("dvc ") <= 1 for line in commands)
