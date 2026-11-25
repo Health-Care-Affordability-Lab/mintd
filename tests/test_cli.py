@@ -5848,6 +5848,32 @@ def test_cli_data_import_under_a_symlinked_home_stays_short_and_relative(
     assert Path(payload["dest"]).parts[:2] == ("data", "imports"), payload
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
+def test_cli_data_import_through_a_dest_root_linked_inside_the_project_names_the_target(
+    patched_clients, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`mintd data import demo-map --dest-root imports`, where `imports` is a
+    relative link to `real_imports` in the project: the summary line names
+    where the import landed, relative to the project, never in full. That
+    real dvc accepts the import there is pinned in `test_dvc_ops_contract`.
+    Mutations: give the import the link's own spelling (`_physical` returns
+    its argument unresolved) -> the summary names `imports/`; name paths in
+    full (`_where` returns them absolute) -> the summary is absolute."""
+    client, _ = patched_clients
+    _register_demo_map(client, primary="data/final/")
+    Path("real_imports").mkdir()
+    Path("imports").symlink_to("real_imports", target_is_directory=True)
+    capsys.readouterr()
+
+    rc = cli.main(["data", "import", "demo-map", "--dest-root", "imports"])
+
+    out = capsys.readouterr()
+    printed = " ".join((out.out + out.err).split())
+    assert rc == 0, printed
+    assert "→ real_imports/data_demo-map/data/" in printed, printed
+    assert str(Path.cwd()) not in printed and os.path.realpath(Path.cwd()) not in printed, printed
+
+
 def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patched_clients, capsys: pytest.CaptureFixture[str],
 ) -> None:
