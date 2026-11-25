@@ -40,19 +40,33 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption("--test-shard", metavar="I/N", help="run only shard I of N of the tests (CI's Windows job)")
 
 
+def _test_shard(config: pytest.Config) -> tuple[int, int] | None:
+    """--test-shard's (i, n), or None when it isn't given. A value that isn't i/n with 1 <= i <= n is a usage
+    error, so a typo can't quietly run nothing."""
+    shard = config.getoption("--test-shard")
+    if shard is None:
+        return None
+    m = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
+    if m is None or int(m[1]) > int(m[2]):
+        raise pytest.UsageError(f"--test-shard must be i/n with 1 <= i <= n, not {shard!r}")
+    return int(m[1]), int(m[2])
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    # Checked here, before xdist starts its workers: a usage error raised while they collect reaches the
+    # user as an INTERNALERROR, without the message.
+    _test_shard(config)
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     """With --test-shard i/n, run only shard i of n: CI's Windows job runs the suite as shards on separate
     runners. A test is in the shard its node id hashes to (crc32, the same on every platform and every xdist
     worker), so the shards split the suite exactly and none can lose a test. It is an option, not a variable,
-    so a pytest that a test starts itself never inherits it. A value that isn't i/n with 1 <= i <= n stops the
-    run, so a typo can't quietly run nothing. Pinned by tests/test_test_shards.py."""
-    shard = config.getoption("--test-shard")
+    so a pytest that a test starts itself never inherits it. Pinned by tests/test_test_shards.py."""
+    shard = _test_shard(config)
     if shard is None:
         return
-    m = re.fullmatch(r"([1-9][0-9]*)/([1-9][0-9]*)", shard)
-    if m is None or int(m[1]) > int(m[2]):
-        raise pytest.UsageError(f"--test-shard must be i/n with 1 <= i <= n, not {shard!r}")
-    i, n = int(m[1]), int(m[2])
+    i, n = shard
     keep: list[pytest.Item] = []
     drop: list[pytest.Item] = []
     for item in items:
