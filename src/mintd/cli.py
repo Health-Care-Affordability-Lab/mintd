@@ -1115,8 +1115,8 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     name_hint = args.targets[0] if args.targets else "<name>"
     project_path = _require_project(
         args.path,
-        hint=f"mintd data pull refreshes this project's tracked data; to get a "
-             f"published product: mintd clone {name_hint}",
+        hint=f"mintd data pull refreshes this project's tracked data\n"
+             f"to get a published product: mintd clone {name_hint}",
     )
     reporter = args._reporter
     config = Config.load()
@@ -1483,8 +1483,8 @@ def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, 
     reporter = args._reporter
     project_path = _require_project(
         args.path,
-        hint="the repo file cache (S3) lives inside a project's own bucket "
-             "prefix — cd into the project; for ad-hoc handoffs use mintd share put",
+        hint="the repo file cache (S3) lives in a project's own bucket prefix\ncd into the project\n"
+             "for an ad-hoc handoff: mintd share put",
     )
     config = Config.load()
     factory = _resolve_cache_ops(config)
@@ -2098,8 +2098,8 @@ def _handle_data_import(args: argparse.Namespace) -> int:
     _require_project(
         Path("."),
         or_above=True,
-        hint=f"mintd import adds a product to a project, and this folder isn't in one. "
-             f"To get the whole product: mintd clone {args.name}. To start a project: mintd init",
+        hint=f"mintd import adds a product to a project\nto get the whole product: mintd clone {args.name}\n"
+             f"to start a project: mintd init",
     )
 
     reporter = getattr(args, "_reporter", None) or Reporter()
