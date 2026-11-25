@@ -74,9 +74,16 @@ def _stage_tracked_out(tmp_path: Path, name: str = "a") -> None:
 @pytest.fixture
 def patched_clients(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> tuple[InMemoryCatalogClient, _FakeDvcOps]:
     client = InMemoryCatalogClient()
     dvc_ops = _FakeDvcOps()
+    # `mintd import` adds a product to the project it runs in and stops outside
+    # one, so these tests run from a project folder (a `.dvc/` is what makes
+    # one). A test that needs another folder changes into it itself.
+    project = tmp_path_factory.mktemp("project")
+    (project / ".dvc").mkdir()
+    monkeypatch.chdir(project)
     # Always return defaults; avoid touching the real ~/.config/mintd/.
     monkeypatch.setattr(
         "mintd.cli.Config.load",
@@ -406,6 +413,75 @@ def test_data_import_writes_dvc_file(
     assert rc == 0
     assert len(dvc_ops.calls) == 1
     assert dvc_ops.calls[0].path == "outputs/main.parquet"
+
+
+@pytest.mark.parametrize("argv", [
+    ["import", "demo-map"],
+    ["data", "import", "demo-map"],
+    ["data", "import", "demo-map", "--bump"],
+    ["import", "not-in-the-catalog"],
+], ids=["import", "data-import", "bump", "unknown-name"])
+def test_import_outside_a_project_stops_before_the_catalog_or_dvc(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], patched_clients,
+    monkeypatch: pytest.MonkeyPatch, argv: list[str],
+) -> None:
+    """Outside a project (no .dvc/ where it runs), import and --bump stop at
+    once and say what to run instead. Before, the catalog was read and the
+    import went on to dvc, whose 'not inside of a DVC repository' was what a
+    user saw. The unknown name shows the catalog isn't read: its own error
+    would name the catalog."""
+    client, dvc_ops = patched_clients
+    _register_demo_map(client)
+    monkeypatch.chdir(tmp_path)  # no .dvc/ here
+    rc = cli.main(argv)
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1
+    assert dvc_ops.calls == []
+    assert f"not inside a mintd project (no .dvc/ at {tmp_path.resolve()} or above)" in err
+    assert f"mintd clone {argv[-1] if argv[-1] != '--bump' else 'demo-map'}" in err
+    assert "mintd init" in err
+
+
+@pytest.mark.parametrize("argv", [["import", "demo-map"], ["data", "import", "demo-map", "--bump"]],
+                         ids=["import", "bump"])
+def test_import_from_a_folder_inside_a_project_still_runs_there(
+    capsys: pytest.CaptureFixture[str], patched_clients, monkeypatch: pytest.MonkeyPatch, argv: list[str],
+) -> None:
+    """Import and --bump run from any folder inside a project, as dvc does and
+    as they did before the project check: the .dvc/ may be above. An import
+    still lands under the folder it ran from."""
+    client, dvc_ops = patched_clients
+    _register_demo_map(client)
+    sub = Path.cwd() / "analysis"  # patched_clients runs from a project folder
+    sub.mkdir()
+    monkeypatch.chdir(sub)
+    rc = cli.main(argv)
+    err = " ".join(capsys.readouterr().err.split())
+    assert "not inside a mintd project" not in err
+    if argv[0] != "import":
+        # --bump got past the project check and looked for the import where it
+        # was typed, as before; with nothing imported there it says so.
+        assert rc == 1
+        assert "'demo-map' not imported in ." in err
+    else:
+        assert rc == 0
+        (call,) = dvc_ops.calls
+        assert (Path.cwd() / call.cwd / call.dest).resolve().is_relative_to(sub.resolve() / "data" / "imports")
+
+
+@pytest.mark.parametrize("verb", [["data", "pull"], ["cache", "ls"]], ids=["pull", "cache"])
+def test_pull_and_cache_take_their_path_as_the_project_itself(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], verb: list[str],
+) -> None:
+    """Unlike import, pull and the cache verbs don't walk up: a --path one level
+    below a project is refused, as before the shared check."""
+    (tmp_path / ".dvc").mkdir()
+    sub = tmp_path / "analysis"
+    sub.mkdir()
+    rc = cli.main([*verb, "--path", str(sub)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 1
+    assert f"not inside a mintd project (no .dvc/ at {sub.resolve()})" in err
 
 
 def test_cli_data_import_threads_dvc_args(
@@ -1461,7 +1537,8 @@ def test_cli_data_pull_no_dvc_project_friendly_error(
     rc = cli.main(["data", "pull", "dol-form5500", "--path", str(tmp_path)])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "mintd data clone" in err
+    assert "not inside a mintd project" in err
+    assert "mintd clone" in err
     assert "dol-form5500" in err
     assert str(tmp_path.resolve()) in err
 
@@ -1479,7 +1556,7 @@ def test_cli_data_pull_in_dvc_project_proceeds(
     rc = cli.main(["data", "pull", "--path", str(tmp_path)])
     assert rc == 0
     err = capsys.readouterr().err
-    assert "not inside a DVC project" not in err
+    assert "not inside a mintd project" not in err
 
 
 # issue18: a boto3-less install fails loudly instead of fabricating counts ----
@@ -1577,6 +1654,7 @@ def test_cli_data_clone_invokes_clone_and_pull_product(
     spelling: list[str],
 ) -> None:
     """`mintd clone` and `mintd data clone` hand the clone the same arguments."""
+    monkeypatch.chdir(tmp_path)  # clone runs anywhere; this test keeps it outside a project
     from mintd.data import CloneResult
 
     received: dict[str, object] = {}
@@ -3492,6 +3570,7 @@ def test_spinner_dvc_handlers_thread_reporter_into_the_ops_factories(
     # the D7 missing report, which the real pull has always guaranteed exists.
     EnclaveManifest(enclave_name="test").save(tmp_path / "m.yaml")
 
+    (tmp_path / ".dvc").mkdir(exist_ok=True)  # a project: import stops outside one
     monkeypatch.chdir(tmp_path)  # before `data push`: it commits from the cwd's project
     cli.main(["data", "push"])
     cli.main(["data", "verify", "--path", str(tmp_path)])
@@ -3522,7 +3601,6 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
 
     Allowlist rationale:
       - error: argparse framework override (not a handler).
-      - _handle_data_pull: frozen surface (slice 36/37 own its rendering).
       - _render_bump_blocked: shared renderer; 38b cleanup candidate.
     """
     import ast
@@ -3533,7 +3611,7 @@ def test_no_handler_calls_sys_stderr_directly() -> None:
         for child in ast.iter_child_nodes(node):
             parent[child] = node
 
-    allowlist = {"error", "_handle_data_pull", "_render_bump_blocked"}
+    allowlist = {"error", "_render_bump_blocked"}
     writers: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -4871,6 +4949,7 @@ def test_data_import_bump_renders_a_bad_namespace(
     Mutation: make `UnknownProductPath` a plain `ValueError` -> traceback
     (`--bump` has only `_hint(DvcOpError, …)`).
     """
+    (tmp_path / ".dvc").mkdir(exist_ok=True)  # a project: import stops outside one
     monkeypatch.chdir(tmp_path)
 
     rc = cli.main(["data", "import", "..", "--bump"])
@@ -5707,6 +5786,7 @@ def test_cli_data_import_json_paths_stay_relative_for_a_default_import(
     the project, as before. Mutation: return the resolved paths -> absolute, red."""
     client, _ = patched_clients
     _register_demo_map(client)
+    (tmp_path / ".dvc").mkdir(exist_ok=True)  # a project: import stops outside one
     monkeypatch.chdir(tmp_path)
     rc = cli.main(["--json", "data", "import", "demo-map"])
     payload = json.loads(capsys.readouterr().out)
@@ -5742,6 +5822,7 @@ def test_cli_data_import_through_a_missing_folders_dotdot_reports_where_it_lande
     0 bytes). Mutation: report the path as the caller spelled it -> red."""
     client, fake = patched_clients
     _register_demo_map(client)
+    (tmp_path / ".dvc").mkdir(exist_ok=True)  # a project: import stops outside one
     monkeypatch.chdir(tmp_path)
     payload = _import_json(monkeypatch, capsys, fake, "--dest-root", "foo/..")
     assert all(Path(p).is_file() and ".." not in Path(p).parts for p in payload["produced"]), payload
@@ -5759,7 +5840,7 @@ def test_cli_data_import_under_a_symlinked_home_stays_short_and_relative(
     `test_paths_under_a_symlinked_home_are_named_relative_to_where_the_project_is`."""
     client, fake = patched_clients
     _register_demo_map(client)
-    (tmp_path / "real" / "proj").mkdir(parents=True)
+    (tmp_path / "real" / "proj" / ".dvc").mkdir(parents=True)  # a project: import stops outside one
     (tmp_path / "home").symlink_to(tmp_path / "real", target_is_directory=True)
     monkeypatch.chdir(tmp_path / "home" / "proj")
     payload = _import_json(monkeypatch, capsys, fake)
@@ -5774,7 +5855,7 @@ def test_cli_data_import_to_a_dest_root_outside_the_project_stays_absolute(
     the path is given in full. Mutation: always relative -> red."""
     client, fake = patched_clients
     _register_demo_map(client)
-    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / ".dvc").mkdir(parents=True)  # a project: import stops outside one
     elsewhere = tmp_path / "elsewhere"
     monkeypatch.chdir(tmp_path / "proj")
     payload = _import_json(monkeypatch, capsys, fake, "--dest-root", str(elsewhere))

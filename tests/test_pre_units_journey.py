@@ -866,7 +866,7 @@ def test_import_of_an_unpinned_directory_out_exits_nonzero_and_leaves_nothing(
     out = " ".join(_drain(capsys).split())
 
     assert rc == 1, out
-    assert "cannot be delivered by 'mintd data import'" in out
+    assert "cannot be delivered by 'mintd import'" in out
     assert "S3 version ID" in out
     assert "ask them to run 'mintd check'" in out
     assert "✓" not in out
