@@ -1313,7 +1313,8 @@ def test_clone_of_a_product_that_declares_no_output_holds_its_code_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Nothing declared, nothing pulled by default, and the clone says so and
-    names --all. Mutation: pull everything when nothing is declared -> red."""
+    names --all. Mutations: pull everything when nothing is declared, or let an
+    empty target list reach dvc -> red."""
     from mintd._console import Reporter
 
     monkeypatch.chdir(tmp_path)
@@ -1327,6 +1328,7 @@ def test_clone_of_a_product_that_declares_no_output_holds_its_code_only(
         client, dvc, git, _fast(), name="demo-map", reporter=Reporter(json_mode=False, no_color=True),
     )
 
-    assert [c.targets for c in dvc.pull_calls] in ([], [[]])
+    # No dvc pull at all: `dvc pull` with no targets would pull everything.
+    assert dvc.pull_calls == []
     assert result.pull_error_count == 0
     assert "declares no outputs, so the clone holds its code only (--all pulls everything)" in capsys.readouterr().err

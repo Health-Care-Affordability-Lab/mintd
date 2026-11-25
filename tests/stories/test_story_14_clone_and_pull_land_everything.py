@@ -68,6 +68,21 @@ def _git_clone_then_pull(mintd, product, tmp_path: Path, *, json: bool = True):
     return dest, mintd("data", "pull", cwd=dest, json=json)
 
 
+def test_a_plain_clone_lands_the_declared_outputs_and_leaves_raw_data_on_s3(product, mintd, s3_server, tmp_path) -> None:
+    """Without --all, clone brings the code, the declared outputs and the primary:
+    `data/final` and `data/extra` land, and `data/raw`, which the product tracks
+    but never declares, is never downloaded. Real dvc, git and S3.
+    Mutation: the default pulls everything again -> data/raw lands, red."""
+    dest = tmp_path / "clone"
+    run = mintd("data", "clone", product.name, "--dest", str(dest), cwd=tmp_path)
+
+    assert run.returncode == 0, run.stderr
+    declared = product.published("data/final", "data/extra")
+    assert _landed(dest) == {k: md5(b) for k, b in declared.items()}
+    assert set(s3_state(s3_server, product.prefix).gets) == set(declared), "nothing undeclared downloads"
+    assert (dest / "metadata.json").is_file(), "the code comes with it"
+
+
 @pytest.mark.parametrize("fetch", [_clone, _git_clone_then_pull], ids=["clone", "pull"])
 def test_a_storage_hiccup_on_one_file_is_fetched_again(product, mintd, s3_server, tmp_path, fetch) -> None:
     hiccup = f"/{BUCKET}/{product.prefix}/data/final/a.csv"
