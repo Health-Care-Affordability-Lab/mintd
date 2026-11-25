@@ -159,17 +159,17 @@ def _release_notice(args: argparse.Namespace) -> None:
     # No stderr (`2>&-`): rich would fall back to stdout, which must stay one line.
     if args.json_out or args.quiet or sys.stderr is None:
         return
-    from ._release_check import is_release, newest_release, release_notice
+    from ._release_check import newest_release, release_notice
 
     try:
         cache_dir = Config.load().resolved_cache_dir()
     except (ConfigError, OSError):
         return
-    notice = release_notice(__version__, newest_release(cache_dir, __version__))
-    if notice and is_release(__version__):
+    notice, update = release_notice(__version__, *newest_release(cache_dir, __version__))
+    if notice and update:
         where = ", in PowerShell" if os.name == "nt" else ""
         notice += f"\n  update{where}: {_install_line()}"
-    if notice:  # a dev build gets no update line: the release would be older
+    if notice:
         args._reporter.info(notice)  # every reporter line is soft-wrapped, so it copies whole
 
 

@@ -1227,9 +1227,9 @@ def release_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("MINTD_NO_UPDATE_CHECK", raising=False)  # the suite turns the lookup off
     monkeypatch.delenv("CI", raising=False)
 
-    def seed(version: str) -> Path:
-        # Looked up today for the version mintd reports now (patchable per test).
-        (cache / "newest-release").write_text(f"{version}\n{cli.__version__}\n")
+    def seed(version: str, standing: str = "") -> Path:
+        # Looked up just now for the version mintd reports now (patchable per test).
+        (cache / "newest-release").write_text(f"{version}\n{cli.__version__}\n{standing}\n")
         return cfg
 
     return seed
@@ -1247,6 +1247,31 @@ def test_version_prints_only_the_version_on_stdout_and_a_newer_release_on_stderr
     assert out == "mintd 1.0.0\n"  # install.sh and scripts read this line
     where = ", in PowerShell" if os.name == "nt" else ""
     assert err == f"newest release: v999.0.0\n  update{where}: {cli._install_line()}\n"
+
+
+@pytest.mark.parametrize("standing", ["pending", "unreleased", ""])
+def test_a_prerelease_is_told_what_it_is_and_offered_no_downgrade(
+    release_cache, capsys, monkeypatch: pytest.MonkeyPatch, standing: str,
+) -> None:
+    """Newer than the newest release and not withdrawn: the update line would install an older release.
+    Mutation: add the update line for any install newer than the newest release -> red."""
+    monkeypatch.setattr(cli, "__version__", "1.3.0")
+    release_cache("1.2.3", standing)
+    assert cli.main(["--version"]) == 0
+    out, err = capsys.readouterr()
+    assert out == "mintd 1.3.0\n" and err.startswith("mintd 1.3.0 ") and "\n  hint: " in err
+    assert "update" not in err.replace("no update is offered", "")
+
+
+def test_a_withdrawn_release_is_told_and_offered_the_way_back(release_cache, capsys, monkeypatch) -> None:
+    """A rolled-back release: going back to the newest release is the fix."""
+    monkeypatch.setattr(cli, "__version__", "1.3.0")
+    release_cache("1.2.3", "withdrawn")
+    assert cli.main(["--version"]) == 0
+    where = ", in PowerShell" if os.name == "nt" else ""
+    assert capsys.readouterr().err == (
+        "mintd 1.3.0 was withdrawn; the newest release is v1.2.3\n  hint: go back to v1.2.3 with the update line below\n"
+        f"  update{where}: {cli._install_line()}\n")
 
 
 def test_a_dev_build_is_not_told_to_update(release_cache, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
