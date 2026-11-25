@@ -356,6 +356,48 @@ def test_an_unreachable_repository_leaves_the_entry_untouched(tmp_path: Path) ->
     assert result.verdict == "unreachable" and path.read_bytes() == before
 
 
+_KEPT_WHY = {
+    "held": "the repository has no metadata.json",
+    "unreachable": "can't read the repository",
+    "unreadable-entry": "the registry entry can't be read",
+    "no-url": "the entry names no repository.github_url",
+}
+
+
+@pytest.mark.parametrize("case", list(_KEPT_WHY))
+def test_an_entry_the_rebuild_doesnt_update_keeps_its_file_and_fields(tmp_path: Path, case: str) -> None:
+    """Products are kept: a rebuild never deletes, empties or strips an entry.
+    A held entry changes only `source.held`; an unreachable one, and one
+    skipped (it can't be read, or names no repository), stays byte for byte.
+
+    Mutations: unlink a skipped entry -> both skipped cases are red; write
+    `{}` for a held one, or drop a field it doesn't own -> the held case is
+    red."""
+    registry, gone = tmp_path / "registry", tmp_path / "remotes" / "gone"
+    if case == "held":
+        repo, _ = _product(tmp_path, "demo", None)
+        path = _entry(registry, "demo", repo, lambda e: e.update(source={"commit": "a" * 40}))
+    elif case == "no-url":
+        path = _entry(registry, "demo", gone, lambda e: e["repository"].update(github_url=""))
+    else:
+        path = _entry(registry, "demo", gone)
+    if case == "unreadable-entry":
+        path.write_text("{ not: [yaml\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    [result] = _rebuild(registry)
+
+    assert result.verdict == {"held": "held", "unreachable": "unreachable"}.get(case, "skipped")
+    assert result.why.startswith(_KEPT_WHY[case]), result.why
+    assert path.is_file() and path.read_bytes().strip()
+    if case == "held":
+        after, was = _read(path), yaml.safe_load(before)
+        assert after["source"].pop("held")["why"] == result.why
+        assert after == was
+    else:
+        assert path.read_bytes() == before
+
+
 def test_check_writes_nothing_and_says_whether_anything_would_change(tmp_path: Path) -> None:
     repo, _ = _product(tmp_path, "demo", _meta("demo", lambda m: m["metadata"].update(description="new")))
     path = _entry(tmp_path / "registry", "demo", repo)
