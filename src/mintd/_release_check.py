@@ -10,11 +10,11 @@ this install is behind it, or newer than it.
   always nudged, which is accurate.
 - An install newer than the newest release reads its own release (one
   unauthenticated API call) to say which it is: a prerelease not yet promoted
-  (its notes still hold the release run's "A prerelease: " line, which promote
-  drops), withdrawn (a prerelease without that line: promoted, then rolled
-  back), or not released (no published release for its tag). Only withdrawn
-  gets the update line: going back is the fix there, and a downgrade anywhere
-  else.
+  (its notes hold the release run's "A prerelease: " line from the moment it is
+  published, and promote drops it), withdrawn (published without that line:
+  promoted, then rolled back, or a full release that isn't the newest), or not
+  released (no published release for its tag). Only withdrawn gets the update
+  line: going back is the fix there, and a downgrade anywhere else.
 - Silent when anything fails. The lookup gets 2 seconds in all, DNS included:
   the socket timeout doesn't cover name lookup, so it runs on a daemon thread
   that is abandoned at the deadline.
@@ -93,7 +93,8 @@ def _fetch(url: str, timeout: float) -> str:
 
 
 def _standing(url: str, timeout: float) -> str:
-    """What the release at `url` (the API's release for a tag) is: "pending", "withdrawn", "unreleased", or ""."""
+    """What the release at `url` (the API's release for a tag) is: "pending", "withdrawn", "unreleased", or "" when
+    it can't be read."""
 
     def read() -> str:
         try:
@@ -101,10 +102,9 @@ def _standing(url: str, timeout: float) -> str:
                 release = json.loads(r.read(1_000_000))
         except HTTPError as e:
             return "unreleased" if e.code == 404 else ""
-        if release.get("prerelease") is not True:
-            return ""
         lines = str(release.get("body") or "").splitlines()
-        return "pending" if any(line.startswith(PRERELEASE_MARKER) for line in lines) else "withdrawn"
+        pending = release.get("prerelease") is True and any(line.startswith(PRERELEASE_MARKER) for line in lines)
+        return "pending" if pending else "withdrawn"
 
     return _in_time(read, url, timeout)
 
@@ -164,8 +164,8 @@ def release_notice(installed: str, newest: str | None, standing: str = "") -> tu
     if not _newer(installed, newest):
         return f"newest release: v{newest}", is_release(installed)
     line, hint = {
-        "pending": (f"mintd {installed} is a prerelease, not yet promoted; the newest release is v{newest}",
-                    "nothing to do: promoting it makes it the newest release"),
+        "pending": (f"mintd {installed} is a prerelease; the newest release is v{newest}",
+                    "nothing to do until it's promoted or withdrawn"),
         "withdrawn": (f"mintd {installed} was withdrawn; the newest release is v{newest}",
                       f"go back to v{newest} with the update line below"),
         "unreleased": (f"mintd {installed} is not released; the newest release is v{newest}",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -22,8 +23,23 @@ import yaml
 from mintd._release_check import PRERELEASE_MARKER, newest_release, release_notice
 
 
+_RELEASE_YML = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+
+
+def _release_steps(job: str) -> str:
+    return "\n".join(step.get("run", "") for step in yaml.safe_load(_RELEASE_YML.read_text())["jobs"][job]["steps"])
+
+
+def _first_note() -> str:
+    """The notes a prerelease is published with, before the evidence job writes its own, as release.yml has them."""
+    note = re.search(r'notes="((?:[^"\\]|\\.)*)"', _release_steps("prerelease"))
+    assert note is not None
+    return note[1].replace("\\`", "`").replace("$run_url", "https://github.com/o/r/actions/runs/1")
+
+
 # The API's release for each tag, as an install newer than the newest release reads it.
 _RELEASES = {
+    "/api/releases/tags/v1.8.0": (200, {"prerelease": True, "body": _first_note()}),  # published, evidence not yet run
     "/api/releases/tags/v1.3.0": (200, {"prerelease": True, "body": "notes\r\n\r\nA prerelease: `releases/latest` skips it."}),
     "/api/releases/tags/v1.4.0": (200, {"prerelease": True, "body": "notes\nIts gate wrote A prerelease: once; promote dropped it."}),
     "/api/releases/tags/v1.5.0": (404, {"message": "Not Found"}),
@@ -131,14 +147,17 @@ def test_an_upgrade_asks_again_at_once(github: str, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(("installed", "standing"), [
-    ("1.3.0", "pending"), ("1.4.0", "withdrawn"), ("1.5.0", "unreleased"), ("1.6.0", ""), ("1.7.0", ""),
+    ("1.3.0", "pending"), ("1.8.0", "pending"), ("1.4.0", "withdrawn"), ("1.6.0", "withdrawn"), ("1.5.0", "unreleased"),
+    ("1.7.0", ""),
 ])
 def test_an_install_newer_than_the_newest_release_reads_its_own_release(
     github: str, tmp_path: Path, installed: str, standing: str,
 ) -> None:
-    """A prerelease not yet promoted keeps the release run's marker line; a withdrawn one (promoted, then made a
-    prerelease again) doesn't; no release for the tag is not released; anything else is unknown.
-    Mutations: read the marker anywhere in a line; take any 404 as unknown; treat a full release as withdrawn -> red."""
+    """A prerelease not yet promoted has the release run's marker line, from its first notes (1.8.0: published,
+    the evidence job not yet run) to promote; a withdrawn one (promoted, then made a prerelease again, or a full
+    release that isn't the newest) doesn't; no release for the tag is not released; a failed read is unknown.
+    Mutations: read the marker anywhere in a line; take any 404 as unknown; read a full release as unknown;
+    publish the first notes without the marker -> red."""
     api = f"{github}/api/releases/tags/v"
     assert newest_release(tmp_path, installed, f"{github}/releases/latest", api=api) == ("1.2.3", standing)
     assert _GitHub.requests == ["/releases/latest", f"/api/releases/tags/v{installed}"]
@@ -250,8 +269,7 @@ def test_the_suite_never_looks_up_a_release(server: str, tmp_path: Path, monkeyp
 
 
 _HINTS = {
-    "pending": ("mintd 1.3.0 is a prerelease, not yet promoted; the newest release is v1.2.3",
-                "nothing to do: promoting it makes it the newest release"),
+    "pending": ("mintd 1.3.0 is a prerelease; the newest release is v1.2.3", "nothing to do until it's promoted or withdrawn"),
     "withdrawn": ("mintd 1.3.0 was withdrawn; the newest release is v1.2.3", "go back to v1.2.3 with the update line below"),
     "unreleased": ("mintd 1.3.0 is not released; the newest release is v1.2.3",
                    "no published release has its tag, so no update is offered"),
@@ -279,16 +297,17 @@ def test_release_notice(installed: str, newest: str | None, standing: str, notic
     assert release_notice(installed, newest, standing) == (notice, update)
 
 
-def test_every_new_message_is_one_line_and_a_short_hint() -> None:
-    for line, hint in _HINTS.values():
-        assert "\n" not in line and len(f"  hint: {hint}") < 70, hint
+@pytest.mark.parametrize("standing", list(_HINTS))
+def test_every_new_message_is_a_short_line_and_a_short_hint(standing: str) -> None:
+    notice, _ = release_notice("0.17.14", "0.16.0", standing)
+    assert notice is not None
+    line, hint = notice.split("\n")
+    assert len(line) < 70 and len(hint) < 70 and hint.startswith("  hint: "), notice
 
 
 def test_the_prerelease_marker_is_the_line_the_release_run_writes_and_promote_drops() -> None:
     """The check tells a pending prerelease from a withdrawn one by this line. Mutation: change it on either
     side -> red."""
-    jobs = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text())["jobs"]
-    evidence = "\n".join(step.get("run", "") for step in jobs["evidence"]["steps"])
-    promote = "\n".join(step.get("run", "") for step in jobs["promote"]["steps"])
-    assert f"\n{PRERELEASE_MARKER}" in evidence
-    assert f"grep -v '^{PRERELEASE_MARKER}'" in promote
+    assert f"\n{PRERELEASE_MARKER}" in _first_note()  # published with it, before evidence runs
+    assert f"\n{PRERELEASE_MARKER}" in _release_steps("evidence")
+    assert f"grep -v '^{PRERELEASE_MARKER}'" in _release_steps("promote")
