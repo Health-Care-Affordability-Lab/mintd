@@ -55,6 +55,9 @@ Use "Re-run failed jobs" in the same run: it keeps the run's version. Once the r
 - **Stopped on "draft <id>"**, or **"several releases for vX.Y.Z"**: delete each draft by the id the run
   printed, `gh api -X DELETE "repos/Health-Care-Affordability-Lab/mintd/releases/<id>"`, then re-run. Only
   ever a draft: never `gh release delete vX.Y.Z`, which picks the published release when there is one.
+- **Stopped on "not the draft this run made"**: the tag has two drafts, most likely because a re-run made a
+  second one while GitHub's list still hid the first. Delete the extra draft by the id the run printed, as
+  above, then re-run.
 - **Stopped on "published release"**: it is never changed. If it is missing a file, roll it back and ship the
   next version.
 - **"landed on <sha>, not <sha>"**: the tag is permanent, so the release stays an unpromoted prerelease and
