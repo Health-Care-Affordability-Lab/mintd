@@ -1,8 +1,8 @@
 """Producer-fetch subprocess seam.
 
 Only this module shells out to `git` for producer-side operations (fetching
-`metadata.json` at a pinned commit). Mirrors the single-seam pattern of
-`_dvc_ops.py` and `_registry_git_ops.py`.
+`metadata.json` or a tree at a pinned commit, listing refs). Mirrors
+the single-seam pattern of `_dvc_ops.py` and `_registry_git_ops.py`.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import subprocess
 from ._git_invoke import git_env
 import tarfile
 import tempfile
+from collections.abc import Sequence
 from enum import StrEnum
 from io import BytesIO
 from pathlib import Path
@@ -198,24 +199,56 @@ class GitArchiveFetcher:
         raw = self.fetch_metadata_at(repo, head_sha)
         return raw, head_sha
 
-    def checkout_at(self, repo: str, pin: str, dest: Path) -> None:
-        """Check ``repo``'s tree at ``pin`` out into the empty directory
-        ``dest``, one commit deep: the fetch ``_fallback_clone`` makes, checked
-        out instead of shown. Raises FetchError."""
-        # The whole tree at the pin, not a sparse checkout of the DVC files:
-        # the import postcondition calls this only for an import that landed
-        # nothing, and `dvc import` has just cloned the full repo anyway.
+    def checkout_at(self, repo: str, pin: str, dest: Path, *, paths: Sequence[str] = ()) -> str:
+        """Check ``repo``'s tree at ``pin`` (a tag, a branch, ``HEAD`` or a
+        full commit SHA) out into the empty directory ``dest``, one commit
+        deep: the fetch ``_fallback_clone`` makes, checked out instead of
+        shown. ``paths``, patterns in ``.gitignore`` syntax, limit the
+        checkout to the files they match (a sparse checkout); with none it
+        checks the whole tree out. Returns the commit's SHA. Raises
+        FetchError: ``PIN_MISSING`` for a pin the remote doesn't have, a
+        short SHA included, since only a full one can be fetched."""
+        # The import postcondition takes the whole tree: it calls this only
+        # for an import that landed nothing, and `dvc import` has just cloned
+        # the full repo anyway.
+        self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, str(dest)], repo=repo, pin=pin, path="")
+        if paths:
+            self._run_clone(["git", "-C", str(dest), "config", "core.sparseCheckout", "true"], repo=repo, pin=pin, path="")
+            (dest / ".git" / "info").mkdir(exist_ok=True)
+            (dest / ".git" / "info" / "sparse-checkout").write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
         for argv in (
-            ["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, str(dest)],
-            ["git", "-C", str(dest), "fetch", "--depth=1", "origin", pin],
+            # `--end-of-options`: a pin such as `--upload-pack=...` is a ref to
+            # git, never an option.
+            ["git", "-C", str(dest), "fetch", "--depth=1", "--end-of-options", "origin", pin],
             ["git", "-C", str(dest), "checkout", "--quiet", "FETCH_HEAD"],
         ):
             self._run_clone(argv, repo=repo, pin=pin, path="")
+        head = _run(["git", "-C", str(dest), "rev-parse", "HEAD"], timeout=self.timeout, repo=repo, pin=pin, binary_stdout=False)
+        if head.returncode != 0:
+            raise FetchError.unreachable(repo, pin, detail=head.stderr.strip())
+        return head.stdout.strip()
+
+    def refs(self, repo: str) -> dict[str, str]:
+        """Every ref ``repo`` lists, ``HEAD`` included, mapped to the commit
+        it names: an annotated tag to its commit (the peeled ``<tag>^{}``
+        line), not to the tag object. Raises FetchError."""
+        result = _run(["git", "ls-remote", repo], timeout=self.timeout, repo=repo, pin="", binary_stdout=False)
+        if result.returncode != 0:
+            reason = _classify_stderr(result.stderr) or FetchError.Reason.UNREACHABLE
+            raise FetchError(reason, repo, "", detail=result.stderr.strip())
+        refs: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.endswith("^{}"):
+                refs[ref.removesuffix("^{}")] = sha
+            else:
+                refs.setdefault(ref, sha)
+        return refs
 
     def _fallback_clone(self, repo: str, pin: str, path: str) -> bytes:
         with tempfile.TemporaryDirectory() as tmp:
             self._run_clone(["git", "clone", "--depth=1", "--filter=blob:none", "--no-checkout", repo, tmp], repo=repo, pin=pin, path=path)
-            self._run_clone(["git", "-C", tmp, "fetch", "--depth=1", "origin", pin], repo=repo, pin=pin, path=path)
+            self._run_clone(["git", "-C", tmp, "fetch", "--depth=1", "--end-of-options", "origin", pin], repo=repo, pin=pin, path=path)
             show = _run(
                 ["git", "-C", tmp, "show", f"{pin}:{path}"],
                 timeout=self.timeout,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import tempfile
@@ -29,24 +30,30 @@ from ._cache_ops import dvc_tracked_paths
 from ._paths import physical as _physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import (
-    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+    _covers_exact, default_remote_name, delivery, discover_all_outs, does_not_parse, get_remote_config, normalize_target,
+    outs_matching, parse_s3_url, path_covers, require_default_remote,
 )
 from ._fast_sync_ops import FastSyncOps
+from ._paths import inside
+from ._pin_proof import Entry, publishable_scope
 from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
-from ._storage_state import inspect_storage
+from ._share_ops import _has_control_char
+from ._storage_state import inspect_storage, remote_is_version_aware
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
 from .data_ops import data_pull
-from .errors import MintdError, unreachable_repo_hint
+from .errors import MintdError, strip_userinfo, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
-from ._producer_git_ops import _classify_stderr
+from .publish import _SEMVER_RE, _semver_tuple
+from ._producer_git_ops import _SHA_RE, _classify_stderr
 from .producer import (
     FetchError,
     GitArchiveFetcher,
     MissingPrimaryDataProduct,
     ProducerError,
     ProducerView,
+    _safe_repo_dirname,
 )
 
 if TYPE_CHECKING:
@@ -63,11 +70,13 @@ __all__ = [
     "NoTrackedOutputs",
     "PrimaryRemovedAtHead",
     "ProducerError",
+    "PublishedVersion",
     "UndeliverableImport",
     "UnknownProductPath",
     "bump_import",
     "clone_and_pull_product",
     "import_product",
+    "read_published",
 ]
 
 
@@ -496,6 +505,205 @@ def _require_deliverable(
         f"{verdict.detail}; nothing was imported for it",
         hint,
     )
+
+
+@dataclass(frozen=True)
+class PublishedVersion:
+    """What a product's DVC pointers record for one path at one commit, the
+    answer `mintd data locate` prints. ``bucket``, ``prefix`` (empty or
+    ending in ``/``) and ``endpoint`` come from the default remote in
+    ``.dvc/config`` at that commit: the remote those pointers' version IDs
+    belong to."""
+
+    commit: str
+    bucket: str
+    prefix: str
+    endpoint: str | None
+    target: str
+    files: list[Entry]
+
+
+def _release_tags(tags: list[str]) -> list[str]:
+    """The tags among ``tags`` that `mintd publish` writes, ``v`` and its
+    MAJOR.MINOR.PATCH version, newest first."""
+    found = [t for t in tags if t.startswith("v") and _SEMVER_RE.match(t[1:])]
+    return sorted(found, key=lambda t: _semver_tuple(t[1:]), reverse=True)
+
+
+# What `_published_files` reads at a commit: the pointers, the `.gitignore`
+# files that decide which of them DVC reads, the remote and the pipeline.
+_DVC_FILES = ("*.dvc", ".gitignore", "/.dvc/config", "/dvc.yaml", "/dvc.lock")
+_SHORT_SHA_RE = re.compile(r"[0-9a-f]{4,39}")
+
+
+def _unreachable(name: str, repo_url: str, at: str, exc: FetchError) -> MintdError:
+    return MintdError(
+        f"could not read {name}'s DVC pointers at {at} from {strip_userinfo(repo_url)}: {exc.detail or exc.reason}",
+        hint=unreachable_repo_hint(repo_url),
+    )
+
+
+def _no_such_rev(name: str, repo_url: str, rev: str | None, refs: dict[str, str] | None) -> MintdError:
+    url = strip_userinfo(repo_url)
+    tags = (
+        ", ".join(_release_tags([r.removeprefix("refs/tags/") for r in refs if r.startswith("refs/tags/")])) or "none"
+        if refs is not None else "unknown (they could not be listed)"
+    )
+    if rev is not None and _SHORT_SHA_RE.fullmatch(rev):
+        return MintdError(
+            f"{rev} is no tag of {name}, and no tag or branch in {url} is at a commit "
+            f"starting {rev}; its release tags: {tags}",
+            hint="give the commit's full 40-character SHA\na short SHA finds only a commit a tag or branch is at",
+        )
+    return MintdError(
+        f"{name} has no tag or commit {rev or 'HEAD'} in {url}; its release tags: {tags}",
+        hint="give --rev one of its release tags or a commit's SHA",
+    )
+
+
+def _resolve(fetcher: GitArchiveFetcher, name: str, repo_url: str, rev: str | None) -> str:
+    """The commit ``rev`` names in ``repo_url``, from the refs it lists: the
+    default branch's head for None, else a tag, a branch, or a short SHA of
+    the commit one of them is at (as `mintd use` and locate print it)."""
+    try:
+        refs = fetcher.refs(repo_url)
+    except FetchError as exc:
+        raise _unreachable(name, repo_url, rev or "its default branch", exc) from exc
+    names = ("HEAD",) if rev is None else (rev, f"refs/tags/{rev}", f"refs/heads/{rev}")
+    commit = next((refs[n] for n in names if n in refs), None)
+    if commit is None and rev is not None and _SHORT_SHA_RE.fullmatch(rev):
+        tips = {sha for sha in refs.values() if sha.startswith(rev)}
+        commit = tips.pop() if len(tips) == 1 else None
+    if commit is None:
+        raise _no_such_rev(name, repo_url, rev, refs)
+    return commit
+
+
+def _dvc_files_at(fetcher: GitArchiveFetcher, repo_url: str, commit: str, cache_dir: Path) -> Path:
+    """``repo_url``'s DVC files at ``commit`` (``_DVC_FILES``), checked out
+    with their ``.git`` under ``cache_dir`` the first time they are asked
+    for: a commit never changes, so the copy never goes stale. It lands by
+    one rename, so a failed or concurrent checkout leaves no partial copy.
+    The ``.git`` stays because which ``.dvc`` files DVC reads depends on the
+    repo's ``.gitignore`` files, read through git. Raises FetchError."""
+    tree = cache_dir / _safe_repo_dirname(strip_userinfo(repo_url)) / f"{commit}-dvc-files"
+    if tree.is_dir():
+        return tree
+    try:
+        tree.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".checkout-", dir=tree.parent, ignore_cleanup_errors=True) as staging:
+            fetcher.checkout_at(repo_url, commit, Path(staging) / "tree", paths=_DVC_FILES)
+            (Path(staging) / "tree").rename(tree)
+    except OSError as exc:
+        if not tree.is_dir():  # else another run's copy landed first
+            raise MintdError(
+                f"could not write mintd's copy of the producer's DVC files in {tree.parent}: {exc}",
+                hint="set cache_dir in mintd's config to a folder you can write",
+            ) from exc
+    return tree
+
+
+def _published_files(root: Path, declared: str, remote: str) -> tuple[str, list[Entry]]:
+    """The files the pointers and root ``dvc.lock`` under ``root`` record at
+    ``declared``: that file, or every file under that folder at any depth.
+    Returns ``(declared as resolved, files sorted by path)``, a folder ending
+    in ``/``; no files means nothing matched. A ``declared`` ending in ``/``
+    names a folder only. Matched case-exactly.
+
+    The files are those a push to ``remote`` uploads (``publishable_scope``,
+    the rule ``data push`` verifies pushes with), each with the version ID
+    recorded for ``remote``. A folder recorded as one ``.dir`` hash with no
+    per-file list is an error rather than a folder that seems empty: its list
+    is an S3 object, which this never reads (no cache is given, so the scope
+    lists it as unrecoverable). So is a pointer cut short or damaged by the
+    rule every reader applies (``does_not_parse``: a hash not in dvc's shape,
+    a size that isn't a number), a file whose path isn't a plain path inside
+    the project, since a reader joins it onto a folder of its own, and a
+    version ID holding a control character, since a reader writes it out.
+    """
+    rel = normalize_target(declared)
+    pointers = discover_all_outs(root)
+    for p in (*pointers, "dvc.lock"):
+        if does_not_parse(root, p):
+            raise MintdError(f"{p} is cut short or damaged", hint="ask the producer to fix that pointer")
+    scope = publishable_scope(root, remote=remote, prefix="", cache_dir=root / ".dvc" / "cache", dvc_files=pointers)
+    for out in scope.unrecoverable:
+        if _covers_exact(out.path, rel) or _covers_exact(rel, out.path):
+            raise MintdError(
+                f"{out.path} is recorded as one folder hash with no list of its files, "
+                "so its files can't be named from git",
+                hint="ask the producer to run 'mintd data push'\nit records the folder file by file",
+            )
+    files = sorted((e for e in scope.entries if _covers_exact(rel, e.path)), key=lambda e: e.path)
+    for e in files:
+        if inside(root, e.path, read="recorded", dotdot="refuse") != e.path or _has_control_char(e.path):
+            raise MintdError(
+                f"{e.pointer} records a file at {e.path!r}, which is not a plain path inside the project",
+                hint="ask the producer to fix that pointer",
+            )
+        if _has_control_char(e.version_id or ""):
+            raise MintdError(f"{e.pointer} records a version ID for {e.path!r} holding a control character",
+                             hint="ask the producer to fix that pointer")
+    folder = declared.endswith("/") or any(e.path != rel for e in files)
+    return (f"{rel}/", [e for e in files if e.path != rel]) if folder else (rel, files)
+
+
+def read_published(name: str, repo_url: str, rev: str | None, path: str, *, cache_dir: Path) -> PublishedVersion:
+    """``path`` of product ``name`` as its DVC pointers record it at ``rev``:
+    a tag, a branch or a commit SHA, or None for the head of the default
+    branch.
+
+    It resolves ``rev`` to a commit (``_resolve``; a full SHA as it is),
+    checks that commit's DVC files out, once, into ``cache_dir``
+    (``_dvc_files_at``) and reads its ``.dvc`` files, root ``dvc.lock`` and
+    ``.dvc/config`` (``_published_files``). It reads the
+    producer's git, never its bucket: it needs GitHub access but no AWS
+    credentials, and a file pushed after that commit is never named. A
+    full SHA read before needs no network at all. Not through
+    ``ProducerView``, which reads only ``metadata.json`` and refuses a
+    commit whose ``metadata.json`` predates schema 2.0, though that commit's
+    pointers read fine.
+    """
+    url = strip_userinfo(repo_url)
+    at = rev or "its default branch"
+    if rev is not None and rev.startswith("-"):
+        # git would read it as an option (`--upload-pack=...` runs a command).
+        raise MintdError(f"--rev {rev!r} is not a tag or a commit", hint="give --rev one of its release tags or a commit's SHA")
+    fetcher = GitArchiveFetcher()
+    commit = rev if rev is not None and _SHA_RE.fullmatch(rev) else _resolve(fetcher, name, repo_url, rev)
+    try:
+        tree = _dvc_files_at(fetcher, repo_url, commit, cache_dir)
+    except FetchError as exc:
+        if exc.reason is not FetchError.Reason.PIN_MISSING:
+            raise _unreachable(name, repo_url, at, exc) from exc
+        try:
+            refs: dict[str, str] | None = fetcher.refs(repo_url)
+        except FetchError:
+            refs = None
+        raise _no_such_rev(name, repo_url, rev, refs) from exc
+    try:
+        remote_name = default_remote_name(tree)
+        remote = get_remote_config(tree, remote_name) if remote_name else {}
+        aware = remote_is_version_aware(remote.get, remote_name) if remote_name else False
+    except KeyError:  # a default remote with no section
+        remote_name, remote, aware = None, {}, False
+    except MintdError as exc:  # dvc can't read it (or refuses its version_aware); the cause, not mintd's cache path
+        raise MintdError(f"{name}'s .dvc/config at {at} (commit {commit[:7]}) can't be read: {exc.__cause__ or exc}",
+                         hint="ask the producer to fix .dvc/config") from exc
+    s3_url = remote.get("url") or ""
+    if remote_name is None or not s3_url.startswith("s3://"):
+        raise MintdError(f"{name}'s .dvc/config at {at} in {url} names no S3 remote ({s3_url or 'none'})",
+                         hint="ask the producer to run 'mintd check'")
+    if not aware:
+        raise MintdError(
+            f"{name} at {at} keeps its files under their md5, not their paths (its DVC remote "
+            "isn't version_aware; storage.versioning: false), and data locate doesn't support that",
+            hint=f"clone the repo and read its .dvc files:\nmintd data clone {name}",
+        )
+    bucket, prefix = parse_s3_url(s3_url)
+    target, files = _published_files(tree, path, remote_name)
+    return PublishedVersion(commit=commit, bucket=bucket, prefix=f"{prefix}/" if prefix else "",
+                            endpoint=remote.get("endpointurl") or None, target=target, files=files)
 
 
 def _drop_nested_paths(paths: list[str], *, reporter: "Reporter | None") -> list[str]:
