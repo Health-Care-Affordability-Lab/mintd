@@ -215,7 +215,12 @@ def check_project(
     """
     findings = _producer_findings(path, git_ops=git_ops)
     if remote:
-        findings.extend(_check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile))
+        # The remote lane reads the config through the same readers: an error the
+        # offline check already said (a version_aware dvc refuses) isn't said twice.
+        # Matching on the message alone is one fact: remote-lane messages name their remote or pointer.
+        said = {f.message for f in findings if f.severity == "error"}
+        findings.extend(f for f in _check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile)
+                        if not (f.severity == "error" and f.message in said))
     try:
         findings.extend(
             _consumer_findings(
@@ -337,6 +342,10 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                 hint=repair_hint(inspection),
             )
         )
+    if inspection.dvc_refused is not None:  # dvc refuses the config, so nothing here reads the remote as version-aware
+        findings.append(CheckFinding(severity="error", section="producer", kind="dvc_state_unreadable",
+                                     message=str(inspection.dvc_refused), hint=inspection.dvc_refused.hint,
+                                     source=inspection.dvc_config_path))
 
     if meta:
         findings.extend(_check_data_products_primary(meta, metadata_path))
