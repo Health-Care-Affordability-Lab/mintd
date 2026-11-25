@@ -617,8 +617,9 @@ def test_the_fetcher_reads_an_option_like_pin_as_a_ref(producer, tmp_path) -> No
     "config",
     [DVC_CONFIG + "    endpointurl = https://other.example.com\n",
      DVC_CONFIG + f"['remote \"{REMOTE}\"']\n    url = s3://other/\n",
-     DVC_CONFIG.encode() + b"    region = caf\xe9\n"],
-    ids=["option-twice", "section-twice", "not-utf-8"],
+     DVC_CONFIG.encode() + b"    region = caf\xe9\n",
+     DVC_CONFIG.replace("version_aware = true", "version_aware = yes")],
+    ids=["option-twice", "section-twice", "not-utf-8", "version-aware-neither-true-nor-false"],
 )
 def test_a_dvc_config_that_cant_be_read_is_a_json_error(catalog, producer, capsys, config: str | bytes) -> None:
     commit = _commit(producer, {"dvc.lock": _lock({"a.parquet": "va1"}), ".dvc/config": config})

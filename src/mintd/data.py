@@ -684,16 +684,17 @@ def read_published(name: str, repo_url: str, rev: str | None, path: str, *, cach
     try:
         remote_name = default_remote_name(tree)
         remote = get_remote_config(tree, remote_name) if remote_name else {}
+        aware = remote_is_version_aware(remote.get, remote_name) if remote_name else False
     except KeyError:  # a default remote with no section
-        remote_name, remote = None, {}
-    except MintdError as exc:  # dvc can't read it either; the cause, not mintd's cache path
+        remote_name, remote, aware = None, {}, False
+    except MintdError as exc:  # dvc can't read it (or refuses its version_aware); the cause, not mintd's cache path
         raise MintdError(f"{name}'s .dvc/config at {at} (commit {commit[:7]}) can't be read: {exc.__cause__ or exc}",
                          hint="ask the producer to fix .dvc/config") from exc
     s3_url = remote.get("url") or ""
     if remote_name is None or not s3_url.startswith("s3://"):
         raise MintdError(f"{name}'s .dvc/config at {at} in {url} names no S3 remote ({s3_url or 'none'})",
                          hint="ask the producer to run 'mintd check'")
-    if not remote_is_version_aware(remote.get):
+    if not aware:
         raise MintdError(
             f"{name} at {at} keeps its files under their md5, not their paths (its DVC remote "
             "isn't version_aware; storage.versioning: false), and data locate doesn't support that",
