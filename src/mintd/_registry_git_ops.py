@@ -95,11 +95,12 @@ NETWORK_TOO = "if GitHub access is fine, check your network"
 
 class GitHubAccessMissing(GitOpError):
     """mintd reaches GitHub through gh only, and gh isn't ready for this
-    repository. Raised before git runs, as a ``GitOpError``, so every caller
-    of the git seam handles it as it handles git failing."""
+    repository, or (``reason``) git couldn't take it as one. Raised before git
+    runs, as a ``GitOpError``, so every caller of the git seam handles it as it
+    handles git failing."""
 
-    def __init__(self, url: str, hint: str) -> None:
-        reason = f"mintd reaches GitHub through gh, and it isn't ready for {url}"
+    def __init__(self, url: str, hint: str, *, reason: str | None = None) -> None:
+        reason = reason or f"mintd reaches GitHub through gh, and it isn't ready for {url}"
         MintdError.__init__(self, reason, hint=hint)
         self.command: list[str] = []
         self.stderr = reason
@@ -236,7 +237,13 @@ def urls_git_uses(url: str, *, cwd: Path | None = None, push: bool = False) -> l
     """Every URL git will actually reach for ``url`` (a URL or a remote name):
     with ``insteadOf`` applied, and for a push every ``pushurl`` with
     ``pushInsteadOf`` too. Local: none of these commands talks to a remote.
-    When git can't say, this refuses rather than guess (GitHubAccessMissing)."""
+    When git can't say, this refuses rather than guess (GitHubAccessMissing).
+    A ``url`` starting with ``-`` is refused before any git runs: git takes it
+    as a word of its own here and in every seam, so it would read it as an
+    option, and ``--upload-pack=<cmd>`` runs a command."""
+    if url.startswith("-"):
+        raise GitHubAccessMissing(url, reason=f"{_credentials_out(url)!r} can't be a repository: git would read it as an option",
+                                  hint="a repository is an https:// URL or a path")
     try:
         # A remote's push URLs, if ``url`` names one in the repository.
         urls = _git_output(["git", "remote", "get-url", "--push", "--all", url], cwd) if push and cwd else []

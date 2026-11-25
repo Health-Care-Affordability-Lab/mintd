@@ -9,6 +9,7 @@ nothing reaches the network. Org and account names are made up.
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 import subprocess
 import shutil
@@ -515,6 +516,47 @@ def test_data_import_stops_before_dvc_with_the_hint(github: GitHub, tmp_path: Pa
     assert "isn't ready" in str(raised.value)
     assert "gh auth login" in (raised.value.hint or "")
     assert not (tmp_path / "data_demo_map").exists()
+
+
+@pytest.mark.parametrize("command", ["import", "clone", "producer-git"])
+def test_a_catalog_url_git_would_read_as_an_option_never_reaches_git(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """git takes the catalog's repository URL as a word of its own (`clone
+    <url>`, `ls-remote <url>`), so one starting with `-` is an option to it,
+    and `--upload-pack=<cmd>` runs a command. It is refused before any git
+    runs: by import (dvc's seam), clone (the registry seam) and any producer
+    git call (check's and enclave's). gh is ready, so the access check isn't
+    what stops it, and a git first on PATH records every call."""
+    from mintd.catalog import InMemoryCatalogClient
+    from mintd.data import clone_and_pull_product, import_product
+    from mintd.errors import MintdError
+    from tests._fakes.dvc_ops import _FakeDvcOps
+    from tests.test_data_clone import _fast, _register
+
+    marker, calls = tmp_path / "pwned", tmp_path / "git-calls"
+    real_git = shutil.which("git") or "git"
+    (tmp_path / "bin" / "git").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(calls))}\nexec {shlex.quote(real_git)} "$@"\n'
+    )
+    (tmp_path / "bin" / "git").chmod(0o755)
+    github.ready()
+    monkeypatch.chdir(tmp_path)
+    client = InMemoryCatalogClient()
+    url = f"--upload-pack=touch {marker}; git-upload-pack"
+    _register(client, mutate=lambda data: data["repository"].update(github_url=url))
+
+    with pytest.raises((MintdError, FetchError)) as raised:
+        if command == "clone":
+            clone_and_pull_product(client, _FakeDvcOps(), SubprocessRegistryGitOps(), _fast(), name="demo-map")
+        elif command == "import":
+            import_product(client, SubprocessDvcOps(timeouts=Timeouts()), "demo-map", cwd=tmp_path, dest_root=tmp_path)
+        else:
+            _producer_git_ops._run(["git", "ls-remote", url, "HEAD"], timeout=5, repo=url, pin="", binary_stdout=False)
+
+    assert "git would read it as an option" in str(raised.value)
+    assert [c for c in (calls.read_text().splitlines() if calls.exists() else []) if "upload-pack" in c] == []
+    assert not marker.exists()
 
 
 def test_a_token_in_the_catalog_url_never_reaches_the_written_pointer(
