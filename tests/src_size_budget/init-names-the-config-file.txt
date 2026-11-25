@@ -1,0 +1,1 @@
++2: init's missing-bucket refusal names the config file mintd reads and the key to set

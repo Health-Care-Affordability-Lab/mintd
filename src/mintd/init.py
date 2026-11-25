@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+from ._config import _default_config_path
 from ._console import Reporter
 from .errors import MintdError
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
@@ -163,8 +164,9 @@ def init_project(
         # the rollback boundary, so nothing was undone and the rerun then hit
         # the destination guard. Raised here it leaves nothing behind at all.
         raise InitOpError(
-            "bucket not configured in ~/.mintd/config.yaml; run "
-            "'mintd config setup' first, then rerun the same command"
+            f"storage_bucket_prefix is not set in {_default_config_path()}",
+            hint="to set it: mintd config setup\nor: mintd config setup --set storage_bucket_prefix=<bucket>\n"
+            "then rerun the same command",
         )
     # Validated once, above; re-bound as a plain str so the storage block
     # needs no second check. Truthy iff storage is wanted and configured.
