@@ -208,6 +208,11 @@ def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
     assert "fetch" not in stages, "fetch must be commented out, not an active stage"
     assert "#  fetch:" in raw_text, "commented fetch block must be present"
 
+    # The comment and the ingest stub name mintd's command for tracking raw data.
+    stub = (tmp_path / "code" / f"ingest.{ {'python': 'py', 'r': 'R', 'stata': 'do'}[language] }").read_text(encoding="utf-8")
+    for text in (raw_text, stub):
+        assert "mintd data add data/raw" in text and "dvc add data/raw" not in text
+
     # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
     # schema output into validate. Either way the DAG stays acyclic, and the
     # out is uncached so git keeps the file for the catalog, and persistent so
