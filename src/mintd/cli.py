@@ -366,6 +366,15 @@ def _add_schema_parser(subs: Any) -> None:
     p_schema_gen.set_defaults(_handler=_handle_data_schema_generate)
 
 
+def _add_registry_rebuild_parser(subs: Any) -> None:
+    p = subs.add_parser(
+        "rebuild", help="Rebuild each catalog entry from its product's default branch (run in a registry checkout)"
+    )
+    p.add_argument("--check", action="store_true", help="Show what would change; write nothing")
+    p.add_argument("--registry", type=Path, default=Path("."), help="The registry checkout (default: .)")
+    p.set_defaults(_handler=_handle_registry_rebuild)
+
+
 def _add_cache_parser(subs: Any) -> None:
     """Wire the ``cache push/pull/ls`` subparsers. Split out of ``_build_parser``
     so the naming-discipline grep test can scope to exactly the cache surface's
@@ -834,6 +843,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_reg_sync = p_registry_sub.add_parser("sync", help="Refresh the registry cache")
     p_reg_sync.set_defaults(_handler=_handle_registry_sync)
+    _add_registry_rebuild_parser(p_registry_sub)
 
     p_publish = subs.add_parser("publish", help="Publish a new version of this project")
     p_publish.add_argument("version", nargs="?")
@@ -2781,6 +2791,35 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
         count = client.sync()
     print(f"synced ({count} entries)")
     return 0
+
+
+def _handle_registry_rebuild(args: argparse.Namespace) -> int:
+    """Rebuild the catalog in a registry checkout. Exits 1 when an entry
+    couldn't be read (its repository unreachable, or the entry itself) or is
+    held by mintd's own error, the other entries written; under --check, also
+    when any entry would change or is held, so a dry run can gate."""
+    from .catalog import rebuild_catalog
+
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    if not (args.registry / "catalog").is_dir():
+        reporter.error(f"{args.registry} has no catalog/ folder", hint="run it in a registry checkout, or pass --registry")
+        return 1
+    results = rebuild_catalog(args.registry, git_ops=_resolve_git_ops(Config.load()), write=not args.check)
+    if reporter.json_mode:
+        reporter.result([
+            {"name": r.name, "entry": r.entry, "verdict": r.verdict, "commit": r.commit, "why": r.why,
+             "changes": [c.field_path for c in r.changes], "reports": list(r.reports), "mintd_error": r.mintd_error}
+            for r in results
+        ])
+    else:
+        for r in results:
+            changed = f" ({', '.join(c.field_path for c in r.changes)})" if r.changes else ""
+            line = f"{r.entry}: {r.verdict}{changed}" + (f": {r.why}" if r.why else "")
+            (reporter.warn if r.verdict in ("held", "unreachable", "skipped") else reporter.info)(line)
+            for report in r.reports:
+                reporter.warn(f"{r.entry}: {report}")
+    unread = any(r.verdict in ("unreachable", "skipped") or r.mintd_error for r in results)
+    return 1 if unread or (args.check and any(r.verdict in ("updated", "held") for r in results)) else 0
 
 
 def _handle_publish(args: argparse.Namespace) -> int:
