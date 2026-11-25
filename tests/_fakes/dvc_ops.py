@@ -314,7 +314,7 @@ class _FakeDvcOps:
         # Dispatch on target kind, like real dvc: a DIRECTORY gets an
         # `.dir`-suffixed md5 — the only dir marker a `.dvc` file has;
         # production branches on exactly it (`is_dir=md5.endswith(".dir")`
-        # in `_fast_sync_ops`) — plus `nfiles`, a RECURSIVE file count. A
+        # in `_dvc_state`) — plus `nfiles`, a RECURSIVE file count. A
         # plain md5 here made every downstream reader see a FILE where the
         # caller added a directory: not laxer, wrong-shaped. Licensed by
         # `test_add_on_a_directory_writes_a_dir_pointer` (both arms).
@@ -400,7 +400,7 @@ class _FakeDvcOps:
         `EMPTY_DIR_MD5`) — the fake WRITES the paths production STATS, so
         writer and reader must agree on the address by construction. Only
         the stand-in file CONTENT below is fake-specific."""
-        from mintd._fast_sync_ops import (
+        from mintd._dvc_state import (
             EMPTY_DIR_MD5,
             cache_path_for,
             outs_for_target,
@@ -478,7 +478,7 @@ class _FakeDvcOps:
         orphans, which is the failure this flag exists to catch.
 
         **Why not ``parse_dvc_lock_outs``**, which does this parse already:
-        it sets ``target=rel`` (`_fast_sync_ops.py:536`), i.e. it throws the
+        it sets ``target=rel``, i.e. it throws the
         stage name away and keeps only the path. The stage name is precisely
         what separates a declared out from an orphan, so that function cannot
         answer this question -- the first attempt here used it and the oracle
@@ -662,7 +662,7 @@ class _FakeDvcOps:
         """
         import posixpath
 
-        from mintd._fast_sync_ops import normalize_target
+        from mintd._dvc_state import normalize_target
 
         names, paths = self._declared_targets(root)
 

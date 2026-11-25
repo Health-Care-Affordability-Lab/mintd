@@ -33,10 +33,12 @@ import yaml
 
 from mintd._config import Timeouts
 from mintd._dvc_ops import DvcOpError, SubprocessDvcOps
-from mintd._fast_sync_ops import (
-    SubprocessFastSyncOps,
+from mintd._dvc_state import (
     parse_dvc_lock_outs,
     partition_pipeline_outs,
+)
+from mintd._fast_sync_ops import (
+    SubprocessFastSyncOps,
 )
 from mintd.catalog import InMemoryCatalogClient
 from mintd.check import check_project
@@ -382,7 +384,7 @@ def test_pipeline_stage_out_is_servable(
 
     # `partition_pipeline_outs`, the function the criterion names — not
     # `parse_dvc_lock_outs`, which it wraps. Behaviourally identical for the
-    # `all_outs` half (`_fast_sync_ops.py:582` returns it verbatim), so the
+    # `all_outs` half (`partition_pipeline_outs` returns it verbatim), so the
     # substitution changed no verdict; calling the named one anyway removes a
     # discrepancy between the criterion and the test that satisfies it.
     fast_syncable, all_outs = partition_pipeline_outs(local_producer.work, "storage")
@@ -1629,7 +1631,7 @@ def test_discover_all_outs_reads_the_pointers_dvc_reads(tmp_path: Path, real_dvc
     from an ignored folder -> `negation` red; no per-file check ->
     `file-rule` red."""
     import mintd
-    from mintd._fast_sync_ops import discover_all_outs, gitignored_pointers
+    from mintd._dvc_state import discover_all_outs, gitignored_pointers
 
     scaffold = (Path(mintd.__file__).parent / "files" / "gitignore.txt").read_text()
     ignores = {
@@ -1673,7 +1675,7 @@ def test_dir_manifest_md5_matches_the_tree_dvc_add_records(tmp_path: Path, real_
     its pointer, so a complete list always names a tree the cache holds."""
     import yaml
 
-    from mintd._fast_sync_ops import dir_manifest_md5, read_cached_dir_manifest
+    from mintd._dvc_state import dir_manifest_md5, read_cached_dir_manifest
 
     ws = tmp_path / "ws"
     (ws / "data" / "final").mkdir(parents=True)

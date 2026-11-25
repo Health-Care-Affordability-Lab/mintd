@@ -14,7 +14,8 @@ from mintd._registry_git_ops import (
     GhNotInstalled, GitOpError, GitTagAlreadyExists, PRConflictError,
     RegistryBranchExists,
 )
-from mintd._fast_sync_ops import DvcFileEntry, ensure_dir_manifest
+from mintd._dvc_state import DvcFileEntry
+from mintd._fast_sync_ops import ensure_dir_manifest
 from tests._dvc_fixtures import (
     MD5,
     S3HoldsWhatThePointersSay,
@@ -124,6 +125,7 @@ def test_publish_increments_patch_version(tmp_path):
     
     assert result.version == "0.1.1"
     assert "0.1.1" in (proj / "metadata.json").read_text(encoding="utf-8")
+
 
 def test_publish_calls_catalog_update_last(tmp_path):
     proj = _seed_project(tmp_path)
@@ -1460,6 +1462,40 @@ class TestDeliveryGate:
         ).stdout
         assert "version_id: v-1" in committed
 
+    def test_publish_still_not_deliverable_names_the_field(self, tmp_path):
+        """The check after the push said only "Field required" for a finding
+        with no file. This push pins the output but leaves metadata.json
+        without an output's description, which only that check sees.
+
+        Mutation: `publish.py` joining the messages alone again -> red.
+        """
+        proj = _seed_project(tmp_path)
+        stage_undeliverable_primary(proj)
+        _cache_the_tree(proj)
+        subprocess.run(["git", "add", "-A"], cwd=proj, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "declare and track"], cwd=proj, check=True)
+
+        class _PushDropsADescription(_FakeDvcOps):
+            def push(self, *, cwd, **kw):
+                result = super().push(cwd=cwd, **kw)
+                write_pointer(cwd, "data/final", files={"a.parquet": "v-1"})
+                meta = json.loads((cwd / "metadata.json").read_text(encoding="utf-8"))
+                del meta["data_products"]["outputs"][0]["description"]
+                (cwd / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+                return result
+
+        with pytest.raises(DvcPushFailed) as excinfo:
+            publish_project(
+                project_path=proj,
+                version="0.1.1",
+                client=_FakeCatalogClient(),
+                dvc_ops=_PushDropsADescription(),
+                git_ops=_FakeRegistryGitOps(),
+            )
+
+        assert "still not deliverable" in str(excinfo.value)
+        assert "data_products.outputs[0].description: Field required" in str(excinfo.value)
+
     def test_publish_releases_past_an_untracked_pointer_gitignore_excludes(self, tmp_path):
         """A stray `.dvc` file in a folder `.gitignore` excludes, never
         committed and with its data nowhere, is one DVC never reads: publish
@@ -1600,7 +1636,7 @@ def _publish_on_moto(tmp_path: Path, s3, *, cloud: dict | None, cache: bool) -> 
 
     import yaml
 
-    from mintd._fast_sync_ops import cache_path_for
+    from mintd._dvc_state import cache_path_for
 
     proj = _seed_project(tmp_path)
     stage_dvc_project(proj)
@@ -1763,7 +1799,15 @@ def test_publish_rolls_metadata_back_even_when_a_pointer_cant_be_put_back(tmp_pa
     assert lock.read_bytes() == locked
 
 
-def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_path, s3_versioned, monkeypatch):
+@pytest.mark.parametrize(("local", "refusal"), [
+    pytest.param('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n', "config.local overrides storage's endpointurl",
+                 id="a-location-override"),
+    pytest.param("[core\n", "can't read .*config.local", id="a-config-local-dvc-cannot-read"),
+])
+def test_publish_refuses_a_location_config_local_redirects_before_any_push(
+    tmp_path, s3_versioned, monkeypatch, local, refusal,
+):
+    """Mutation that must redden the second case: check config.local outside the rollback again."""
     s3, bucket = s3_versioned
     monkeypatch.setattr("mintd._push_verify._create_s3_client", lambda cfg, profile, **_: s3)
     s3.put_object(Bucket=bucket, Key="lab/p/data/final/x.csv", Body=b"x\n")
@@ -1771,10 +1815,11 @@ def test_publish_refuses_a_location_config_local_redirects_before_any_push(tmp_p
     (proj / ".dvc" / ".gitignore").write_text("/config.local\n")  # as `dvc init` writes it
     subprocess.run(["git", "add", ".dvc/.gitignore"], cwd=proj, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "ignore config.local"], cwd=proj, check=True)
-    (proj / ".dvc" / "config.local").write_text('[\'remote "storage"\']\n    endpointurl = http://elsewhere\n')
+    (proj / ".dvc" / "config.local").write_text(local)
     dvc, git = _FakeDvcOps(), _FakeRegistryGitOps()
-    with pytest.raises(DvcPushFailed, match="config.local overrides storage's endpointurl"):
+    with pytest.raises(DvcPushFailed, match=refusal) as excinfo:
         publish_project(project_path=proj, version="0.1.1", client=_FakeCatalogClient(), dvc_ops=dvc, git_ops=git)
+    assert "rolled back" in excinfo.value.recovery_hint
     assert dvc.push_calls == [] and git.tag_calls == []
     assert "0.1.0" in (proj / "metadata.json").read_text(encoding="utf-8")
 

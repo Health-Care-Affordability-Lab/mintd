@@ -47,7 +47,7 @@ from ._registry_git_ops import (
     specific_hint,
 )
 from ._dvc_invoke import dvc_root
-from ._fast_sync_ops import FastSyncOps, gitignored_pointers
+from ._fast_sync_ops import FastSyncOps
 from . import _s3
 from ._s3 import S3AccessDenied
 from .errors import MintdError, strip_userinfo, unreachable_repo_hint
@@ -60,7 +60,7 @@ from .catalog import (
     CatalogNotFound,
     GitCatalogClient,
 )
-from ._dvc_state import abbreviate
+from ._dvc_state import abbreviate, gitignored_pointers
 from .check import CheckFinding, check_project
 from .data import (
     BumpBlocked,
@@ -428,6 +428,131 @@ def _add_cache_parser(subs: Any) -> None:
     p_cache_ls.set_defaults(_handler=_handle_cache_ls)
 
 
+#: What each form of `import` and `clone` brings, shown in their --help and
+#: checked word for word against README's "Command | Brings" tables.
+_IMPORT_BRINGS = [
+    ("<name>", ["the primary output"]),
+    ("<name> --path <path>", ["only that dataset or folder, declared", "as an output or not (repeatable)"]),
+    ("<name> --all", ["every output in the product's", "data_products.outputs; a tracked",
+                      "folder no output declares is left out"]),
+]
+_CLONE_BRINGS = [
+    ("<name>", ["a full git clone of the producer's repo,", "with every DVC-tracked output pulled"]),
+    ("<name> --primary", ["the same clone, with only the primary", "output pulled; --path pulls only declared",
+                          "outputs"]),
+]
+
+
+def _brings_epilog(prefix: str, verb: str, rows: list[tuple[str, list[str]]], width: int, other: str) -> str:
+    """The "what each form brings" table for `<prefix><verb> --help`, aligned at
+    ``width`` whichever spelling it is shown under."""
+    lines = ["what each form brings:"]
+    for form, brings in rows:
+        lines.append(f"  {prefix}{verb} {form}".ljust(width) + brings[0])
+        lines.extend(" " * width + more for more in brings[1:])
+    return "\n".join(lines) + "\n\n" + other.format(prefix=prefix)
+
+
+def _add_import_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`import` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_import = subs.add_parser(
+        "import",
+        help="Bring a product's primary output into this project, pinned (--path, --all for more)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_brings_epilog(
+            prefix, "import", _IMPORT_BRINGS, 42,
+            "To get the producer's whole project, code and data, use `{prefix}clone`.",
+        ),
+    )
+    p_import.add_argument(
+        "name",
+        help="Registered data product name (the catalog key) — the same "
+             "identifier for import and for --bump",
+    )
+    p_import.add_argument(
+        "--bump", action="store_true",
+        help="Re-pin an existing import to the producer's HEAD; selects the "
+             "import with the same name/--path pair a plain import uses",
+    )
+    p_import.add_argument(
+        "--path", dest="import_path", action="append", default=[], metavar="PATH",
+        help="Import only this path — any file or directory the producer tracks, "
+             "declared in data_products.outputs or not (repeatable). Default: the "
+             "primary output.",
+    )
+    p_import.add_argument(
+        "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
+    )
+    p_import.add_argument(
+        "--all", dest="all_outputs", action="store_true",
+        help="Import every tracked output of the product",
+    )
+    p_import.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing import of the same output",
+    )
+    p_import.add_argument(
+        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root",
+        help="Directory imports land under (default: data/imports)",
+    )
+    p_import.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_import.add_argument(
+        "--timeout", type=float, default=None,
+        help="Wall-clock cap in seconds for the import (default: unbounded)",
+    )
+    p_import.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
+    p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+    return p_import
+
+
+def _add_clone_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
+    """`clone` under `prefix` ("mintd data " or "mintd "): the same arguments,
+    defaults and handler under both spellings, so the two can't drift apart."""
+    p_clone = subs.add_parser(
+        "clone",
+        help="Get a product's whole project in its own folder, with every tracked output pulled",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_brings_epilog(
+            prefix, "clone", _CLONE_BRINGS, 37,
+            "To bring only a product's data into your project, use `{prefix}import`.",
+        ),
+    )
+    p_clone.add_argument("name", help="Registered data product name")
+    p_clone.add_argument(
+        "--dest", type=Path,
+        help="Destination path (default: ./<type>_<name>)",
+    )
+    p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
+    clone_scope = p_clone.add_mutually_exclusive_group()
+    clone_scope.add_argument(
+        "--primary", dest="primary_only", action="store_true",
+        help="Pull only the primary data product (default: pull every tracked output)",
+    )
+    clone_scope.add_argument(
+        "--path", dest="paths", action="append", metavar="PATH",
+        help="Pull only this tracked output — a file or directory from the "
+             "product's data_products.outputs (repeatable). Default: pull every "
+             "tracked output.",
+    )
+    p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
+    p_clone.add_argument("--timeout", type=float, default=None,
+                         help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
+    p_clone.add_argument(
+        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
+        help="Append an arg to the underlying `dvc` invocation. "
+             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
+             "(repeatable; ignored on fast-sync code paths).",
+    )
+    p_clone.set_defaults(_handler=_handle_data_clone)
+    return p_clone
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = _MintdArgumentParser(
         prog="mintd",
@@ -477,6 +602,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(_handler=_handle_init)
 
+    # The front door: the same entries as `data import` and `data clone`.
+    _add_import_parser(subs, "mintd ")
+    _add_clone_parser(subs, "mintd ")
+
     p_check = subs.add_parser("check", help="Validate a mintd project")
     p_check.add_argument("path", nargs="?", type=Path, default=Path("."))
     p_check.add_argument("--upgrades", action="store_true")
@@ -497,62 +626,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_data = subs.add_parser("data", help="Data commands")
     p_data_sub = p_data.add_subparsers(dest="data_command")
-    p_import = p_data_sub.add_parser(
-        "import", help="Import a producer's data product",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data import <name>                the primary output
-  mintd data import <name> --path <path>  only that dataset or folder, declared
-                                          as an output or not (repeatable)
-  mintd data import <name> --all          every output in the product's
-                                          data_products.outputs; a tracked
-                                          folder no output declares is left out
-
-To get the producer's whole project, code and data, use `mintd data clone`.""",
-    )
-    p_import.add_argument(
-        "name",
-        help="Registered data product name (the catalog key) — the same "
-             "identifier for import and for --bump",
-    )
-    p_import.add_argument(
-        "--bump", action="store_true",
-        help="Re-pin an existing import to the producer's HEAD; selects the "
-             "import with the same name/--path pair a plain import uses",
-    )
-    p_import.add_argument(
-        "--path", dest="import_path", action="append", default=[], metavar="PATH",
-        help="Import only this path — any file or directory the producer tracks, "
-             "declared in data_products.outputs or not (repeatable). Default: the "
-             "primary output.",
-    )
-    p_import.add_argument(
-        "--rev", help="Producer commit/tag/branch to import at (default: HEAD)"
-    )
-    p_import.add_argument(
-        "--all", dest="all_outputs", action="store_true",
-        help="Import every tracked output of the product",
-    )
-    p_import.add_argument(
-        "--force", action="store_true",
-        help="Overwrite an existing import of the same output",
-    )
-    p_import.add_argument(
-        "--dest-root", type=Path, default=Path("data/imports"), dest="dest_root",
-        help="Directory imports land under (default: data/imports)",
-    )
-    p_import.add_argument("--jobs", type=int, help="DVC parallelism")
-    p_import.add_argument(
-        "--timeout", type=float, default=None,
-        help="Wall-clock cap in seconds for the import (default: unbounded)",
-    )
-    p_import.add_argument(
-        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
-        help="Append an arg to the underlying `dvc` invocation. "
-             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
-             "(repeatable; ignored on fast-sync code paths).",
-    )
-    p_import.set_defaults(_handler=_handle_data_import, _parser=p_import)
+    _add_import_parser(p_data_sub, "mintd data ")
 
     p_pull = p_data_sub.add_parser("pull", help="Pull DVC data")
     p_pull.add_argument(
@@ -571,46 +645,7 @@ To get the producer's whole project, code and data, use `mintd data clone`.""",
     )
     p_pull.set_defaults(_handler=_handle_data_pull)
 
-    p_clone = p_data_sub.add_parser(
-        "clone",
-        help="Clone a published data product (registry lookup + git clone + dvc pull)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""what each form brings:
-  mintd data clone <name>            a full git clone of the producer's repo,
-                                     with every DVC-tracked output pulled
-  mintd data clone <name> --primary  the same clone, with only the primary
-                                     output pulled; --path pulls only declared
-                                     outputs
-
-To bring only a product's data into your project, use `mintd data import`.""",
-    )
-    p_clone.add_argument("name", help="Registered data product name")
-    p_clone.add_argument(
-        "--dest", type=Path,
-        help="Destination path (default: ./<type>_<name>)",
-    )
-    p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
-    clone_scope = p_clone.add_mutually_exclusive_group()
-    clone_scope.add_argument(
-        "--primary", dest="primary_only", action="store_true",
-        help="Pull only the primary data product (default: pull every tracked output)",
-    )
-    clone_scope.add_argument(
-        "--path", dest="paths", action="append", metavar="PATH",
-        help="Pull only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable). Default: pull every "
-             "tracked output.",
-    )
-    p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
-    p_clone.add_argument("--timeout", type=float, default=None,
-                         help="Wall-clock cap in seconds for the clone+pull (default: unbounded)")
-    p_clone.add_argument(
-        "--dvc-arg", action="append", default=[], dest="dvc_args", metavar="ARG",
-        help="Append an arg to the underlying `dvc` invocation. "
-             "Use `--dvc-arg=VALUE` form for hyphen-prefixed values "
-             "(repeatable; ignored on fast-sync code paths).",
-    )
-    p_clone.set_defaults(_handler=_handle_data_clone)
+    _add_clone_parser(p_data_sub, "mintd data ")
 
     p_push = p_data_sub.add_parser(
         "push", help="Upload DVC data, check every pinned S3 version, then commit and push the .dvc / dvc.lock files it rewrote",
@@ -1077,16 +1112,12 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     # `dvc pull failed (exit 253): ERROR: you are not inside of a DVC
     # repository` — they're confusing `pull` (refresh own data) with
     # `import` (declare and fetch from registry).
-    project_path = args.path.resolve()
-    if not (project_path / ".dvc").is_dir():
-        name_hint = args.targets[0] if args.targets else "<name>"
-        print(
-            f"error: not inside a DVC project (no .dvc/ at {project_path}).\n"
-            f"  mintd data pull operates on the current project's tracked data.\n"
-            f"  To grab a published product: mintd data clone {name_hint}",
-            file=sys.stderr,
-        )
-        return 1
+    name_hint = args.targets[0] if args.targets else "<name>"
+    project_path = _require_project(
+        args.path,
+        hint=f"mintd data pull refreshes this project's tracked data\n"
+             f"to get a published product: mintd clone {name_hint}",
+    )
     reporter = args._reporter
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
@@ -1431,17 +1462,30 @@ def _handle_share_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_project(project_path: Path, *, hint: str, or_above: bool = False) -> Path:
+    """Stop a verb that works on a project before it reads the catalog or runs
+    dvc, when ``project_path`` isn't one: a mintd project has ``.dvc/`` at its
+    root. Pull and the cache verbs take their ``--path`` as that root. With
+    ``or_above`` (import, which runs anywhere in a project, as dvc does), the
+    project may be any folder above, found by ``dvc_root`` as dvc finds it.
+    Returns the project's root."""
+    resolved = project_path.resolve()
+    root = dvc_root(resolved) if or_above else resolved
+    if not (root / ".dvc").is_dir():
+        where = f"{resolved} or above" if or_above else str(resolved)
+        raise MintdError(f"not inside a mintd project (no .dvc/ at {where})", hint=hint)
+    return root
+
+
 def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any]:
     """Shared preflight for the three cache verbs: project probe + config +
     boto3-backed factory. Returns ``(reporter, project_path, config, factory)``."""
     reporter = args._reporter
-    project_path = args.path.resolve()
-    if not (project_path / ".dvc").is_dir():
-        raise MintdError(
-            f"not inside a mintd project (no .dvc/ at {project_path})",
-            hint="the repo file cache (S3) lives inside a project's own bucket "
-                 "prefix — cd into the project; for ad-hoc handoffs use mintd share put",
-        )
+    project_path = _require_project(
+        args.path,
+        hint="the repo file cache (S3) lives in a project's own bucket prefix\ncd into the project\n"
+             "for an ad-hoc handoff: mintd share put",
+    )
     config = Config.load()
     factory = _resolve_cache_ops(config)
     if factory is None:
@@ -2048,6 +2092,15 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         args._parser.error("--bump cannot be combined with --rev or --all")
     if args.bump and len(args.import_path) > 1:
         args._parser.error("--bump takes at most one --path")
+    # Import adds a product to the project it runs in, from any folder inside
+    # it (it has no --path), so outside one it stops here, before the catalog
+    # lookup or any dvc call. It still runs from ".", as before.
+    _require_project(
+        Path("."),
+        or_above=True,
+        hint=f"mintd import adds a product to a project\nto get the whole product: mintd clone {args.name}\n"
+             f"to start a project: mintd init",
+    )
 
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()
@@ -2728,8 +2781,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
     except PublishBlocked as exc:
         reporter.error(str(exc))
         for f in exc.findings[:5]:
-            src = f.source or "<project>"
-            reporter.info(f"  [{f.severity}] {src}: {f.message}")
+            reporter.info(f"  [{f.severity}] {f.location}: {f.message}")
             if f.hint:
                 reporter.info(f"    💡 {f.hint}")
         if len(exc.findings) > 5:
@@ -2946,8 +2998,7 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
     else:
         for f in findings:
             prefix = _resolve_prefix(f.kind)
-            loc = f.source if f.source else "<project>"
-            print(strip_userinfo(f"{prefix} [{f.severity}] {loc}: {f.message}"))
+            print(strip_userinfo(f"{prefix} [{f.severity}] {f.location}: {f.message}"))
             if f.hint:
                 print(strip_userinfo(f"    💡 {f.hint}"))
         if not findings:

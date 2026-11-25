@@ -715,6 +715,33 @@ def test_a_renamed_full_name_stays_bumpable(tmp_path: Path) -> None:
     assert result.changed is True
 
 
+def test_an_entry_with_a_blank_github_url_stays_bumpable(tmp_path: Path) -> None:
+    """A blank `repository.github_url` is no ownership evidence, as a missing
+    one is: it was compared as the owner, so bump refused with "imports
+    https://…, not ; refusing to overwrite another product's import".
+
+    Mutation: keep the blank -> UnknownProductPath."""
+    fake = _FakeDvcOps()
+    dvc_path = _stage_namespaced(
+        tmp_path, name="final", producer_path="data/final/"
+    )
+    client = InMemoryCatalogClient()
+    meta = Metadata.model_validate_json(MINIMAL.read_text(encoding="utf-8"))
+    blank = meta.repository.model_copy(update={"github_url": ""})
+    client.register(meta.model_copy(update={"repository": blank}))
+
+    def factory(repo: str) -> tuple[ProducerView, str]:
+        return _view_with_primary("data/final/"), HEAD_SHA
+
+    result = bump_import(
+        client, fake, project_path=tmp_path, name="test_project",
+        producer_view_factory=factory,
+        check_findings=[_drift_finding(dvc_path)],
+    )
+
+    assert result.changed is True
+
+
 def test_two_namespaces_that_could_be_the_name_refuse_to_guess(tmp_path: Path) -> None:
     """Picking the wrong folder re-pins ANOTHER product, and `_require_owner`
     cannot catch it when there is no entry left to compare a URL against."""

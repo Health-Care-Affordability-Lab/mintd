@@ -873,9 +873,12 @@ def test_has_commit_reads_an_unborn_branch_whose_name_prefixes_another(tmp_path:
 def _gh_state_cached_before_the_test() -> None:
     """What an earlier test on this worker could leave: gh read as missing, and a
     producer's refusal. Module-scoped, so pytest sets it up before conftest's
-    per-test fixtures, whatever ran before."""
+    per-test fixtures, whatever ran before. It starts from empty caches: a value an
+    earlier test on this worker left there would otherwise be read instead."""
     from mintd import _registry_git_ops
+    from tests._harness.access import clear_access_caches
 
+    clear_access_caches()
     path = os.environ.get("PATH", "")
     os.environ["PATH"] = ""  # no gh
     try:
