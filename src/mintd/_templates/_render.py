@@ -341,10 +341,6 @@ def render_scaffold(
         _write_file(out_path, template_name, context)
         written.append(out_path)
 
-        # Enclave shell scripts must be executable for the legacy workflow.
-        if rel_path.startswith("scripts/") and rel_path.endswith(".sh"):
-            out_path.chmod(0o755)
-
     return written
 
 

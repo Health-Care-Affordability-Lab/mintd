@@ -5,8 +5,10 @@ Md5-keyed support is deferred for v1.
 """
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, List, Optional
 from ._s3 import ClientError, create_client as _create_s3_client
+from ._paths import inside
 from .errors import MintdError
 
 @dataclass(frozen=True)
@@ -34,12 +36,11 @@ class BucketNotFound(S3ListingError):
 class BucketAccessError(S3ListingError):
     hint = "check AWS credentials (aws configure list / aws_profile_name)"
 
-_SUB_PATH_FORBIDDEN = ("..", "\\")
-
 def _normalise_sub_path(sub_path: Optional[str]) -> str:
     if sub_path is None:
         return ""
-    if sub_path.startswith("/") or any(token in sub_path for token in _SUB_PATH_FORBIDDEN):
+    # Any `..`, even inside a name, as before; a leading `/`, a `\` or a drive: a recorded path that isn't inside.
+    if ".." in sub_path or inside(Path("."), sub_path, read="recorded", root_ok=True) is None:
         raise ValueError(f"invalid sub_path: {sub_path!r}")
     return sub_path.strip("/") + "/" if sub_path.strip("/") else ""
 

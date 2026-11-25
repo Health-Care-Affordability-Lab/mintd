@@ -520,7 +520,7 @@ def _normalise_or_share_error(sub_path: str | None) -> str:
     except ValueError as exc:
         raise ShareError(
             f"path escapes share/<user>/: {exc}",
-            hint="use a relative sub-path without '..', '\\', or a leading '/'",
+            hint="use a relative sub-path: no '..', '\\', leading '/' or drive (c:)",
         ) from exc
 
 

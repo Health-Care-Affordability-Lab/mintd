@@ -56,7 +56,10 @@ def dvc_root(start: Path, *, within: Path | None = None) -> Path:
     repository; dvc's doesn't. With ``within``, the walk never goes above it:
     ``check --staged`` stops at the git top level, since a commit can't stage
     files above it. ``start`` when there is none."""
+    from ._paths import inside
+
     return next(
-        (p for p in (start, *start.parents) if (within is None or p.is_relative_to(within)) and (p / ".dvc").is_dir()),
+        (p for p in (start, *start.parents)
+         if (within is None or inside(within, p, read="lexical", root_ok=True) is not None) and (p / ".dvc").is_dir()),
         start,
     )

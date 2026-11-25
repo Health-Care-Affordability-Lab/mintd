@@ -1,0 +1,1 @@
+-16: the callers outside the DVC readers ask _paths.inside, and their own checks are gone
