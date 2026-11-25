@@ -103,7 +103,7 @@ def _config_dvc_refuses(proj: Path, how: str) -> tuple[str, str]:
     cfg.write_text(text.replace("version_aware = true", line), encoding="utf-8")
     return (f"the DVC remote {REMOTE} sets {key} to {value!r} in .dvc/config, which dvc reads as neither true nor "
             "false, so dvc refuses the config in any clone of the project",
-            f"set {key} to true or false in .dvc/config and commit it; a clone doesn't carry .dvc/config.local")
+            f"set {key} to true or false in .dvc/config and commit it")
 
 
 def _errors(findings) -> list[tuple[str, str, str]]:

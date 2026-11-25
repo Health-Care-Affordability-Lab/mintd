@@ -302,8 +302,7 @@ class VersionAwareRefused(MintdError):
         super().__init__(
             f"the DVC remote {remote} sets {key} to {value!r} in {where}, which dvc reads as neither true nor false, "
             f"so dvc refuses the config {'in any clone of the project' if committed else 'on this machine'}",
-            hint=(f"set {key} to true or false in .dvc/config and commit it; a clone doesn't carry .dvc/config.local"
-                  if committed else f"set {key} to true or false in {where}"),
+            hint=f"set {key} to true or false in {where}" + (" and commit it" if committed else ""),
         )
 
 
