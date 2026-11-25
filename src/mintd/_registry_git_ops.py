@@ -594,6 +594,7 @@ class RegistryGitOps(Protocol):
         *,
         shallow: bool = True,
         branch: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None: ...
     def fetch(self, repo_dir: Path) -> None: ...
     def reset_hard(self, repo_dir: Path, ref: str) -> None: ...
@@ -614,6 +615,7 @@ class RegistryGitOps(Protocol):
     def uncommitted_pointers(self, work_dir: Path) -> list[str]: ...
     def uncommitted_files(self, work_dir: Path) -> list[str]: ...
     def current_commit(self, work_dir: Path) -> str: ...
+    def head_commit(self, work_dir: Path) -> tuple[str, str]: ...
     def repo_toplevel(self, work_dir: Path) -> Path: ...
     def tracked_changes(self, work_dir: Path) -> list[tuple[str, str]]: ...
     def head_text(self, work_dir: Path, path: str) -> str | None: ...
@@ -681,7 +683,9 @@ class SubprocessRegistryGitOps:
         *,
         shallow: bool = True,
         branch: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
+        # ``env`` is merged over ``git_env()`` (GIT_LFS_SKIP_SMUDGE, say).
         # Slice 25: clone uses run_streaming so git's --progress output
         # reaches the terminal live. run_streaming reads chunks (not lines)
         # so \r-based progress overwrites correctly in place — single
@@ -710,7 +714,7 @@ class SubprocessRegistryGitOps:
         try:
             r = run_streaming(
                 argv,
-                env=git_env(),
+                env={**git_env(), **(env or {})},
                 wall_timeout=wall_timeout,
                 reporter=self._reporter,
             )
@@ -936,6 +940,11 @@ class SubprocessRegistryGitOps:
 
     def current_commit(self, work_dir: Path) -> str:
         return self._git(["rev-parse", "--short=7", "HEAD"], cwd=work_dir).strip()
+
+    def head_commit(self, work_dir: Path) -> tuple[str, str]:
+        """HEAD's full sha and its committer date (ISO 8601)."""
+        sha, _, date = self._git(["log", "-1", "--format=%H%x00%cI"], cwd=work_dir).strip().partition("\0")
+        return sha, date
 
     def repo_toplevel(self, work_dir: Path) -> Path:
         """The top level of the repository ``work_dir`` is in."""

@@ -20,8 +20,12 @@ from .model import Metadata
 
 def serialize(metadata: Metadata) -> str:
     """Emit `metadata` as catalog yaml text."""
-    entry = metadata.to_catalog_entry()
-    return yaml.safe_dump(entry.model_dump(mode="json"), sort_keys=False, default_flow_style=False)
+    return dump(metadata.to_catalog_entry().model_dump(mode="json"))
+
+
+def dump(entry: dict[str, object]) -> str:
+    """An entry's plain data as catalog yaml text: one format for every writer."""
+    return yaml.safe_dump(entry, sort_keys=False, default_flow_style=False)
 
 
 def deserialize(yaml_text: str, *, source: object = None) -> CatalogEntry:
