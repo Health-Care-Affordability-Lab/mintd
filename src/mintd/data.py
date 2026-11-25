@@ -473,6 +473,7 @@ def _require_deliverable(
                 f"{access}, then {retry}",
             ) from exc
         storage = inspect_storage(tree)
+        # `storage.dvc_refused` can't be set here: dvc import refuses such a producer's config first.
         verdict = delivery(
             tree, path, storage.dvc_remote_name or "", version_aware=storage.dvc_version_aware
         )
