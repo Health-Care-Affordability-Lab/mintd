@@ -341,10 +341,21 @@ case "$*" in
     echo "gh: No commit found for SHA: v1.2.3 (HTTP 422)" >&2; exit 1 ;;
   # The listing as `gh api --paginate --jq` prints it: one line per match, page
   # after page. Without --paginate only the first page comes back.
-  "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" "$PAGE2" ;;
+  # A new draft shows in the listing only after $LAG listings, as GitHub's list can lag a write.
+  "api --paginate "*) [ "$LIST_FAIL" = 1 ] && exit 1
+    if [ -s "$LAGGED" ]; then
+      n=$(cat "$LAGGED")
+      if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$LAGGED"; else cat "$NEW" >> "$PAGE1"; : > "$LAGGED"; fi
+    fi
+    cat "$PAGE1" "$PAGE2" ;;
   "api "*) [ "$LIST_FAIL" = 1 ] && exit 1; cat "$PAGE1" ;;
   "release view"*"--json assets"*) [ "$ASSETS_FAIL" = 1 ] && exit 1; cat "$HAVE" ;;
-  "release create"*) [ "$UNLISTED" = 1 ] || echo "999 true true $GITHUB_SHA https://github.com/o/r/releases/tag/untagged-1" >> "$PAGE1" ;;
+  # Real gh prints the new release's URL. $LISTED_URL lists another release in its place.
+  "release create"*)
+    echo "https://github.com/o/r/releases/tag/untagged-1"
+    [ "$UNLISTED" = 1 ] || {
+      echo "999 true true $GITHUB_SHA ${LISTED_URL:-https://github.com/o/r/releases/tag/untagged-1}" > "$NEW"
+      echo "${LAG:-0}" > "$LAGGED"; } ;;
   # Publishing makes the tag, on the draft's commit unless $LANDS_ON says otherwise.
   "release edit"*"--draft=false"*) echo "${LANDS_ON:-$GITHUB_SHA}" > "$TAG_AT" ;;
   "release upload"*)
@@ -393,6 +404,11 @@ _COMPLETE = {"a.whl": _SAME, "b.txt": _SAME}
         ("an upload fails", ([], []), {}, "", True, ["a.whl"], False, ""),
         ("an upload lands incomplete", ([], []), {}, "", True, _BOTH, False, "draft 999 has an incomplete upload of a.whl"),
         ("a new draft that isn't listed", ([], []), {}, "", True, [], False, "new draft isn't listed as its only release"),
+        # GitHub's list lags a new draft: the step waits while the list is empty.
+        ("a new draft listed two tries late", ([], []), {}, "", True, _BOTH, True, None),
+        # Never another release in its place: the one listed must be the draft this run made.
+        ("another release listed after the create", ([], []), {}, "", True, [], False,
+         "one listed release is https://github.com/o/r/releases/tag/untagged-2, not the draft this run made"),
         # Checked again seconds before publishing: publishing onto an existing tag would attach to its commit.
         ("the tag appears before the publish", ([_DRAFT], []), _COMPLETE, "def", False, [], False, "appeared since this run began"),
         # The tag is permanent once made: the run stops, and nothing after it runs.
@@ -421,7 +437,10 @@ def test_the_prerelease_publishes_only_a_complete_draft(
         lines = (f"{100 * i + j} {flags} https://github.com/o/r/releases/tag/v1.2.3\n" for j, flags in enumerate(page))
         (tmp_path / f"page{i}").write_text("".join(lines))
     env = {
-        **_stubs(tmp_path, gh=_STUB_GH_PUBLISH), "TAG": "v1.2.3", "GH_REPO": "o/r",
+        **_stubs(tmp_path, gh=_STUB_GH_PUBLISH, sleep='#!/bin/sh\necho "sleep $*" >> "$LOG"\n'),
+        "TAG": "v1.2.3", "GH_REPO": "o/r", "NEW": str(tmp_path / "new"), "LAGGED": str(tmp_path / "lagged"),
+        "LAG": "2" if case == "a new draft listed two tries late" else "0",
+        "LISTED_URL": "https://github.com/o/r/releases/tag/untagged-2" if case.startswith("another release") else "",
         "PAGE1": str(tmp_path / "page1"), "PAGE2": str(tmp_path / "page2"), "TAG_AT": str(tmp_path / "tag_at"),
         "LIST_FAIL": "1" if case == "the listing fails" else "0",
         "ASSETS_FAIL": "1" if case == "the file lookup fails" else "0",
@@ -442,6 +461,9 @@ def test_the_prerelease_publishes_only_a_complete_draft(
     if error:
         assert error in result.stdout
     assert any(line.startswith(_CREATE) for line in log) is created
+    # Waits only while a new draft isn't listed yet, five at most.
+    waits = {"a new draft listed two tries late": 2, "a new draft that isn't listed": 5}.get(case, 0)
+    assert [line for line in log if line.startswith("sleep")] == ["sleep 5"] * waits
     assert [line.rsplit("/", 1)[1] for line in log if line.startswith("gh release upload")] == uploaded
     # The one edit is the publish, after every upload and the final check; then only the tag's commit is read.
     edits = [i for i, line in enumerate(log) if line.startswith("gh release edit")]
