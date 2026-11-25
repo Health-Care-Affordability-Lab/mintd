@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -222,6 +223,31 @@ def test_init_refuses_a_symlinked_scaffold_directory(tmp_path: Path) -> None:
     assert list(shared_code.iterdir()) == [team_utils]
 
 
+def test_init_refuses_a_scaffold_directory_that_is_a_link_loop(tmp_path: Path) -> None:
+    """`code -> loop -> code`: Python 3.11's `resolve()` raised `RuntimeError`, a
+    traceback; 3.13's reads it as inside, and the write fails later. Refused up front,
+    as a link out of the project is.
+
+    Mutation: resolve the target without detecting the loop -> no refusal, red."""
+    work = tmp_path / "work"
+    work.mkdir()
+    try:
+        (work / "code").symlink_to(work / "loop", target_is_directory=True)
+        (work / "loop").symlink_to(work / "code", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"can't make a link here: {exc}")
+
+    with pytest.raises(InitDestinationExists, match="outside"):
+        init_project(
+            project_type="data",
+            name="cohort",
+            target_dir=work,
+            use_current_repo=True,
+            force=True,
+            ops=_FakeInitOps(),
+        )
+
+
 def test_init_code_type_ignores_a_readme(tmp_path: Path) -> None:
     """A code scaffold writes metadata.json and nothing else, so a README in
     the target is not a collision for it."""
@@ -245,7 +271,7 @@ def test_init_missing_bucket_writes_nothing(tmp_path: Path) -> None:
     survived and the rerun wedged on the destination guard.
     """
     fake = _FakeInitOps()
-    with pytest.raises(InitOpError, match="bucket not configured"):
+    with pytest.raises(InitOpError, match="storage_bucket_prefix is not set in "):
         init_project(
             project_type="data",
             name="my_proj",
@@ -258,6 +284,33 @@ def test_init_missing_bucket_writes_nothing(tmp_path: Path) -> None:
     assert not (tmp_path / "data_my_proj").exists()
     assert fake.git_calls == []
     assert fake.dvc_calls == []
+
+
+def test_a_missing_bucket_names_the_config_file_the_reader_uses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal named ~/.mintd/config.yaml, a file mintd never reads, so a user
+    who wrote the bucket there was refused again. It now names the file
+    Config.load reads, and the key: writing the key to that file is what clears it.
+
+    Mutations: any literal path in the message, or the hint's first two lines joined with "; " -> red."""
+    from mintd._config import Config
+
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "cfg"))
+    with pytest.raises(InitOpError) as excinfo:
+        init_project(project_type="data", name="my_proj", target_dir=tmp_path, classification="labonly",
+                     bucket=None, endpoint="", ops=_FakeInitOps())
+    named = tmp_path / "cfg" / "config.yaml"
+    assert str(excinfo.value) == f"storage_bucket_prefix is not set in {named}"
+    assert (excinfo.value.hint or "").splitlines() == [
+        "to set it: mintd config setup",
+        "or: mintd config setup --set storage_bucket_prefix=<bucket>",
+        "then rerun the same command",
+    ]
+
+    named.parent.mkdir()
+    named.write_text("storage_bucket_prefix: lab-bucket\n", encoding="utf-8")
+    assert Config.load().storage_bucket_prefix == "lab-bucket"
 
 
 def test_init_invalid_name_leaves_no_directory(tmp_path: Path) -> None:
@@ -817,7 +870,7 @@ def test_init_removes_sentinel_on_success(tmp_path: Path) -> None:
 def test_init_project_requires_bucket_when_classification_set(tmp_path: Path) -> None:
     from mintd._init_ops import InitOpError
     fake = _FakeInitOps()
-    with pytest.raises(InitOpError, match="bucket not configured"):
+    with pytest.raises(InitOpError, match="storage_bucket_prefix is not set in "):
         init_project(
             project_type="data",
             name="foo",
@@ -1450,6 +1503,85 @@ def test_prompt_classification_licensed_prompts_for_slug() -> None:
     )
     assert tier == "licensed"
     assert slug == "optum"
+
+
+@pytest.mark.parametrize("typed", ["", "3\n"], ids=["classification", "licensed-slug"])
+def test_end_of_input_at_a_prompt_is_one_plain_error(monkeypatch: pytest.MonkeyPatch, typed: str) -> None:
+    """Ctrl-D (or a closed stdin) at either prompt raised EOFError, a traceback.
+    Real input() on an empty stdin now stops with one line and a hint.
+
+    Mutation: let EOFError through -> red."""
+    import io
+
+    from mintd._init_ops import InitNonInteractive
+    from mintd.init import _prompt_classification
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(typed))
+    with pytest.raises(InitNonInteractive) as excinfo:
+        _prompt_classification(reporter=Reporter(), prompt_fn=input, isatty_fn=lambda: True)
+    assert str(excinfo.value) == "no answer given"
+    assert excinfo.value.hint == "run mintd init again and answer the prompt"
+
+
+@pytest.mark.parametrize("tty", [True, False], ids=["stderr-tty", "stderr-not-tty"])
+@pytest.mark.parametrize("mode", [{}, {"quiet": 1}, {"json_mode": True}], ids=["default", "quiet", "json"])
+def test_end_of_input_ends_the_prompts_line_in_every_output_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: dict, tty: bool,
+) -> None:
+    """A terminal echoes no newline for Ctrl-D, so the error printed on the
+    prompt's line; under -q or --json the reporter dropped the line end.
+    It is now written to stderr whenever stderr is a terminal.
+
+    Mutation: drop the line end, or send it through the reporter -> red."""
+    import io
+
+    from mintd._init_ops import InitNonInteractive
+    from mintd.init import _prompt_classification
+
+    class Stderr(io.StringIO):
+        def isatty(self) -> bool:
+            return tty
+
+    reporter = Reporter(**mode)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("sys.stderr", err := Stderr())
+    with pytest.raises(InitNonInteractive):
+        _prompt_classification(reporter=reporter, prompt_fn=input, isatty_fn=lambda: True)
+    assert err.getvalue() == ("\n" if tty else "")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="closes fd 0 in the child before exec, a POSIX call")
+def test_a_closed_stdin_is_the_non_interactive_error_not_a_traceback(tmp_path: Path) -> None:
+    """With stdin closed (`<&-`), sys.stdin is None, and the isatty defaults in
+    init.py and cli.py read it at import: init died with AttributeError.
+
+    Mutation: either default back to sys.stdin.isatty -> red."""
+    import os
+    import subprocess
+
+    r = subprocess.run([sys.executable, "-m", "mintd", "init", "data", "demo", "--path", str(tmp_path)],
+                       preexec_fn=lambda: os.close(0), capture_output=True, text=True, timeout=120)
+    assert (r.returncode, "Traceback" in r.stderr) == (1, False), r.stderr
+    assert "init is interactive; run from a terminal" in r.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_end_of_input_at_inits_prompt_exits_1_with_no_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Through the CLI: exit 1, the line and its hint, and nothing written."""
+    import io
+
+    from mintd import cli
+    from mintd.init import _prompt_classification
+
+    monkeypatch.setitem(_prompt_classification.__kwdefaults__, "isatty_fn", lambda: True)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert cli.main(["init", "data", "demo", "--path", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "error: no answer given" in err and "hint: run mintd init again and answer the prompt" in err, err
+    assert "Traceback" not in err
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_init_then_inspect_returns_initialized(tmp_path: Path) -> None:

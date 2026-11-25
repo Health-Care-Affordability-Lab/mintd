@@ -1099,17 +1099,12 @@ def _handle_init(args: argparse.Namespace) -> int:
         reporter=reporter,
     )
     # Render paths relative to cwd when possible so the user sees the subdir.
-    cwd = Path.cwd().resolve()
-    try:
-        rel = project_path.resolve().relative_to(cwd)
-    except ValueError:
-        rel = project_path
+    from ._paths import inside
+
+    cwd = Path.cwd()
+    rel = inside(cwd, project_path, read="follow", root_ok=True) or project_path
     for p in written:
-        try:
-            line = p.resolve().relative_to(cwd)
-        except ValueError:
-            line = p
-        print(f"created: {line}")
+        print(f"created: {inside(cwd, p, read='follow', root_ok=True) or p}")
     print("initialized: git")
     if args.project_type in {"data", "code", "project"}:
         print("initialized: dvc")
@@ -2032,6 +2027,8 @@ def _measure_clone_result(dest: Path) -> tuple[int, int]:
     .dvc/ holds the local cache: every pulled byte exists there AND as its
     workspace materialization, so counting both doubled the ✓-line's
     files/bytes (e.g. 37 GB of product reported as 74.3 GB)."""
+    from ._paths import rel as rel_to
+
     files = 0
     total = 0
     try:
@@ -2040,7 +2037,7 @@ def _measure_clone_result(dest: Path) -> tuple[int, int]:
                 continue
             # Skip clone metadata: .git internals and the .dvc dir
             # (cache/tmp/config) — neither is data product content.
-            parts = p.relative_to(dest).parts
+            parts = rel_to(dest, p).split("/")
             if ".git" in parts or ".dvc" in parts:
                 continue
             files += 1
@@ -2918,7 +2915,7 @@ def _render_publish_preview(reporter: Reporter, preview: PublishPreview) -> None
 def _prompt_publish_confirm(
     reporter: Reporter, 
     prompt_fn: Callable[[str], str] = input, 
-    isatty_fn: Callable[[], bool] = sys.stdin.isatty
+    isatty_fn: Callable[[], bool] = lambda: sys.stdin is not None and sys.stdin.isatty()  # None: stdin closed
 ) -> bool:
     if not isatty_fn():
         raise PublishNonInteractive("publish is interactive without --yes")

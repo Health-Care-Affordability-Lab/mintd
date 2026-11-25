@@ -216,7 +216,12 @@ def check_project(
     """
     findings = _producer_findings(path, git_ops=git_ops)
     if remote:
-        findings.extend(_check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile))
+        # The remote lane reads the config through the same readers: an error the
+        # offline check already said (a version_aware dvc refuses) isn't said twice.
+        # Matching on the message alone is one fact: remote-lane messages name their remote or pointer.
+        said = {f.message for f in findings if f.severity == "error"}
+        findings.extend(f for f in _check_remote(path, all_outs=all_outs, git_ops=git_ops, aws_profile=aws_profile)
+                        if not (f.severity == "error" and f.message in said))
     try:
         findings.extend(
             _consumer_findings(
@@ -338,6 +343,10 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                 hint=repair_hint(inspection),
             )
         )
+    if inspection.dvc_refused is not None:  # dvc refuses the config, so nothing here reads the remote as version-aware
+        findings.append(CheckFinding(severity="error", section="producer", kind="dvc_state_unreadable",
+                                     message=str(inspection.dvc_refused), hint=inspection.dvc_refused.hint,
+                                     source=inspection.dvc_config_path))
 
     if meta:
         findings.extend(_check_data_products_primary(meta, metadata_path))
@@ -530,9 +539,9 @@ def _unhashed_lock_deps(project_path: Path) -> list[CheckFinding]:
 
 
 _RAW_INPUT_HINT = (
-    "'mintd data add {path}' tracks it in DVC and the next 'mintd data push' uploads it; or have a stage write it, "
-    "like the scaffold's commented-out fetch stage. Whether raw files belong in lab storage (licence, size) is the "
-    "producer's call."
+    "to track it: mintd data add {path}\nthen mintd data push uploads it\n"
+    "or let a pipeline stage download it, like the scaffold's fetch stage\n"
+    "whether raw data belongs in lab storage (licence, size) is your call"
 )
 
 
@@ -630,7 +639,7 @@ def _untracked_pipeline_inputs(
                 if rel is None:
                     warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({where}) is outside the "
                          "project, so a fresh clone has it only if that path exists on its machine",
-                         "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                         "copy it into the project (e.g. data/raw/), and point the dep there\n"
                          + _RAW_INPUT_HINT.format(path="data/raw"))
                 else:
                     inputs.setdefault(rel, (yaml_rel, str(name)))
@@ -665,7 +674,7 @@ def _untracked_pipeline_inputs(
         if query == ".." or query.startswith("../"):
             warn("pipeline_input_untracked", yaml_rel, f"pipeline input {dep!r} ({yaml_rel} stage '{name}') is a "
                  "symlink to a path outside the project, so a fresh clone has it only if that path exists on its "
-                 "machine", "copy it into the project (e.g. data/raw/) and point the dep there; then "
+                 "machine", "copy it into the project (e.g. data/raw/), and point the dep there\n"
                  + _RAW_INPUT_HINT.format(path="data/raw"))
             continue
         if os.path.isdir(real):

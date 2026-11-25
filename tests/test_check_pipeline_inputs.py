@@ -77,6 +77,21 @@ def _put(proj: Path, rel: str, text: str = "x") -> None:
     (proj / rel).write_text(text, encoding="utf-8")
 
 
+RAW_HINT = [
+    "to track it: mintd data add data/raw",
+    "then mintd data push uploads it",
+    "or let a pipeline stage download it, like the scaffold's fetch stage",
+    "whether raw data belongs in lab storage (licence, size) is your call",
+]
+COPY_IN = "copy it into the project (e.g. data/raw/), and point the dep there"
+
+
+def _hint(proj: Path) -> list[str]:
+    """The lines of the one pipeline_input_untracked finding's hint."""
+    [hint] = [f.hint for f in check_project(proj) if f.kind == "pipeline_input_untracked"]
+    return hint.splitlines()
+
+
 def _found(proj: Path, **kw) -> list[tuple[str, str, str]]:
     return [(f.kind, f.severity, f.message) for f in check_project(proj, **kw)
             if f.kind in ("pipeline_input_untracked", "pipeline_input_unchecked")]
@@ -98,8 +113,7 @@ def test_a_raw_file_no_one_tracks_is_named(tmp_path: Path) -> None:
         "a fresh clone can't rerun the stage",
         proj / "dvc.yaml",
     )]
-    assert "mintd data add data/raw" in warned[0].hint
-    assert "producer's call" in warned[0].hint
+    assert warned[0].hint.splitlines() == RAW_HINT
 
 
 def test_it_is_a_warning_and_json_output_stays_clean(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -286,6 +300,7 @@ def test_an_input_outside_the_project_is_named(tmp_path: Path, stage: str, dep: 
     assert _found(proj) == [("pipeline_input_untracked", "warning",
                              f"pipeline input {dep!r} (dvc.yaml stage 's') is outside the project, so a fresh "
                              "clone has it only if that path exists on its machine")]
+    assert _hint(proj) == [COPY_IN, *RAW_HINT]
 
 
 @pytest.mark.parametrize("deps", ["3", "[3, {a: b}]"])
@@ -362,6 +377,7 @@ def test_a_dep_symlinked_outside_the_project_is_named(tmp_path: Path) -> None:
     assert _found(proj) == [("pipeline_input_untracked", "warning",
                              "pipeline input 'data/raw' (dvc.yaml stage 'ingest') is a symlink to a path outside the "
                              "project, so a fresh clone has it only if that path exists on its machine")]
+    assert _hint(proj) == [COPY_IN, *RAW_HINT]
 
 
 def test_a_dep_symlinked_inside_the_project_is_read_where_it_resolves(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ from typing import Any
 
 
 from ._dvc_state import abbreviate, dvc_cache_dir
+from ._paths import rel as _rel
 from .errors import MintdError
 from ._dvc_state import (
     default_remote_name, discover_all_outs, merged_remote, parse_s3_url, pipeline_files, read_dvc_config,
@@ -60,22 +61,20 @@ class PushRefused(MintdError):
         self.hint = hint
 
 
-def _version_aware(cfg: dict[str, str], name: str) -> bool:
-    """dvc's version-aware rule for the remote ``name``. A ``version_aware`` or
-    ``worktree`` that dvc reads as neither true nor false raises ``PushRefused``:
-    dvc refuses the whole config then, and reading it as "not version-aware"
-    would skip every check on the remote's pins."""
-    from ._storage_state import remote_is_version_aware
+def _version_aware(root: Path, cfg: dict[str, str], name: str) -> bool:
+    """dvc's version-aware rule for the remote ``name``, whose merged settings are
+    ``cfg``, read by the one reader (``_storage_state.remote_is_version_aware``). A
+    value dvc refuses stops push and ``check`` as ``PushRefused``, naming the file it
+    is in: reading it as "not version-aware" would skip every check on the remote's
+    pins."""
+    from ._storage_state import VersionAwareRefused, remote_is_version_aware
 
-    for key in ("version_aware", "worktree"):
-        value = cfg.get(key)
-        if value is not None and str(value).lower() not in ("true", "false"):  # dvc's Bool: lowercased, one of two
-            raise PushRefused(
-                f"the DVC remote {name} sets {key} to {value!r}, which dvc reads as neither true nor false, "
-                "so dvc refuses the config",
-                hint=f"set {key} to true or false in .dvc/config or .dvc/config.local",
-            )
-    return remote_is_version_aware(cfg.get)
+    try:
+        return remote_is_version_aware(cfg.get, name)
+    except VersionAwareRefused as exc:
+        if exc.key in read_dvc_config(root, "local")["remote"].get(remote_key(name), {}):
+            exc = VersionAwareRefused(name, exc.key, exc.value, where=".dvc/config.local")
+        raise PushRefused(str(exc), hint=exc.hint) from exc
 
 
 def default_for_pins(root: Path) -> str | None:
@@ -138,7 +137,7 @@ def pinned_remote(root: Path, name: str, tree: Path, dvc_files: list[str]) -> Pi
     carries its own access keys, or an out in ``dvc_files`` or the
     ``dvc.yaml`` (both read under ``tree``) names a remote of its own."""
     cfg = merged_remote(root, name)
-    if not _version_aware(cfg, name):
+    if not _version_aware(root, cfg, name):
         return None
     if any(cfg.get(k) for k in _CREDENTIAL_KEYS):
         raise PushRefused(
@@ -280,7 +279,7 @@ def prepare(
     name = remote_key(remote_arg) if remote_arg else default
     if name is None:
         return None
-    versioned = [r for r in {name, default} if r and _version_aware(merged_remote(root, r), r)]
+    versioned = [r for r in {name, default} if r and _version_aware(root, merged_remote(root, r), r)]
     if not versioned:
         return None
     if name != default:
@@ -382,7 +381,7 @@ def _lockfiles(root: Path) -> list[str]:
         dirnames[:] = [d for d in dirnames if d not in (".dvc", ".git")
                        and not os.path.isdir(os.path.join(dirpath, d, ".dvc"))]
         if "dvc.lock" in filenames:
-            found.append((Path(dirpath) / "dvc.lock").relative_to(root).as_posix())
+            found.append(_rel(root, Path(dirpath) / "dvc.lock"))
     return found
 
 

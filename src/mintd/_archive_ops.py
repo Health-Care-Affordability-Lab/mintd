@@ -9,9 +9,9 @@ outside the archive at both `pack` and `list_safe_members` time.
 
 from __future__ import annotations
 
-import os
 import tarfile
 from pathlib import Path
+from ._paths import inside
 from .errors import MintdError
 from typing import Protocol
 
@@ -45,15 +45,10 @@ class TarGzArchiveOps:
             raise ArchiveAlreadyExists(str(dest_archive))
         dest_archive.parent.mkdir(parents=True, exist_ok=True)
         # Pre-pack symlink guard. We refuse to bundle a symlink whose
-        # resolved target escapes `src_dir`. The `os.sep` suffix on the
-        # comparison prefix prevents sibling-directory false positives
-        # (e.g., `/tmp/a` vs `/tmp/ab`).
-        src_dir_abs = str(src_dir.resolve())
-        prefix = src_dir_abs + os.sep
+        # resolved target escapes `src_dir` (a link to `src_dir` itself is fine).
         for p in src_dir.rglob("*"):
             if p.is_symlink():
-                resolved = str(p.resolve())
-                if resolved != src_dir_abs and not resolved.startswith(prefix):
+                if inside(src_dir, p, read="follow", root_ok=True) is None:
                     raise UnsafeArchiveMember(
                         f"symlink {p} resolves outside src_dir"
                     )
@@ -72,9 +67,9 @@ class TarGzArchiveOps:
 def _validate_member_safe(member: tarfile.TarInfo) -> None:
     """Refuse absolute paths, `..` segments, and symlinks outside the archive."""
     name = member.name
-    if name.startswith("/") or ".." in Path(name).parts:
+    if inside(Path("."), name, read="recorded", root_ok=True, dotdot="refuse") is None:
         raise UnsafeArchiveMember(name)
     if member.issym() or member.islnk():
         link_target = member.linkname
-        if link_target.startswith("/") or ".." in Path(link_target).parts:
+        if inside(Path("."), link_target, read="recorded", root_ok=True, dotdot="refuse") is None:
             raise UnsafeArchiveMember(f"{name} -> {link_target}")

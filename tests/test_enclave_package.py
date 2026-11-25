@@ -660,3 +660,19 @@ def test_unsubscribed_product_is_not_packaged(tmp_path: Path) -> None:
     packed = "\n".join(fake.staged[-1])
     assert "aaaaaaa" in packed, "the surviving subscription must still ship"
     assert "bbbbbbb" not in packed, "the REVOKED product must not cross the gap"
+
+
+def test_pack_keeps_a_link_to_the_folder_itself(tmp_path: Path) -> None:
+    """A link in `src_dir` back to `src_dir` itself doesn't leave it, so pack
+    keeps it, as it always has.
+
+    Mutation: don't count the folder itself as inside -> refused, red."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "data.csv").write_text("x\n")
+    try:
+        os.symlink(str(src), str(src / "self"), target_is_directory=True)
+    except OSError as exc:  # Windows without the privilege to make links
+        pytest.skip(f"can't make a link here: {exc}")
+    TarGzArchiveOps().pack(src, tmp_path / "out.tar.gz")
+    assert (tmp_path / "out.tar.gz").exists()

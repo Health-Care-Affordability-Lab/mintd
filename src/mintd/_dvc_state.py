@@ -743,7 +743,9 @@ def _walk_pointers(
     push can name what it skipped. It doesn't apply ``.dvcignore``,
     ``core.no_scm``, or DVC's pruning of folders that are outputs.
     """
-    root = os.path.abspath(project_path)
+    # Resolved, as git's library opens the repository: a path asked in another spelling (macOS's /var for
+    # /private/var) would read from there as `../../var/...`, which a `.gitignore` line `var/` ignores.
+    root = os.path.realpath(project_path)
     scm: Any = _NothingIgnored()
     try:
         from scmrepo.exceptions import SCMError

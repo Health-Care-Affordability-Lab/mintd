@@ -16,9 +16,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+from ._config import _default_config_path
 from ._console import Reporter
 from .errors import MintdError
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
+from ._paths import inside
 from ._storage_state import SLUG_REGEX, compute_storage_prefix
 from ._templates import (
     InitNameInvalid,
@@ -50,24 +52,6 @@ class InitDestinationExists(MintdError):
     def __init__(self, msg: str, *, hint: str | None = None) -> None:
         super().__init__(msg)
         self.hint = hint
-
-
-def _escapes(project_path: Path, rel: str) -> bool:
-    """True if writing ``rel`` would land outside ``project_path``.
-
-    ``os.path.lexists`` catches a symlinked *leaf*, but a symlinked parent
-    directory (``code/ -> ../shared_code``) is transparent to it: mkdir is
-    satisfied by the link and write_text then follows it out of the project.
-    Resolving the whole path is what closes that.
-    """
-    try:
-        resolved = (project_path / rel).resolve()
-        resolved.relative_to(project_path.resolve())
-    except OSError:
-        return False
-    except ValueError:
-        return True
-    return False
 
 
 def _resuming(sentinel: Path, metadata_path: Path, full_name: str) -> bool:
@@ -103,7 +87,7 @@ def _prompt_classification(
     *,
     reporter: Reporter,
     prompt_fn: Callable[[str], str] = input,
-    isatty_fn: Callable[[], bool] = sys.stdin.isatty,
+    isatty_fn: Callable[[], bool] = lambda: sys.stdin is not None and sys.stdin.isatty(),  # None: stdin closed
 ) -> tuple[str, str | None]:
     """Interactive classification + slug prompt.
 
@@ -115,12 +99,20 @@ def _prompt_classification(
     if not isatty_fn():
         raise InitNonInteractive("init is interactive; run from a terminal")
 
+    def ask(text: str) -> str:
+        try:
+            return prompt_fn(text).strip()
+        except EOFError:  # Ctrl-D, or stdin closed
+            if sys.stderr is not None and sys.stderr.isatty():  # Ctrl-D echoes no newline; end the prompt's
+                sys.stderr.write("\n")  # line on the terminal, whatever the output mode (-q, --json)
+            raise InitNonInteractive("no answer given", hint="run mintd init again and answer the prompt") from None
+
     reporter.info("Choose a storage classification for this product:")
     for i, (_key, desc) in enumerate(_TIERS, 1):
         reporter.info(f"  {i}. {desc}")
 
     while True:
-        raw = prompt_fn("Choice [1-3]: ").strip()
+        raw = ask("Choice [1-3]: ")
         try:
             idx = int(raw)
         except ValueError:
@@ -134,7 +126,7 @@ def _prompt_classification(
     slug: str | None = None
     if tier == "licensed":
         while True:
-            slug = prompt_fn("Slug (licensor / DUA, e.g. 'optum'): ").strip()
+            slug = ask("Slug (licensor / DUA, e.g. 'optum'): ")
             if not slug:
                 reporter.warn("Slug is required for licensed tier.")
                 continue
@@ -180,8 +172,9 @@ def init_project(
         # the rollback boundary, so nothing was undone and the rerun then hit
         # the destination guard. Raised here it leaves nothing behind at all.
         raise InitOpError(
-            "bucket not configured in ~/.mintd/config.yaml; run "
-            "'mintd config setup' first, then rerun the same command"
+            f"storage_bucket_prefix is not set in {_default_config_path()}",
+            hint="to set it: mintd config setup\nor: mintd config setup --set storage_bucket_prefix=<bucket>\n"
+            "then rerun the same command",
         )
     # Validated once, above; re-bound as a plain str so the storage block
     # needs no second check. Truthy iff storage is wanted and configured.
@@ -215,13 +208,14 @@ def init_project(
 
     # Refused even under --force: --force authorizes overwriting files in
     # THIS project, never following a link out of it.
-    escaping = sorted(rel for rel in targets if _escapes(project_path, rel))
+    # Resolved whole: `lexists` catches a linked leaf, not a linked folder above it (`code/ -> ../shared_code`),
+    # which mkdir accepts and write_text follows out. A link loop reads as outside: refused, not a traceback.
+    escaping = sorted(r for r in targets if inside(project_path, project_path / r, read="follow", root_ok=True) is None)
     if escaping:
         raise InitDestinationExists(
             f"refusing to write outside {project_path} through a symlink:\n  "
             + "\n  ".join(escaping),
-            hint="a directory in the scaffold's path is a symlink; "
-            "replace it with a real directory",
+            hint="a directory in the scaffold's path is a symlink\nreplace it with a real directory",
         )
 
     if collisions and not force and not resuming:
@@ -271,7 +265,7 @@ def init_project(
     try:
         project_path.mkdir(parents=True, exist_ok=True)
         # unlink first, same reason as _write_file: the sentinel path is
-        # not a scaffold target, so _escapes never sees it, and
+        # not a scaffold target, so the link check above never sees it, and
         # write_text would follow a symlink there and truncate whatever
         # it points at.
         sentinel.unlink(missing_ok=True)
