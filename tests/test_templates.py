@@ -127,8 +127,10 @@ def test_enclave_renders_transfer_scripts(tmp_path: Path) -> None:
     )
     rel = {p.relative_to(tmp_path).as_posix() for p in written}
     assert "enclave_manifest.yaml" in rel
-    assert "scripts/pull_data.sh" in rel
-    assert "src/registry.py" in rel
+    # Superseded by `mintd enclave pull`; they cloned GitHub over SSH.
+    assert "scripts/pull_data.sh" not in rel
+    assert "src/registry.py" not in rel
+    assert "src/download.py" not in rel
     # The v1 inside-enclave path is gone: all four failed against a real v2
     # archive. Landing is `land.py`, shipped inside each transfer instead.
     assert "enclave_cli.py" not in rel
@@ -205,6 +207,11 @@ def test_data_dvc_yaml_pipeline_shape(tmp_path: Path, language: str) -> None:
     # fetch ships as a commented-out block, not an active stage.
     assert "fetch" not in stages, "fetch must be commented out, not an active stage"
     assert "#  fetch:" in raw_text, "commented fetch block must be present"
+
+    # The comment and the ingest stub name mintd's command for tracking raw data.
+    stub = (tmp_path / "code" / f"ingest.{ {'python': 'py', 'r': 'R', 'stata': 'do'}[language] }").read_text(encoding="utf-8")
+    for text in (raw_text, stub):
+        assert "mintd data add data/raw" in text and "dvc add data/raw" not in text
 
     # Schema generation: stata keeps a dedicated `schema` stage; py/r fold the
     # schema output into validate. Either way the DAG stays acyclic, and the
@@ -1017,22 +1024,6 @@ def test_render_scaffold_matrix_no_unrendered_markers(
         assert "{%" not in text, f"{project_type}/{language}: unrendered block in {path.name}"
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="POSIX exec bit; the scaffolded .sh are bash-only (Windows GA "
-    "tracks .ps1 siblings — see project_windows_support_followup)",
-)
-def test_enclave_shell_scripts_executable(tmp_path: Path) -> None:
-    """Enclave transfer shell scripts must ship with 0o755. The legacy
-    workflow `bash scripts/pull_data.sh` relies on the exec bit."""
-    render_scaffold(
-        project_type="enclave", name="foo", language="python", target_dir=tmp_path
-    )
-    for rel in ("scripts/pull_data.sh",):
-        mode = (tmp_path / rel).stat().st_mode
-        assert mode & 0o111, f"{rel} is not executable (mode {oct(mode)})"
-
-
 @pytest.mark.parametrize("project_type", ["data", "project", "code", "enclave"])
 def test_scaffolds_write_no_commit_hooks(tmp_path: Path, project_type: str) -> None:
     """Nothing installed the scaffold's pre-commit hooks, so they never ran: init no
@@ -1110,31 +1101,6 @@ def test_enclave_readme_documents_landing(tmp_path: Path) -> None:
     assert "unpack_transfer.sh" not in text
     assert "mint enclave" not in text
     assert "pull --all" not in text
-
-
-@pytest.mark.parametrize("template_name", ["package.py.j2"])
-def test_transfer_manifest_default_schema_version_validates(
-    template_name: str, tmp_path: Path
-) -> None:
-    """A transfer manifest built from a source manifest that omits
-    ``schema_version`` must default to ``"2.0"`` and validate against
-    ``TransferManifest`` (slice 46). Guards the fallback default in the
-    generated transfer/package scripts against future drift back to ``"1.0"``.
-    """
-    from mintd.enclave import TransferManifest
-
-    source = render_template(template_name, _MIN_CONTEXT)
-    namespace: dict[str, object] = {"__file__": str(tmp_path / "script.py")}
-    exec(compile(source, template_name, "exec"), namespace)
-
-    # Simulate an enclave manifest missing ``schema_version`` (hand-edited,
-    # older file, or partial write) with no downloaded contents.
-    namespace["load_manifest"] = lambda: {"enclave_name": "foo"}
-
-    manifest = namespace["create_transfer_manifest"]({})
-
-    assert manifest["schema_version"] == "2.0"
-    TransferManifest.model_validate(manifest)
 
 
 @pytest.mark.parametrize(

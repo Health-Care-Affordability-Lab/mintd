@@ -1103,7 +1103,9 @@ def data_push(
         except PointerCutShort as exc:  # a path target is found by reading every pointer
             from ._push_verify import PushRefused
 
-            pointer = Path(exc.pointer).resolve().relative_to(Path(project_path).resolve()).as_posix()
+            from ._paths import rel
+
+            pointer = rel(Path(project_path), Path(exc.pointer), read="follow")
             raise PushRefused(
                 f"nothing was written or pushed: {pointer} is cut short or damaged ({exc.detail}), and a push "
                 "naming a path reads every pointer to find what it names",
@@ -1452,18 +1454,19 @@ def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
     pointer, or the stage, and its .gitignore lines go; the data stays.
     Returns the outs it named that are still on disk, repo-relative, for the
     caller to name; never their contents."""
+    from ._paths import inside
+
+    wdir = ""
     try:
         if name.endswith(".dvc"):  # its out paths are relative to its folder
-            outs = [posixpath.join(posixpath.dirname(name), o.path) for o in parse_dvc_outs(project_path / name, "")]
+            wdir, outs = posixpath.dirname(name), [o.path for o in parse_dvc_outs(project_path / name, "")]
         else:  # a stage of the root dvc.yaml; dvc.lock's out paths are project-relative
             stage = name.removeprefix("dvc.yaml:")
             outs = [o.path for o in parse_dvc_lock_outs(project_path, "") if o.stage == stage]
     except (MintdError, OSError):  # a file dvc can't read (or a folder named x.dvc): dvc remove reports it
         outs = []
     dvc_ops.remove(name, cwd=project_path)
-    left = [posixpath.normpath(rel) for rel in outs]
-    # An out outside the project (`cache: false` allows ../x or /abs) is neither
-    # probed nor named. A lexical check, until the shared path check takes it over.
-    inside = [rel for rel in left if rel != ".." and not rel.startswith("../") and not Path(rel).is_absolute()
-              and not posixpath.isabs(rel)]
-    return [rel for rel in inside if (project_path / rel).exists()]
+    # An out outside the project (`cache: false` allows ../x or /abs) is neither probed nor named. Each is
+    # the file it names on this OS (lexical), so a POSIX name with a `\` or a `c:` folder stays named.
+    kept = [r for o in outs if (r := inside(project_path, project_path / wdir / o, read="lexical")) is not None]
+    return [rel for rel in kept if (project_path / rel).exists()]

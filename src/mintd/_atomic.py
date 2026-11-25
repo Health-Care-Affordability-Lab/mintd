@@ -149,11 +149,12 @@ def write_tree(root: Path, files: dict[str, str]) -> None:
     Text git gave (decoded with ``surrogateescape``) is written back as git's
     own bytes, so a file that isn't UTF-8 stays that way for its reader to
     refuse by name. Refuses a path that would land outside ``root``."""
+    from ._paths import inside
+
     root.mkdir(parents=True, exist_ok=True)
-    base = root.resolve()
     for rel, text in files.items():
         target = root / rel
-        if not target.resolve().is_relative_to(base):
+        if inside(root, target, read="follow", root_ok=True) is None:
             raise ValueError(f"{rel} is outside {root}")
         target.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write_text(target, text, newline="", errors="surrogateescape")

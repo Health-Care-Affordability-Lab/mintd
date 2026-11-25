@@ -61,3 +61,17 @@ def test_invalid_sub_path_rejected(s3):
             aws_profile_name=None,
             s3_client_factory=lambda cfg, prof: s3
         )
+
+
+@pytest.mark.parametrize("sub_path", ["c:dir/", "q:notes.txt", "a..b", "a\x00b"],
+                         ids=["drive", "drive-file", "dots-inside-a-name", "nul"])
+def test_a_drive_dots_or_a_nul_is_no_sub_path(sub_path):
+    """A first name Windows reads as a drive is outside, as for any recorded path;
+    `..` is refused anywhere, even inside a name, as before; a NUL is refused.
+
+    Mutations: drop the drive rule -> `c:dir/` passes, red; test `..` only as a
+    segment -> `a..b` passes, red."""
+    from mintd._s3_listing_ops import _normalise_sub_path
+
+    with pytest.raises(ValueError, match="invalid sub_path"):
+        _normalise_sub_path(sub_path)
