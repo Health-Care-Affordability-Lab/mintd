@@ -2918,7 +2918,7 @@ def _render_publish_preview(reporter: Reporter, preview: PublishPreview) -> None
 def _prompt_publish_confirm(
     reporter: Reporter, 
     prompt_fn: Callable[[str], str] = input, 
-    isatty_fn: Callable[[], bool] = sys.stdin.isatty
+    isatty_fn: Callable[[], bool] = lambda: sys.stdin is not None and sys.stdin.isatty()  # None: stdin closed
 ) -> bool:
     if not isatty_fn():
         raise PublishNonInteractive("publish is interactive without --yes")

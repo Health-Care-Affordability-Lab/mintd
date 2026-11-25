@@ -103,7 +103,7 @@ def _prompt_classification(
     *,
     reporter: Reporter,
     prompt_fn: Callable[[str], str] = input,
-    isatty_fn: Callable[[], bool] = sys.stdin.isatty,
+    isatty_fn: Callable[[], bool] = lambda: sys.stdin is not None and sys.stdin.isatty(),  # None: stdin closed
 ) -> tuple[str, str | None]:
     """Interactive classification + slug prompt.
 
@@ -119,7 +119,8 @@ def _prompt_classification(
         try:
             return prompt_fn(text).strip()
         except EOFError:  # Ctrl-D, or stdin closed
-            reporter.info("")  # a terminal echoes no newline for Ctrl-D: end the prompt's line
+            if sys.stderr is not None and sys.stderr.isatty():  # Ctrl-D echoes no newline; end the prompt's
+                sys.stderr.write("\n")  # line on the terminal, whatever the output mode (-q, --json)
             raise InitNonInteractive("no answer given", hint="run mintd init again and answer the prompt") from None
 
     reporter.info("Choose a storage classification for this product:")

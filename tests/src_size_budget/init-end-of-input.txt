@@ -1,1 +1,1 @@
-+6: init's prompts stop with one line and a hint when input ends, not a traceback
++7: init's prompts stop with one line and a hint when input ends or stdin is closed, not a traceback

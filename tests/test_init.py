@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -1468,6 +1469,49 @@ def test_end_of_input_at_a_prompt_is_one_plain_error(monkeypatch: pytest.MonkeyP
         _prompt_classification(reporter=Reporter(), prompt_fn=input, isatty_fn=lambda: True)
     assert str(excinfo.value) == "no answer given"
     assert excinfo.value.hint == "run mintd init again and answer the prompt"
+
+
+@pytest.mark.parametrize("tty", [True, False], ids=["stderr-tty", "stderr-not-tty"])
+@pytest.mark.parametrize("mode", [{}, {"quiet": 1}, {"json_mode": True}], ids=["default", "quiet", "json"])
+def test_end_of_input_ends_the_prompts_line_in_every_output_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: dict, tty: bool,
+) -> None:
+    """A terminal echoes no newline for Ctrl-D, so the error printed on the
+    prompt's line; under -q or --json the reporter dropped the line end.
+    It is now written to stderr whenever stderr is a terminal.
+
+    Mutation: drop the line end, or send it through the reporter -> red."""
+    import io
+
+    from mintd._init_ops import InitNonInteractive
+    from mintd.init import _prompt_classification
+
+    class Stderr(io.StringIO):
+        def isatty(self) -> bool:
+            return tty
+
+    reporter = Reporter(**mode)
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    monkeypatch.setattr("sys.stderr", err := Stderr())
+    with pytest.raises(InitNonInteractive):
+        _prompt_classification(reporter=reporter, prompt_fn=input, isatty_fn=lambda: True)
+    assert err.getvalue() == ("\n" if tty else "")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="closes fd 0 in the child before exec, a POSIX call")
+def test_a_closed_stdin_is_the_non_interactive_error_not_a_traceback(tmp_path: Path) -> None:
+    """With stdin closed (`<&-`), sys.stdin is None, and the isatty defaults in
+    init.py and cli.py read it at import: init died with AttributeError.
+
+    Mutation: either default back to sys.stdin.isatty -> red."""
+    import os
+    import subprocess
+
+    r = subprocess.run([sys.executable, "-m", "mintd", "init", "data", "demo", "--path", str(tmp_path)],
+                       preexec_fn=lambda: os.close(0), capture_output=True, text=True, timeout=120)
+    assert (r.returncode, "Traceback" in r.stderr) == (1, False), r.stderr
+    assert "init is interactive; run from a terminal" in r.stderr
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_end_of_input_at_inits_prompt_exits_1_with_no_traceback(
