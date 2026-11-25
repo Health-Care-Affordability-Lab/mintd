@@ -2842,7 +2842,7 @@ def _handle_publish(args: argparse.Namespace) -> int:
         for f in exc.findings[:5]:
             reporter.info(f"  [{f.severity}] {f.location}: {f.message}")
             if f.hint:
-                reporter.info(f"    💡 {f.hint}")
+                reporter.info(_finding_hint(f.hint))
         if len(exc.findings) > 5:
             reporter.info(f"  ... and {len(exc.findings) - 5} more")
         return 1
@@ -3039,6 +3039,11 @@ def _resolve_prefix(kind: str | None) -> str:
     return _KIND_PREFIX.get(kind, "·")
 
 
+def _finding_hint(hint: str) -> str:
+    """A finding's hint under it: the first line after the 💡, the rest aligned beneath."""
+    return "    💡 " + hint.replace("\n", "\n       ")
+
+
 def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
     if json_out:
         for f in findings:
@@ -3060,7 +3065,7 @@ def _render_findings(findings: list[CheckFinding], *, json_out: bool) -> int:
             prefix = _resolve_prefix(f.kind)
             print(strip_userinfo(f"{prefix} [{f.severity}] {f.location}: {f.message}"))
             if f.hint:
-                print(strip_userinfo(f"    💡 {f.hint}"))
+                print(strip_userinfo(_finding_hint(f.hint)))
         if not findings:
             print("no issues found")
         else:

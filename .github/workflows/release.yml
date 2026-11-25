@@ -1,35 +1,80 @@
 name: release
-# Turns a vX.Y.Z tag into a GitHub prerelease, then waits for the maintainer to
-# promote it. tag.yml starts this on each new tag: a tag pushed with GITHUB_TOKEN
-# starts no `push: tags` workflow, but a dispatch does. For a hotfix tag, run
-# `gh workflow run release.yml --ref vX.Y.Z.postN`. The runbook is RELEASING.md.
+# A release when the maintainer asks for one: Actions -> release -> Run workflow
+# on main (patch or minor), or on a hotfix/vX.Y.Z branch (vX.Y.Z.postN). It
+# tests and builds that commit, publishes it as a prerelease only once every
+# file is up (which makes its v tag), installs it from its own URL, and waits
+# for the maintainer's yes in the `release` environment before it becomes the
+# latest release. The runbook is RELEASING.md.
 #
 # The wheel is built once here, and that file is what the prerelease carries;
 # nothing is rebuilt at promotion. `releases/latest` skips prereleases, so
-# users get this tag only after the `promote` job is approved.
+# users get this version only after the `promote` job is approved.
 on:
   workflow_dispatch:
+    inputs:
+      bump:
+        description: "On main: patch or minor. Ignored on a hotfix/vX.Y.Z branch."
+        type: choice
+        options: [patch, minor]
+        default: patch
 permissions: {}
+# One release at a time: a second press waits until the first is approved,
+# rejected or fails, so two runs never claim one number.
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
+  version:
+    # The number, chosen once: a re-run of failed jobs keeps it.
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    env:
+      BUMP: ${{ inputs.bump }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0  # every tag, to find the latest version
+          persist-credentials: false
+      - name: Choose the version
+        id: version
+        run: |
+          set -euo pipefail
+          # Only main or a hotfix/vX.Y.Z branch, and only a commit after the
+          # latest tag on its line (scripts/release_version.py says why not).
+          tag=$(python3 scripts/release_version.py "$GITHUB_REF" "$GITHUB_SHA" "$BUMP")
+          # A tag that exists already is never reused or moved, even one this
+          # checkout doesn't have.
+          err=$(mktemp)
+          if gh api "repos/$GH_REPO/git/ref/tags/$tag" > /dev/null 2>"$err"; then
+            echo "::error::$tag already exists; a version is never reused"; exit 1
+          elif ! grep -q 'HTTP 404' "$err"; then
+            cat "$err" >&2; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "this run releases $GITHUB_SHA as $tag"
   test:
-    # CI on the exact tag being released.
-    if: github.ref_type == 'tag'
+    # CI on the exact commit being released.
+    needs: version
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
   build:
     # Read-only: the build runs the build backend fresh from PyPI
     # (setuptools-scm is not in the lock), so it never holds a write token.
-    needs: test
+    needs: [version, test]
     runs-on: ubuntu-26.04
     permissions:
       contents: read
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.version.outputs.tag }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          fetch-depth: 0  # setuptools-scm reads the version from the tag
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
@@ -43,6 +88,9 @@ jobs:
           set -euo pipefail
           # The tag is written into files users run, so it must be exactly this shape.
           [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$ ]] || { echo "::error::$TAG is not vX.Y.Z or vX.Y.Z.postN"; exit 1; }
+          # The tag is made only when the release is published, so the version
+          # is given to setuptools-scm, which would otherwise build a dev wheel.
+          export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_MINTD="${TAG#v}"
           # Outside the checkout, so the tree stays clean for setuptools-scm.
           # The lock pins setuptools for the build (setuptools-scm is not in it).
           uv export --locked --no-dev --no-emit-project --no-hashes -q -o "$RUNNER_TEMP/build.txt"
@@ -55,34 +103,21 @@ jobs:
           # a constraints file only limits versions, it installs nothing.
           uv export --locked --no-dev --no-emit-project --extra schema -q -o dist/constraints.txt
       - name: Stamp the install scripts
-        # Writes the tag into the release's own install.sh and install.ps1.
-        # Exactly one placeholder line each, or the build stops: an unstamped
-        # copy would install the newest release instead of this one.
-        run: |
-          python3 - "$TAG" <<'EOF'
-          import sys
-          tag = sys.argv[1]
-          for name, empty in (("install.sh", 'MINTD_TAG=""'), ("install.ps1", '$MintdTag = ""')):
-              with open(name, encoding="utf-8", newline="") as f:
-                  text = f.read()
-              line = "\n" + empty + "\n"
-              if text.count(line) != 1:
-                  sys.exit(f"{name}: the line {empty!r} must appear exactly once")
-              with open(f"dist/{name}", "w", encoding="utf-8", newline="") as f:
-                  f.write(text.replace(line, "\n" + empty.replace('""', f'"{tag}"') + "\n"))
-          EOF
+        # Writes the tag into the release's own install.sh and install.ps1, with
+        # the one stamper CI's install checks will use too.
+        run: python3 scripts/stamp_install_scripts.py "$TAG" --out dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
           path: dist/
           if-no-files-found: error
   prerelease:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-26.04
     permissions:
       contents: write
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.version.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -93,36 +128,112 @@ jobs:
       - name: Publish the prerelease
         run: |
           set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::dist/ is empty: there is nothing to release"; exit 1; }
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           notes="The release gate is running: $run_url. The \`evidence\` job replaces this note with its results."
-          # --verify-tag: never create a tag here.
-          if ! gh release view "$TAG" --json tagName > /dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --prerelease --latest=false --title "$TAG" --notes "$notes"
-          fi
-          # Only a prerelease is changed here; a promoted release never is.
-          [ "$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)" = true ] \
-            || { echo "::error::$TAG is not a prerelease; a promoted release is never changed"; exit 1; }
-          # A rerun can finish a release but never change one. Every file the
-          # release already has must be these same bytes, all checked before
-          # anything is uploaded; then only the missing files are uploaded.
-          have=$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.state) \(.digest)"')
-          for f in dist/*; do
-            line=$(awk -v n="${f##*/}" '$1 == n' <<< "$have")
-            [ -n "$line" ] || continue
-            read -r name state digest <<< "$line"
-            if [ "$state" != uploaded ] || [ "$digest" = null ]; then
-              echo "::error::$TAG has an incomplete upload of $name (RELEASING.md, A failed run)"; exit 1
-            elif [ "$digest" != "sha256:$(sha256sum "$f" | cut -d' ' -f1)" ]; then
-              echo "::error::$TAG already has a different $name; a release's files are never replaced"; exit 1
+          # Every release for the tag, drafts included: one line each, across
+          # every page. Captured with out=$(...), so a failed listing fails the step.
+          releases() {
+            gh api --paginate "repos/$GH_REPO/releases?per_page=100" \
+              --jq '.[] | select(.tag_name == env.TAG) | "\(.id) \(.draft) \(.prerelease) \(.target_commitish) \(.html_url)"'
+          }
+          # Sets $tagged to the commit the tag names, or to nothing when there is
+          # no tag yet (a 404 or 422). Anything else stops the step. gh prints an
+          # error's body on stdout, so stdout is read only when gh succeeded, and
+          # this runs outside $(...), where a failure would be ignored.
+          lookup_tag() {
+            local out err; out=$(mktemp); err=$(mktemp)
+            if gh api "repos/$GH_REPO/commits/refs/tags/$TAG" --jq .sha >"$out" 2>"$err"; then
+              tagged=$(cat "$out")
+              [[ $tagged =~ ^[0-9a-f]+$ ]] || { echo "::error::$TAG's commit read as '$tagged'"; exit 1; }
+            elif grep -qE 'HTTP (404|422)' "$err"; then
+              tagged=""
+            else
+              cat "$err" >&2; echo "::error::couldn't read which commit $TAG names (RELEASING.md, A failed run)"; exit 1
             fi
+          }
+          out=$(releases)
+          count=0
+          [ -z "$out" ] || count=$(grep -c '' <<< "$out")
+          if [ "$count" -gt 1 ]; then
+            echo "::error::several releases for $TAG: delete the stray drafts by id (RELEASING.md, A failed run)"
+            echo "$out"
+            exit 1
+          elif [ "$count" -eq 0 ]; then
+            # A draft until every file is up: a published release's files are
+            # final. Its tag is made at publish, on this commit.
+            gh release create "$TAG" --draft --prerelease --latest=false --target "$GITHUB_SHA" --title "$TAG" --notes "$notes"
+            out=$(releases)  # the new draft's id, for any stop below to name
+            [ -n "$out" ] && [ "$(grep -c '' <<< "$out")" -eq 1 ] \
+              || { echo "::error::$TAG's new draft isn't listed as its only release; re-run (RELEASING.md, A failed run)"; exit 1; }
+          fi
+          read -r id draft prerelease target _ <<< "$out"
+          # Every stop names which it is: a draft is deleted by its id and re-run;
+          # a published release is never changed.
+          what=$([ "$draft" = true ] && echo "draft $id" || echo "published release")
+          # A draft is reused only for this commit: another one's would become a
+          # permanent tag on the wrong commit.
+          if [ "$draft" = true ] && [ "$target" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG's $what targets $target, not this run's $GITHUB_SHA: delete it by its id and re-run (RELEASING.md, A failed run)"; exit 1
+          fi
+          if [ "$prerelease" != true ] && [ "$draft" = true ]; then
+            echo "::error::$TAG's $what is not a prerelease: delete it by its id and re-run (RELEASING.md, A failed run)"; exit 1
+          elif [ "$prerelease" != true ]; then
+            echo "::error::$TAG is not a prerelease; a promoted release is never changed"; exit 1
+          fi
+          # Every file the release has must be one of dist/*, fully uploaded,
+          # the same bytes.
+          check() {
+            have=$(gh release view "$TAG" --json assets --jq '.assets[] | "\(.name) \(.state) \(.digest)"')
+            while read -r name state digest; do
+              if [ -z "$name" ]; then
+                continue
+              elif [ ! -f "dist/$name" ]; then
+                echo "::error::$TAG's $what has $name, which this build didn't make (RELEASING.md, A failed run)"; exit 1
+              elif [ "$state" != uploaded ] || [ "$digest" = null ]; then
+                echo "::error::$TAG's $what has an incomplete upload of $name (RELEASING.md, A failed run)"; exit 1
+              elif [ "$digest" != "sha256:$(sha256sum "dist/$name" | cut -d' ' -f1)" ]; then
+                echo "::error::$TAG's $what already has a different $name; a release's files are never replaced (RELEASING.md, A failed run)"; exit 1
+              fi
+            done <<< "$have"
+          }
+          has() { awk -v n="${1##*/}" '$1 == n {found = 1} END {exit !found}' <<< "$have"; }
+          check
+          if [ "$draft" != true ]; then
+            # Published, by this run before a later step failed: it passes only
+            # on this commit with every file; it is never changed.
+            lookup_tag
+            [ "$tagged" = "$GITHUB_SHA" ] \
+              || { echo "::error::$TAG's published release is on another commit, not this run's $GITHUB_SHA (RELEASING.md, A failed run)"; exit 1; }
+            for f in "${files[@]}"; do
+              has "$f" || { echo "::error::$TAG's published release is missing ${f##*/}; a published release's files are never changed (RELEASING.md, A failed run)"; exit 1; }
+            done
+            exit 0
+          fi
+          for f in "${files[@]}"; do
+            has "$f" || gh release upload "$TAG" "$f"
           done
-          for f in dist/*; do
-            awk -v n="${f##*/}" '$1 == n {found = 1} END {exit !found}' <<< "$have" || gh release upload "$TAG" "$f"
+          # Publish only a draft that holds exactly dist/*, each file uploaded
+          # whole and the same bytes.
+          check
+          for f in "${files[@]}"; do
+            has "$f" || { echo "::error::$TAG's $what is still missing ${f##*/} (RELEASING.md, A failed run)"; exit 1; }
           done
+          # Seconds before publishing, the tag must still not exist: publishing
+          # onto an existing tag would attach this release to its old commit.
+          lookup_tag
+          [ -z "$tagged" ] || { echo "::error::$TAG appeared since this run began; a version is never reused (RELEASING.md, A failed run)"; exit 1; }
+          gh release edit "$TAG" --draft=false --prerelease --latest=false
+          # The tag is permanent now: it must name this commit, before anything else runs.
+          lookup_tag
+          [ "$tagged" = "$GITHUB_SHA" ] \
+            || { echo "::error::$TAG landed on ${tagged:-nothing}, not $GITHUB_SHA: the release stays an unpromoted prerelease and the next press takes the next number (RELEASING.md, A failed run)"; exit 1; }
   install:
     # A real clean install with this release's own scripts, from its URL, on
     # each system; then the stories against the Linux install.
-    needs: prerelease
+    needs: [version, prerelease]
     strategy:
       fail-fast: false
       matrix:
@@ -134,7 +245,7 @@ jobs:
     permissions:
       contents: read
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.version.outputs.tag }}
       FLAGS: ${{ matrix.flags }}
     steps:
       - name: Install with the release's install.sh
@@ -190,17 +301,22 @@ jobs:
           uv run --no-sync pytest tests/stories -q -rxX
   evidence:
     # Writes the gate's results on the prerelease, pass or fail.
-    needs: [prerelease, install]
+    needs: [version, prerelease, install]
     if: always() && needs.prerelease.result == 'success'
     runs-on: ubuntu-26.04
     permissions:
       contents: write
+      pull-requests: read  # the merged PRs' bodies, for the changelog
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.version.outputs.tag }}
       INSTALL: ${{ needs.install.result }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0  # the merges since the last promoted release
+          persist-credentials: false
       - name: Write the evidence on the release notes
         run: |
           set -euo pipefail
@@ -208,24 +324,42 @@ jobs:
             || { echo "::error::$TAG is not a prerelease; a promoted release is never changed"; exit 1; }
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           install_line="- clean install with this release's install.sh and install.ps1 on Linux (--with-schema), macOS and Windows PowerShell 5.1 (plain, then -WithSchema), and the story tests against the Linux install: $INSTALL"
+          # The changelog, from the PRs merged since the last promoted release
+          # (RELEASING.md). A failure says so in the notes rather than leaving it
+          # out, and a re-run of this job writes it again.
+          failed="(The changelog could not be written: see this run's evidence job.)"
+          changelog() {
+            changes=$(python3 scripts/release_notes.py "$TAG") || {
+              echo "::warning::the changelog could not be written; its error is above"
+              changes=$failed
+            }
+          }
           body=$(gh release view "$TAG" --json body --jq .body)
           if [[ $body == "The release gate is running"* ]]; then
-            notes="commit: $GITHUB_SHA
+            changelog
+            notes="$changes
+
+          ---
+
+          commit: $GITHUB_SHA
           gate run: $run_url
 
           - CI (test.yml) on this tag: passed
           $install_line
-          - live tier: run by hand on the lab Linux box when the change touches download or push paths; result: not recorded yet
-          - canary: run by hand (RELEASING.md); result: not recorded yet
 
           A prerelease: \`releases/latest\` skips it. It becomes the latest release only when the maintainer approves this run's \`release\` environment (RELEASING.md)."
           else
-            # A rerun: keep what people have written; replace only this line.
+            # A rerun: keep what people have written; replace only the install
+            # line, and a changelog that couldn't be written last time.
             notes=$(awk -v line="$install_line" '/^- clean install with /{print line; next} {print}' <<< "$body")
+            if [[ $notes == "$failed"* ]]; then
+              changelog
+              notes="$changes${notes#"$failed"}"
+            fi
           fi
           gh release edit "$TAG" --notes "$notes"
   promote:
-    needs: [install, evidence]
+    needs: [version, install, evidence]
     runs-on: ubuntu-26.04
     # Waits here until the maintainer approves (RELEASING.md).
     environment: release
@@ -233,7 +367,7 @@ jobs:
       contents: write
       actions: read  # to read the environment's protection rules
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: ${{ needs.version.outputs.tag }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
@@ -267,6 +401,10 @@ jobs:
           if [ -n "$latest" ] && [ "$(printf '%s\n' "$latest" "$TAG" | sort -V | tail -n1)" != "$TAG" ]; then
             echo "::error::$latest is already latest and newer than $TAG; to roll back, see RELEASING.md"; exit 1
           fi
-          gh release edit "$TAG" --prerelease=false --latest
+          # The notes' "A prerelease: …" line is true only until now: it goes in
+          # the same edit. A failed read stops here, so the notes are never blanked.
+          body=$(gh release view "$TAG" --json body --jq .body)
+          notes=$(grep -v '^A prerelease: ' <<< "$body" || true)
+          gh release edit "$TAG" --prerelease=false --latest --notes "$notes"
           [ "$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name)" = "$TAG" ]
           echo "$TAG is now the latest release"

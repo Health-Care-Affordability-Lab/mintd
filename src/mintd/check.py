@@ -397,7 +397,7 @@ def _producer_findings(project_path: Path, git_ops: RegistryGitOps | None = None
                         message=u.message(),
                         source=project_path / u.pointer,
                         kind="dvc_folder_unlisted",
-                        hint=u.hint() + ", then re-run 'mintd check'.",
+                        hint=u.hint() + "\nthen check again: mintd check",
                     )
                     for u in unlisted
                 )
