@@ -637,6 +637,32 @@ def test_pull_check_and_push_all_skip_a_pointer_gitignore_excludes(tmp_path: Pat
     assert fast.calls[0].targets == ["data/final.dvc"]
 
 
+def test_a_project_reached_through_a_link_finds_its_pointers(tmp_path: Path) -> None:
+    """On macOS the temp folder is under `/var`, a link to `/private/var`. git's
+    library opens the repository at its resolved path, so a pointer asked about
+    by its `/var/...` path reads as `../../var/...` from there, and the scaffold's
+    `.gitignore`, which ignores `var/`, ignored every pointer: `check` called each
+    declared output untracked. A link named `var` stands in for `/var` here, on
+    any OS.
+
+    Mutation: walk the project as spelled, not resolved -> the pointer reads as
+    ignored and isn't found, red."""
+    from mintd._dvc_state import discover_all_outs
+    from tests._harness.git import _git
+
+    real = tmp_path / "private" / "proj"
+    real.mkdir(parents=True)
+    _git(["init", "-q", "-b", "main"], cwd=real)
+    (real / ".gitignore").write_text("var/\n")  # as the scaffold's does
+    write_pointer(real, "data/final", files={"a.csv": "v-1"})
+    try:
+        (tmp_path / "var").symlink_to(tmp_path / "private", target_is_directory=True)
+    except OSError as exc:  # Windows without the privilege to make links
+        pytest.skip(f"can't make a link here: {exc}")
+    assert discover_all_outs(real) == ["data/final.dvc"]
+    assert discover_all_outs(tmp_path / "var" / "proj") == ["data/final.dvc"]
+
+
 def test_lock_outs_carry_their_stage(tracked: Path) -> None:
     from mintd._dvc_state import parse_dvc_lock_outs
     assert {o.target: o.stage for o in parse_dvc_lock_outs(tracked, REMOTE)} == {
