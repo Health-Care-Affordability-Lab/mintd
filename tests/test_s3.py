@@ -233,6 +233,73 @@ def test_data_pull_stops_on_a_missing_named_profile_and_never_falls_back_to_dvc(
     assert "dvc pull" not in err
 
 
+@pytest.mark.parametrize(("keys", "message"), [
+    pytest.param("", "no AWS credentials were found", id="none"),
+    pytest.param("[default]\naws_access_key_id = AKIABLANK\naws_secret_access_key =\n",
+                 "the AWS credentials from shared-credentials-file have an empty access key or secret", id="a-blank-secret"),
+])
+def test_every_s3_client_is_refused_without_usable_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keys: str, message: str,
+) -> None:
+    """create_client is the one place every S3 command connects through: it loads the
+    credentials first, so push, clone, import, cache, share and check --remote stop there,
+    with config validate's message and hint (a pull then falls back to dvc: below).
+    Mutation: create_client back to profile_session alone -> no refusal, red."""
+    from mintd import _s3
+
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+                "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "credentials").write_text(keys)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")  # off EC2 the chain would wait 2 s there
+    with pytest.raises(_s3.CredentialsUnavailable) as raised:
+        _s3.create_client({"endpointurl": "http://127.0.0.1:9"}, None)
+    assert str(raised.value) == message and "AKIABLANK" not in str(raised.value)
+    assert "they go in a [mintd] section of" in (raised.value.hint or "")
+
+
+def test_a_pull_falls_back_to_dvc_when_only_dvc_has_the_keys(
+    s3_server, real_dvc, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Keys only in .dvc/config.local: mintd finds none, dvc does. A pull falls back to dvc
+    and gets the file, as on main; other commands stop early. Mutation: let pull stop on
+    CredentialsUnavailable like any other MintdError -> red."""
+    from mintd import cli
+    from tests._harness.git import _git
+
+    project = tmp_path / "dvcproj"
+    project.mkdir()
+    _git(["init", "-q", "-b", "main"], cwd=project)
+    real_dvc(["init", "-q"], cwd=project, check=True)
+    real_dvc(["remote", "add", "-d", "storage", "s3://journey-bucket/p"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "storage", "endpointurl", s3_server.endpoint], cwd=project, check=True)
+    real_dvc(["remote", "modify", "storage", "version_aware", "true"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "--local", "storage", "access_key_id", "test"], cwd=project, check=True)
+    real_dvc(["remote", "modify", "--local", "storage", "secret_access_key", "test"], cwd=project, check=True)
+    (project / "x.csv").write_text("x\n")
+    real_dvc(["add", "-q", "x.csv"], cwd=project, check=True)
+    real_dvc(["push", "-q"], cwd=project, check=True)
+    (project / "x.csv").unlink()
+    # Moved aside, not deleted: dvc makes its cache files read-only, and Windows won't
+    # delete those; pytest's own tmp cleanup handles them.
+    (project / ".dvc" / "cache").rename(tmp_path / "pushed-cache")
+
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "credentials").write_text("")
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "no-config"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(tmp_path / "mintd-config"))
+    rc = cli.main(["data", "pull", "--path", str(project)])
+    err = " ".join(capsys.readouterr().err.split())
+    assert rc == 0, err
+    assert (project / "x.csv").read_text() == "x\n"
+
+
 def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """With AWS_PROFILE naming a profile that exists, the profile step is ok and says which
     profile it checked and what named it."""
@@ -242,27 +309,28 @@ def test_config_validate_names_the_profile_it_checks(credentials: Path, tmp_path
     cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "other")
     step = next(s for s in validate_config(cfg) if s.name == "aws_profile")
-    assert (step.status, step.message) == ("ok", "'other' profile, named by AWS_PROFILE")
+    assert (step.status, step.message) == ("ok", "'other' profile, named by AWS_PROFILE; credentials from shared-credentials-file")
 
 
-@pytest.mark.parametrize(("bucket", "step_name"), [
-    pytest.param(None, "aws_profile", id="the-profile-step"),
-    pytest.param("b", "s3", id="the-s3-step-with-a-bucket"),
-])
+@pytest.mark.parametrize("bucket", [pytest.param(None, id="no-bucket"), pytest.param("b", id="with-a-bucket")])
 def test_config_validate_fails_a_missing_named_profile_with_its_hint(
-    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str | None, step_name: str,
+    credentials: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bucket: str | None,
 ) -> None:
-    """Every S3 command fails on it, so validate can't call it ok, and the hint says how to fix it.
-    Mutations that must redden this: drop the existence check in the profile step; drop the hint."""
+    """Every S3 command fails on it, so validate can't call it ok, and the hint says how to fix it;
+    the s3 step, which would fail the same way, is skipped rather than said twice.
+    Mutations that must redden this: drop the existence check in the profile step; drop the hint;
+    run the s3 step after the profile step failed."""
     from mintd.config_ops import validate_config
 
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("registry_url: x\n")
     monkeypatch.setenv("AWS_PROFILE", "nope")
-    step = next(s for s in validate_config(cfg, bucket=bucket) if s.name == step_name)
+    steps = {s.name: s for s in validate_config(cfg, bucket=bucket)}
+    step = steps["aws_profile"]
     assert step.status == "fail"
     assert "AWS profile 'nope' (named by AWS_PROFILE)" in step.message
-    assert "add a [nope] section there, or unset AWS_PROFILE" in step.message
+    assert step.hint == "add a [nope] section there, or unset AWS_PROFILE"  # printed under the step
+    assert (steps["s3"].status, steps["s3"].message) == ("skipped", "aws_profile failed")
 
 
 @pytest.mark.parametrize("source", ["dvc-config", "AWS_PROFILE", "empty-in-config.local"])
