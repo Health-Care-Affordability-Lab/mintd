@@ -2022,7 +2022,8 @@ def _read_primary_from_clone(dest: Path) -> str | None:
     """
     try:
         meta = json.loads((dest / "metadata.json").read_text(encoding="utf-8"))
-        primary = meta.get("data_products", {}).get("primary")
+        products = meta.get("data_products") if isinstance(meta, dict) else None
+        primary = products.get("primary") if isinstance(products, dict) else None
         return primary if isinstance(primary, str) else None
     except (OSError, json.JSONDecodeError):
         return None
