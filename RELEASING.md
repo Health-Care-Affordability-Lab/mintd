@@ -23,7 +23,9 @@ with write access can edit a release):
    Look for entries that would change though their product didn't, holds that the catalog job's open issue
    doesn't list, and any entry losing fields. It exits 1 whenever an entry is held or would change, so read the
    output, not the exit code. On a Mac, run `export TMPDIR=$(cd "${TMPDIR:-/tmp}" && pwd -P)` first: until mintd
-   resolves the temp folder itself, its path through /var gives false holds.
+   resolves the temp folder itself, its path through /var gives false holds. If this release carries
+   `clone --all` (#158), set `CLONE_ALL_RELEASE` in the catalog repo's site generator to it before promoting, since
+   the catalog pages' install line fetches `releases/latest`.
 4. Review deployments → tick `release` → Approve and deploy. Or Reject: nothing reaches users.
 
 One release runs at a time: a second press waits for the first's yes or no. A read-only run of the live tier on the lab Linux box before promoting is still worth doing, as
