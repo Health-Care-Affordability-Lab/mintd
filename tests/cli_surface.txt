@@ -1,189 +1,204 @@
 mintd  -v, --verbose  count nargs=0 default=0
 mintd  -q, --quiet  count nargs=0 default=0
-mintd  --json  storetrue nargs=0
-mintd  --no-color  storetrue nargs=0
-mintd  --version  storetrue nargs=0
+mintd  --json  storetrue nargs=0 default=False
+mintd  --no-color  storetrue nargs=0 default=False
+mintd  --version  storetrue nargs=0 default=False
+mintd  <command>  subcommand
 mintd init
 mintd init  <project_type>  store choices=data,code,project,enclave
 mintd init  <name>  store
-mintd init  --path  store default=Path('.')
-mintd init  --use-current-repo  storetrue nargs=0
-mintd init  --force  storetrue nargs=0
+mintd init  --path  store type=Path default=Path('.')
+mintd init  --use-current-repo  storetrue nargs=0 default=False
+mintd init  --force  storetrue nargs=0 default=False
 mintd init  --lang  store choices=python,r,stata default='python'
 mintd import
 mintd import  <name>  store
-mintd import  --bump  storetrue nargs=0
+mintd import  --bump  storetrue nargs=0 default=False
 mintd import  --path  append default=[]
 mintd import  --rev  store
-mintd import  --all  storetrue nargs=0
-mintd import  --force  storetrue nargs=0
-mintd import  --dest-root  store default=Path('data/imports')
-mintd import  --jobs  store
-mintd import  --timeout  store
+mintd import  --all  storetrue nargs=0 default=False
+mintd import  --force  storetrue nargs=0 default=False
+mintd import  --dest-root  store type=Path default=Path('data/imports')
+mintd import  --jobs  store type=int
+mintd import  --timeout  store type=float
 mintd import  --dvc-arg  append default=[]
 mintd clone
+mintd clone  one of: --primary | --path
 mintd clone  <name>  store
-mintd clone  --dest  store
+mintd clone  --dest  store type=Path
 mintd clone  --rev  store
-mintd clone  --primary  storetrue nargs=0
+mintd clone  --primary  storetrue nargs=0 default=False
 mintd clone  --path  append
-mintd clone  --jobs  store
-mintd clone  --timeout  store
+mintd clone  --jobs  store type=int
+mintd clone  --timeout  store type=float
 mintd clone  --dvc-arg  append default=[]
 mintd check
-mintd check  <path>  store nargs=? default=Path('.')
-mintd check  --upgrades  storetrue nargs=0
-mintd check  --remote  storetrue nargs=0
-mintd check  --staged  storetrue nargs=0
-mintd check  --all  storetrue nargs=0
+mintd check  one of: --remote | --staged
+mintd check  <path>  store type=Path nargs=? default=Path('.')
+mintd check  --upgrades  storetrue nargs=0 default=False
+mintd check  --remote  storetrue nargs=0 default=False
+mintd check  --staged  storetrue nargs=0 default=False
+mintd check  --all  storetrue nargs=0 default=False
 mintd data
+mintd data  <data_command>  subcommand
 mintd data import
 mintd data import  <name>  store
-mintd data import  --bump  storetrue nargs=0
+mintd data import  --bump  storetrue nargs=0 default=False
 mintd data import  --path  append default=[]
 mintd data import  --rev  store
-mintd data import  --all  storetrue nargs=0
-mintd data import  --force  storetrue nargs=0
-mintd data import  --dest-root  store default=Path('data/imports')
-mintd data import  --jobs  store
-mintd data import  --timeout  store
+mintd data import  --all  storetrue nargs=0 default=False
+mintd data import  --force  storetrue nargs=0 default=False
+mintd data import  --dest-root  store type=Path default=Path('data/imports')
+mintd data import  --jobs  store type=int
+mintd data import  --timeout  store type=float
 mintd data import  --dvc-arg  append default=[]
 mintd data pull
 mintd data pull  <targets>  store nargs=*
 mintd data pull  --remote  store
-mintd data pull  --jobs  store
-mintd data pull  --path  store default=Path('.')
+mintd data pull  --jobs  store type=int
+mintd data pull  --path  store type=Path default=Path('.')
 mintd data pull  --dvc-arg  append default=[]
 mintd data clone
+mintd data clone  one of: --primary | --path
 mintd data clone  <name>  store
-mintd data clone  --dest  store
+mintd data clone  --dest  store type=Path
 mintd data clone  --rev  store
-mintd data clone  --primary  storetrue nargs=0
+mintd data clone  --primary  storetrue nargs=0 default=False
 mintd data clone  --path  append
-mintd data clone  --jobs  store
-mintd data clone  --timeout  store
+mintd data clone  --jobs  store type=int
+mintd data clone  --timeout  store type=float
 mintd data clone  --dvc-arg  append default=[]
 mintd data push
 mintd data push  <targets>  store nargs=*
 mintd data push  --remote  store
-mintd data push  --jobs  store
-mintd data push  --no-commit  storetrue nargs=0
+mintd data push  --jobs  store type=int
+mintd data push  --no-commit  storetrue nargs=0 default=False
 mintd data add
-mintd data add  <path>  store
+mintd data add  <path>  store type=Path
 mintd data verify
 mintd data verify  <targets>  store nargs=*
-mintd data verify  --path  store default=Path('.')
+mintd data verify  --path  store type=Path default=Path('.')
 mintd data remove
 mintd data remove  <name>  store
 mintd data schema
+mintd data schema  <schema_command>  subcommand
 mintd data schema generate
-mintd data schema generate  --project-dir  store
-mintd data schema generate  --data-dir  store
-mintd data schema generate  --output  store
+mintd data schema generate  --project-dir  store type=Path
+mintd data schema generate  --data-dir  store type=Path
+mintd data schema generate  --output  store type=Path
 mintd data schema generate  --recursive, --no-recursive  booleanoptional nargs=0 default=True
-mintd data schema generate  --allow-numeric-column-names  storetrue nargs=0
+mintd data schema generate  --allow-numeric-column-names  storetrue nargs=0 default=False
 mintd data list
-mintd data list  --imported  storetrue nargs=0
-mintd data list  --detailed  storetrue nargs=0
-mintd data list  --width  store default=80
+mintd data list  --imported  storetrue nargs=0 default=False
+mintd data list  --detailed  storetrue nargs=0 default=False
+mintd data list  --width  store type=int default=80
 mintd data list  --type  store choices=data,code,project,enclave
 mintd data ls
 mintd data ls  <name>  store
 mintd data ls  <sub_path>  store nargs=?
-mintd data ls  --shallow  storefalse nargs=0
-mintd data ls  --no-truncate  storetrue nargs=0
-mintd data ls  --versions  storetrue nargs=0
+mintd data ls  --shallow  storefalse nargs=0 default=True
+mintd data ls  --no-truncate  storetrue nargs=0 default=False
+mintd data ls  --versions  storetrue nargs=0 default=False
 mintd share
+mintd share  <share_command>  subcommand
 mintd share put
-mintd share put  <file>  store
+mintd share put  <file>  store type=Path
 mintd share put  --as  store
 mintd share get
 mintd share get  <ref>  store
 mintd share get  --out  store
 mintd cache
+mintd cache  <cache_command>  subcommand
 mintd cache push
 mintd cache push  <paths>  store nargs=+
 mintd cache push  --remote  store
-mintd cache push  --jobs  store default=8
-mintd cache push  --dry-run  storetrue nargs=0
-mintd cache push  --path  store default=Path('.')
+mintd cache push  --jobs  store type=int default=8
+mintd cache push  --dry-run  storetrue nargs=0 default=False
+mintd cache push  --path  store type=Path default=Path('.')
 mintd cache pull
 mintd cache pull  <paths>  store nargs=*
 mintd cache pull  --prefix  removed nargs=?
 mintd cache pull  --remote  store
-mintd cache pull  --jobs  store default=8
-mintd cache pull  --force  storetrue nargs=0
-mintd cache pull  --path  store default=Path('.')
+mintd cache pull  --jobs  store type=int default=8
+mintd cache pull  --force  storetrue nargs=0 default=False
+mintd cache pull  --path  store type=Path default=Path('.')
 mintd cache ls
 mintd cache ls  <paths>  store nargs=*
 mintd cache ls  --prefix  removed nargs=?
 mintd cache ls  --remote  store
-mintd cache ls  --no-truncate  storetrue nargs=0
-mintd cache ls  --path  store default=Path('.')
+mintd cache ls  --no-truncate  storetrue nargs=0 default=False
+mintd cache ls  --path  store type=Path default=Path('.')
 mintd enclave
+mintd enclave  <enclave_command>  subcommand
 mintd enclave bump
 mintd enclave bump  <name>  store
-mintd enclave bump  --manifest  store default=Path('enclave_manifest.yaml')
-mintd enclave bump  --force  storetrue nargs=0
+mintd enclave bump  --manifest  store type=Path default=Path('enclave_manifest.yaml')
+mintd enclave bump  --force  storetrue nargs=0 default=False
 mintd enclave list
 mintd enclave list  <repo>  store nargs=?
-mintd enclave list  --manifest  store default=Path('enclave_manifest.yaml')
+mintd enclave list  --manifest  store type=Path default=Path('enclave_manifest.yaml')
 mintd enclave add
+mintd enclave add  one of: --source-path | --all
 mintd enclave add  <repo>  store
 mintd enclave add  --pin  store
 mintd enclave add  --source-path  store
-mintd enclave add  --all  storetrue nargs=0
-mintd enclave add  --manifest  store default=Path('enclave_manifest.yaml')
+mintd enclave add  --all  storetrue nargs=0 default=False
+mintd enclave add  --manifest  store type=Path default=Path('enclave_manifest.yaml')
 mintd enclave remove
+mintd enclave remove  one of: --source-path | --primary | --all
 mintd enclave remove  <repo>  store
 mintd enclave remove  --source-path  store
-mintd enclave remove  --primary  storetrue nargs=0
-mintd enclave remove  --all  storetrue nargs=0
-mintd enclave remove  --manifest  store default=Path('enclave_manifest.yaml')
+mintd enclave remove  --primary  storetrue nargs=0 default=False
+mintd enclave remove  --all  storetrue nargs=0 default=False
+mintd enclave remove  --manifest  store type=Path default=Path('enclave_manifest.yaml')
 mintd enclave pull
 mintd enclave pull  <repo>  store nargs=?
-mintd enclave pull  --force  storetrue nargs=0
-mintd enclave pull  --manifest  store default=Path('enclave_manifest.yaml')
+mintd enclave pull  --force  storetrue nargs=0 default=False
+mintd enclave pull  --manifest  store type=Path default=Path('enclave_manifest.yaml')
 mintd enclave package
 mintd enclave package  <repo>  store nargs=?
-mintd enclave package  --output  store
-mintd enclave package  --resend  storetrue nargs=0
-mintd enclave package  --manifest  store default=Path('enclave_manifest.yaml')
+mintd enclave package  --output  store type=Path
+mintd enclave package  --resend  storetrue nargs=0 default=False
+mintd enclave package  --manifest  store type=Path default=Path('enclave_manifest.yaml')
 mintd enclave verify
-mintd enclave verify  <extracted_dir>  store
-mintd enclave verify  --manifest  store default=Path('enclave_manifest.yaml')
-mintd enclave verify  --data-root  store
+mintd enclave verify  <extracted_dir>  store type=Path
+mintd enclave verify  --manifest  store type=Path default=Path('enclave_manifest.yaml')
+mintd enclave verify  --data-root  store type=Path
 mintd registry
+mintd registry  <registry_command>  subcommand
 mintd registry register
-mintd registry register  <path>  store nargs=? default=Path('.')
+mintd registry register  <path>  store type=Path nargs=? default=Path('.')
 mintd registry update
-mintd registry update  <path>  store nargs=? default=Path('.')
-mintd registry update  --dry-run  storetrue nargs=0
+mintd registry update  <path>  store type=Path nargs=? default=Path('.')
+mintd registry update  --dry-run  storetrue nargs=0 default=False
 mintd registry status
 mintd registry status  <name>  store nargs=?
 mintd registry sync
 mintd registry rebuild
-mintd registry rebuild  --check  storetrue nargs=0
-mintd registry rebuild  --registry  store default=Path('.')
+mintd registry rebuild  --check  storetrue nargs=0 default=False
+mintd registry rebuild  --registry  store type=Path default=Path('.')
 mintd publish
 mintd publish  <version>  store nargs=?
-mintd publish  --dry-run  storetrue nargs=0
-mintd publish  --yes, -y  storetrue nargs=0
+mintd publish  --dry-run  storetrue nargs=0 default=False
+mintd publish  --yes, -y  storetrue nargs=0 default=False
 mintd publish  --message, -m  store
-mintd publish  --path  store default=Path('.')
+mintd publish  --path  store type=Path default=Path('.')
 mintd config
+mintd config  <config_command>  subcommand
 mintd config show
-mintd config show  --path  store
+mintd config show  --path  store type=Path
 mintd config setup
-mintd config setup  --path  store
+mintd config setup  one of: --set | --from | --migrate-v1
+mintd config setup  --path  store type=Path
 mintd config setup  --set  append
-mintd config setup  --from  store
-mintd config setup  --migrate-v1  store
-mintd config setup  --dry-run  storetrue nargs=0
+mintd config setup  --from  store type=str
+mintd config setup  --migrate-v1  store type=str
+mintd config setup  --dry-run  storetrue nargs=0 default=False
 mintd config validate
-mintd config validate  --path  store
+mintd config validate  --path  store type=Path
 mintd config validate  --bucket  store
 mintd update
+mintd update  <update_command>  subcommand
 mintd update metadata
-mintd update metadata  <path>  store nargs=? default=Path('.')
-mintd update metadata  --dry-run  storetrue nargs=0
+mintd update metadata  <path>  store type=Path nargs=? default=Path('.')
+mintd update metadata  --dry-run  storetrue nargs=0 default=False
