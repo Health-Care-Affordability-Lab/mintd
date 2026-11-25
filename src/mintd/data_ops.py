@@ -70,6 +70,7 @@ from ._dvc_state import (
 from ._pin_proof import unlisted_on_disk
 from ._import_rescue_ops import RescueResult, rescue_import_pull
 from ._registry_git_ops import GitOpError, GitPushRejected, RegistryGitOps, is_pointer_path, specific_hint
+from ._s3 import CredentialsUnavailable
 from ._storage_state import inspect_storage
 from ._subprocess import WallTimeoutExceeded
 from .errors import MintdError
@@ -940,6 +941,12 @@ def data_pull(
                         pipeline_outs=pipeline_outs,
                         reporter=reporter,
                     )
+                except CredentialsUnavailable as exc:
+                    # mintd found no usable credentials, but dvc reads keys mintd
+                    # doesn't (a remote's own, in .dvc/config or config.local) and
+                    # anonymous remotes: a pull falls back to dvc, as before.
+                    logger.warning("fast-sync: %s; falling back to full dvc pull", exc)
+                    fast_sync_failed = True
                 except MintdError:
                     raise  # the user's to fix (a missing named AWS profile, a pointer cut short): no dvc pull fallback
                 except Exception as exc:

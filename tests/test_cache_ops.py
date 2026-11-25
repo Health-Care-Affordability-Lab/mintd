@@ -1272,6 +1272,27 @@ def test_cache_key_path_maps_as_push_does(tmp_path: Path) -> None:
     assert c.cache_key_path(proj, ".") is None
 
 
+def test_cache_key_path_compares_the_paths_it_resolved_as_text(tmp_path: Path, monkeypatch) -> None:
+    """The key compares the two paths it has just resolved, as text (`lexical`), which is
+    what `relative_to` did. `follow` would resolve them again and differ only on a link
+    loop, which 3.11's `resolve()` raises on before the comparison, so no loop can pin the
+    rule on every Python; it is pinned at the call.
+
+    Mutation: read the key as `follow` -> red."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    reads: list[dict] = []
+    real = c.inside
+
+    def spy(root, path, **kw):
+        reads.append(kw)
+        return real(root, path, **kw)
+
+    monkeypatch.setattr(c, "inside", spy)
+    assert c.cache_key_path(proj, "data/x.bin") == "data/x.bin"
+    assert reads == [{"read": "lexical"}]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privilege on Windows CI")
 def test_a_symlink_argument_is_skipped_by_push_and_followed_by_pull(
     s3_versioned, tmp_path: Path, capsys

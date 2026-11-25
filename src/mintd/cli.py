@@ -877,7 +877,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_config_validate.add_argument("--path", type=Path, default=None)
     p_config_validate.add_argument(
         "--bucket", default=None,
-        help="S3 bucket to test head_bucket against (auto-discovery is slice-22+).",
+        help="the S3 bucket to check (default: the config's storage_bucket_prefix)",
     )
     p_config_validate.set_defaults(_handler=_handle_config_validate)
 
@@ -2929,18 +2929,19 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
     with reporter.status("Validating S3 connectivity..."):
         steps = config_ops.validate_config(args.path, bucket=args.bucket)
     text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
-    print(text)
+    print(strip_userinfo(text))  # an endpoint or an error's URL can carry credentials
     if not args.json_out:
         s3_step = next((s for s in steps if s.name == "s3"), None)
         if s3_step is not None and s3_step.status == "ok":
             try:
-                config = Config.load()
+                config = Config.load(args.path)
                 endpoint = config.storage_endpoint or "default AWS endpoint"
                 profile = _s3.resolve_profile({}, config.aws_profile_name)[0] or "default"
             except Exception:
                 endpoint, profile = "default AWS endpoint", "default"
             ms_clause = f" — 200 OK, {s3_step.latency_ms}ms" if s3_step.latency_ms is not None else " — 200 OK"
-            reporter.success(f"✓ s3://{args.bucket} via {endpoint} (profile: {profile}){ms_clause}")
+            # The bucket the step checked: --bucket, or the config's storage_bucket_prefix.
+            reporter.success(f"✓ s3://{s3_step.bucket or args.bucket} via {endpoint} (profile: {profile}){ms_clause}")
     return exit_code
 
 
