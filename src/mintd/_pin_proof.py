@@ -758,10 +758,10 @@ class Unlisted:
     def hint(self) -> str:
         pipeline = Path(self.pointer).with_name("dvc.yaml").as_posix()
         again = (f"mintd data add {self.folder}" if self.stage is None
-                 else f"dvc commit {pipeline}:{self.stage}, or dvc repro it")
-        first = f"move the .dvc file or folder out of {self.folder}/, then " if self.holds_dvc else ""
-        return (f"{first}record the folder again ({again}), or list files DVC should skip in .dvcignore"
-                + ("; if the pointer was cut, restore it from git" if self.cut_possible else ""))
+                 else f"dvc commit {pipeline}:{self.stage}\nor run the stage again: dvc repro {pipeline}:{self.stage}")
+        first = f"move the .dvc file or folder out of {self.folder}/\n" if self.holds_dvc else ""
+        return (f"{first}to record the folder again: {again}\nto leave a file out instead, list it in .dvcignore"
+                + ("\nif the pointer was cut, restore it from git" if self.cut_possible else ""))
 
 
 def unlisted_on_disk(root: Path, pointers: Sequence[str], *, remote: str) -> list[Unlisted]:

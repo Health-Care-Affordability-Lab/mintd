@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from mintd._dvc_state import dvc_cache_dir, DvcFileEntry
-from mintd._pin_proof import unlisted_on_disk
+from mintd._pin_proof import Unlisted, unlisted_on_disk
 from mintd._fast_sync_ops import ensure_dir_manifest
 from mintd.check import check_project
 from tests._dvc_fixtures import REMOTE, stage_dvc_project
@@ -89,8 +89,8 @@ def test_a_folder_holding_files_its_pointer_doesnt_list_is_named(tmp_path: Path)
     assert u.message() == ("data/final.dvc lists 3 file(s) of data/final/, but the folder on disk holds 2 it doesn't "
                            "list (part-03.csv, part-04.csv): the pointer was cut short, or the folder changed since "
                            "it was recorded")
-    assert u.hint().startswith("record the folder again (mintd data add data/final), or list files DVC should skip "
-                               "in .dvcignore")
+    assert u.hint().startswith("to record the folder again: mintd data add data/final\n"
+                               "to leave a file out instead, list it in .dvcignore")
 
 
 def test_the_message_names_the_first_five_unlisted_files(tmp_path: Path) -> None:
@@ -185,8 +185,8 @@ def test_a_file_placed_in_a_dir_tracked_folder_is_named(tmp_path: Path, listed) 
     (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
     assert (u.folder, u.listed, u.unlisted, u.cut_possible) == ("data/final", len(listed), ("placed.csv",), False)
     assert u.message().endswith(": files were added since the folder was recorded")
-    assert u.hint() == ("record the folder again (mintd data add data/final), or list files DVC should skip "
-                        "in .dvcignore")
+    assert u.hint() == ("to record the folder again: mintd data add data/final\n"
+                        "to leave a file out instead, list it in .dvcignore")
 
 
 def test_a_file_placed_beside_an_empty_files_list_keeps_the_cut_cause(tmp_path: Path) -> None:
@@ -200,7 +200,7 @@ def test_a_file_placed_beside_an_empty_files_list_keeps_the_cut_cause(tmp_path: 
     (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
     assert (u.listed, u.unlisted, u.cut_possible) == (0, ("placed.csv",), True)
     assert u.message().endswith(": the pointer was cut short, or the folder changed since it was recorded")
-    assert u.hint().endswith("; if the pointer was cut, restore it from git")
+    assert u.hint().endswith("\nif the pointer was cut, restore it from git")
 
 
 def test_an_empty_dir_pointer_is_compared_without_a_cache(tmp_path: Path) -> None:
@@ -318,7 +318,7 @@ def test_a_folder_holding_a_dvc_file_is_named_with_why(tmp_path: Path) -> None:
     (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
     assert u.unlisted == (".dvc",)
     assert "it holds a .dvc file or folder, so DVC would record it as an empty folder" in u.message()
-    assert u.hint().startswith("move the .dvc file or folder out of data/final/, then record the folder again")
+    assert u.hint().startswith("move the .dvc file or folder out of data/final/\nto record the folder again: ")
 
 
 def test_check_and_publish_compare_a_nested_pipeline_folder(tmp_path: Path) -> None:
@@ -347,3 +347,16 @@ def test_check_and_publish_compare_a_nested_pipeline_folder(tmp_path: Path) -> N
         publish_project(project_path=proj, version="0.2.0", client=_FakeCatalogClient(),
                         dvc_ops=_FakeDvcOps(), git_ops=_FakeRegistryGitOps())
     assert "dvc_folder_unlisted" in [f.kind for f in excinfo.value.findings]
+
+
+@pytest.mark.parametrize("u", [
+    Unlisted("data/final.dvc", None, "data/final", 3, ("x.csv",), holds_dvc=True),
+    Unlisted("dvc.lock", "build", "data/out", 2, ("c.csv",), cut_possible=True),
+], ids=["dvc-file", "stage"])
+def test_the_hint_is_short_lines_with_one_idea_each(u: Unlisted) -> None:
+    """Each line of the hint stays within 70 characters, holds one idea and
+    joins none with '; ', and each command sits on a line of its own."""
+    lines = u.hint().splitlines()
+    assert len(lines) >= 2 and all(len(line) <= 70 and "; " not in line for line in lines)
+    commands = [line for line in lines if "mintd " in line or "dvc " in line]
+    assert all(line.count("dvc ") <= 1 for line in commands)
