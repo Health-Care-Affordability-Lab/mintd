@@ -25,6 +25,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any, NoReturn, Optional
 
@@ -72,6 +73,7 @@ from .data import (
     bump_import,
     clone_and_pull_product,
     import_product,
+    read_published,
 )
 from .data_ops import (
     COMMIT_MESSAGE,
@@ -374,6 +376,27 @@ def _add_registry_rebuild_parser(subs: Any) -> None:
     p.add_argument("--check", action="store_true", help="Show what would change; write nothing")
     p.add_argument("--registry", type=Path, default=Path("."), help="The registry checkout (default: .)")
     p.set_defaults(_handler=_handle_registry_rebuild)
+
+
+def _add_locate_parser(subs: Any) -> None:
+    """Wire ``data locate``. Split out of ``_build_parser``, which is at the
+    statement cap."""
+    p_locate = subs.add_parser(
+        "locate",
+        help="Print the s3:// paths, S3 versions and md5s of a registered product at one published version, "
+             "read from its DVC pointers; downloads nothing",
+    )
+    p_locate.add_argument("name", help="Registered data product name")
+    p_locate.add_argument(
+        "path", nargs="?", default=None,
+        help="A file or folder under the product root, e.g. data/final/ (default: the catalog's data_products.primary)",
+    )
+    p_locate.add_argument(
+        "--rev", default=None,
+        help="A tag or a commit SHA in the producer's repo, a short SHA only for the commit a tag or "
+             "branch is at (default: the newest release; with no release, the head of its default branch)",
+    )
+    p_locate.set_defaults(_handler=_handle_data_locate)
 
 
 def _add_cache_parser(subs: Any) -> None:
@@ -713,6 +736,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_data_ls.add_argument("--versions", dest="versions", action="store_true",
                            help="Show per-key version count (version_aware buckets only)")
     p_data_ls.set_defaults(_handler=_handle_data_ls, _parser=p_data_ls, recursive=True)
+    _add_locate_parser(p_data_sub)
 
     p_share = subs.add_parser("share", help="Ephemeral handoff lane (drop-zone)")
     p_share_sub = p_share.add_subparsers(dest="share_command")
@@ -1637,7 +1661,7 @@ def _handle_cache_ls(args: argparse.Namespace) -> int:
         )
 
     payload = _data_ls_payload("cache", result, include_versions=False)
-    # Overwrite the built-in `mintd data pull` hint with the cache-pull one. Keys
+    # Overwrite the built-in `mintd data locate` hint with the cache-pull one. Keys
     # are full repo paths and cache pull takes a file's path, so name the file,
     # quoted so a path with a space pastes as one.
     first_file = next((o for o in result.objects if not o.is_dir), None)
@@ -1795,9 +1819,125 @@ def _handle_data_ls(args: argparse.Namespace) -> int:
         payload,
         pretty=lambda p: _pretty_data_ls(
             p, name=args.name, versions=args.versions, no_truncate=no_truncate,
+            hint_label="Get a published file's s3:// path, S3 version and md5",
         ),
     )
     return 0
+
+
+class _UnknownProduct(MintdError):
+    """No catalog entry has this name. ``candidates`` are the names to offer
+    instead: the close ones, best first, else every data product."""
+
+    def __init__(self, name: str, client: CatalogClient) -> None:
+        entries = client.list()
+        close = get_close_matches(name, [e.name for e in entries])
+        self.candidates = close or sorted(e.name for e in entries if e.project_type == "data")
+        super().__init__(
+            f"no catalog entry named {name!r}",
+            hint="did you mean:\n" + "\n".join(close) if close else "'mintd data list' shows every product",
+        )
+
+
+def _handle_data_locate(args: argparse.Namespace) -> int:
+    """Turn a catalog name into what a reader needs to read one published
+    version: each file's s3:// url, md5 and S3 version ID, the endpoint, and
+    the AWS profile mintd's own S3 clients use. The files come from the
+    producer's DVC pointers at that version (``data.read_published``), not
+    from the bucket: it asks S3 nothing, downloads nothing and needs no
+    project. A reader in any language calls it with ``--json``, so the lookup
+    and its rules live here once.
+
+    Under ``--json`` a failure also prints ``{"error", "hint", "exit_code"}``
+    on stdout, plus ``candidates`` for an unknown name, because stdout is what
+    a reader parses; stderr still carries the usual ``error:`` line. No other
+    verb prints a JSON error: this is the shape ``main`` would print for all.
+    """
+    reporter = args._reporter
+    try:
+        payload = _locate_payload(args)
+    except MintdError as e:
+        if args.json_out:
+            error: dict[str, Any] = {"error": str(e), "hint": e.hint, "exit_code": e.exit_code}
+            if isinstance(e, _UnknownProduct):
+                error["candidates"] = e.candidates
+            reporter.result(error)
+        raise
+    reporter.result(payload, pretty=_pretty_data_locate)
+    return 0
+
+
+def _locate_payload(args: argparse.Namespace) -> dict:
+    """The newest release is the tag `mintd publish` made for the catalog's
+    ``status.last_published_version``, the one the catalog advertises: a
+    tag's shape alone can't say, since a hand-made ``v2026.04.07`` has a
+    release's shape too."""
+    config = Config.load()
+    client = _resolve_catalog_client(config)
+    try:
+        entry = client.fetch(args.name)
+    except CatalogNotFound as e:
+        raise _UnknownProduct(args.name, client) from e
+    primary = entry._nested("data_products", "primary") or None
+    path = args.path if args.path is not None else primary
+    if path is None:
+        raise MintdError(
+            f"{args.name} declares no data_products.primary",
+            hint=f"name a file or folder; this lists them:\nmintd data ls {args.name}",
+        )
+    release = entry._nested("status", "last_published_version") or None
+    rev = args.rev or (f"v{release}" if release else None)
+    at = rev or "its default branch"
+    with args._reporter.status(f"Reading {args.name}'s DVC pointers at {at}..."):
+        found = read_published(args.name, entry.repo_url, rev, path, cache_dir=config.resolved_cache_dir() / "producers")
+    if not found.files:
+        products = entry.model_dump().get("data_products") or {}
+        outputs = [o.get("path") for o in products.get("outputs") or [] if o.get("path")]
+        raise MintdError(
+            f"{args.name} publishes no file at {found.target} at {at} (commit {found.commit[:7]})",
+            hint="its outputs:\n" + "\n".join(outputs) if outputs else "name a file or folder its pointers record",
+        )
+    # No remote config of the reader's names a profile, so this is the one
+    # mintd's own S3 clients would use here.
+    profile, _ = _s3.resolve_profile({}, config.aws_profile_name)
+    return {
+        "name": args.name,
+        "bucket": found.bucket,
+        "prefix": found.prefix,
+        "endpoint": found.endpoint,
+        "profile": profile,
+        "primary": primary,
+        "target": found.target,
+        "rev": rev,
+        "commit": found.commit,
+        "classification": entry._nested("governance", "classification") or None,
+        "files": [
+            {"key": f.path, "url": f"s3://{found.bucket}/{found.prefix}{f.path}", "size": f.size,
+             "md5": f.md5 or None, "version_id": f.version_id}
+            for f in found.files
+        ],
+    }
+
+
+def _pretty_data_locate(p: dict) -> str:
+    # The producer's repo and the catalog write every string here but the
+    # profile and the counts: neutralize them as data ls does its keys.
+    n = neutralize_control_chars
+    rev = p["rev"] or "default branch, no release yet"
+    profile = p["profile"] if p["profile"] is not None else "none named (boto3's default credentials)"
+    urls = [n(f["url"]) for f in p["files"]]
+    width = max(len(u) for u in urls)
+    return "\n".join([
+        f"{n(p['name'])} at {n(rev)} (commit {p['commit'][:7]}, "
+        f"{n(p['classification'] or 'unclassified')}): {n(p['target'])}",
+        f"endpoint {n(str(p['endpoint']))}, AWS profile {profile}",
+        "",
+        *(f"  {u:<{width}}  {'-' if f['size'] is None else _human_bytes(f['size']):>9}"
+          for u, f in zip(urls, p["files"], strict=True)),
+        "",
+        f"{len(urls)} file(s), {_human_bytes(sum(f['size'] or 0 for f in p['files']))} total.",
+    ])
+
 
 def _data_ls_payload(name: str, result: S3ListingResult, *, include_versions: bool) -> dict:
     objects = [
@@ -1824,15 +1964,14 @@ def _data_ls_payload(name: str, result: S3ListingResult, *, include_versions: bo
         "dir_count": len(dirs),
     }
     # Slice-31 review P1a: hint must point at a file, not a directory.
-    # Slice-31 review P1b: keys are relative to sub_path; prepend it so the
-    # hint command works from the project root (where `mintd data pull`
-    # expects paths).
+    # Keys are relative to sub_path; prepend it, as `data locate` takes a key
+    # from the product root. Like `data ls`, it works outside a project.
     first_file = next((o for o in result.objects if not o.is_dir), None)
     if first_file is not None:
         sub = result.truncated_to_prefix or ""
         sub = sub.strip("/") + "/" if sub.strip("/") else ""
         full_key = sub + first_file.key
-        payload["hint"] = f"mintd data pull {name} {full_key}"
+        payload["hint"] = f"mintd data locate {name} {shlex.quote(full_key)}"
     return payload
 
 def _human_bytes(n: int) -> str:
@@ -1860,6 +1999,7 @@ _DATA_LS_ROW_CAP = 50
 
 def _pretty_data_ls(
     payload: dict, *, name: str, versions: bool, no_truncate: bool = False,
+    hint_label: str = "Download a single file",
 ) -> str:
     lines = [f"s3://{payload['bucket']}/{payload['prefix']}"]
     if not payload["objects"]:
@@ -1928,7 +2068,7 @@ def _pretty_data_ls(
         # Cache-redteam P2: the hint embeds a remote-controlled key; neutralize
         # so the suggested command can't carry a smuggled newline/ANSI.
         lines.append(
-            f"\n💡 Download a single file:\n   {neutralize_control_chars(payload['hint'])}"
+            f"\n💡 {hint_label}:\n   {neutralize_control_chars(payload['hint'])}"
         )
     return "\n".join(lines)
 

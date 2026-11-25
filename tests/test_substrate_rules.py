@@ -106,14 +106,18 @@ BANNED_TARGETS: dict[str, int] = {
 # a site each: tests/test_github_access.py's two tests of GitHub access together
 # with a pointer hash dvc never writes pull against moto, and serve a producer's
 # files as `git archive` would, at the boundaries every other such test fakes.
+# `cli._resolve_catalog_client` and `cli._resolve_s3_listing_ops`, one site each:
+# tests/test_data_locate.py's `catalog` fixture hands `data locate` and `data ls`
+# an in-memory catalog, and its `data ls` test the real listing over moto, at
+# those two seams.
 PERMITTED_TARGETS: dict[str, int] = {
     "mintd.cli._build_reporter": 1,
     "mintd.cli._resolve_cache_ops": 2,
-    "mintd.cli._resolve_catalog_client": 6,
+    "mintd.cli._resolve_catalog_client": 7,
     "mintd.cli._resolve_dvc_ops": 5,
     "mintd.cli._resolve_fast_sync_ops": 7,
     "mintd.cli._resolve_git_ops": 9,
-    "mintd.cli._resolve_s3_listing_ops": 1,
+    "mintd.cli._resolve_s3_listing_ops": 2,
     "mintd._atomic.os.replace": 2,
     "mintd._aws_credentials.os.replace": 1,
     "mintd._fast_sync_ops._create_s3_client": 7,
@@ -658,9 +662,15 @@ SRC_FILE_EFFECT_SITES: dict[str, dict[str, int]] = {
     "src/mintd/_fast_sync_ops.py": {"unlink": 4, "write_bytes": 1},
     # The URL opener's .open(Request(...)): a fetch, which the scan can't tell from a write.
     "src/mintd/_release_check.py": {"open-for-write": 1},
+    # `checkout_at` writes the patterns of a sparse checkout to
+    # `.git/info/sparse-checkout` in the clone it just made, which is how
+    # `data locate` checks out only a producer's DVC files.
+    "src/mintd/_producer_git_ops.py": {"write_text": 1},
     "src/mintd/_share_ops.py": {"unlink": 3},
     "src/mintd/_templates/_render.py": {"unlink": 1, "write_text": 3},
-    "src/mintd/data.py": {"rename": 2, "rmdir": 1, "unlink": 3, "write_bytes": 2},
+    # One rename: `data locate` lands a producer's DVC files at a commit in
+    # `<cache_dir>/producers` by renaming the finished checkout into place.
+    "src/mintd/data.py": {"rename": 3, "rmdir": 1, "unlink": 3, "write_bytes": 2},
     "src/mintd/enclave.py": {"unlink": 1, "write_text": 4},
     "src/mintd/init.py": {"unlink": 2, "write_text": 1},
     "src/mintd/pending_registrations.py": {"unlink": 1},

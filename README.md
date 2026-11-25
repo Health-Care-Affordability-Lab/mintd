@@ -298,6 +298,12 @@ mintd data list
 # Peek at the S3 layout of a specific product before pulling:
 mintd data ls my-cleaned-survey
 
+# The s3:// paths, S3 versions and md5s of the newest release, read from its
+# DVC pointers, plus the endpoint and AWS profile a reader needs (downloads nothing):
+mintd data locate my-cleaned-survey data/final/survey.parquet
+# or: at another tag, or a commit
+mintd data locate my-cleaned-survey --rev v0.1.0
+
 # Clone the whole producer repo + pull every tracked output:
 mintd clone my-cleaned-survey
 # or: only the primary output, pinned to a tag
@@ -456,7 +462,7 @@ mintd clone    NAME [--primary | --path P…]       Get a product's whole projec
 mintd check    [path] [--upgrades] [--remote [--all] | --staged]
                                                   Validate metadata, output delivery + (optionally) pins;
                                                   --remote asks S3 for every pinned version; --staged checks a commit for dropped IDs
-mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
+mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls|locate
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
@@ -489,6 +495,20 @@ key, and arrays are always present, possibly empty, never null.
 - `clone` / `data clone` — object: `dest` (absolute), `primary` (str or null),
   `elapsed_s` (two decimals), `files`, `bytes`, `rev` (str or null),
   `remote_bucket` (str or null).
+- `data locate` — object: `name`, `bucket`, `prefix` (ends in `/`),
+  `endpoint` (str or null), `profile` (str or null: null when mintd names no
+  profile and boto3's default credentials apply), `primary` (str or null),
+  `target` (a folder ends in `/`), `rev` (the `--rev` given, else the release
+  tag read; null when the product has no release and its default branch was
+  read), `commit` (the full SHA read), `classification` (str or null), `files` (array of `{key,
+  url, size, md5, version_id}`: `key` from the product root, `url` the full
+  `s3://` path, `size`, `md5` and `version_id` as the DVC pointer records
+  them, each null when it records none). Without `--rev` it reads the tag of
+  the catalog's `status.last_published_version`. On failure it exits non-zero
+  and stdout carries `{error, hint, exit_code}`, with `hint` null when there
+  is none. An unknown name adds `candidates`: the close catalog names, best
+  first, or every data product when none is close. An unknown rev's `error`
+  lists the release tags.
 
 ## Where to look next
 
