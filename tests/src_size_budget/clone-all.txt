@@ -1,0 +1,1 @@
++1: clone --all and the default, and import --all, read from the producer's tree
