@@ -32,18 +32,7 @@ def producer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_serve
     (wdir `code`) writing `data/final/a.csv`; committed and pushed to a bare
     upstream, no data pushed yet."""
     endpoint = s3_server.endpoint
-    for k, v in {"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
-                 "AWS_DEFAULT_REGION": "us-east-1"}.items():
-        monkeypatch.setenv(k, v)
-        real_dvc.env[k] = v  # the harness copied the environment before these were set
-    # mintd's own dvc subprocesses share the harness's redirected dvc dirs, so
-    # a stale site cache left by a raw `dvc push` is the one mintd would read.
-    for k in ("HOME", "USERPROFILE", "DVC_GLOBAL_CONFIG_DIR", "DVC_SYSTEM_CONFIG_DIR", "DVC_SITE_CACHE_DIR"):
-        monkeypatch.setenv(k, real_dvc.env[k])
-    config_dir = tmp_path / "mintd-config"
-    config_dir.mkdir()
-    (config_dir / "config.yaml").write_text(f"cache_dir: {tmp_path / 'mintd-cache'}\n", encoding="utf-8")
-    monkeypatch.setenv("MINTD_CONFIG_DIR", str(config_dir))
+    _lab_env(tmp_path, monkeypatch, real_dvc)
 
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -70,6 +59,22 @@ def producer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_serve
     _git(["push", "-q", "-u", "origin", "main"], cwd=proj)
     monkeypatch.chdir(proj)
     return proj
+
+
+def _lab_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc) -> None:  # noqa: F811
+    """Test credentials for the S3 server, and mintd's config and dvc dirs in tmp_path."""
+    for k, v in {"AWS_ACCESS_KEY_ID": "test", "AWS_SECRET_ACCESS_KEY": "test",
+                 "AWS_DEFAULT_REGION": "us-east-1"}.items():
+        monkeypatch.setenv(k, v)
+        real_dvc.env[k] = v  # the harness copied the environment before these were set
+    # mintd's own dvc subprocesses share the harness's redirected dvc dirs, so
+    # a stale site cache left by a raw `dvc push` is the one mintd would read.
+    for k in ("HOME", "USERPROFILE", "DVC_GLOBAL_CONFIG_DIR", "DVC_SYSTEM_CONFIG_DIR", "DVC_SITE_CACHE_DIR"):
+        monkeypatch.setenv(k, real_dvc.env[k])
+    config_dir = tmp_path / "mintd-config"
+    config_dir.mkdir()
+    (config_dir / "config.yaml").write_text(f"cache_dir: {tmp_path / 'mintd-cache'}\n", encoding="utf-8")
+    monkeypatch.setenv("MINTD_CONFIG_DIR", str(config_dir))
 
 
 def _remote(proj: Path, real_dvc, endpoint: str, prefix: str) -> None:  # noqa: F811
@@ -551,6 +556,40 @@ def test_a_file_placed_in_a_folder_tracked_while_empty_stops_the_push(
     assert "data/empty.dvc lists 0 file(s) of data/empty/, but the folder on disk holds 1 it doesn't list " \
            "(placed.csv)" in err, err
     assert "mintd data add data/empty" in err
+    assert len(s3_server.puts) == puts
+
+
+def test_a_new_products_unrecorded_raw_file_fails_check_and_stops_the_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_dvc, s3_server, capsys,  # noqa: F811
+) -> None:
+    """A new data product tracks data/raw while it's empty. A raw file placed
+    there and not yet recorded drew only check's pipeline_input_untracked
+    warning; it is now check's dvc_folder_unlisted error, and the push refuses
+    before any upload. (A fresh scaffold's check exits 1 for other errors too,
+    so the finding's severity is what's pinned, not the exit code.)
+
+    Mutation: the scaffold skips its data/raw add -> red."""
+    from mintd._init_ops import SubprocessInitOps
+    from mintd.init import init_project
+
+    _lab_env(tmp_path, monkeypatch, real_dvc)
+    project, _ = init_project(project_type="data", name="rainfall", target_dir=tmp_path, ops=SubprocessInitOps())
+    _remote(project, real_dvc, s3_server.endpoint, "lab/rainfall")
+    (project / "data" / "raw" / "source.csv").write_text("a,b\n1,2\n")
+    monkeypatch.chdir(project)
+
+    findings = check_project(project, upgrades=False)
+    found = [f for f in findings if f.kind == "dvc_folder_unlisted"]
+    assert [f.severity for f in found] == ["error"] and "(source.csv)" in found[0].message
+    assert "to record the folder again: mintd data add data/raw" in (found[0].hint or "")
+    assert not [f for f in findings if f.kind == "pipeline_input_untracked"]
+
+    puts = len(s3_server.puts)
+    assert cli.main(["data", "push", "data/raw.dvc"]) == 1  # a bare push stops first: the pipeline hasn't run
+    err = _out(capsys)
+    assert "data/raw.dvc lists 0 file(s) of data/raw/, but the folder on disk holds 1 it doesn't list " \
+           "(source.csv)" in err, err
+    assert "mintd data add data/raw" in err
     assert len(s3_server.puts) == puts
 
 
