@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import re
 import hashlib
 import shlex
@@ -41,6 +42,7 @@ from ._dvc_state import (
     discover_all_outs,
     outs_for_target,
     outs_materialized,
+    parse_dvc_outs,
     partition_pipeline_outs,
     remote_key,
     resolve_target_outs,
@@ -1434,5 +1436,16 @@ def data_verify(
     return dvc_ops.status(targets=targets, cwd=project_path)
 
 
-def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> None:
+def data_remove(name: str, *, project_path: Path, dvc_ops: DvcOps) -> list[str]:
+    """Stop tracking ``name`` with dvc (`dvc remove`, without `--outs`): the
+    pointer and its .gitignore line go, the data stays. Returns the outs a
+    ``.dvc`` pointer named that are still on disk, repo-relative, for the
+    caller to name; never their contents."""
+    try:
+        outs = parse_dvc_outs(project_path / name, "") if name.endswith(".dvc") else []
+    except MintdError:  # a pointer dvc can't read either: dvc remove reports it
+        outs = []
     dvc_ops.remove(name, cwd=project_path)
+    # A .dvc file's out paths are relative to the folder it sits in.
+    left = [posixpath.normpath(posixpath.join(posixpath.dirname(name), o.path)) for o in outs]
+    return [rel for rel in left if (project_path / rel).exists()]
