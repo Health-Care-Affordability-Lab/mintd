@@ -1112,16 +1112,12 @@ def _handle_data_pull(args: argparse.Namespace) -> int:
     # `dvc pull failed (exit 253): ERROR: you are not inside of a DVC
     # repository` — they're confusing `pull` (refresh own data) with
     # `import` (declare and fetch from registry).
-    project_path = args.path.resolve()
-    if not (project_path / ".dvc").is_dir():
-        name_hint = args.targets[0] if args.targets else "<name>"
-        print(
-            f"error: not inside a DVC project (no .dvc/ at {project_path}).\n"
-            f"  mintd data pull operates on the current project's tracked data.\n"
-            f"  To grab a published product: mintd data clone {name_hint}",
-            file=sys.stderr,
-        )
-        return 1
+    name_hint = args.targets[0] if args.targets else "<name>"
+    project_path = _require_project(
+        args.path,
+        hint=f"mintd data pull refreshes this project's tracked data\n"
+             f"to get a published product: mintd clone {name_hint}",
+    )
     reporter = args._reporter
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
@@ -1466,17 +1462,30 @@ def _handle_share_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_project(project_path: Path, *, hint: str, or_above: bool = False) -> Path:
+    """Stop a verb that works on a project before it reads the catalog or runs
+    dvc, when ``project_path`` isn't one: a mintd project has ``.dvc/`` at its
+    root. Pull and the cache verbs take their ``--path`` as that root. With
+    ``or_above`` (import, which runs anywhere in a project, as dvc does), the
+    project may be any folder above, found by ``dvc_root`` as dvc finds it.
+    Returns the project's root."""
+    resolved = project_path.resolve()
+    root = dvc_root(resolved) if or_above else resolved
+    if not (root / ".dvc").is_dir():
+        where = f"{resolved} or above" if or_above else str(resolved)
+        raise MintdError(f"not inside a mintd project (no .dvc/ at {where})", hint=hint)
+    return root
+
+
 def _cache_project_preflight(args: argparse.Namespace) -> tuple[Reporter, Path, Config, Any]:
     """Shared preflight for the three cache verbs: project probe + config +
     boto3-backed factory. Returns ``(reporter, project_path, config, factory)``."""
     reporter = args._reporter
-    project_path = args.path.resolve()
-    if not (project_path / ".dvc").is_dir():
-        raise MintdError(
-            f"not inside a mintd project (no .dvc/ at {project_path})",
-            hint="the repo file cache (S3) lives inside a project's own bucket "
-                 "prefix — cd into the project; for ad-hoc handoffs use mintd share put",
-        )
+    project_path = _require_project(
+        args.path,
+        hint="the repo file cache (S3) lives in a project's own bucket prefix\ncd into the project\n"
+             "for an ad-hoc handoff: mintd share put",
+    )
     config = Config.load()
     factory = _resolve_cache_ops(config)
     if factory is None:
@@ -2083,6 +2092,15 @@ def _handle_data_import(args: argparse.Namespace) -> int:
         args._parser.error("--bump cannot be combined with --rev or --all")
     if args.bump and len(args.import_path) > 1:
         args._parser.error("--bump takes at most one --path")
+    # Import adds a product to the project it runs in, from any folder inside
+    # it (it has no --path), so outside one it stops here, before the catalog
+    # lookup or any dvc call. It still runs from ".", as before.
+    _require_project(
+        Path("."),
+        or_above=True,
+        hint=f"mintd import adds a product to a project\nto get the whole product: mintd clone {args.name}\n"
+             f"to start a project: mintd init",
+    )
 
     reporter = getattr(args, "_reporter", None) or Reporter()
     config = Config.load()

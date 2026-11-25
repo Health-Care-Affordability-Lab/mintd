@@ -571,7 +571,7 @@ def test_a_failed_import_names_what_it_left_and_the_rerun_says_whose_it_is(tmp_p
     with pytest.raises(ImportDestinationExists) as refused:
         import_product(client, _FakeDvcOps(), "demo_map", cwd=tmp_path, dest_root=tmp_path)
     assert refused.value.hint.startswith(
-        "if this is a folder an earlier mintd data import left, not yours: "
+        "if this is a folder an earlier mintd import left, not yours: "
         "rm -r -- data_demo_map/outputs/core_rows; otherwise move that folder"
     )
 
@@ -627,7 +627,7 @@ def test_a_folder_holding_no_files_is_not_called_safe_to_remove(tmp_path: Path, 
         import_product(client, _FakeDvcOps(), "demo_map", cwd=tmp_path, dest_root=tmp_path)
     assert "safe to remove" not in refused.value.hint
     assert refused.value.hint.startswith(
-        "if this is a folder an earlier mintd data import left, not yours: rm -r -- data_demo_map/outputs/core_rows;"
+        "if this is a folder an earlier mintd import left, not yours: rm -r -- data_demo_map/outputs/core_rows;"
     )
 
 
