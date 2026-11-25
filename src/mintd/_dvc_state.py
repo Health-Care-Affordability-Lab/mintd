@@ -1017,8 +1017,10 @@ def read_dvc_config_text(text: str, source: str) -> dict[str, Any]:
     for section, values in parsed.items():
         if not isinstance(values, dict):
             continue  # a key outside any section: dvc's schema refuses it, and nothing here reads one
-        # A comma-separated value comes back as a list; dvc's schema would refuse it as a remote setting.
-        keys = {k.lower(): ", ".join(v) if isinstance(v, list) else v for k, v in values.items()}
+        # A comma-separated value comes back as a list, which dvc's schema refuses as a remote setting. Joined back
+        # as written, a one-item list (`true,`) keeps its comma, so the value isn't read as the bare word.
+        keys = {k.lower(): ", ".join(v) + ("," if len(v) == 1 else "") if isinstance(v, list) else v
+                for k, v in values.items()}
         name = section.lower()
         bare = re.fullmatch(r"\s*remote\s+([^\s\"]+)\s*", section, re.IGNORECASE)
         if bare:

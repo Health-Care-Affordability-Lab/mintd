@@ -701,6 +701,27 @@ def _judge(root: Path, pointers: list[str], head: dict, *, version_aware: bool =
     )
 
 
+def test_another_remotes_refused_flag_leaves_the_default_version_aware(tmp_path: Path) -> None:
+    """`other` has `version_aware = yes` in .dvc/config, fixed in config.local: dvc
+    accepts it on this machine. The storage check reports a clone's refusal, but the
+    default remote stays version-aware, so a pointer with no S3 version ID is still
+    kept from being committed.
+
+    Mutation: read the default as not version-aware when another remote is refused ->
+    the pointer passes, red."""
+    from mintd._storage_state import inspect_storage
+
+    root, head = _folder_project(tmp_path)  # a version-aware default
+    write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": None})  # one file with no version ID
+    cfg = root / ".dvc" / "config"
+    cfg.write_text(cfg.read_text() + '[remote "other"]\n    url = s3://b/o\n    version_aware = yes\n')
+    (root / ".dvc" / "config.local").write_text('[remote "other"]\n    version_aware = true\n')
+    storage = inspect_storage(root)
+    assert storage.dvc_refused is not None and storage.dvc_refused.remote == "other"
+    assert storage.dvc_version_aware is True
+    assert _judge(root, ["data/final.dvc"], {"data/final.dvc": head}, version_aware=storage.dvc_version_aware).blocked
+
+
 def test_judge_passes_a_folder_pinned_whole(tmp_path: Path) -> None:
     root, head = _folder_project(tmp_path)
     write_pointer(root, "data/final", files={"x.csv": "v-1", "y.csv": "v-2"})

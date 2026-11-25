@@ -473,3 +473,50 @@ def test_check_reports_a_config_dvc_cannot_read_and_carries_on(tmp_path: Path, l
     assert any(f.kind == "dvc_state_unreadable" and "can't read" in f.message and level in f.message
                for f in findings)
     assert any(f.kind == "data_products_output_untracked" for f in findings)  # the checks after it still ran
+
+
+_OTHER = "['remote \"other\"']\n    url = s3://b/o\n"
+
+
+@pytest.mark.parametrize(("remotes", "args", "dvc_says", "mintd_says"), [
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = false\n    worktree = true\n", ["status", "-c"],
+                 "worktree remotes require version_aware cloud",
+                 "the DVC remote storage sets version_aware to false on a worktree remote in .dvc/config",
+                 id="a-worktree-remote-not-version-aware"),
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = true,\n", ["status"], "expected true or false",
+                 "the DVC remote storage sets version_aware to 'true,' in .dvc/config", id="a-trailing-comma"),
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    version_aware = yes\n", ["status"],
+                 "expected true or false", "the DVC remote other sets version_aware to 'yes' in .dvc/config",
+                 id="a-refused-value-on-another-remote"),
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    worktree = yes\n", ["status"],
+                 "expected true or false", "the DVC remote other sets worktree to 'yes' in .dvc/config",
+                 id="a-refused-worktree-on-another-remote"),
+    pytest.param(f"{R}    url = s3://b/p\n    version_aware = true\n{_OTHER}    version_aware = false\n    worktree = true\n",
+                 ["status"], None, None, id="a-worktree-remote-not-version-aware-that-dvc-never-opens"),
+])
+def test_a_remote_config_dvc_refuses_mintd_refuses_too(real_dvc, tmp_path: Path, remotes, args, dvc_says, mintd_says) -> None:
+    """mintd and dvc agree, accept or refuse. dvc refuses `version_aware = false` on a
+    worktree remote when it opens the remote; a trailing comma, which makes the value a
+    list; and a value neither true nor false on any remote, the default or not, when it
+    loads the config. A worktree remote it never opens it lets be.
+
+    Mutations: drop the worktree rule -> the first passes, red; join a one-item list
+    without its comma -> the second passes, red; read only the default remote's flags ->
+    the third passes, red; read only another remote's `version_aware` -> the fourth
+    passes, red; refuse the worktree rule on every remote -> the last, red."""
+    from mintd._storage_state import _read_dvc_config
+    from tests._harness.git import _git
+
+    _git(["init", "-q", "-b", "main"], cwd=tmp_path)
+    real_dvc(["init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "f.txt").write_text("x")
+    real_dvc(["add", "f.txt"], cwd=tmp_path, check=True)  # before the config: dvc refuses some on load
+    (tmp_path / ".dvc" / "config").write_text("[core]\n    remote = storage\n" + remotes)
+    ran = real_dvc(args, cwd=tmp_path)
+    *_, refused = _read_dvc_config(tmp_path / ".dvc" / "config")
+    if dvc_says is None:
+        assert ran.returncode == 0, ran.stderr
+        assert refused is None
+    else:
+        assert ran.returncode != 0 and dvc_says in ran.stderr + ran.stdout, ran.stderr
+        assert refused is not None and str(refused).startswith(mintd_says), refused
