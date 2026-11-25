@@ -15,7 +15,7 @@ Most other terms make sense only against one split: **who originated a piece of 
 A project whose `metadata.json` and DVC-tracked outputs other projects depend on. Any project type can be registered and published. The producer owns:
 
 - Its own `metadata.json` (validated by `Metadata`, below).
-- The data products themselves: DVC-tracked files at the paths declared in `data_products.outputs[].path`. `data_products.primary` names one of them and is required only when `project.type` is `data`.
+- The data products themselves: DVC-tracked files at the paths declared in `data_products.outputs[].path`, each a relative posix path inside the repo (`Metadata` refuses an absolute or drive path, `..`, a backslash, an empty path or a leading `-`). `data_products.primary` names one of them and is required only when `project.type` is `data`.
 - Its catalog entry (see Catalog projection), sent to the registry as a PR by `mintd registry register`, `mintd registry update`, or the last step of `mintd publish`.
 
 The catalog keys a producer by `project.name`; consumers use that name on the CLI and in an enclave's `approved_products[].repo`. `project.full_name` names the folder its imports land in. A consumer's `.dvc` pointer records the producer's git URL, not its name. Producer findings read the project's own `metadata.json`, `.dvc/config`, DVC pointers, `dvc.yaml` and `dvc.lock`.
@@ -24,7 +24,7 @@ Why: the producer section of `mintd check` is what a project owner is responsibl
 
 ### Consumer
 
-A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project also records subscriptions in `enclave_manifest.yaml`. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd data import <name> --bump`, `mintd enclave bump`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
+A project that **depends on** another project's data products. Its dependency list is what DVC already records: `.dvc` files under `data/imports/` (written by `mintd import`, the same command as `mintd data import`, which runs `dvc import`) and `dvc.lock` stage deps that carry a `repo:` block. `scan_imports` reads both. An enclave project also records subscriptions in `enclave_manifest.yaml`. Under `--upgrades`, consumer findings compare these against the producer at the pin and at `HEAD`; plain `check` reports each import (and refuses an empty pin) without reading the producer. Producers can keep changing; consumers see a stable view until they explicitly bump the pin (`mintd import <name> --bump`, `mintd enclave bump`). `mintd check --upgrades` reads the producer at `HEAD`, but only to compare.
 
 Why: the consumer section of `mintd check` is what a project owner is responsible for keeping current as upstreams move.
 
@@ -53,10 +53,10 @@ Why publish merges: because sub-models drop unknown keys, writing the bare dump 
 
 Names the **role expected to write** a given field, attached to every `Metadata` field as `Annotated[T, Owner.X]`:
 
-- `USER`: humans edit it (`metadata.*`, `ownership.*`, `access_control.*`, `governance.*`, `repository.mirror`, `status.state`).
-- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.*`, `storage.*`, `schema_.location` and the rest of `repository.*`.
-- `PIPELINE`: `data_products.*` and `status.last_updated` / `last_published_version`. Publish writes the status fields and each `outputs[].last_published`; nothing derives `outputs[].path` or `primary` from DVC, so those are edited by hand.
-- `REGISTRY`: reserved; no field uses it.
+- `USER`: humans edit it (`metadata.*`, `ownership.*`, `status.state`).
+- `MINTD`: written by `mintd init`, `mintd update metadata`, or `mintd publish` (which sets `mint.version`). Covers `schema_version`, `mint.*`, `project.created_at`, `project.created_by` and `schema_.location`.
+- `PIPELINE`: the declared outputs, `data_products.primary` and each output's `path`, `description` and `primary`. Nothing derives them from DVC, so they're edited by hand.
+- `REGISTRY`: the catalog registry's, set when a product joins and changed only by a reviewed registry change: `project.name`, `project.type` and `project.full_name`, and all of `repository.*`, `access_control.*`, `storage.*` and `governance.*`. Also the publish stamps `status.last_updated`, `status.last_published_version` and `outputs[].last_published`. A catalog rebuild copies only USER and PIPELINE leaves.
 
 `field_metadata(model_class, "dotted.path")` → `Owner` walks a dotted path (e.g. `"storage.dvc.remote_name"`) through nested models, unwrapping `Optional[...]` and `list[...]`, and raises `KeyError` for an unknown segment, a non-model intermediate, or a leaf with no Owner. It is Owner's only reader, and only tests call it: Owner is documentation, not enforcement, and no `mintd check` finding looks at it.
 
@@ -89,7 +89,7 @@ Why it runs even when validation failed: drift is independent of metadata-schema
 
 ### Delivery gate (`Delivery` / `DeliveryState`)
 
-`_dvc_state.delivery` answers, offline from a tree's pointers and `dvc.lock`, whether `mintd data import <path>` would land bytes. States: `pinned`, `via_parent` (under a pinned `.dir` out), `untracked`, `not_pullable` (only `cache: false` or `dvc import` outs), `unpinned` / `partial` (on a version-aware remote, no / some files carry an S3 version ID), `missing_from_manifest`. Only `pinned` and `via_parent` are deliverable. `check` runs it on the primary and every `outputs[].path` and emits one `data_products_output_<state>` error per undeliverable path (`partial` reports as `unpinned`). When an import with a recorded pin lands no file, `data import` runs the same function on the producer's tree at that pin; if the tree cannot deliver the path, or cannot be read, it fails (`UndeliverableImport`) instead of reporting success.
+`_dvc_state.delivery` answers, offline from a tree's pointers and `dvc.lock`, whether `mintd import <name> --path <path>` would land bytes. States: `pinned`, `via_parent` (under a pinned `.dir` out), `untracked`, `not_pullable` (only `cache: false` or `dvc import` outs), `unpinned` / `partial` (on a version-aware remote, no / some files carry an S3 version ID), `missing_from_manifest`. Only `pinned` and `via_parent` are deliverable. `check` runs it on the primary and every `outputs[].path` and emits one `data_products_output_<state>` error per undeliverable path (`partial` reports as `unpinned`). When an import with a recorded pin lands no file, `data import` runs the same function on the producer's tree at that pin; if the tree cannot deliver the path, or cannot be read, it fails (`UndeliverableImport`) instead of reporting success.
 
 Why: `metadata.json` holds a human's claim about outputs and DVC holds the truth. Without the gate, a product could declare a path DVC tracks nowhere, or one with no S3 version IDs, pass `check`, publish, and hand every consumer an empty directory at exit 0.
 
@@ -133,6 +133,10 @@ Why: lets `status` and `register` know about a PR that has not merged yet. `upda
 
 Why register refuses uncommitted changes: importers read the commit on the git remote, not your disk.
 
+`rebuild [--check] [--registry PATH]` runs in a checkout of the registry. Each entry under `catalog/` is rebuilt from its product: the repository the entry names is cloned at its default branch's HEAD (one commit, no DVC data), and only the product's own fields are copied, those the model tags `Owner.USER` or `Owner.PIPELINE` (description, tags, team, maintainers, the declared outputs and `status.state`). The entry records the commit as `source.commit` and its date as `status.last_updated`. A product whose `metadata.json` is missing or invalid, declares an output path a consumer can't import, or fails offline `mintd check` keeps its entry as it was, with `source.held` (since, commit, why); its next good commit clears it. Differences in name, storage, classification or schema, and a credential in the product's own URL, are reported, never copied. `--check` writes nothing and exits 1 when any entry would change or is held; `--json` gives each entry's verdict.
+
+Why only those fields: the registry's own workflows act on the rest (repository permissions from `access_control`, bucket policies from `storage`, a public mirror from `repository.mirror.url`), so a product must not be able to set them by editing its own file. The entries are the join record: a product with no entry gets none.
+
 ---
 
 ## Producer side: publishing
@@ -157,7 +161,7 @@ Why: it unifies the two ways DVC records imports on the consumer side.
 
 ### Import namespace (`data/imports/<full_name>/<producer path>`)
 
-`mintd data import` writes each output to `<dest_root>/<namespace>/<the producer's own output path>`. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The import writer and the bump reader share one definition.
+`mintd import` (or `mintd data import`) writes each output to `<dest_root>/<namespace>/<the producer's own output path>`, relative to the folder it runs in. `--dest-root` defaults to `data/imports`; the namespace is the producer's `project.full_name` (falling back to the catalog name) and must be a single plain folder name. The import writer and the bump reader share one definition. Import, `--bump` included, runs from any folder inside a project (a `.dvc/` there or above, found as dvc finds it, by `dvc_root`); outside one it stops before reading the catalog or running dvc, and points at `mintd clone` for the whole product or `mintd init` for a new project.
 
 Why: without the namespace, two products that both publish `data/final/` would collide. Mirroring the full producer path, not just the basename, keeps `data/final/` and `archive/final/` apart under `--all`.
 
@@ -195,7 +199,7 @@ An import has drifted when the producer's DVC pointer md5 for the imported path 
 
 Why: producer metadata has no per-output content identity (`last_published` is a per-publish stamp), so bytes committed without a `mintd publish` still count and the pointer is the ground truth. An unreadable pointer is never `up_to_date`: silent degradation to "up to date" is the bug class this lane exists to kill.
 
-### `mintd data import --bump` (`bump_import`)
+### `mintd import --bump` (`bump_import`)
 
 Re-pins one existing import to the producer's current `HEAD` SHA, selecting it by the same `(name, --path)` pair a plain import uses. It reads the import's consumer finding from `check_project(upgrades=True)`: `up_to_date` changes nothing, `drift` rewrites the same `.dvc` via `dvc import --rev <head_sha> --force` on the path the import recorded (or `HEAD`'s primary if it recorded none). `schema_too_old` re-pins the same way when `HEAD` reads (check judges the schema at the pin only); when `HEAD` is too old as well it raises `BumpBlocked` with that finding, and when `HEAD` cannot be read, with a `drift_unknown` one. Any other kind raises `BumpBlocked` with the finding attached.
 
@@ -224,6 +228,18 @@ A **pointer** is a git-tracked DVC file that records data by hash: a `.dvc` file
 A target inside a tracked output pushes the whole output. `--no-commit` uploads only.
 
 Why: importers read the producer's pushed commit, never its working tree, so a pointer that is not committed and pushed is one no importer can see yet.
+
+### Reading DVC's own files
+
+The shared readers of the files DVC itself writes or reads live in one module, `_dvc_state`: `.dvc` pointers, `dvc.lock`, `dvc.yaml`, `.dvc/config` (with `config.local` on top) and the cache's layout, each read the way dvc reads it. They parse YAML with `load12` (YAML 1.2, so `on` and `no` stay names; a value its type can't hold is invalid YAML, so a pointer with one is cut short). A few older call sites still parse DVC files with their own `yaml.safe_load`, in `check`, import rescue, `enclave`, `imports` and one CLI handler; moving them onto the shared readers is a follow-up. `.dvc/config` is read once by every caller, with quoting and inline comments as dvc treats them. `_fast_sync_ops` keeps the S3 code and the cache writers and imports what it reads from `_dvc_state`; `_dvc_state` imports no other mintd module but `mintd.errors`. What a push records, and the folder comparison built on it (`unlisted_on_disk`), live in `_pin_proof`, which talks to S3.
+
+Why: when five places parsed `.dvc/config` each its own way, a quoted value, an inline comment or a remote set in `config.local` meant different things to fast sync, the push check and publish.
+
+### `mintd data remove`: stop tracking, keep the data
+
+`mintd data remove <pointer>` runs `dvc remove` without `--outs`: the pointer and its `.gitignore` line go, and the data stays on disk. The command names what stayed (never its contents), for a `.dvc` pointer or a root stage, and warns about the outs whose files git now sees as untracked (neither tracked by HEAD nor ignored), so a `git add` would commit them: delete them, or add them to `.gitignore`. Under the scaffold's `/data/**` rule git still ignores files under `data/`.
+
+Why: the name reads as "delete", so the command says plainly what it did and didn't do.
 
 ### Version-aware remote / out
 
@@ -353,7 +369,7 @@ A frozen Pydantic `Config` (`extra="forbid"`) loaded from `$MINTD_CONFIG_DIR/con
 
 The CLI loads config and passes values down. The exception is the scaffold renderer (`_templates/_render.py`), which calls `Config.load()` itself to fill template fields such as `author` and `organization`, falling back to defaults if loading fails.
 
-**AWS profile (`[mintd]`)**: `Config.aws_profile_name` is `"mintd"` when the shared credentials file (`$AWS_SHARED_CREDENTIALS_FILE`, else `~/.aws/credentials`) has a `[mintd]` section, otherwise `None`. Every S3 client mintd opens (`mintd._s3.create_client`) picks its profile in the order dvc does: the remote's `profile` (`.dvc/config`, or a per-machine override in `.dvc/config.local`; every other remote key stays the committed one), else an exported `AWS_DEFAULT_PROFILE` or `AWS_PROFILE` (botocore's order), else `[mintd]`. The import-rescue lane reads a producer's bucket with the consumer's own credentials, because the producer's `profile` names a profile on the producer's machine. With none named it uses boto3's default chain, on purpose, so CI and sandboxes work. A named profile that doesn't exist stops the command with `error: AWS profile 'X' (named in .dvc/config) isn't in <credentials file>` and a hint, never a silent fallback to other credentials; plain `dvc` fails on it too. `data ls` and share take their storage from the catalog or the config, not from a DVC remote, so only the environment's profile and `[mintd]` apply there. dvc gets `[mintd]` as `AWS_PROFILE` via `setdefault`, so an exported `AWS_PROFILE` wins there too; `mintd init` writes it as the DVC remote's `profile`. `mintd config setup` offers to write the section (mode 0600, atomic, `[default]` untouched), and `mintd config validate` reports the profile it will use and where its name came from.
+**AWS profile (`[mintd]`)**: `Config.aws_profile_name` is `"mintd"` when the shared credentials file (`$AWS_SHARED_CREDENTIALS_FILE`, else `~/.aws/credentials`) has a `[mintd]` section, otherwise `None`. Every S3 client mintd opens (`mintd._s3.create_client`) picks its profile in the order dvc does: the remote's `profile` (`.dvc/config`, or a per-machine override in `.dvc/config.local`; every other remote key stays the committed one), else an exported `AWS_DEFAULT_PROFILE` or `AWS_PROFILE` (botocore's order), else `[mintd]`. The import-rescue lane reads a producer's bucket with the consumer's own credentials, because the producer's `profile` names a profile on the producer's machine. With none named it uses boto3's default chain, on purpose, so CI and sandboxes work. `create_client` loads the credentials before it connects (`_s3.load_credentials`): none, a blank key or secret, or a failed load is `CredentialsUnavailable` ("no AWS credentials were found", or "AWS credentials could not be loaded (<type>)", which names only the error's type). That stops a command before any work, except a pull or a clone, which falls back to `dvc pull`, since dvc also reads a remote's own keys and anonymous remotes. A named profile that doesn't exist stops the command with `error: AWS profile 'X' (named in .dvc/config) isn't in <credentials file>` and a hint, never a silent fallback to other credentials; plain `dvc` fails on it too. `data ls` and share take their storage from the catalog or the config, not from a DVC remote, so only the environment's profile and `[mintd]` apply there. dvc gets `[mintd]` as `AWS_PROFILE` via `setdefault`, so an exported `AWS_PROFILE` wins there too; `mintd init` writes it as the DVC remote's `profile`. `mintd config setup` offers to write the section (mode 0600, atomic, `[default]` untouched), and `mintd config validate` runs the same load, reports the profile it used and where its name came from, and checks the configured bucket.
 
 Why checkout is a transfer: it materializes cache blobs, which can mean minutes of copying on non-reflink filesystems, longer than the 30 s fast cap allows.
 
@@ -361,7 +377,7 @@ Why add, status and remove are transfers: add hashes every byte, status hashes e
 
 ### Subprocess seams (`DvcOps`, `RegistryGitOps`, `Fetcher`, `InitOps`)
 
-External commands are spawned behind Protocols that tests replace with fakes: `DvcOps` (dvc); `RegistryGitOps` ([src/mintd/_registry_git_ops.py](src/mintd/_registry_git_ops.py)), git and gh for the catalog client, the catalog cache, and the project-side git calls of `check`, `publish`, `registry register`, `data push` and `data import`, plus the producer clone in `data clone`; `Fetcher` (the other git reads against producers); `InitOps` (`git init`, `dvc init`, remote setup). `RegistryGitOps` failures become typed exceptions: `GitOpError` (with `GitTagError`, `GitTagAlreadyExists`, `RegistryBranchExists`), `GhAuthError`, `GhNotInstalled`, `PRConflictError`. Only five modules are exempt from the lint ban on spawning through `subprocess` directly (`_subprocess`, `_registry_git_ops`, `_init_ops`, `_fast_sync_ops`, `_producer_git_ops`), a list `tests/test_substrate_rules.py` pins. Every dvc spawn uses `dvc_cmd()` (`sys.executable -m dvc`, the dvc in mintd's own env) and `dvc_env()` (`DVC_NO_ANALYTICS=1`); every git spawn uses `git_env()`, which pins git's messages to English.
+External commands are spawned behind Protocols that tests replace with fakes: `DvcOps` (dvc); `RegistryGitOps` ([src/mintd/_registry_git_ops.py](src/mintd/_registry_git_ops.py)), git and gh for the catalog client, the catalog cache, and the project-side git calls of `check`, `publish`, `registry register`, `data push`, `data remove` and `import`, plus the producer clone in `clone`; `Fetcher` (the other git reads against producers); `InitOps` (`git init`, `dvc init`, remote setup). `RegistryGitOps` failures become typed exceptions: `GitOpError` (with `GitTagError`, `GitTagAlreadyExists`, `RegistryBranchExists`), `GhAuthError`, `GhNotInstalled`, `PRConflictError`. Only five modules are exempt from the lint ban on spawning through `subprocess` directly (`_subprocess`, `_registry_git_ops`, `_init_ops`, `_fast_sync_ops`, `_producer_git_ops`), a list `tests/test_substrate_rules.py` pins. Every dvc spawn uses `dvc_cmd()` (`sys.executable -m dvc`, the dvc in mintd's own env) and `dvc_env()` (`DVC_NO_ANALYTICS=1`); every git spawn uses `git_env()`, which pins git's messages to English.
 
 Why: one seam normalizes subprocess failures into typed exceptions and lets implementations be swapped without touching callers. mintd parses git's stderr, so a translated `fatal:` line would silently stop matching. dvc telemetry is off because an unannounced outbound request on project creation is a governance question for enclave and lab-only projects.
 

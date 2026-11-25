@@ -124,8 +124,26 @@ Then point `mintd` at your lab's registry and your S3 storage:
 ```bash
 mintd config setup            # interactive walkthrough
 mintd config show             # see what got written
-mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 head_bucket check
+mintd config validate         # schema, AWS credentials, and that the bucket answers (storage_bucket_prefix, or --bucket NAME)
 ```
+
+`config validate` exits 1 when there are no AWS credentials, when they
+can't be loaded, or when the bucket doesn't answer. It can't prove
+everything a push needs:
+
+- The bucket answering means you can list it, not that you can write to it
+  or read its files.
+- It reads only this config, not a project's `.dvc/config`, which can name
+  another bucket, endpoint, region or AWS profile.
+- With both `AWS_ACCESS_KEY_ID` exported and a profile named (by
+  `AWS_PROFILE` or a `[mintd]` section), it checks the profile, while
+  `dvc push` in a project whose `.dvc/config` names no profile uses the
+  exported keys.
+- On AWS a wrong region is followed to the bucket's own, so it isn't
+  caught, and with no bucket to check, neither is a wrong
+  `storage_endpoint`.
+- With no bucket to check, ✓ on `aws_profile` means the keys loaded, not
+  that AWS accepts them: nothing has been asked of S3.
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
 `registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
@@ -302,16 +320,18 @@ mintd import my-cleaned-survey --bump --path data/final/survey.parquet
 **An import in an old place.** An import made by hand or by an older mintd can
 sit outside `data/imports/<full_name>/`, at `data/external/rainfall/final.dvc`
 say. `--bump` and `mintd check --upgrades` don't look there, and a plain import
-adds a second copy under `data/imports/`. Move it by removing the old pointer together with
-its data, importing again, and committing both changes:
+adds a second copy under `data/imports/`. Move it: stop tracking the old pointer,
+delete the old folder it leaves on disk, import again, and commit:
 
 ```bash
-dvc remove --outs data/external/rainfall/final.dvc
+mintd data remove data/external/rainfall/final.dvc   # says what it left on disk
+rm -r data/external/rainfall/final
 mintd import county-rainfall
 git add -A data && git commit -m "Move the county-rainfall import to data/imports/data_county-rainfall/"
 ```
 
-(`mintd data remove` would leave the old data files on disk.)
+`mintd data remove` stops DVC tracking a pointer and leaves its data where it is,
+naming what stayed; it warns when git would now pick those files up.
 
 ## Example: enclave workflow
 
@@ -440,7 +460,7 @@ mintd data     import|clone|pull|push|add|verify|remove|schema|list|ls
 mintd cache    push|pull|ls                        Durable file cache for untracked repo files
 mintd share    put|get                             Ephemeral per-user file handoff
 mintd enclave  add|remove|bump|pull|package|verify|list   package: incremental, --resend re-ships
-mintd registry register|update|status|sync        Catalog operations
+mintd registry register|update|status|sync|rebuild   Catalog operations; rebuild: each entry from its product
 mintd publish  [version] [--dry-run] [-y]         Cut a versioned release
 mintd config   show|setup|validate
 mintd update   metadata [path]                    Migrate v1 metadata.json → v2

@@ -366,6 +366,15 @@ def _add_schema_parser(subs: Any) -> None:
     p_schema_gen.set_defaults(_handler=_handle_data_schema_generate)
 
 
+def _add_registry_rebuild_parser(subs: Any) -> None:
+    p = subs.add_parser(
+        "rebuild", help="Rebuild each catalog entry from its product's default branch (run in a registry checkout)"
+    )
+    p.add_argument("--check", action="store_true", help="Show what would change; write nothing")
+    p.add_argument("--registry", type=Path, default=Path("."), help="The registry checkout (default: .)")
+    p.set_defaults(_handler=_handle_registry_rebuild)
+
+
 def _add_cache_parser(subs: Any) -> None:
     """Wire the ``cache push/pull/ls`` subparsers. Split out of ``_build_parser``
     so the naming-discipline grep test can scope to exactly the cache surface's
@@ -672,8 +681,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--path", type=Path, default=Path("."))
     p_verify.set_defaults(_handler=_handle_data_verify)
 
-    p_remove = p_data_sub.add_parser("remove", help="Remove DVC data")
-    p_remove.add_argument("name")
+    p_remove = p_data_sub.add_parser(
+        "remove", help="Stop tracking a file or folder with DVC; the data stays on disk")
+    p_remove.add_argument("name", help="the .dvc file (or stage) to stop tracking")
     p_remove.set_defaults(_handler=_handle_data_remove)
 
     _add_schema_parser(p_data_sub)
@@ -833,6 +843,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_reg_sync = p_registry_sub.add_parser("sync", help="Refresh the registry cache")
     p_reg_sync.set_defaults(_handler=_handle_registry_sync)
+    _add_registry_rebuild_parser(p_registry_sub)
 
     p_publish = subs.add_parser("publish", help="Publish a new version of this project")
     p_publish.add_argument("version", nargs="?")
@@ -876,7 +887,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_config_validate.add_argument("--path", type=Path, default=None)
     p_config_validate.add_argument(
         "--bucket", default=None,
-        help="S3 bucket to test head_bucket against (auto-discovery is slice-22+).",
+        help="the S3 bucket to check (default: the config's storage_bucket_prefix)",
     )
     p_config_validate.set_defaults(_handler=_handle_config_validate)
 
@@ -1708,8 +1719,27 @@ def _handle_data_remove(args: argparse.Namespace) -> int:
     config = Config.load()
     dvc_ops = _resolve_dvc_ops(config, reporter)
     with _hint(DvcOpError, "check the name; 'mintd data verify' lists tracked outputs"):
-        data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
+        left = data_remove(args.name, project_path=Path("."), dvc_ops=dvc_ops)
     print(f"removed: {args.name}")
+    if not left:
+        return 0
+    def shown(paths: list[str]) -> str:
+        return ", ".join(f"{p}/" if Path(p).is_dir() else p for p in paths)
+
+    reporter.info(f"DVC no longer tracks it; the data stays on disk: {shown(left)}")
+    # dvc remove also drops the pointer's .gitignore line, so git may now see
+    # the data as untracked, ready for the next `git add` to commit it.
+    # Untracked: what git lists, less what it ignores and what HEAD tracks.
+    try:
+        git = _resolve_git_ops(config, reporter)
+        tracked = set(git.head_files(Path("."))) if git.has_commit(Path(".")) else set()
+        untracked = set(git.listed_files(Path("."), left)) - set(git.ignored_files(Path("."), left)) - tracked
+    except GitOpError:  # not a git repository, or git failed: nothing to warn about
+        untracked = set()
+    seen = [p for p in left if any(f == p or f.startswith(f"{p}/") for f in untracked)]
+    if seen:
+        reporter.warn(f"git now sees {len(untracked)} file(s) in {shown(seen)} as untracked: a `git add` would commit them")
+        reporter.warn(f"to keep them out: delete them, or add {shown(seen)} to .gitignore")
     return 0
 
 
@@ -2763,6 +2793,35 @@ def _handle_registry_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_registry_rebuild(args: argparse.Namespace) -> int:
+    """Rebuild the catalog in a registry checkout. Exits 1 when an entry
+    couldn't be read (its repository unreachable, or the entry itself) or is
+    held by mintd's own error, the other entries written; under --check, also
+    when any entry would change or is held, so a dry run can gate."""
+    from .catalog import rebuild_catalog
+
+    reporter = getattr(args, "_reporter", None) or Reporter()
+    if not (args.registry / "catalog").is_dir():
+        reporter.error(f"{args.registry} has no catalog/ folder", hint="run it in a registry checkout, or pass --registry")
+        return 1
+    results = rebuild_catalog(args.registry, git_ops=_resolve_git_ops(Config.load()), write=not args.check)
+    if reporter.json_mode:
+        reporter.result([
+            {"name": r.name, "entry": r.entry, "verdict": r.verdict, "commit": r.commit, "why": r.why,
+             "changes": [c.field_path for c in r.changes], "reports": list(r.reports), "mintd_error": r.mintd_error}
+            for r in results
+        ])
+    else:
+        for r in results:
+            changed = f" ({', '.join(c.field_path for c in r.changes)})" if r.changes else ""
+            line = f"{r.entry}: {r.verdict}{changed}" + (f": {r.why}" if r.why else "")
+            (reporter.warn if r.verdict in ("held", "unreachable", "skipped") else reporter.info)(line)
+            for report in r.reports:
+                reporter.warn(f"{r.entry}: {report}")
+    unread = any(r.verdict in ("unreachable", "skipped") or r.mintd_error for r in results)
+    return 1 if unread or (args.check and any(r.verdict in ("updated", "held") for r in results)) else 0
+
+
 def _handle_publish(args: argparse.Namespace) -> int:
     from .publish import prepare_publish, _apply_publish
     reporter = getattr(args, "_reporter", None) or Reporter()
@@ -2909,18 +2968,19 @@ def _handle_config_validate(args: argparse.Namespace) -> int:
     with reporter.status("Validating S3 connectivity..."):
         steps = config_ops.validate_config(args.path, bucket=args.bucket)
     text, exit_code = config_ops.render_validation(steps, json_out=args.json_out)
-    print(text)
+    print(strip_userinfo(text))  # an endpoint or an error's URL can carry credentials
     if not args.json_out:
         s3_step = next((s for s in steps if s.name == "s3"), None)
         if s3_step is not None and s3_step.status == "ok":
             try:
-                config = Config.load()
+                config = Config.load(args.path)
                 endpoint = config.storage_endpoint or "default AWS endpoint"
                 profile = _s3.resolve_profile({}, config.aws_profile_name)[0] or "default"
             except Exception:
                 endpoint, profile = "default AWS endpoint", "default"
             ms_clause = f" — 200 OK, {s3_step.latency_ms}ms" if s3_step.latency_ms is not None else " — 200 OK"
-            reporter.success(f"✓ s3://{args.bucket} via {endpoint} (profile: {profile}){ms_clause}")
+            # The bucket the step checked: --bucket, or the config's storage_bucket_prefix.
+            reporter.success(f"✓ s3://{s3_step.bucket or args.bucket} via {endpoint} (profile: {profile}){ms_clause}")
     return exit_code
 
 
