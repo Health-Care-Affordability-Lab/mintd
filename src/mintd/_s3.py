@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from ._aws_credentials import shared_credentials_path
+from ._aws_credentials import default_credentials_path, shared_credentials_path
 from .errors import MintdError
 
 try:
@@ -319,12 +319,56 @@ def profile_session(remote_cfg: dict[str, str], aws_profile_name: str | None) ->
         ) from exc
 
 
+class CredentialsUnavailable(MintdError):
+    """No usable AWS credentials where mintd looks: none, a blank key or secret, or a load
+    that failed. dvc reads keys mintd doesn't (a remote's own in `.dvc/config` or
+    `config.local`, an anonymous remote), so a pull falls back to dvc on this one."""
+
+
+def load_credentials(remote_cfg: dict[str, str], aws_profile_name: str | None) -> tuple[Any, str]:
+    """Load the credentials of :func:`profile_session`'s session, as boto3 would on its first S3 call,
+    and say where they came from (botocore's name: ``env``, ``shared-credentials-file``, ``sso``, ...).
+    :func:`create_client` calls this for every S3 command, and ``mintd config validate`` directly.
+    A ``CredentialsUnavailable`` when there are no credentials, when the access key or secret is blank,
+    or when loading fails; that message names only the exception's type, so nothing from the failure
+    (a key, a token, a credential_process's output) is ever printed. A named profile that doesn't exist,
+    and an AWS config file that doesn't parse, stop earlier, in :func:`profile_session`, as on main. Loading runs the whole chain, including
+    any SSO, assume-role or credential_process fetch. With no credentials anywhere it ends at the
+    instance metadata service: two requests, one try each, a one-second timeout each (botocore's
+    defaults), so about two seconds off EC2, paid only on the way to "no AWS credentials"."""
+    session = profile_session(remote_cfg, aws_profile_name)
+    path = shared_credentials_path()
+    hint = (f"run mintd config setup to add your lab keys\nthey go in a [mintd] section of "
+            f"{'~/.aws/credentials' if path == default_credentials_path() else path}\n"
+            "or export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+    try:  # all of the load, field access included, so no error escapes this one message
+        creds = session.get_credentials()
+        if creds is None:
+            raise CredentialsUnavailable("no AWS credentials were found", hint=hint)
+        method = creds.method
+        frozen = creds.get_frozen_credentials()  # SSO, assume-role, credential_process: reading them proves them
+        blank = not (frozen.access_key or "").strip() or not (frozen.secret_key or "").strip()
+    except MintdError:
+        raise
+    except Exception as exc:  # by type only: the text can carry a key, a token or a process's output
+        raise CredentialsUnavailable(f"AWS credentials could not be loaded ({type(exc).__name__})", hint=hint) from None
+    if blank:
+        raise CredentialsUnavailable(f"the AWS credentials from {method} have an empty access key or secret", hint=hint)
+    return session, method
+
+
 def create_client(
-    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None,
+    remote_cfg: dict[str, str], aws_profile_name: str | None, *, pool: int | None = None, session: Any = None,
 ) -> Any:
     """An S3 client for a DVC remote section (``endpointurl``/``endpoint``, ``region``,
-    ``profile``), on :func:`profile_session`'s session."""
-    session = profile_session(remote_cfg, aws_profile_name)
+    ``profile``), on ``session`` when given (one :func:`load_credentials` returned),
+    else on one whose credentials :func:`load_credentials` has just loaded. Every S3
+    command connects through here, so each stops before any work, with that one
+    message and hint, when there are no credentials, the access key or secret is
+    blank, the named profile is missing, or loading fails: the same checks
+    ``mintd config validate`` reports."""
+    if session is None:
+        session, _ = load_credentials(remote_cfg, aws_profile_name)
 
     endpoint_url = remote_cfg.get("endpointurl")
     if not endpoint_url:

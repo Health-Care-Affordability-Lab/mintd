@@ -124,8 +124,26 @@ Then point `mintd` at your lab's registry and your S3 storage:
 ```bash
 mintd config setup            # interactive walkthrough
 mintd config show             # see what got written
-mintd config validate         # schema + AWS profile; --bucket NAME adds an S3 head_bucket check
+mintd config validate         # schema, AWS credentials, and that the bucket answers (storage_bucket_prefix, or --bucket NAME)
 ```
+
+`config validate` exits 1 when there are no AWS credentials, when they
+can't be loaded, or when the bucket doesn't answer. It can't prove
+everything a push needs:
+
+- The bucket answering means you can list it, not that you can write to it
+  or read its files.
+- It reads only this config, not a project's `.dvc/config`, which can name
+  another bucket, endpoint, region or AWS profile.
+- With both `AWS_ACCESS_KEY_ID` exported and a profile named (by
+  `AWS_PROFILE` or a `[mintd]` section), it checks the profile, while
+  `dvc push` in a project whose `.dvc/config` names no profile uses the
+  exported keys.
+- On AWS a wrong region is followed to the bucket's own, so it isn't
+  caught, and with no bucket to check, neither is a wrong
+  `storage_endpoint`.
+- With no bucket to check, ✓ on `aws_profile` means the keys loaded, not
+  that AWS accepts them: nothing has been asked of S3.
 
 The config lives at `~/.config/mintd/config.yaml`. Knobs include
 `registry_url`, `storage_bucket_prefix`, `storage_endpoint` and a
