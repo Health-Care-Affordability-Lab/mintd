@@ -1175,7 +1175,8 @@ def data_push(
             "nothing was written or pushed: " + "; ".join(u.message() for u in unlisted),
             hint=(unlisted[0].hint() if len(unlisted) == 1 else
                   "record each folder again (mintd data add <folder>, or dvc commit <stage> for a stage out), "
-                  "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
+                  "or list files DVC should skip in .dvcignore"
+                  + ("; if a pointer was cut, restore it from git" if any(u.cut_possible for u in unlisted) else ""))
             + "; then push",
         )
     prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,

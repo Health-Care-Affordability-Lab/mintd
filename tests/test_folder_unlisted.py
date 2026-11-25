@@ -160,35 +160,47 @@ def test_only_folders_dvc_pushes_are_compared(tmp_path: Path, pointer: str) -> N
 
 
 def _dir_pointer(root: Path, names) -> None:
-    """data/final.dvc in md5 layout (a `.dir` out, as `dvc add` writes it on a
-    remote that isn't version-aware), its list cached, listing ``names``."""
+    """data/final.dvc in md5 layout (a `.dir` out, as `dvc add` writes it on
+    any remote until a version-aware push rewrites it as a `files:` list),
+    its list cached, listing ``names``."""
     tree = ensure_dir_manifest(dvc_cache_dir(root), [DvcFileEntry(md5="0" * 32, relpath=n, size=1) for n in names])
     (root / "data").mkdir(parents=True, exist_ok=True)
     (root / "data" / "final.dvc").write_text(
         f"outs:\n- md5: {tree}\n  size: {len(names)}\n  nfiles: {len(names)}\n  hash: md5\n  path: final\n")
 
 
-@pytest.mark.parametrize("listed", [PARTS, ()], ids=["dir-list", "empty-folder"])
+@pytest.mark.parametrize("listed", [PARTS, ()], ids=["dir-list", "empty-dir"])
 def test_a_file_placed_in_a_dir_tracked_folder_is_named(tmp_path: Path, listed) -> None:
-    """A `.dir` list in the cache, and an empty folder (`nfiles: 0`, as
-    `mintd init` tracks data/raw), are compared too: a file placed in the
-    folder and not yet recorded is named, with the way to record it. A cached
-    `.dir` list can't be cut short, so then neither message nor hint says so;
-    an empty one may be a pointer emptied since, so it keeps that cause.
+    """A `.dir` list in the cache, and an empty `.dir` (`nfiles: 0`, as `dvc
+    add` writes for an empty folder, like the data/raw `mintd init` tracks),
+    are compared too: a file placed in the folder and not yet recorded is
+    named, with the way to record it. A `.dir` list can't be cut short, so
+    neither the message nor the hint says so.
 
-    Mutations: skip `.dir` entries (legacy_dir), or skip scope.empty -> red.
+    Mutations: skip `.dir` entries (legacy_dir), or skip scope.empty -> red;
+    call an empty `.dir` cut -> red.
     """
     _dir_pointer(tmp_path, listed)
     _folder(tmp_path, "data/final", [*listed, "placed.csv"])
     (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
-    assert (u.folder, u.listed, u.unlisted, u.cut_possible) == ("data/final", len(listed), ("placed.csv",), not listed)
-    assert u.hint().startswith("record the folder again (mintd data add data/final), or list files DVC should skip "
-                               "in .dvcignore")
-    if listed:
-        assert u.message().endswith(": files were added since the folder was recorded")
-        assert "restore it from git" not in u.hint()
-    else:
-        assert u.message().endswith(": the pointer was cut short, or the folder changed since it was recorded")
+    assert (u.folder, u.listed, u.unlisted, u.cut_possible) == ("data/final", len(listed), ("placed.csv",), False)
+    assert u.message().endswith(": files were added since the folder was recorded")
+    assert u.hint() == ("record the folder again (mintd data add data/final), or list files DVC should skip "
+                        "in .dvcignore")
+
+
+def test_a_file_placed_beside_an_empty_files_list_keeps_the_cut_cause(tmp_path: Path) -> None:
+    """A version-aware pointer's `files: []` may be a list emptied since it
+    was recorded, so it keeps "cut short" and "restore it from git".
+
+    Mutation: call every empty folder uncut -> red."""
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "final.dvc").write_text("outs:\n- path: final\n  hash: md5\n  files: []\n")
+    _folder(tmp_path, "data/final", ["placed.csv"])
+    (u,) = unlisted_on_disk(tmp_path, ["data/final.dvc"], remote=REMOTE)
+    assert (u.listed, u.unlisted, u.cut_possible) == (0, ("placed.csv",), True)
+    assert u.message().endswith(": the pointer was cut short, or the folder changed since it was recorded")
+    assert u.hint().endswith("; if the pointer was cut, restore it from git")
 
 
 def test_a_dir_folder_whose_list_isnt_cached_is_left_out(tmp_path: Path) -> None:

@@ -739,8 +739,9 @@ class Unlisted:
     #: The folder holds a ``.dvc`` file or folder, which makes DVC record it
     #: as an empty folder.
     holds_dvc: bool = False
-    #: The list is the pointer's own (a ``files:`` list, or none), which a cut
-    #: or a rewrite can shorten; a cached ``.dir`` list, under its md5, can't be.
+    #: The list is the pointer's own ``files:``, which a cut or a rewrite can
+    #: shorten; a ``.dir`` list, under its md5 (an empty one too, as ``dvc
+    #: add`` writes it), can't be.
     cut_possible: bool = True
 
     def message(self) -> str:
@@ -777,15 +778,18 @@ def unlisted_on_disk(root: Path, pointers: Sequence[str], *, remote: str) -> lis
                               dvc_files=[p for p in pointers if p.endswith(".dvc")],
                               locks=[p for p in pointers if Path(p).name == "dvc.lock"])
     lists: dict[tuple[str, str | None, str], set[str]] = {}
-    uncut: set[tuple[str, str | None, str]] = set()  # a cached .dir list
+    uncut: set[tuple[str, str | None, str]] = set()  # a .dir list: nothing a cut could shorten
     for e in scope.entries:
         if e.relpath is not None and e.pointer in wanted:
             lists.setdefault((e.pointer, e.stage, e.out), set()).add(e.relpath)
             if e.legacy_dir:
                 uncut.add((e.pointer, e.stage, e.out))
-    for o in scope.empty:  # recorded empty, or a pointer emptied since
+    for o in scope.empty:  # recorded empty, or a files: list emptied since
         if o.pointer in wanted:
             lists.setdefault((o.pointer, o.stage, o.path), set())
+            records = _records(_load(root / o.pointer), o.stage)
+            if o.index < len(records) and not isinstance(records[o.index].get("files"), list):
+                uncut.add((o.pointer, o.stage, o.path))
     found = []
     for (pointer, stage, folder), listed in lists.items():
         extra = sorted(set(_files_on_disk(root, folder)) - listed)

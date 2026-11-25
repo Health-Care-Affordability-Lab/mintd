@@ -3,11 +3,11 @@ fix: 91e55c5 (#70); before the fix: 9e50769.
 validated: with this patch on HEAD, tests/test_push_journey.py::test_a_moved_remote_is_reuploaded_despite_a_stale_dvc_site_cache goes red.
 
 diff --git a/src/mintd/data_ops.py b/src/mintd/data_ops.py
-index 376851f..e739652 100644
+index c4eedb4..b1e2624 100644
 --- a/src/mintd/data_ops.py
 +++ b/src/mintd/data_ops.py
-@@ -1155,8 +1155,7 @@ def data_push(
-                   "or list files DVC should skip in .dvcignore; if a pointer was cut, restore it from git")
+@@ -1179,8 +1179,7 @@ def data_push(
+                   + ("; if a pointer was cut, restore it from git" if any(u.cut_possible for u in unlisted) else ""))
              + "; then push",
          )
 -    prepared = prepare(project_path, remote_arg=remote, selection=None if unresolved else selection,

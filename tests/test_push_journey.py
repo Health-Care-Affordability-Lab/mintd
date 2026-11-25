@@ -18,6 +18,8 @@ import pytest
 import yaml
 
 from mintd import cli
+from mintd.check import check_project
+from tests._dvc_fixtures import MINIMAL_METADATA
 from tests._harness.dvc import real_dvc  # noqa: F401  (fixture)
 from tests._harness.git import _git
 from tests._harness.s3 import BUCKET
@@ -430,6 +432,52 @@ def test_a_folder_pointer_shorter_than_its_folder_stops_the_push_before_upload(
     assert "mintd data add data/raw" in err
     assert len(s3_server.puts) == puts
     assert _git(["show", "HEAD:data/raw.dvc"], cwd=producer) == head
+
+
+def test_a_file_placed_in_a_dir_tracked_folder_is_flagged_by_check_and_push(
+    producer, s3_server, real_dvc, capsys,  # noqa: F811
+) -> None:
+    """Real dvc: `dvc add` writes data/raw.dvc as a `.dir` list (the remote is
+    version-aware, but nothing is pushed yet). A file placed in data/raw and
+    not recorded is named by check, and the push refuses before any upload,
+    without calling it a cut pointer. `mintd data add data/raw` clears it.
+
+    Mutation: skip `.dir` lists -> check is silent and the push runs, red.
+    """
+    out = yaml.safe_load((producer / "data" / "raw.dvc").read_text())["outs"][0]
+    assert out["md5"].endswith(".dir") and "files" not in out  # a .dir list, not a files: list
+    # check reads a product: give the producer the minimal metadata.json.
+    (producer / "metadata.json").write_text(MINIMAL_METADATA.read_text(encoding="utf-8"), encoding="utf-8")
+    _git(["add", "metadata.json"], cwd=producer)
+    _git(["commit", "-q", "-m", "metadata"], cwd=producer)
+    (producer / "data" / "raw" / "z.csv").write_text("z\n")
+    found = [f for f in check_project(producer) if f.kind == "dvc_folder_unlisted"]
+    assert len(found) == 1 and "(z.csv): files were added since the folder was recorded" in found[0].message
+    puts = len(s3_server.puts)
+    assert cli.main(["data", "push"]) == 1
+    err = _out(capsys)
+    assert "data/raw.dvc lists 2 file(s) of data/raw/, but the folder on disk holds 1 it doesn't list (z.csv)" in err
+    assert "mintd data add data/raw" in err and "restore it from git" not in err
+    assert len(s3_server.puts) == puts
+    assert cli.main(["data", "add", "data/raw"]) == 0
+    assert not [f for f in check_project(producer) if f.kind == "dvc_folder_unlisted"]
+
+
+def test_two_dir_folders_with_placed_files_get_one_hint_without_a_cut(
+    producer, s3_server, real_dvc, capsys,  # noqa: F811
+) -> None:
+    """With two `.dir` folders flagged, the push's combined hint doesn't say
+    "if a pointer was cut": neither list can be.
+
+    Mutation: always add the cut clause -> red."""
+    (producer / "data" / "more").mkdir()
+    (producer / "data" / "more" / "m.csv").write_text("m\n")
+    real_dvc(["add", "-q", "data/more"], cwd=producer, check=True)
+    (producer / "data" / "raw" / "z.csv").write_text("z\n")
+    (producer / "data" / "more" / "n.csv").write_text("n\n")
+    assert cli.main(["data", "push"]) == 1
+    err = _out(capsys)
+    assert "record each folder again" in err and "if a pointer was cut" not in err
 
 
 def test_a_file_placed_in_a_folder_tracked_while_empty_stops_the_push(

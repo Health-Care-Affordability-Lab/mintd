@@ -764,8 +764,9 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
     the folder on disk, lists files, and still refused on a rerun, which the
     folder comparison stops before the push.
 
-    Mutation: drop the empty-listing checks -> the empty pointer is
-    committed, red.
+    Mutations: drop the post-push check's `_holds_files` arm -> the
+    never-committed case passes verification, red; drop the folder
+    comparison's empty folders -> the rerun's message changes, red.
     """
     proj = _producer(tmp_path)
     if not committed:
@@ -778,10 +779,14 @@ def test_push_refuses_a_folder_rewritten_to_an_empty_list(
     for run in range(2):  # the rerun finds the emptied pointer still on disk
         assert cli.main(["data", "push", "data/final"]) == 1
         err = _err(capsys)
-        # The push empties it, so the first run is stopped after dvc push; the
-        # rerun is stopped before, by the folder comparison.
-        assert ("data/final" in err and "lists no files" in err) if run == 0 else \
-            "data/final.dvc lists 0 file(s) of data/final/, but the folder on disk holds" in err
+        # The push empties it, so the first run is stopped after dvc push, by the
+        # post-push check (its own wording, with no ✓); the rerun is stopped
+        # before, by the folder comparison.
+        if run == 0:
+            assert "the push isn't verified" in err and "✓" not in err
+            assert "lists no files, but the folder or the last commit holds some: data/final" in err
+        else:
+            assert "data/final.dvc lists 0 file(s) of data/final/, but the folder on disk holds" in err
         assert _head(proj) == before
 
 
