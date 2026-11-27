@@ -9,7 +9,6 @@ nothing reaches the network. Org and account names are made up.
 from __future__ import annotations
 
 import os
-import shlex
 import socket
 import subprocess
 import shutil
@@ -518,32 +517,33 @@ def test_data_import_stops_before_dvc_with_the_hint(github: GitHub, tmp_path: Pa
     assert not (tmp_path / "data_demo_map").exists()
 
 
+_OPTION_URLS = {"long": "--upload-pack=touch {marker}; git-upload-pack", "short": "-utouch {marker}; git-upload-pack"}
+
+
+@pytest.mark.parametrize("form", sorted(_OPTION_URLS))
 @pytest.mark.parametrize("command", ["import", "clone", "producer-git"])
 def test_a_catalog_url_git_would_read_as_an_option_never_reaches_git(
-    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str, form: str
 ) -> None:
     """git takes the catalog's repository URL as a word of its own (`clone
     <url>`, `ls-remote <url>`), so one starting with `-` is an option to it,
-    and `--upload-pack=<cmd>` runs a command. It is refused before any git
-    runs: by import (dvc's seam), clone (the registry seam) and any producer
-    git call (check's and enclave's). gh is ready, so the access check isn't
-    what stops it, and a git first on PATH records every call."""
+    and `--upload-pack=<cmd>` or `-u<cmd>` runs a command. It is refused
+    before any git runs: by import (dvc's seam), clone (the registry seam) and
+    any producer git call (check's and enclave's). gh is ready, so the access
+    check isn't what stops it, and a git first on PATH records every call."""
     from mintd.catalog import InMemoryCatalogClient
     from mintd.data import clone_and_pull_product, import_product
     from mintd.errors import MintdError
     from tests._fakes.dvc_ops import _FakeDvcOps
     from tests.test_data_clone import _fast, _register
+    from tests.test_producer_git_ops import record_git_calls
 
-    marker, calls = tmp_path / "pwned", tmp_path / "git-calls"
-    real_git = shutil.which("git") or "git"
-    (tmp_path / "bin" / "git").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(calls))}\nexec {shlex.quote(real_git)} "$@"\n'
-    )
-    (tmp_path / "bin" / "git").chmod(0o755)
+    marker = tmp_path / "pwned"
     github.ready()
+    calls = record_git_calls(tmp_path, monkeypatch)
     monkeypatch.chdir(tmp_path)
     client = InMemoryCatalogClient()
-    url = f"--upload-pack=touch {marker}; git-upload-pack"
+    url = _OPTION_URLS[form].format(marker=marker)
     _register(client, mutate=lambda data: data["repository"].update(github_url=url))
 
     with pytest.raises((MintdError, FetchError)) as raised:
@@ -554,8 +554,39 @@ def test_a_catalog_url_git_would_read_as_an_option_never_reaches_git(
         else:
             _producer_git_ops._run(["git", "ls-remote", url, "HEAD"], timeout=5, repo=url, pin="", binary_stdout=False)
 
-    assert "git would read it as an option" in str(raised.value)
-    assert [c for c in (calls.read_text().splitlines() if calls.exists() else []) if "upload-pack" in c] == []
+    assert "can't be a repository: git would read it as an option" in str(raised.value)
+    assert [c for c in calls.read_text().splitlines() if "pwned" in c] == []
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda ops, repo, remote: ops.push_to(repo, remote, "main"),
+        lambda ops, repo, remote: ops.remote_default_branch(repo, remote),
+    ],
+    ids=["push_to", "remote_default_branch"],
+)
+def test_a_remote_git_would_read_as_an_option_never_reaches_git(
+    github: GitHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    call: Callable[[SubprocessRegistryGitOps, Path, str], object],
+) -> None:
+    """`_git` finds the remote a network call reaches by skipping the call's
+    options, so a remote named `--upload-pack=<cmd>` was skipped as one, and
+    the access check read the word after it (`HEAD`). The two calls that take
+    a remote's name, read from the branch's git config, refuse one starting
+    with `-` before any git runs."""
+    from tests.test_producer_git_ops import record_git_calls
+
+    marker, repo = tmp_path / "pwned", _local_repo(tmp_path, _REPO)
+    github.ready()
+    calls = record_git_calls(tmp_path, monkeypatch)
+
+    with pytest.raises(GitHubAccessMissing) as raised:
+        call(SubprocessRegistryGitOps(), repo, f"--upload-pack=touch {marker}; git-upload-pack")
+
+    assert "can't be a remote: git would read it as an option" in str(raised.value)
+    assert [c for c in calls.read_text().splitlines() if "pwned" in c] == []
     assert not marker.exists()
 
 

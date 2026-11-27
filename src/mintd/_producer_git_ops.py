@@ -275,6 +275,17 @@ def _extract_path_bytes(archive_bytes: bytes, path: str, *, repo: str, pin: str)
     raise FetchError.path_missing(repo, pin, detail=f"{path} missing from archive")
 
 
+#: A rev git reads as nothing but a rev: no leading ``-`` (an option to git),
+#: no ``:`` (``git show <pin>:<path>`` reads what follows it as a path) and no
+#: space or control character, which no SHA, tag or branch holds.
+_PLAIN_REV = re.compile(r"[^-:\x00-\x20\x7f][^:\x00-\x20\x7f]*")
+
+
+def is_plain_rev(pin: str) -> bool:
+    """Whether ``pin`` is a rev git can only read as one (``_PLAIN_REV``)."""
+    return _PLAIN_REV.fullmatch(pin) is not None
+
+
 @overload
 def _run(
     argv: list[str],
@@ -310,9 +321,16 @@ def _run(
     Translates FileNotFoundError and TimeoutExpired into typed FetchError so
     callers never see raw subprocess exceptions. Every producer git call
     reaches ``repo``, so GitHub access through gh is checked here first.
+    Before that, a ``pin`` that isn't a plain rev is refused: it is the
+    ``rev_lock`` of a ``.dvc`` file from someone else's project, and git
+    takes it as a word of its own (``archive <pin>``, ``fetch origin
+    <pin>``), where ``--exec=<cmd>`` or ``--upload-pack=<cmd>`` runs a command.
     """
     from ._registry_git_ops import GitHubAccessMissing, require_github_access  # imports this module lazily too
 
+    if pin and not is_plain_rev(pin):
+        raise FetchError.pin_missing(repo, pin, detail=f"{pin!r} isn't a plain rev: it starts with '-', or holds "
+                                                       "':', a space or a control character")
     try:
         require_github_access(repo)
     except GitHubAccessMissing as e:  # this seam's own error, so its callers handle it

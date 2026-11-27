@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import io
+import os
+import shlex
+import shutil
 import subprocess
 import tarfile
 from pathlib import Path
@@ -688,3 +691,94 @@ def test_fetch_metadata_at_translates_path_missing_to_metadata_missing(
         GitArchiveFetcher().fetch_metadata_at(REPO, PIN)
 
     assert ei.value.reason == FetchError.Reason.METADATA_MISSING
+
+
+# --- a value git would read as an option -----------------------------------
+
+
+def record_git_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A git first on PATH that appends each call's words to the file it
+    returns, then runs the real git: a test reads it to see what git was handed."""
+    real, shim, calls = shutil.which("git") or "git", tmp_path / "git-shim", tmp_path / "git-calls"
+    shim.mkdir()
+    (shim / "git").write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(calls))}\nexec {shlex.quote(real)} "$@"\n')
+    (shim / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
+    calls.touch()
+    return calls
+
+
+def _committed_repo(tmp_path: Path) -> Path:
+    """A local producer: one commit holding `a.txt`, tagged `v1.0.0`, with a branch `feature/x`."""
+    from tests._harness.git import _git
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init", "-q"], cwd=repo)
+    (repo / "a.txt").write_text("a")
+    _git(["add", "a.txt"], cwd=repo)
+    _git(["commit", "-q", "-m", "a"], cwd=repo)
+    _git(["tag", "v1.0.0"], cwd=repo)
+    _git(["branch", "feature/x"], cwd=repo)
+    return repo
+
+
+# No space, `:` or control character in them, so the leading `-` is all that
+# makes them anything but a plain rev; the shell git runs them with reads `${IFS}`.
+_OPTION_PINS = {
+    "exec": "--exec=touch${{IFS}}{marker};git-upload-archive",
+    "upload-pack": "--upload-pack=touch${{IFS}}{marker};git-upload-pack",
+    "u": "-utouch${{IFS}}{marker};git-upload-pack",
+}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the recording git is a POSIX script")
+@pytest.mark.parametrize("route", ["archive", "fallback-clone", "checkout"])
+@pytest.mark.parametrize("form", sorted(_OPTION_PINS))
+def test_a_pin_git_would_read_as_an_option_never_reaches_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, form: str
+) -> None:
+    """A pin is an import's `rev_lock`, from a `.dvc` file that arrives with
+    any clone of someone else's project. git takes it as a word of its own
+    (`archive <pin>`, `fetch origin <pin>`), so one starting with `-` is an
+    option, short (`-u…`) or long, and `--exec=<cmd>` or `--upload-pack=<cmd>`
+    runs a command. Every producer git call refuses it before git runs."""
+    repo, marker = _committed_repo(tmp_path), tmp_path / "pwned"
+    pin = _OPTION_PINS[form].format(marker=marker)
+    calls = record_git_calls(tmp_path, monkeypatch)
+    fetcher = GitArchiveFetcher()
+
+    with pytest.raises(FetchError) as raised:
+        if route == "archive":
+            fetcher.fetch_path_at(str(repo), pin, "a.txt")
+        elif route == "fallback-clone":
+            fetcher._fallback_clone(str(repo), pin, "a.txt")
+        else:
+            fetcher.checkout_at(str(repo), pin, tmp_path / "tree")
+
+    assert "isn't a plain rev" in raised.value.detail
+    assert [c for c in calls.read_text().splitlines() if "pwned" in c] == []
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("pin", ["HEAD:a.txt", "main x", "main\x1b[2J"], ids=["colon", "space", "control"])
+def test_a_pin_that_isnt_a_plain_rev_is_refused(tmp_path: Path, pin: str) -> None:
+    """`git show <pin>:<path>` would read a `:` in the pin as the start of a
+    path, and no SHA, tag or branch holds a space or a control character."""
+    with pytest.raises(FetchError) as raised:
+        GitArchiveFetcher().fetch_path_at(str(_committed_repo(tmp_path)), pin, "a.txt")
+
+    assert raised.value.reason is FetchError.Reason.PIN_MISSING
+    assert "isn't a plain rev" in raised.value.detail
+
+
+@pytest.mark.parametrize("pin", ["HEAD", "sha", "v1.0.0", "feature/x"])
+def test_a_plain_rev_still_reads(tmp_path: Path, pin: str) -> None:
+    """A SHA, a tag and a branch holding `/` or `.` all pass the check."""
+    from tests._harness.git import _git
+
+    repo = _committed_repo(tmp_path)
+    rev = _git(["rev-parse", "HEAD"], cwd=repo).strip() if pin == "sha" else pin
+
+    assert GitArchiveFetcher().fetch_path_at(str(repo), rev, "a.txt") == b"a"
+
