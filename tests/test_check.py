@@ -3065,7 +3065,7 @@ def _import_findings(tmp_path: Path, producer_path: str, served: dict[str, tuple
     _write_metadata(tmp_path)
     write_import(tmp_path, Import(name="demo-map", producer_url=_VIEW_REPO, pin=_PIN, producer_path=producer_path,
                                   local_path="imported"))
-    store = {(_VIEW_REPO, rev, name): body for name, pair in served.items() for rev, body in zip((_PIN, _HEAD), pair)}
+    store = {(_VIEW_REPO, rev, name): body for name, pair in served.items() for rev, body in zip((_PIN, _HEAD), pair, strict=True)}
     findings = check_project(
         tmp_path, upgrades=True,
         producer_view_factory=_factory_by_pin({
