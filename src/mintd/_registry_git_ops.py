@@ -91,15 +91,19 @@ SSH_TO_HTTPS = (
 #: Said after the GitHub access hint where git failed to reach the repo: the
 #: same failure can be the network.
 NETWORK_TOO = "if GitHub access is fine, check your network"
+#: For a remote name ``_refuse_an_option`` refuses: ``push_to`` and
+#: ``remote_default_branch`` take it from the branch's ``branch.<name>.remote``.
+_REMOTE_HINT = "a remote is a name `git remote` lists\nset the branch's upstream to one:\ngit branch --set-upstream-to <remote>/<branch>"
 
 
 class GitHubAccessMissing(GitOpError):
     """mintd reaches GitHub through gh only, and gh isn't ready for this
-    repository. Raised before git runs, as a ``GitOpError``, so every caller
-    of the git seam handles it as it handles git failing."""
+    repository, or (``reason``) git couldn't take it as one. Raised before git
+    runs, as a ``GitOpError``, so every caller of the git seam handles it as it
+    handles git failing."""
 
-    def __init__(self, url: str, hint: str) -> None:
-        reason = f"mintd reaches GitHub through gh, and it isn't ready for {url}"
+    def __init__(self, url: str, hint: str, *, reason: str | None = None) -> None:
+        reason = reason or f"mintd reaches GitHub through gh, and it isn't ready for {url}"
         MintdError.__init__(self, reason, hint=hint)
         self.command: list[str] = []
         self.stderr = reason
@@ -232,11 +236,26 @@ def _git_output(argv: list[str], cwd: Path | None) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
+def _refuse_an_option(value: str, what: str, *, hint: str) -> None:
+    """Refuse ``value``, which git takes as a word of its own, when it starts
+    with ``-``: git would read it as an option, and ``--upload-pack=<cmd>``
+    (``-u<cmd>``) runs a command. Raised before any git runs, as the access
+    check's own error, so every caller of a git seam handles it as a refusal."""
+    if value.startswith("-"):
+        raise GitHubAccessMissing(
+            value, hint=hint, reason=f"{_credentials_out(value)!r} can't be {what}: git would read it as an option"
+        )
+
+
 def urls_git_uses(url: str, *, cwd: Path | None = None, push: bool = False) -> list[str]:
     """Every URL git will actually reach for ``url`` (a URL or a remote name):
     with ``insteadOf`` applied, and for a push every ``pushurl`` with
     ``pushInsteadOf`` too. Local: none of these commands talks to a remote.
-    When git can't say, this refuses rather than guess (GitHubAccessMissing)."""
+    When git can't say, this refuses rather than guess (GitHubAccessMissing).
+    A ``url`` starting with ``-`` is refused first (``_refuse_an_option``):
+    git takes it as a word of its own here and in every seam."""
+    _refuse_an_option(url, "a repository", hint="a repository is an https:// URL or a path\n"
+                      "for a catalog product, fix repository.github_url in its entry")
     try:
         # A remote's push URLs, if ``url`` names one in the repository.
         urls = _git_output(["git", "remote", "get-url", "--push", "--all", url], cwd) if push and cwd else []
@@ -1066,6 +1085,7 @@ class SubprocessRegistryGitOps:
         rejections stay plain ``GitOpError`` (the same narrow test as
         ``push_branch``). ``GIT_TERMINAL_PROMPT=0``: an HTTPS credential prompt
         fails at once instead of waiting on a terminal nobody is watching."""
+        _refuse_an_option(remote, "a remote", hint=_REMOTE_HINT)
         try:
             self._git(["push", remote, f"HEAD:{ref}"], cwd=work_dir, slow=True, env={"GIT_TERMINAL_PROMPT": "0"})
         except GitOpError as e:
@@ -1077,6 +1097,7 @@ class SubprocessRegistryGitOps:
         """The branch ``remote``'s HEAD names, the one importers read; None when
         git cannot say. Asks the remote, so it works where
         ``refs/remotes/<remote>/HEAD`` was never set."""
+        _refuse_an_option(remote, "a remote", hint=_REMOTE_HINT)
         try:
             out = self._git(["ls-remote", "--symref", remote, "HEAD"], cwd=work_dir, env={"GIT_TERMINAL_PROMPT": "0"})
         except GitOpError:

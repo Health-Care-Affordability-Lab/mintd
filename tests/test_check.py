@@ -6,6 +6,7 @@ These tests pin the producer- and consumer-section validation behavior.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -2436,6 +2437,50 @@ def test_plain_check_refuses_an_empty_manifest_pin(tmp_path: Path, pin_yaml: str
     # Names the row's own repo, so the hint is copy-pasteable rather than a
     # shape to fill in. Mutation: drop the `hint=` -> this reddens.
     assert consumer[0].hint and "mintd enclave add demo-map" in consumer[0].hint
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the planted pin runs a POSIX command")
+@pytest.mark.parametrize("upgrades", [False, True], ids=["plain", "upgrades"])
+def test_check_refuses_a_rev_lock_git_would_read_as_an_option(tmp_path: Path, upgrades: bool) -> None:
+    """An import's `rev_lock` comes with any clone of someone else's project,
+    and `check --upgrades` handed it to `git archive --remote <producer>
+    <pin>`, where `--exec=<cmd>` runs a command. It is refused where the pin
+    is read, as the empty pin is, naming the `.dvc` file, before any git runs."""
+    from tests.test_producer_git_ops import _committed_repo
+
+    repo, marker, project = _committed_repo(tmp_path), tmp_path / "pwned", tmp_path / "project"
+    project.mkdir()
+    _write_metadata(project)
+    _stage_dvc_fixture(project, "standalone_import.dvc", "standalone_import.dvc")
+    dvc_file = project / "data" / "imports" / "standalone_import.dvc"
+    dvc_file.write_text(
+        dvc_file.read_text(encoding="utf-8")
+        .replace("https://github.com/example-org/demo-map", str(repo))
+        .replace(f"rev_lock: {_PIN}", f"rev_lock: '--exec=touch${{IFS}}{marker};git-upload-archive'"),
+        encoding="utf-8",
+    )
+
+    consumer = [f for f in check_project(project, upgrades=upgrades) if f.section == "consumer"]
+
+    assert [(f.kind, f.severity) for f in consumer] == [("pin_missing", "error")]
+    assert consumer[0].source == dvc_file
+    assert "has a pin that isn't a plain rev: '--exec=touch${IFS}" in consumer[0].message
+    assert (consumer[0].hint or "").startswith("set rev_lock in this .dvc file to the producer's commit SHA\n")
+    assert not marker.exists()
+
+
+def test_plain_check_refuses_a_manifest_pin_git_would_read_as_an_option(tmp_path: Path) -> None:
+    _write_metadata(tmp_path)
+    manifest = _stage_enclave_manifest(tmp_path)
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(f"pin: {_PIN}", "pin: '-utouch${IFS}pwned'"),
+        encoding="utf-8",
+    )
+
+    consumer = [f for f in check_project(tmp_path, client=_client_with_demo_map()) if f.section == "consumer"]
+
+    assert [(f.kind, f.severity) for f in consumer] == [("pin_missing", "error")]
+    assert "a pin that isn't a plain rev: '-utouch${IFS}pwned'" in consumer[0].message
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,7 @@ from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, scan_imports
 from .model import Metadata
 from .producer import FetchError, Fetcher, GitArchiveFetcher, ProducerError, ProducerView
+from ._producer_git_ops import is_plain_rev
 
 if TYPE_CHECKING:
     # Avoid module-level import of enclave.py — enclave.py imports from this
@@ -1386,12 +1387,15 @@ def _consumer_findings_from_dvc(
         # `[info] imported <path> from <repo>@` and exited 0, and `publish` /
         # `registry register` (both `check_project(upgrades=False)`) let it
         # through.
-        if not dep.contract_pin.strip():
+        # A pin that isn't a plain rev (`_producer_git_ops.is_plain_rev`) is refused
+        # here too, naming its `.dvc` file: git would read `--exec=<cmd>` as an option.
+        if not is_plain_rev(dep.contract_pin):
             findings.append(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=f"import {dep.local_path} has an empty pin",
+                    message=f"import {dep.local_path} has an empty pin" if not dep.contract_pin.strip()
+                    else f"import {dep.local_path} has a pin that isn't a plain rev: {dep.contract_pin!r}",
                     source=dep.source,
                     kind="pin_missing",
                     # A pin-less `.dvc` is reachable without hand-editing:
@@ -1401,6 +1405,9 @@ def _consumer_findings_from_dvc(
                         "the .dvc file carries no rev_lock: re-run `mintd data import "
                         "<name> --force` to rewrite it at a real commit, or set rev_lock "
                         "by hand to the producer commit this import was taken from."
+                    ) if not dep.contract_pin.strip() else (
+                        "set rev_lock in this .dvc file to the producer's commit SHA\n"
+                        "or rewrite it at a real commit:\nmintd data import <name> --force"
                     ),
                 )
             )
@@ -1551,13 +1558,14 @@ def _consumer_findings_from_enclave_manifest(
         #
         # Above the `upgrades` gate for the same reason as the `.dvc` lane:
         # the pin is read from the manifest, not the wire.
-        if not ap.pin.strip():
+        if not is_plain_rev(ap.pin):
             findings.append(
                 CheckFinding(
                     severity="error",
                     section="consumer",
-                    message=f"approved product {ap.repo!r} has an empty pin"
-                    f" ({subscription_label(ap)})",
+                    message=f"approved product {ap.repo!r} has "
+                    + ("an empty pin" if not ap.pin.strip() else f"a pin that isn't a plain rev: {ap.pin!r}")
+                    + f" ({subscription_label(ap)})",
                     source=manifest_path,
                     field_path=field_path,
                     kind="pin_missing",
