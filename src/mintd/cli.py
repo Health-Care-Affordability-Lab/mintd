@@ -443,11 +443,11 @@ def _add_cache_parser(subs: Any) -> None:
 _IMPORT_BRINGS = [
     ("<name>", ["the primary output"]),
     ("<name> --path <path>", ["only that dataset or folder, declared", "as an output or not (repeatable)"]),
-    ("<name> --all", ["every output in the product's", "data_products.outputs; a tracked",
-                      "folder no output declares is left out"]),
+    ("<name> --all", ["everything the product's DVC tracks,", "raw and intermediate data included"]),
 ]
 _CLONE_BRINGS = [
-    ("<name>", ["a full git clone of the producer's repo,", "with every DVC-tracked output pulled"]),
+    ("<name>", ["a full git clone of the producer's repo,", "with its declared outputs and primary", "pulled"]),
+    ("<name> --all", ["the same clone, with everything DVC tracks", "pulled, raw and intermediate data", "included"]),
     ("<name> --primary", ["the same clone, with only the primary", "output pulled; --path pulls only declared",
                           "outputs"]),
 ]
@@ -496,7 +496,8 @@ def _add_import_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
     )
     p_import.add_argument(
         "--all", dest="all_outputs", action="store_true",
-        help="Import every tracked output of the product",
+        help="Import everything the product's DVC tracks, raw and intermediate "
+             "data included. It can be large; licensed data still needs access.",
     )
     p_import.add_argument(
         "--force", action="store_true",
@@ -526,7 +527,7 @@ def _add_clone_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
     defaults and handler under both spellings, so the two can't drift apart."""
     p_clone = subs.add_parser(
         "clone",
-        help="Get a product's whole project in its own folder, with every tracked output pulled",
+        help="Get a product's whole project in its own folder, with its declared outputs pulled (--all for everything)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=_brings_epilog(
             prefix, "clone", _CLONE_BRINGS, 37,
@@ -541,14 +542,19 @@ def _add_clone_parser(subs: Any, prefix: str) -> argparse.ArgumentParser:
     p_clone.add_argument("--rev", help="Branch or tag to clone at (default: HEAD)")
     clone_scope = p_clone.add_mutually_exclusive_group()
     clone_scope.add_argument(
+        "--all", dest="all_outputs", action="store_true",
+        help="Pull everything the product's DVC tracks, raw and intermediate "
+             "data included. It can be large; licensed data still needs access.",
+    )
+    clone_scope.add_argument(
         "--primary", dest="primary_only", action="store_true",
-        help="Pull only the primary data product (default: pull every tracked output)",
+        help="Pull only the primary data product (default: the declared outputs and the primary)",
     )
     clone_scope.add_argument(
         "--path", dest="paths", action="append", metavar="PATH",
         help="Pull only this tracked output — a file or directory from the "
-             "product's data_products.outputs (repeatable). Default: pull every "
-             "tracked output.",
+             "product's data_products.outputs (repeatable). Default: the "
+             "declared outputs and the primary.",
     )
     p_clone.add_argument("--jobs", type=int, help="DVC parallelism")
     p_clone.add_argument("--timeout", type=float, default=None,
@@ -1946,11 +1952,11 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
     reporter.debug(f"resolved registry_url={config.registry_url}")
     with (
         _hint(ValueError),
-        _hint(MissingPrimaryDataProduct, "drop --primary to pull every tracked output"),
+        _hint(MissingPrimaryDataProduct, "drop --primary to pull the declared outputs"),
         _hint(
             UnknownProductPath,
-            "pass --path with one of the tracked outputs listed above, "
-            "or drop --path/--primary to pull everything",
+            "pass --path with one of the tracked outputs listed above\n"
+            "or pass --all to pull everything DVC tracks",
         ),
         _hint(ImportDestinationExists, "pass --dest <path> or remove the existing directory"),
         _hint(ProducerError, _producer_unreachable),
@@ -1962,6 +1968,7 @@ def _handle_data_clone(args: argparse.Namespace) -> int:
             rev=args.rev,
             primary_only=args.primary_only,
             paths=args.paths or None,
+            all_outputs=args.all_outputs,
             jobs=args.jobs,
             extra_dvc_args=args.dvc_args or None,
             reporter=reporter,

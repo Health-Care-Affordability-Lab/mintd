@@ -1194,16 +1194,20 @@ def dir_manifest_md5(entries: list[DvcFileEntry]) -> str:
     return f"{hashlib.md5(_dir_manifest_bytes(entries), usedforsecurity=False).hexdigest()}.dir"
 
 
-def _all_dvc_outs(project_path: Path, remote_name: str, pointers: list[str] | None = None) -> list:
+def _all_dvc_outs(
+    project_path: Path, remote_name: str, pointers: list[str] | None = None, *,
+    declared: Collection[str] | None = None, skipped: list[str] | None = None,
+) -> list:
     """Every DVC out for the project: ``.dvc`` pointers (via
     ``discover_all_outs`` + ``outs_for_target``) plus ``dvc.lock`` stage outs.
     The single enumeration both the collision guard and the tracked-path set
     read from, so neither can drift from the other's view of DVC reality.
-    A caller that already walked the tree passes the ``*.dvc`` list in."""
+    A caller that already walked the tree passes the ``*.dvc`` list in;
+    ``declared`` and ``skipped`` go to ``partition_pipeline_outs``."""
     outs = []
     for target in pointers if pointers is not None else discover_all_outs(project_path):
         outs.extend(outs_for_target(project_path, target, remote_name))
-    _, lock_outs = partition_pipeline_outs(project_path, remote_name)
+    _, lock_outs = partition_pipeline_outs(project_path, remote_name, declared=declared, skipped=skipped)
     outs.extend(lock_outs)
     return outs
 

@@ -29,7 +29,7 @@ from ._cache_ops import dvc_tracked_paths
 from ._paths import inside, physical
 from ._dvc_ops import DvcImportStorageMissing, DvcOpError, DvcOps
 from ._dvc_state import (
-    default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
+    abbreviate, default_remote_name, delivery, normalize_target, outs_matching, path_covers, require_default_remote,
 )
 from ._fast_sync_ops import FastSyncOps
 from ._registry_git_ops import GitHubAccessMissing, GitOpError, RegistryGitOps
@@ -37,7 +37,7 @@ from ._storage_state import inspect_storage
 from ._templates import project_full_name
 from .catalog import CatalogClient, CatalogNotFound
 from .check import CheckFinding, _head_unreadable_finding, check_project, consumer_walk_failure
-from .data_ops import data_pull
+from .data_ops import _dvc_stage_names, data_pull
 from .errors import MintdError, unreachable_repo_hint
 from .imports import DataDependency, NotAnImportError
 from ._producer_git_ops import _classify_stderr
@@ -160,8 +160,8 @@ class UnknownProductPath(MintdError, ValueError):
 
 
 class NoTrackedOutputs(MintdError):
-    """`--all` selected the product's `data_products.outputs` and found none
-    usable. Importing nothing is a refusal, not a success."""
+    """`--all` found nothing DVC tracks in the producer's tree at the pin.
+    Importing nothing is a refusal, not a success."""
 
 
 class UndeliverableImport(MintdError):
@@ -215,6 +215,7 @@ def import_product(
     producer_view_factory: Callable[[str, str], ProducerView] | None = None,
     reporter: "Reporter | None" = None,
     registry_git_ops: RegistryGitOps | None = None,
+    list_tracked: Callable[[str, str], list[str]] | None = None,
 ) -> list[Path]:
     """Catalog-driven `dvc import`. Returns the list of `.dvc` files written.
 
@@ -227,15 +228,24 @@ def import_product(
     dumped = entry.model_dump()
     repo_url = _require_repo_url(dumped, name=name)
 
-    if rev is not None and path is None and not all_outputs:
-        factory = producer_view_factory or ProducerView.at
-        view = factory(repo_url, rev)
-        path = view.primary_or_raise()
-
-    paths = _drop_nested_paths(
-        _resolve_paths(dumped, path=path, all_outputs=all_outputs, name=name),
-        reporter=reporter,
-    )
+    if all_outputs:
+        # Everything DVC tracks at the pin, raw and intermediate included, as
+        # `clone --all` pulls it: the producer's tree decides, not the catalog.
+        pin = rev or "HEAD"
+        selected = list_tracked(repo_url, pin) if list_tracked else _tracked_at(repo_url, pin, dvc_ops, reporter)
+        if not selected:
+            raise NoTrackedOutputs(f"{name!r} tracks nothing with DVC at {pin}; --all has nothing to import")
+    else:
+        if rev is not None and path is None:
+            factory = producer_view_factory or ProducerView.at
+            path = factory(repo_url, rev).primary_or_raise()
+        selected = _resolve_paths(dumped, path=path, name=name)
+    paths = _drop_nested_paths(selected, reporter=reporter)
+    if all_outputs and reporter is not None:
+        declared = [d.rstrip("/") for d in _tracked_output_targets(dumped)]
+        extra = [p for p in paths if not any(path_covers(d, p) or path_covers(p, d) for d in declared)]
+        reporter.info(f"--all: {len(paths)} outputs, {len(extra)} not declared"
+                      + (f" ({abbreviate(extra)})" if extra else ""))
 
     # Namespace the destination by the producer's full_name (e.g.
     # `data_cms-synpuf`) so importing multiple products into the same
@@ -439,6 +449,16 @@ def import_product(
                 f"this failure and remain on disk: "
                 + ", ".join(str(q) for q in produced)
             )
+        if all_outputs and isinstance(exc, DvcOpError) and exc.hint is None:
+            # A re-run of --all stops at the first output already imported, so
+            # without access to this one (licensed raw data) only --path finishes.
+            rest = paths[len(produced) + 1:]
+            argv = ["mintd", "import", name, *(["--rev", rev] if rev else []),
+                    *([] if dest_root == Path("data/imports") else ["--dest-root", str(dest_root)]),
+                    *(a for r in rest for a in ("--path", r))]
+            exc.hint = (f"if {paths[len(produced)]} is licensed data you have no access to,\n"
+                        + (f"import the rest by name:\n{shlex.join(argv)}\n" if rest else "the other outputs are imported\n")
+                        + "or retry with --dvc-arg=-v for verbose DVC output")
         raise
     return produced
 
@@ -550,65 +570,43 @@ def _rows(section: dict[str, Any], key: str) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _tracked_at(repo_url: str, pin: str, dvc_ops: DvcOps, reporter: "Reporter | None") -> list[str]:
+    """Every out DVC tracks in the producer's tree at ``pin``, `.dvc`
+    pointers and `dvc.lock` outs alike, raw and intermediate included: what
+    `import --all` imports. Reads the producer's git, never its bucket. A lock
+    entry for a stage dvc.yaml no longer declares is skipped and named, as
+    `data_pull` does: dvc refuses to import it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp)
+        try:
+            GitArchiveFetcher().checkout_at(repo_url, pin, tree)
+        except FetchError as exc:
+            raise ProducerError.from_fetch_error(exc) from exc
+        stale: list[str] = []
+        tracked = dvc_tracked_paths(tree, inspect_storage(tree).dvc_remote_name or "",
+                                    declared=_dvc_stage_names(tree, dvc_ops), skipped=stale)
+    if stale and reporter is not None:
+        reporter.warn(f"skipped dvc.lock entries for {len(stale)} stage(s) dvc.yaml no longer declares, "
+                      f"as dvc pull does: {abbreviate(sorted(stale))}")
+    return sorted(tracked)
+
+
 def _resolve_paths(
     entry: dict[str, Any],
     *,
     path: str | list[str] | None,
-    all_outputs: bool,
     name: str,
     missing_primary_hint: str = "pass --path or --all",
 ) -> list[str]:
     """Shared path resolver for `import_product` and `clone_and_pull_product`.
 
-    Precedence: ``all_outputs`` → every `data_products.outputs[].path`;
     ``path`` (a single string or a list of them) → exactly those; otherwise
     fall back to `data_products.primary` (raising with the caller-supplied
     hint when no primary is set). One resolver for both verbs so their
-    selection semantics cannot drift.
+    selection semantics cannot drift. `--all` is not resolved here: it reads
+    the producer's tree (`_tracked_at`), not the catalog.
     """
     data_products = _section(entry, "data_products")
-
-    if all_outputs:
-        # `outputs` is raw registry YAML and need not be a list: a truthy
-        # scalar (`outputs: true`) survived `or []` and reached the loop
-        # below, exiting `data import --all` as a raw `TypeError: 'bool'
-        # object is not iterable`. Same hazard `_section` guards for blocks.
-        # An unusable value carries no usable output, so normalising it to
-        # `[]` lands it on the refusal below.
-        outputs = _rows(data_products, "outputs")
-        selected = [
-            o["path"]
-            for o in outputs
-            if isinstance(o, dict) and isinstance(o.get("path"), str)
-        ]
-        if not selected:
-            # Importing nothing is a refusal, not a success: the caller
-            # loops zero times, writes no pointer and exits 0, so a CI gate
-            # on that exit code passes on an import that moved nothing.
-            #
-            # Two different faults reach here and the user cannot act on
-            # them the same way, so the message names which one it is: an
-            # entry with NO outputs is the producer's to fix, while rows
-            # that exist but carry no usable `path` are a malformed entry.
-            # And the way out is not `--path` -- `--all` wins over a `--path`
-            # the user already passed, so suggesting it reads as advice they
-            # just followed. Point at the primary when there is one.
-            primary = data_products.get("primary")
-            fault = (
-                "lists no data_products.outputs"
-                if not outputs
-                else f"lists {len(outputs)} data_products.outputs, none with a usable path"
-            )
-            way_out = (
-                f"drop --all to import the primary ({primary!r})"
-                if isinstance(primary, str) and primary
-                else "wait for the producer to publish one"
-            )
-            raise NoTrackedOutputs(
-                f"catalog entry {name!r} {fault}; --all has nothing to "
-                f"import ({way_out})"
-            )
-        return selected
 
     if path is not None:
         return [path] if isinstance(path, str) else list(path)
@@ -769,11 +767,10 @@ def _resolve_targets_in_clone(
                 f"repo tracks nothing at, above, or beneath it ({cause}); "
                 f"outs tracked in the clone: {listed}",
                 hint=(
-                    "the outs listed are what DVC tracks, not catalog outputs, "
-                    "so --path will not accept them; drop --path/--primary to "
-                    "clone everything"
-                    + ("" if rev_primary else ", or have the producer re-run "
-                       "'mintd check' and 'mintd registry update'")
+                    "the outs listed are what DVC tracks, not catalog outputs\n"
+                    "pass --all to clone everything DVC tracks"
+                    + ("" if rev_primary else "\nor ask the producer to run 'mintd check'\n"
+                       "then 'mintd registry update'")
                 ),
             )
         declared_rel = normalize_target(declared)
@@ -824,6 +821,7 @@ def clone_and_pull_product(
     rev: str | None = None,
     primary_only: bool = False,
     paths: list[str] | None = None,
+    all_outputs: bool = False,
     jobs: int | None = None,
     extra_dvc_args: list[str] | None = None,
     reporter: "Reporter | None" = None,
@@ -832,14 +830,13 @@ def clone_and_pull_product(
     """Clone a published data product into a working directory + dvc pull it.
 
     Looks up `name` in the registry, full-clones the producer repo to
-    `./<type>_<name>/` (or `dest` if provided), then `dvc pull`s every
-    tracked output by default. Pass ``primary_only=True`` to pull only
-    `data_products.primary` (useful when the full product is multi-TB
-    but the user only needs the headline output), or ``paths=[...]`` to
-    pull exactly those tracked outputs (files or directories) — the same
-    selection model as `import_product`'s ``--path``. Precedence:
-    ``paths`` → those targets; else ``primary_only`` → the primary; else
-    everything. ``paths`` and ``primary_only`` together is a usage error.
+    `./<type>_<name>/` (or `dest` if provided), then pulls the product's
+    declared outputs and its primary (`_tracked_output_targets`), read from
+    the cloned `metadata.json` at that rev. ``all_outputs=True`` pulls
+    everything DVC tracks instead, raw and intermediate data included;
+    ``primary_only=True`` only `data_products.primary`; ``paths=[...]``
+    exactly those tracked outputs (files or directories), the same selection
+    model as `import_product`'s ``--path``. The three are mutually exclusive.
 
     Returns a ``CloneResult`` (dest + best-effort cloned rev + remote
     bucket) so the CLI can render an informative completion line (slice
@@ -871,6 +868,8 @@ def clone_and_pull_product(
             "pass --path to pull specific outputs OR --primary for the "
             "primary output, not both"
         )
+    if all_outputs and (paths or primary_only):
+        raise ValueError("--all pulls everything, so it can't be combined with --path or --primary")
     entry = client.fetch(name)
     dumped = entry.model_dump()
     repo_url = _require_repo_url(dumped, name=name)
@@ -882,15 +881,14 @@ def clone_and_pull_product(
     targets: list[str] | None
     if paths or primary_only:
         # One resolver with import_product: `paths` wins, else fall back
-        # to `data_products.primary` (primary_only). No-flag clone stays
-        # targets=None (pull everything) — clone's "all" is DVC's own
-        # discovery, not the catalog outputs list.
+        # to `data_products.primary` (primary_only). The no-flag default is
+        # resolved after the clone, from the cloned metadata.json; `--all`
+        # stays targets=None, DVC's own discovery of every out.
         selected = _resolve_paths(
             dumped,
             path=list(paths) if paths else None,
-            all_outputs=False,
             name=name,
-            missing_primary_hint="drop --primary to pull all tracked outputs",
+            missing_primary_hint="drop --primary to pull the declared outputs",
         )
         targets = [normalize_target(p) for p in selected]
         if paths and rev is None:
@@ -925,10 +923,19 @@ def clone_and_pull_product(
     except GitOpError as exc:
         raise _clone_failure(exc, repo_url=repo_url, rev=rev, dest=resolved_dest) from exc
 
+    if not (paths or primary_only or all_outputs):
+        # The default: the declared outputs and the primary, read from the
+        # cloned metadata.json at the rev the clone is at (the catalog when it
+        # can't be read). A product that declares none clones as code only.
+        targets = [normalize_target(p) for p in
+                   _tracked_output_targets(_cloned_metadata_entry(resolved_dest, fallback=dumped))]
+        if not targets and reporter is not None:
+            reporter.info(f"{name} declares no outputs, so the clone holds its code only (--all pulls everything)")
+
     # `--rev` + `--primary`: the primary came from the HEAD catalog while the
     # clone is at an older rev that may simply predate it — both rejection
     # messages below word their cause by this.
-    rev_primary = rev is not None and not paths
+    rev_primary = rev is not None and primary_only
     unverified: list[str] = []
     if targets is not None:
         # Post-clone, the repo is the source of truth for what a selector

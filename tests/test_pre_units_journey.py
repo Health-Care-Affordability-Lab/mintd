@@ -1372,7 +1372,7 @@ def test_clone_primary_that_is_an_exact_out_is_unchanged(
 
 
 def _publish_two_outs_and_drop_one_blob(producer, register) -> None:
-    """Two declared outs, one blob deleted from the producer's remote AFTER
+    """Two tracked outs, one blob deleted from the producer's remote AFTER
     the push: the failure S1's orphan guard leaves in place (real dvc:
     `Checkout failed for following targets: data/other.csv`, exit 1, sibling
     landed). Blobs live at `files/md5/XX/YYYY` under `producer.remote`."""
@@ -1388,8 +1388,8 @@ def _publish_two_outs_and_drop_one_blob(producer, register) -> None:
 def test_cli_data_clone_partial_pull_reports_what_landed(
     payload_journey, tmp_path, capsys
 ) -> None:
-    """S2, real dvc: one of two outs cannot be pulled (blob gone from the
-    remote). Before: rc 1 with the raw dvc stderr and no word on what landed.
+    """S2, real dvc, `clone --all`: one of two outs cannot be pulled (blob gone
+    from the remote). Before: rc 1 with the raw dvc stderr and no word on what landed.
     After: rc 1, the clone is kept, the sibling's bytes ARE on disk, and the
     summary names the one failed target. Mutation: re-raise DvcPullError in
     `_pull_isolating_failures` -> raw `dvc pull failed (exit 1)` line, red."""
@@ -1397,7 +1397,7 @@ def test_cli_data_clone_partial_pull_reports_what_landed(
     _publish_two_outs_and_drop_one_blob(producer, register)
 
     dest = tmp_path / "clonedest"
-    rc = cli.main(["data", "clone", PRODUCT, "--dest", str(dest)])
+    rc = cli.main(["data", "clone", PRODUCT, "--all", "--dest", str(dest)])
     out = _drain(capsys)
 
     assert rc == 1, out
@@ -1413,14 +1413,14 @@ def test_cli_data_clone_partial_pull_reports_what_landed(
 def test_cli_data_pull_partial_failure_prints_a_summary_not_a_traceback(
     payload_journey, tmp_path, capsys, monkeypatch
 ) -> None:
-    """S2, real dvc, `mintd data pull` inside the clone above: the same
+    """S2, real dvc, `mintd data pull` inside the `clone --all` above: the same
     partial failure renders `pull incomplete: 1 target(s) failed` plus one
     `cannot pull <t>` line with its retry hint -- never the raw dvc stderr --
     and the sibling stays on disk. Mutation: re-raise -> red."""
     producer, _consumer, register = payload_journey
     _publish_two_outs_and_drop_one_blob(producer, register)
     dest = tmp_path / "clonedest"
-    assert cli.main(["data", "clone", PRODUCT, "--dest", str(dest)]) == 1, _drain(capsys)
+    assert cli.main(["data", "clone", PRODUCT, "--all", "--dest", str(dest)]) == 1, _drain(capsys)
     _drain(capsys)
 
     monkeypatch.chdir(dest)

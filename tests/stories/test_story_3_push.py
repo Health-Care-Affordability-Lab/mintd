@@ -84,10 +84,9 @@ def test_push_then_a_teammate_imports_my_bytes(product, mintd, s3_server, fresh_
     got = mintd("data", "import", product.name, "--all", cwd=project)
     assert got.returncode == 0, got.stderr
     mine = {**{f"data/final/{k}": v for k, v in {**product.outs["data/final"], "d.csv": b"delta\n"}.items()},
-            **{f"data/extra/{k}": v for k, v in product.outs["data/extra"].items()}, "data/built/out.csv": b"built"}
+            **{f"data/extra/{k}": v for k, v in product.outs["data/extra"].items()},
+            **{f"data/raw/{k}": v for k, v in product.outs["data/raw"].items()}, "data/built/out.csv": b"built"}
     root = f"data/imports/data_{product.name}"
-    # data/raw, tracked but declared by no output, does not land: --all brings declared outputs today; add it
-    # when story 1's `[all]` Target passes
     assert assert_landed_match_pointers(project) == {f"{root}/{k}": md5(v) for k, v in mine.items()}
 
 
