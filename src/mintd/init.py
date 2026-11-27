@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
+from ._config import _default_config_path
 from ._console import Reporter
 from .errors import MintdError
 from ._init_ops import InitNonInteractive, InitOpError, InitOps, SubprocessInitOps
@@ -86,7 +87,7 @@ def _prompt_classification(
     *,
     reporter: Reporter,
     prompt_fn: Callable[[str], str] = input,
-    isatty_fn: Callable[[], bool] = sys.stdin.isatty,
+    isatty_fn: Callable[[], bool] = lambda: sys.stdin is not None and sys.stdin.isatty(),  # None: stdin closed
 ) -> tuple[str, str | None]:
     """Interactive classification + slug prompt.
 
@@ -98,12 +99,20 @@ def _prompt_classification(
     if not isatty_fn():
         raise InitNonInteractive("init is interactive; run from a terminal")
 
+    def ask(text: str) -> str:
+        try:
+            return prompt_fn(text).strip()
+        except EOFError:  # Ctrl-D, or stdin closed
+            if sys.stderr is not None and sys.stderr.isatty():  # Ctrl-D echoes no newline; end the prompt's
+                sys.stderr.write("\n")  # line on the terminal, whatever the output mode (-q, --json)
+            raise InitNonInteractive("no answer given", hint="run mintd init again and answer the prompt") from None
+
     reporter.info("Choose a storage classification for this product:")
     for i, (_key, desc) in enumerate(_TIERS, 1):
         reporter.info(f"  {i}. {desc}")
 
     while True:
-        raw = prompt_fn("Choice [1-3]: ").strip()
+        raw = ask("Choice [1-3]: ")
         try:
             idx = int(raw)
         except ValueError:
@@ -117,7 +126,7 @@ def _prompt_classification(
     slug: str | None = None
     if tier == "licensed":
         while True:
-            slug = prompt_fn("Slug (licensor / DUA, e.g. 'optum'): ").strip()
+            slug = ask("Slug (licensor / DUA, e.g. 'optum'): ")
             if not slug:
                 reporter.warn("Slug is required for licensed tier.")
                 continue
@@ -163,8 +172,9 @@ def init_project(
         # the rollback boundary, so nothing was undone and the rerun then hit
         # the destination guard. Raised here it leaves nothing behind at all.
         raise InitOpError(
-            "bucket not configured in ~/.mintd/config.yaml; run "
-            "'mintd config setup' first, then rerun the same command"
+            f"storage_bucket_prefix is not set in {_default_config_path()}",
+            hint="to set it: mintd config setup\nor: mintd config setup --set storage_bucket_prefix=<bucket>\n"
+            "then rerun the same command",
         )
     # Validated once, above; re-bound as a plain str so the storage block
     # needs no second check. Truthy iff storage is wanted and configured.
