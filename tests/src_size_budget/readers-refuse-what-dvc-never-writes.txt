@@ -1,1 +1,1 @@
-+28: readers refuse a cached folder list that does not hash to its name and a file list naming a path twice, and check reads a producer pointer at a pin as YAML 1.2
++52: readers refuse a cached folder list that does not hash to its name and a file list naming a path twice, check reports such a file rather than raise, check reads a producer pointer at a pin as YAML 1.2, and a read-only cached list is made writable before it is replaced

@@ -2905,3 +2905,33 @@ def test_a_folder_list_in_storage_naming_a_path_twice_stops_the_pull_naming_it(s
                                               r"it lists a path twice, which dvc never writes"):
         _fast_pull(s3, project, ["data/dir"])
     assert not cache_path_for(project / ".dvc" / "cache", f"{tree}.dir").exists()
+
+
+@pytest.mark.parametrize("storage", ["holds-the-list", "is-down"])
+def test_a_damaged_read_only_cached_folder_list_is_replaced_or_cleared(s3_versioned, tmp_path: Path,
+                                                                     storage: str) -> None:
+    """dvc leaves a cached folder list read-only (0o444). Damaged in place, it
+    no longer hashes to its name, so it is fetched again: the fetched copy
+    replaces it, or, when the fetch fails, it is cleared. Windows refuses to
+    replace or delete a read-only file, so each is made writable first.
+    Mutation: drop ``_writable`` -> on Windows, PermissionError, red (POSIX
+    replaces and deletes a read-only file either way)."""
+    s3, bucket = s3_versioned
+    cache_dir = tmp_path / "cache"
+    entries = [DvcFileEntry(hashlib.md5(n.encode()).hexdigest(), n) for n in ("a.csv", "b.csv")]
+    tree = _put_dir_manifest(s3, bucket, "", entries)
+    if storage == "is-down":
+        s3.delete_object(Bucket=bucket, Key=s3_key_for("", tree))
+    landed = cache_path_for(cache_dir, tree)
+    landed.parent.mkdir(parents=True)
+    landed.write_text(json.dumps([{"md5": entries[0].md5, "relpath": "a.csv"}]), encoding="utf-8")
+    landed.chmod(0o444)
+    assert read_cached_dir_manifest(cache_dir, tree) is None
+
+    got = fetch_dir_manifest(s3, bucket, "", tree, cache_dir)
+
+    if storage == "holds-the-list":
+        assert [e.relpath for e in got or []] == ["a.csv", "b.csv"]
+        assert [e.relpath for e in read_cached_dir_manifest(cache_dir, tree) or []] == ["a.csv", "b.csv"]
+    else:
+        assert got is None and not landed.exists()

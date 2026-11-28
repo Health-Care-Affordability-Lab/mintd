@@ -783,23 +783,26 @@ def _damaged(good: str, damage: str) -> bytes:
     """A pointer dvc would refuse: a merge's conflict markers, cut short
     before its out's path (the cut-short rule's case), not UTF-8 (Latin-1,
     as an editor may save it), with a key twice (PyYAML takes it, dvc's
-    ruamel refuses it), or an impossible date (ruamel raises ValueError)."""
+    ruamel refuses it), an impossible date (ruamel raises ValueError), or
+    a file list naming a.csv twice with two md5s (a merge resolved by hand)."""
     return {"conflict-markers": f"<<<<<<< ours\n{good}=======\n{good}>>>>>>> theirs\n".encode(),
             "cut-short": good[:good.index("  path:")].encode(),
             "not-utf-8": b"# caf\xe9\n" + good.encode(),
             "duplicate-key": f"{good}meta: 1\nmeta: 2\n".encode(),
-            "impossible-date": f"{good}meta:\n  reviewed: 2023-02-29\n".encode()}[damage]
+            "impossible-date": f"{good}meta:\n  reviewed: 2023-02-29\n".encode(),
+            "listed-twice": good.replace("relpath: b.csv", "relpath: a.csv").encode()}[damage]
 
 
-@pytest.mark.parametrize("damage", ["conflict-markers", "not-utf-8", "duplicate-key", "impossible-date"])
+@pytest.mark.parametrize("damage", ["conflict-markers", "not-utf-8", "duplicate-key", "impossible-date",
+                                    "listed-twice"])
 def test_remote_names_a_pointer_it_cant_read_at_head(pushed, damage: str) -> None:
     """A merge left conflict markers in HEAD's pointer (or it was saved as
-    Latin-1) and the working tree was fixed but not committed: importers
-    read the damaged one.
+    Latin-1, or resolved by hand into a list naming a file twice) and the
+    working tree was fixed but not committed: importers read the damaged one.
 
     Mutations: skip the screen at HEAD -> read as no outs, nothing, red;
     write the scratch tree without surrogateescape -> UnicodeEncodeError,
-    red.
+    red; read HEAD's pins with no guard -> listed-twice raises, red.
     """
     proj, *_ = pushed
     good = (proj / "data" / "final.dvc").read_text()
@@ -810,6 +813,39 @@ def test_remote_names_a_pointer_it_cant_read_at_head(pushed, damage: str) -> Non
     assert finding.severity == "error" and finding.message.startswith("could not read data/final.dvc at HEAD: ")
     if damage == "not-utf-8":
         assert finding.message.endswith(": not UTF-8 text (dvc writes UTF-8)")
+
+
+_LOCK_LISTING_A_PATH_TWICE = (
+    "schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: data/out\n      hash: md5\n      files:\n"
+    f"      - relpath: a.csv\n        md5: {_md5(b'a')}\n        size: 1\n"
+    f"      - relpath: a.csv\n        md5: {_md5(b'b')}\n        size: 1\n")
+_TWICE = "the file list of data/out lists a path twice, which dvc never writes"
+
+
+@pytest.mark.parametrize("damage", ["a-working-tree-pointer", "a-head-lock-with-no-dvc-yaml"])
+def test_remote_names_the_pins_it_cant_read(pushed, damage: str) -> None:
+    """A file list naming a path twice stops the read of that tree's pins.
+    The rest of the tree goes unchecked until it's fixed, and that is an
+    error naming the file: the working tree's pointer, which the offline
+    screen names too, or a lock with no dvc.yaml beside it, which no screen
+    reads as dvc does (dvc never opens it; the pin check still reads it).
+
+    Mutations: read the pins with no guard -> both raise, red; skip the
+    tree without a finding -> both pass, red.
+    """
+    proj, *_ = pushed
+    if damage == "a-working-tree-pointer":
+        good = (proj / "data" / "final.dvc").read_text()
+        (proj / "data" / "final.dvc").write_bytes(_damaged(good, "listed-twice"))
+        want = ("the pins in the working tree aren't checked: data/final.dvc is cut short or damaged: "
+                "the file list of data/final lists a path twice, which dvc never writes")
+    else:
+        (proj / "dvc.lock").write_text(_LOCK_LISTING_A_PATH_TWICE)
+        _commit(proj)
+        (proj / "dvc.lock").unlink()
+        want = f"the pins at HEAD aren't checked: dvc.lock is cut short or damaged: {_TWICE}"
+    (finding,) = [f for f in check_project(proj, remote=True) if f.kind == "remote_unchecked"]
+    assert (finding.severity, finding.message) == ("error", want)
 
 
 @pytest.mark.parametrize("where", ["a-pointer", "dvc-yaml"])
@@ -1320,6 +1356,60 @@ def test_staged_screens_the_head_copies_its_comparison_reads(tmp_path: Path, hea
         assert got == []
     else:
         assert [f.message.split(" can't be read")[0] for f in got] == [f"can't check the staged commit: HEAD's {want}"]
+
+
+@pytest.mark.parametrize("commit", ["fixes-it", "removes-it", "drops-its-ids"])
+def test_staged_over_a_head_pointer_listing_a_path_twice(tmp_path: Path, commit: str) -> None:
+    """HEAD's pointer lists a.csv twice (a merge resolved by hand). A commit
+    that fixes it with every ID, or removes it, drops none whatever HEAD's
+    copy says; one that records a file with no ID names HEAD's copy, never
+    the staged one.
+
+    Mutations: read HEAD's pins before ruling out a drop -> fixes-it and
+    removes-it raise, red; screen HEAD after reading its pins -> drops-its-ids
+    raises, red.
+    """
+    proj, files = _pinned_repo(tmp_path)
+    good = (proj / "data" / "final.dvc").read_text()
+    (proj / "data" / "final.dvc").write_bytes(_damaged(good, "listed-twice"))
+    _commit(proj)
+    if commit == "removes-it":
+        _git(proj, "rm", "-q", "data/final.dvc")
+    else:
+        _folder_pointer(proj, "final", {rel: (md5, vid if commit == "fixes-it" else None)
+                                        for rel, (md5, vid) in files.items()})
+        _git(proj, "add", "data/final.dvc")
+    got = check_staged(proj)
+    if commit != "drops-its-ids":
+        assert got == []
+        return
+    (finding,) = got
+    assert (finding.severity, finding.kind) == ("error", "staged_unchecked")
+    assert finding.message.startswith("can't check the staged commit: HEAD's data/final.dvc can't be read (")
+
+
+@pytest.mark.parametrize("where", ["at-head", "in-the-commit"])
+def test_staged_names_a_lock_with_no_dvc_yaml_listing_a_path_twice(tmp_path: Path, where: str) -> None:
+    """The pin check reads a root dvc.lock with no dvc.yaml beside it, which
+    dvc never opens and so no screen reads as dvc does. A file list in it
+    naming a path twice is named, at HEAD or in the commit, never raised.
+
+    Mutations: read either tree's pins with no guard -> that case raises,
+    red.
+    """
+    proj, files = _pinned_repo(tmp_path)
+    (proj / "dvc.lock").write_text(_LOCK_LISTING_A_PATH_TWICE)
+    if where == "at-head":
+        _commit(proj)
+        _folder_pointer(proj, "final", {rel: (md5, None) for rel, (md5, _) in files.items()})
+        _git(proj, "add", "data/final.dvc")
+        want = (f"can't check the staged commit: HEAD's copies can't be read (dvc.lock is cut short or damaged: "
+                f"{_TWICE}), so the IDs they record can't be compared")
+    else:
+        _git(proj, "add", "dvc.lock")
+        want = f"can't check the staged commit: dvc.lock is cut short or damaged: {_TWICE}"
+    (finding,) = check_staged(proj)
+    assert (finding.severity, finding.kind, finding.message) == ("error", "staged_unchecked", want)
 
 
 @pytest.mark.parametrize("setting", ['version_aware = "true"', "worktree = true"])

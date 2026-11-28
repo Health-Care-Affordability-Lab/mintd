@@ -231,7 +231,10 @@ def refuse_a_path_listed_twice(pointer: Path | str, what: str, relpaths: Sequenc
     """``PointerCutShort`` when ``what`` (a file list in ``pointer``) names a
     path twice. dvc lists each path once; a second entry answers for the same
     file with other bytes, and readers disagree on which one counts (dvc's own
-    checkout keeps the last). Compared as readers read a relpath, as text."""
+    checkout keeps the last). Compared as readers read a relpath, as text, so
+    an entry with no relpath is refused first, as incomplete."""
+    if None in relpaths:
+        raise PointerCutShort(pointer, f"{what} has an incomplete entry, with no path")
     names = [str(r) for r in relpaths]
     if len(set(names)) != len(names):
         raise PointerCutShort(pointer, f"{what} lists a path twice, which dvc never writes")

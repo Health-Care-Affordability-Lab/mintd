@@ -836,8 +836,14 @@ def _check_remote(
         for where, root, listed in roots:
             if where == "at HEAD":  # the working tree's are the offline screen's
                 findings.extend(_unreadable_at(root, listed, "at HEAD", project_path))
-            scope = publishable_scope(root, remote=remote.name, prefix=remote.prefix, cache_dir=cache.cache_dir,
-                                      dvc_files=listed)
+            try:
+                scope = publishable_scope(root, remote=remote.name, prefix=remote.prefix,
+                                          cache_dir=cache.cache_dir, dvc_files=listed)
+            except PointerCutShort as exc:  # a file list naming a path twice: none of this tree's pins are read
+                trees[where], bare[where] = [], []
+                findings.append(CheckFinding(severity="error", section="producer", kind="remote_unchecked",
+                                             message=f"the pins {where} aren't checked: {exc}", hint=exc.hint))
+                continue
             trees[where] = [e for e in scope.entries if in_scope(e.out)]
             bare[where] = [o for o in scope.unrecoverable if in_scope(o.path)]
     if nested:
@@ -1045,27 +1051,36 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
                 severity="warning", section="producer", kind="staged_unchecked",
                 message=f"only the root dvc.lock is read, so the pins in {abbreviate(nested)} aren't checked",
             ))
-        scopes = {which: publishable_scope(root, remote=name, prefix="", cache_dir=dvc_cache_dir(project_path),
-                                           dvc_files=[p for p in (changed if which == "head" else dvc_files)
-                                                      if p.endswith(".dvc")])
-                  for which, root in roots.items()}
+        try:  # past the screen above: a lock with no dvc.yaml, which dvc never opens
+            staged_scope = publishable_scope(roots["staged"], remote=name, prefix="",
+                                             cache_dir=dvc_cache_dir(project_path), dvc_files=dvc_files)
+        except PointerCutShort as exc:
+            return [*findings, *unchecked(str(exc), hint=exc.hint)]
         bare = {(o.pointer, o.path): _raw_out_md5(roots["staged"], o.pointer, o.stage, o.index)
-                for o in scopes["staged"].unrecoverable}
-        # HEAD's copy read as "no outs" would hide every ID it records. That
-        # matters only when the staged commit records a file with no ID.
-        could_drop = bool(bare) or any(not e.version_id for e in scopes["staged"].entries)
+                for o in staged_scope.unrecoverable}
+        # HEAD's copies are read only when the staged commit records a file
+        # with no ID; otherwise it drops none, whatever they say.
+        if not bare and all(e.version_id for e in staged_scope.entries):
+            return findings
         head_unreadable = _unreadable_dvc_files(  # a new pointer has no HEAD copy
             roots["head"], [p for p in changed if p.endswith(".dvc") and (roots["head"] / p).is_file()])
-        if could_drop and head_unreadable:
+        if head_unreadable:  # read as "no outs", HEAD's copy would hide every ID it records
             return [*findings, *(f for rel, why in head_unreadable for f in unchecked(
                 f"HEAD's {rel} can't be read ({why}), so the IDs it records can't be compared",
                 hint="run mintd data push, which records the IDs, then commit"))]
+        try:
+            head_scope = publishable_scope(roots["head"], remote=name, prefix="",
+                                           cache_dir=dvc_cache_dir(project_path),
+                                           dvc_files=[p for p in changed if p.endswith(".dvc")])
+        except PointerCutShort as exc:  # past HEAD's screen, as for the staged tree
+            return [*findings, *unchecked(f"HEAD's copies can't be read ({exc}), so the IDs they record can't be "
+                                          "compared", hint="run mintd data push, which records the IDs, then commit")]
     # A file's ID is dropped when HEAD records one for its bytes and no staged
     # entry for those bytes at that key still does (two pointers can record one key).
-    pinned = {(e.path, e.md5) for e in scopes["head"].entries if e.version_id}  # HEAD's, by S3 identity
-    kept = {(e.path, e.md5) for e in scopes["staged"].entries if e.version_id}
+    pinned = {(e.path, e.md5) for e in head_scope.entries if e.version_id}  # HEAD's, by S3 identity
+    kept = {(e.path, e.md5) for e in staged_scope.entries if e.version_id}
     dropped: dict[str, list[str]] = {}
-    for e in scopes["staged"].entries:
+    for e in staged_scope.entries:
         if not e.version_id and (e.path, e.md5) in pinned - kept:
             dropped.setdefault(e.pointer, []).append(e.path)
     # A staged folder out recorded as a bare .dir md5 whose tree isn't cached
@@ -1073,7 +1088,7 @@ def check_staged(project_path: Path, git_ops: RegistryGitOps | None = None) -> l
     # same files, and every ID HEAD recorded for them is gone.
     for (pointer, out), md5 in bare.items():
         # once per file: two of HEAD's pointers can record the same folder
-        files = list({(e.relpath, e.md5): e for e in scopes["head"].entries if e.out == out}.values())
+        files = list({(e.relpath, e.md5): e for e in head_scope.entries if e.out == out}.values())
         tree = dir_manifest_md5([DvcFileEntry(md5=e.md5, relpath=e.relpath or "", size=e.size or 0) for e in files])
         lost = [e.path for e in files if e.version_id and (e.path, e.md5) not in kept]
         if files and md5 == tree and lost:

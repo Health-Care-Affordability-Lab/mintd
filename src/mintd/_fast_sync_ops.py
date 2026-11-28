@@ -8,6 +8,7 @@ import json
 import logging
 import random
 import shlex
+import stat
 import subprocess
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -412,6 +413,18 @@ def ensure_dir_manifest(cache_dir: Path, entries: list[DvcFileEntry]) -> str:
     return full_md5
 
 
+def _writable(path: Path) -> Path:
+    """``path``, made writable when it's there and ours to change: dvc leaves
+    its cache objects read-only, and Windows won't replace or delete a
+    read-only file. Anything else (a shared cache's file owned by someone
+    else) is left to the replace or delete, as before."""
+    try:
+        path.chmod(stat.S_IREAD | stat.S_IWRITE)
+    except OSError:
+        pass
+    return path
+
+
 def fetch_to_cache(
     s3: Any, bucket: str, key: str, cache_path: Path, expected_md5: str,
     version_id: str | None = None,
@@ -460,7 +473,7 @@ def fetch_to_cache(
             # them, e.g. Windows) — the rename is what makes the write
             # visible; fsync only hardens durability.
             _try_fsync_file(tmp_path)
-            tmp_path.replace(cache_path)
+            tmp_path.replace(_writable(cache_path))
             _try_fsync_parent_dir(cache_path)
             return True
         except Exception:
@@ -509,7 +522,7 @@ def fetch_dir_manifest(
         raise
     except Exception as exc:
         logger.warning("fast-sync: dir manifest fetch failed for %s: %s", full_md5, exc)
-        cache_path.unlink(missing_ok=True)
+        _writable(cache_path).unlink(missing_ok=True)
         return None
     return entries
 
