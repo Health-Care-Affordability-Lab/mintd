@@ -6,9 +6,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
-from mintd._dvc_state import cache_path_for
+from mintd._dvc_state import PointerCutShort, cache_path_for
 from mintd._s3 import HeadVerdict, probe_versions
 from mintd._pin_proof import CacheHashes, Entry, hash_cache_object, plan_repair, prove, publishable_scope
 
@@ -187,3 +188,28 @@ def test_hash_cache_object_small_file_has_no_multipart_etag(tmp_path: Path) -> N
     f = tmp_path / "f"
     f.write_bytes(b"hello")
     assert hash_cache_object(f) == (_md5(b"hello"), None, 5)
+
+
+def test_a_file_list_naming_a_path_twice_is_refused_naming_the_pointer(tmp_path: Path) -> None:
+    """Pin proof reads pointers itself, past the pointer readers' check; a
+    list naming a.csv twice would put two entries, two keys' proofs, on one file.
+    Mutation: make ``refuse_a_path_listed_twice`` a no-op -> red."""
+    _write(tmp_path, "data/final.dvc", {"outs": [{"path": "final", "files": [
+        {"relpath": "a.csv", "md5": "b" * 32, "size": 1},
+        {"relpath": "a.csv", "md5": "c" * 32, "size": 1},
+    ]}]})
+    with pytest.raises(PointerCutShort, match="the file list of data/final lists a path twice, which dvc never writes"):
+        _scope(tmp_path, ["data/final.dvc"])
+
+
+def test_a_file_list_entry_with_no_path_is_refused_as_incomplete(tmp_path: Path) -> None:
+    """Two entries with no relpath read, as text, as one path twice; they are
+    incomplete, as the pointer readers say.
+    Mutation: drop the no-path test in ``refuse_a_path_listed_twice`` ->
+    "lists a path twice", red."""
+    _write(tmp_path, "data/final.dvc", {"outs": [{"path": "final", "files": [
+        {"md5": "b" * 32, "size": 1},
+        {"md5": "c" * 32, "size": 1},
+    ]}]})
+    with pytest.raises(PointerCutShort, match="the file list of data/final has an incomplete entry, with no path"):
+        _scope(tmp_path, ["data/final.dvc"])

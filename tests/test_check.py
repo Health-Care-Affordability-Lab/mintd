@@ -3049,3 +3049,89 @@ def test_a_finding_names_its_file_else_its_field_else_the_project(source, field_
     finding = CheckFinding(severity="error", section="producer", message="m", kind="metadata_invalid",
                            source=source, field_path=field_path)
     assert finding.location == shown
+
+
+# ---------------------------------------------------------------------------
+# A producer's pointer at a pin, read as dvc reads it
+# ---------------------------------------------------------------------------
+
+
+def _import_findings(tmp_path: Path, producer_path: str, served: dict[str, tuple[bytes, bytes]]) -> list[CheckFinding]:
+    """`check --upgrades` consumer findings for a project importing one
+    producer path at `_PIN` into `imported`, the producer serving each named
+    file as `(at the pin, at HEAD)`; every other file is missing."""
+    from tests._harness.consumer import Import, write_import
+
+    _write_metadata(tmp_path)
+    write_import(tmp_path, Import(name="demo-map", producer_url=_VIEW_REPO, pin=_PIN, producer_path=producer_path,
+                                  local_path="imported"))
+    store = {(_VIEW_REPO, rev, name): body for name, pair in served.items() for rev, body in zip((_PIN, _HEAD), pair, strict=True)}
+    findings = check_project(
+        tmp_path, upgrades=True,
+        producer_view_factory=_factory_by_pin({
+            _PIN: _view_with_primary(producer_path, pin=_PIN),
+            "": _view_with_primary(producer_path, pin=_HEAD),
+        }),
+        fetcher=_fetcher_serving(store),
+    )
+    return [f for f in findings if f.section == "consumer"]
+
+
+def _import_kinds(tmp_path: Path, producer_path: str, at_pin: bytes, at_head: bytes) -> list[str]:
+    """The kinds when the producer's pointer for the path is `at_pin` at the
+    pin and `at_head` at HEAD."""
+    pointer = f"{producer_path.rstrip('/')}.dvc"
+    return [f.kind for f in _import_findings(tmp_path, producer_path, {pointer: (at_pin, at_head)})]
+
+
+def test_a_producer_pointer_naming_a_file_twice_is_unreadable_not_up_to_date(tmp_path: Path) -> None:
+    """A file list naming a.csv twice answers for one file with two md5s. The
+    same list at the pin and at HEAD read as unchanged; now it can't be read,
+    which is what `drift_unknown` says. Mutation: make
+    `refuse_a_path_listed_twice` a no-op -> up_to_date, red."""
+    twice = _files_pointer(("a.csv", "a" * 32), ("a.csv", "b" * 32))
+
+    (finding,) = _import_findings(tmp_path, _OUT, {_OUT_PTR: (twice, twice)})
+    assert finding.kind == "drift_unknown"
+    # Unreadable, not absent: absence would say the path isn't published at HEAD,
+    # which `bump` treats as the producer having dropped it. Mutation: drop
+    # `absent_so_far = False` where the refusal is caught -> red.
+    assert "no readable .dvc or dvc.lock" in finding.message
+
+
+@pytest.mark.parametrize("head_md5, kind", [("a" * 32, "up_to_date"), ("z" * 32, "drift")], ids=["unchanged", "moved"])
+def test_a_producer_pointer_is_read_as_dvc_reads_it(tmp_path: Path, head_md5: str, kind: str) -> None:
+    """`dvc add NO` (a folder per country) writes `path: NO` unquoted. Read as
+    YAML 1.1 that path was the value false, so it never matched and check
+    couldn't tell whether the output changed. Mutation: read the fetched
+    pointer with `yaml.safe_load` again -> red."""
+    at_pin = _files_pointer(("a.csv", "a" * 32), path="NO")
+    at_head = _files_pointer(("a.csv", head_md5), path="NO")
+
+    assert _import_kinds(tmp_path, "outputs/NO/", at_pin, at_head) == [kind]
+
+
+def _lock(path: str, md5: str) -> bytes:
+    """A producer's `dvc.lock` with one stage, `build`, and one out."""
+    return f"schema: '2.0'\nstages:\n  build:\n    cmd: run\n    outs:\n    - path: {path}\n      md5: {md5}\n      size: 1\n".encode()
+
+
+@pytest.mark.parametrize("head_md5, kind", [("a" * 32, "up_to_date"), ("z" * 32, "drift")], ids=["unchanged", "moved"])
+def test_a_producer_lock_at_a_pin_is_read_as_dvc_reads_it(tmp_path: Path, head_md5: str, kind: str) -> None:
+    """The out is recorded in `dvc.lock`, where dvc writes `path: NO` unquoted.
+    Mutation: read the fetched `dvc.lock` with `yaml.safe_load` again -> red."""
+    served = {"dvc.lock": (_lock("NO", "a" * 32), _lock("NO", head_md5))}
+
+    assert [f.kind for f in _import_findings(tmp_path, "NO/", served)] == [kind]
+
+
+@pytest.mark.parametrize("head_md5, kind", [("a" * 32, "up_to_date"), ("z" * 32, "drift")], ids=["unchanged", "moved"])
+def test_a_producer_dvc_yaml_at_a_pin_is_read_as_dvc_reads_it(tmp_path: Path, head_md5: str, kind: str) -> None:
+    """The stage runs in `wdir: NO`, so its lock records `final` and check
+    needs `dvc.yaml` to place it at `NO/final`. Mutation: read the fetched
+    `dvc.yaml` with `yaml.safe_load` again -> red."""
+    dvc_yaml = b"stages:\n  build:\n    wdir: NO\n    cmd: run\n    outs:\n    - final\n"
+    served = {"dvc.yaml": (dvc_yaml, dvc_yaml), "dvc.lock": (_lock("final", "a" * 32), _lock("final", head_md5))}
+
+    assert [f.kind for f in _import_findings(tmp_path, "NO/final/", served)] == [kind]
+

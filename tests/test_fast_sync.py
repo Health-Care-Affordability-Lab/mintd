@@ -2849,3 +2849,89 @@ def test_retry_transient_backoff_caps_at_8s() -> None:
     assert [c.args[0] for c in mock_sleep.call_args_list] == [
         0.5, 1.0, 2.0, 4.0, 8.0, 8.0, 8.0, 8.0, 8.0,
     ]
+
+
+@pytest.mark.parametrize("tamper", ["drop an entry", "swap an md5"])
+def test_a_cached_folder_list_that_does_not_hash_to_its_name_counts_as_absent(tmp_path: Path, tamper: str) -> None:
+    """Changed in place, a folder list can stay valid JSON while it drops a
+    file or swaps an md5. It is used only when its bytes hash to the name it
+    is filed under; otherwise callers fetch or route, as for a missing one.
+    Mutation: drop the hash comparison in ``read_cached_dir_manifest`` -> red."""
+    entries = [DvcFileEntry(hashlib.md5(n.encode()).hexdigest(), n, 1) for n in ("a.csv", "b.csv")]
+    tree = ensure_dir_manifest(tmp_path, entries)
+    assert [e.relpath for e in read_cached_dir_manifest(tmp_path, tree) or []] == ["a.csv", "b.csv"]
+    landed = cache_path_for(tmp_path, tree if tree.endswith(".dir") else f"{tree}.dir")
+    landed.chmod(0o644)
+    listing = json.loads(landed.read_bytes())
+    if tamper == "drop an entry":
+        listing = listing[:1]
+    else:
+        listing[0]["md5"] = hashlib.md5(b"other").hexdigest()
+    landed.write_text(json.dumps(listing), encoding="utf-8")
+
+    assert read_cached_dir_manifest(tmp_path, tree) is None
+
+
+_TWICE = [{"md5": hashlib.md5(b"a").hexdigest(), "relpath": "a.csv"},
+          {"md5": hashlib.md5(b"other").hexdigest(), "relpath": "a.csv"}]
+
+
+def test_a_cached_folder_list_naming_a_path_twice_is_refused_naming_it(tmp_path: Path) -> None:
+    """dvc lists each path once. A list that names one twice, filed under the
+    md5 of its own bytes, is the producer's as recorded, so fetching it again
+    changes nothing: it is refused, naming it.
+    Mutation: make ``refuse_a_path_listed_twice`` a no-op -> red."""
+    body = json.dumps(_TWICE).encode()
+    tree = hashlib.md5(body, usedforsecurity=False).hexdigest()
+    landed = cache_path_for(tmp_path, f"{tree}.dir")
+    landed.parent.mkdir(parents=True)
+    landed.write_bytes(body)
+    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir in the cache is cut short or damaged: "
+                                              r"it lists a path twice, which dvc never writes"):
+        read_cached_dir_manifest(tmp_path, tree)
+
+
+def test_a_folder_list_in_storage_naming_a_path_twice_stops_the_pull_naming_it(s3_versioned, tmp_path: Path) -> None:
+    """The same rule where the list is fetched, before it lands in the cache.
+    Mutation: make ``refuse_a_path_listed_twice`` a no-op -> red."""
+    s3, bucket = s3_versioned
+    project = _project_on(bucket, tmp_path)
+    body = json.dumps(_TWICE).encode()
+    tree = hashlib.md5(body, usedforsecurity=False).hexdigest()
+    s3.put_object(Bucket=bucket, Key=s3_key_for("", f"{tree}.dir"), Body=body)
+    (project / "data" / "dir.dvc").write_text(f"outs:\n  - path: data/dir\n    md5: {tree}.dir\n")
+
+    with pytest.raises(PointerCutShort, match=rf"the folder list {tree}\.dir from storage is cut short or damaged: "
+                                              r"it lists a path twice, which dvc never writes"):
+        _fast_pull(s3, project, ["data/dir"])
+    assert not cache_path_for(project / ".dvc" / "cache", f"{tree}.dir").exists()
+
+
+@pytest.mark.parametrize("storage", ["holds-the-list", "is-down"])
+def test_a_damaged_read_only_cached_folder_list_is_replaced_or_cleared(s3_versioned, tmp_path: Path,
+                                                                     storage: str) -> None:
+    """dvc leaves a cached folder list read-only (0o444). Damaged in place, it
+    no longer hashes to its name, so it is fetched again: the fetched copy
+    replaces it, or, when the fetch fails, it is cleared. Windows refuses to
+    replace or delete a read-only file, so each is made writable first.
+    Mutation: drop ``_writable`` -> on Windows, PermissionError, red (POSIX
+    replaces and deletes a read-only file either way)."""
+    s3, bucket = s3_versioned
+    cache_dir = tmp_path / "cache"
+    entries = [DvcFileEntry(hashlib.md5(n.encode()).hexdigest(), n) for n in ("a.csv", "b.csv")]
+    tree = _put_dir_manifest(s3, bucket, "", entries)
+    if storage == "is-down":
+        s3.delete_object(Bucket=bucket, Key=s3_key_for("", tree))
+    landed = cache_path_for(cache_dir, tree)
+    landed.parent.mkdir(parents=True)
+    landed.write_text(json.dumps([{"md5": entries[0].md5, "relpath": "a.csv"}]), encoding="utf-8")
+    landed.chmod(0o444)
+    assert read_cached_dir_manifest(cache_dir, tree) is None
+
+    got = fetch_dir_manifest(s3, bucket, "", tree, cache_dir)
+
+    if storage == "holds-the-list":
+        assert [e.relpath for e in got or []] == ["a.csv", "b.csv"]
+        assert [e.relpath for e in read_cached_dir_manifest(cache_dir, tree) or []] == ["a.csv", "b.csv"]
+    else:
+        assert got is None and not landed.exists()
